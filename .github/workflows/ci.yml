@@ -30,11 +30,13 @@ jobs:
           restore-keys: |
             nuget-${{ runner.os }}-dotnet-
 
-      - name: Restore dependencies
-        run: dotnet restore
+      - name: Restore dependencies for API and tests
+        run: |
+          dotnet restore
+          dotnet restore Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj
 
-      - name: Build (Release)
-        run: dotnet build --configuration Release --no-restore
+      - name: Build API project (Release)
+        run: dotnet build Slh.Tms.Api.csproj --configuration Release --no-restore
 
       - name: Run tests
-        run: dotnet test --configuration Release --no-build --verbosity normal
+        run: dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --no-build --verbosity normal
