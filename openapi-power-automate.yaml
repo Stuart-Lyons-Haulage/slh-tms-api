@@ -1,0 +1,99 @@
+swagger: '2.0'
+info:
+  title: SLH TMS API
+  version: '1.0'
+host: REPLACE_WITH_APP.azurewebsites.net
+basePath: /api/v1
+schemes: [https]
+produces: [application/json]
+consumes: [application/json]
+securityDefinitions:
+  oauth2:
+    type: oauth2
+    flow: accessCode
+    authorizationUrl: https://login.microsoftonline.com/REPLACE_TENANT_ID/oauth2/v2.0/authorize
+    tokenUrl: https://login.microsoftonline.com/REPLACE_TENANT_ID/oauth2/v2.0/token
+    scopes:
+      api://REPLACE_API_CLIENT_ID/Tms.Access: Access the TMS API
+security: [{ oauth2: [api://REPLACE_API_CLIENT_ID/Tms.Access] }]
+paths:
+  /customers:
+    get:
+      operationId: GetCustomers
+      summary: Search active customers
+      parameters: [{ name: q, in: query, type: string, required: false }]
+      responses: { '200': { description: Customer results, schema: { type: array, items: { $ref: '#/definitions/Customer' } } } }
+  /vehicles:
+    get:
+      operationId: GetVehicles
+      summary: Search active vehicles
+      parameters: [{ name: q, in: query, type: string, required: false }]
+      responses: { '200': { description: Vehicle results, schema: { type: array, items: { $ref: '#/definitions/Vehicle' } } } }
+  /drivers:
+    get:
+      operationId: GetDrivers
+      summary: Search active drivers
+      parameters: [{ name: q, in: query, type: string, required: false }]
+      responses: { '200': { description: Driver results, schema: { type: array, items: { $ref: '#/definitions/Driver' } } } }
+  /staging:
+    post:
+      operationId: SubmitStagedImport
+      summary: Submit an import for review
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema: { $ref: '#/definitions/StageImportRequest' }
+      responses:
+        '202': { description: Accepted for review, schema: { $ref: '#/definitions/StageImportResponse' } }
+        '200': { description: Existing idempotent submission, schema: { $ref: '#/definitions/StageImportResponse' } }
+  /staging/{id}:
+    get:
+      operationId: GetStagedImport
+      summary: Get review status
+      parameters: [{ name: id, in: path, required: true, type: string, format: uuid }]
+      responses: { '200': { description: Staged record } }
+  /staging/{id}/approve:
+    post:
+      operationId: ApproveStagedImport
+      summary: Approve and promote a staged import
+      parameters:
+        - { name: id, in: path, required: true, type: string, format: uuid }
+        - { name: body, in: body, required: true, schema: { $ref: '#/definitions/ReviewRequest' } }
+      responses: { '200': { description: Promoted record } }
+  /staging/{id}/reject:
+    post:
+      operationId: RejectStagedImport
+      summary: Reject a staged import
+      parameters:
+        - { name: id, in: path, required: true, type: string, format: uuid }
+        - { name: body, in: body, required: true, schema: { $ref: '#/definitions/ReviewRequest' } }
+      responses: { '200': { description: Rejected record } }
+definitions:
+  StageImportRequest:
+    type: object
+    required: [entityType, idempotencyKey, payload]
+    properties:
+      entityType: { type: string, enum: [customer, vehicle, driver, order] }
+      idempotencyKey: { type: string, example: email-message-id-or-source-key }
+      source: { type: string, example: PowerAutomate/InfoMailbox }
+      payload: { type: object, additionalProperties: true }
+  StageImportResponse:
+    type: object
+    properties:
+      stagingId: { type: string, format: uuid }
+      status: { type: string, example: PendingReview }
+      receivedAtUtc: { type: string, format: date-time }
+      reviewUrl: { type: string }
+  ReviewRequest:
+    type: object
+    properties: { note: { type: string } }
+  Customer:
+    type: object
+    properties: { id: { type: string, format: uuid }, code: { type: string }, name: { type: string }, active: { type: boolean } }
+  Vehicle:
+    type: object
+    properties: { id: { type: string, format: uuid }, registration: { type: string }, fleetNumber: { type: string }, active: { type: boolean } }
+  Driver:
+    type: object
+    properties: { id: { type: string, format: uuid }, employeeNumber: { type: string }, displayName: { type: string }, active: { type: boolean } }

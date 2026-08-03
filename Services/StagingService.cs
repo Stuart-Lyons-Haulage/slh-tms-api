@@ -1,0 +1,39 @@
+using System.Security.Claims;
+using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Contracts;
+using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
+
+namespace Slh.Tms.Api.Services;
+public sealed class StagingService(TmsDbContext db)
+{
+    private static readonly HashSet<string> Types = new(StringComparer.OrdinalIgnoreCase) { "customer", "vehicle", "driver", "order" };
+    public StagedImport Create(StageImportRequest r)
+    {
+        if (!Types.Contains(r.EntityType)) throw new ArgumentException("Unsupported entityType");
+        return new StagedImport { EntityType = r.EntityType.ToLowerInvariant(), IdempotencyKey = r.IdempotencyKey, PayloadJson = r.Payload.GetRawText(), Source = r.Source };
+    }
+    public StageImportResponse ToResponse(StagedImport x, HttpRequest request) => new(x.Id, x.Status.ToString(), x.ReceivedAtUtc, $"{request.Scheme}://{request.Host}/api/v1/staging/{x.Id}");
+    public async Task<StagedImport> ReviewAndPromote(Guid id, bool approve, string? note, ClaimsPrincipal user, CancellationToken ct)
+    {
+        var item = await db.StagedImports.SingleOrDefaultAsync(x => x.Id == id, ct) ?? throw new KeyNotFoundException("Staged item not found");
+        if (item.Status != StagingStatus.PendingReview) throw new InvalidOperationException("Only PendingReview items can be reviewed");
+        item.ReviewedAtUtc = DateTimeOffset.UtcNow; item.ReviewedBy = user.Identity?.Name ?? user.FindFirstValue("oid"); item.ReviewNote = note;
+        if (!approve) item.Status = StagingStatus.Rejected;
+        else { item.Status = StagingStatus.Approved; await Promote(item, ct); item.Status = StagingStatus.Promoted; }
+        await db.SaveChangesAsync(ct); return item;
+    }
+    private async Task Promote(StagedImport item, CancellationToken ct)
+    {
+        var o = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        switch (item.EntityType)
+        {
+            case "customer": db.Customers.Add(JsonSerializer.Deserialize<Customer>(item.PayloadJson, o) ?? throw new JsonException()); break;
+            case "vehicle": db.Vehicles.Add(JsonSerializer.Deserialize<Vehicle>(item.PayloadJson, o) ?? throw new JsonException()); break;
+            case "driver": db.Drivers.Add(JsonSerializer.Deserialize<Driver>(item.PayloadJson, o) ?? throw new JsonException()); break;
+            case "order": break; // Order promotion is added when the final order aggregate is agreed.
+        }
+        await db.SaveChangesAsync(ct);
+    }
+}

@@ -1,0 +1,93 @@
+using System.Linq;
+using System.Security.Claims;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
+using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Services;
+
+var builder = WebApplication.CreateBuilder(args);
+var tenantId = builder.Configuration["Entra:TenantId"] ?? throw new InvalidOperationException("Entra:TenantId is required");
+var audience = builder.Configuration["Entra:Audience"] ?? throw new InvalidOperationException("Entra:Audience is required");
+
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+builder.Services.AddDbContext<TmsDbContext>(o => o.UseSqlServer(builder.Configuration.GetConnectionString("TmsDb")));
+builder.Services.AddScoped<StagingService>();
+// Health checks registered but the exposed health endpoint is deliberately minimal and anonymous
+builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
+
+// JWT Bearer authentication - validate tenant and audience
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(o =>
+{
+    o.Authority = $"https://login.microsoftonline.com/{tenantId}/v2.0";
+    // audience must match the configured API audience (api://<client-id>)
+    o.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuer = true,
+        ValidIssuer = $"https://login.microsoftonline.com/{tenantId}/v2.0",
+        ValidateAudience = true,
+        ValidAudience = audience,
+        ValidateLifetime = true
+    };
+
+    // Ensure the middleware returns 401 for invalid/malformed tokens
+    o.Events = new JwtBearerEvents
+    {
+        OnAuthenticationFailed = ctx =>
+        {
+            ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return Task.CompletedTask;
+        },
+        OnChallenge = ctx =>
+        {
+            // preserve default behavior but ensure 401
+            if (!ctx.Handled)
+            {
+                ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            }
+            return Task.CompletedTask;
+        }
+    };
+});
+
+// Authorization: require authenticated users by default for all endpoints except explicitly allowed ones (health)
+builder.Services.AddAuthorization(options =>
+{
+    options.FallbackPolicy = new AuthorizationPolicyBuilder()
+        .RequireAuthenticatedUser()
+        .Build();
+
+    // Require the delegated scope Tms.Access - scp claim contains space-delimited scopes for Delegated tokens
+    options.AddPolicy("TmsAccess", policy => policy.RequireAssertion(context =>
+    {
+        if (!context.User.Identity?.IsAuthenticated ?? true) return false;
+        var scp = context.User.FindFirst(c => c.Type == "scp")?.Value;
+        if (string.IsNullOrEmpty(scp)) return false;
+        return scp.Split(' ').Contains("Tms.Access");
+    }));
+
+    // Keep named policies used by controllers but map them to require the Tms.Access scope
+    options.AddPolicy("TmsWrite", p => p.RequirePolicy("TmsAccess"));
+    options.AddPolicy("TmsApprove", p => p.RequirePolicy("TmsAccess"));
+});
+
+var app = builder.Build();
+app.UseHttpsRedirection();
+app.UseAuthentication();
+app.UseAuthorization();
+
+// Minimal anonymous health endpoint (explicitly under /api/v1)
+app.MapGet("/api/v1/health", () => Results.Ok(new { status = "healthy" })).AllowAnonymous();
+
+// Keep all operational endpoints under /api/v1 via controller routes
+app.MapControllers();
+
+if (app.Environment.IsDevelopment()) { app.UseSwagger(); app.UseSwaggerUI(); }
+app.Run();
+
+public partial class Program { }
