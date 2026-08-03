@@ -1,9 +1,9 @@
 name: CD - Deploy to Azure (OIDC)
 
-on:
-  workflow_dispatch:
-    # Deployment is manual only until Azure quota/licensing is confirmed.
-    # No automatic push-based Azure deploys should run yet.
+on: workflow_dispatch
+
+# Deployment is manual only until Azure quota/licensing is confirmed.
+# No automatic push-based Azure deploys should run yet.
 
 permissions:
   contents: read
