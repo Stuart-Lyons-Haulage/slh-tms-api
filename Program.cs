@@ -72,8 +72,16 @@ builder.Services.AddAuthorization(options =>
     }));
 
     // Keep named policies used by controllers but map them to require the Tms.Access scope
-    options.AddPolicy("TmsWrite", p => p.RequirePolicy("TmsAccess"));
-    options.AddPolicy("TmsApprove", p => p.RequirePolicy("TmsAccess"));
+    options.AddPolicy("TmsWrite", p => p.RequireAssertion(context =>
+    {
+        var scp = context.User.FindFirst(c => c.Type == "scp")?.Value;
+        return !string.IsNullOrEmpty(scp) && scp.Split(' ').Contains("Tms.Access");
+    }));
+    options.AddPolicy("TmsApprove", p => p.RequireAssertion(context =>
+    {
+        var scp = context.User.FindFirst(c => c.Type == "scp")?.Value;
+        return !string.IsNullOrEmpty(scp) && scp.Split(' ').Contains("Tms.Access");
+    }));
 });
 
 var app = builder.Build();
