@@ -1,68 +1,46 @@
-name: CD - Deploy to Azure (OIDC)
+name: CD - Deploy TMS to Azure Container Apps
 
-on: workflow_dispatch
-
-# Deployment is manual only until Azure quota/licensing is confirmed.
-# No automatic push-based Azure deploys should run yet.
+on:
+  workflow_dispatch:
 
 permissions:
   contents: read
   id-token: write
-  actions: read
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup .NET 8 SDK
-        uses: actions/setup-dotnet@v3
-        with:
-          dotnet-version: '8.0.x'
-
-      - name: Restore dependencies
-        run: dotnet restore
-
-      - name: Build (Release)
-        run: dotnet build --configuration Release --no-restore
-
-      - name: Publish application
-        run: dotnet publish Slh.Tms.Api.csproj --configuration Release --output ./publish
-
-      - name: Upload published artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: tms-publish
-          path: ./publish
-
   deploy:
-    needs: build
     runs-on: ubuntu-latest
     environment:
       name: production
-      url: https://${{ secrets.AZURE_WEBAPP_NAME }}.azurewebsites.net
-    steps:
-      - name: Download published artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: tms-publish
-          path: ./publish
 
-      - name: Azure login using OIDC
-        uses: azure/login@v1
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Sign in to Azure with OpenID Connect
+        uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Deploy to Azure Web App
+      - name: Build and push container image in Azure Container Registry
         run: |
-          az webapp deploy --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} --name ${{ secrets.AZURE_WEBAPP_NAME }} --src-path ./publish
+          az acr build \
+            --registry ${{ secrets.AZURE_CONTAINER_REGISTRY }} \
+            --image slh-tms-api:${{ github.sha }} \
+            --image slh-tms-api:latest \
+            .
 
-      - name: Check application health endpoint
+      - name: Deploy image to Azure Container Apps
         run: |
-          sleep 5
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://${{ secrets.AZURE_WEBAPP_NAME }}.azurewebsites.net/api/v1/health || true)
-          echo "Health endpoint returned HTTP $HTTP_STATUS"
+          az containerapp update \
+            --name ${{ secrets.AZURE_CONTAINER_APP_NAME }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --image ${{ secrets.AZURE_CONTAINER_REGISTRY }}.azurecr.io/slh-tms-api:${{ github.sha }}
+
+      - name: Check health endpoint
+        run: |
+          sleep 15
+          curl --fail --retry 3 \
+            "https://${{ secrets.AZURE_CONTAINER_APP_FQDN }}/api/v1/health"
