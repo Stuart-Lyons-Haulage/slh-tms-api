@@ -32,15 +32,25 @@ jobs:
             --image slh-tms-api:latest \
             .
 
-      - name: Deploy image to Azure Container Apps
+      - name: Deploy image and configure ingress
         run: |
           az containerapp update \
             --name ${{ secrets.AZURE_CONTAINER_APP_NAME }} \
             --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
             --image ${{ secrets.AZURE_CONTAINER_REGISTRY }}.azurecr.io/slh-tms-api:${{ github.sha }}
 
+          az containerapp ingress update \
+            --name ${{ secrets.AZURE_CONTAINER_APP_NAME }} \
+            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --target-port 8080
+
       - name: Check health endpoint
         run: |
-          sleep 15
-          curl --fail --retry 3 \
-            "https://${{ secrets.AZURE_CONTAINER_APP_FQDN }}/api/v1/health"
+          for attempt in {1..12}; do
+            if curl --fail --silent --show-error \
+              "https://${{ secrets.AZURE_CONTAINER_APP_FQDN }}/api/v1/health"; then
+              exit 0
+            fi
+            sleep 10
+          done
+          exit 1
