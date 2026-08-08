@@ -12,6 +12,11 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: production
+    env:
+      AZURE_CONTAINER_REGISTRY: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+      AZURE_CONTAINER_APP_NAME: ${{ secrets.AZURE_CONTAINER_APP_NAME }}
+      AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+      AZURE_CONTAINER_APP_FQDN: ${{ secrets.AZURE_CONTAINER_APP_FQDN }}
 
     steps:
       - name: Check out source
@@ -27,28 +32,28 @@ jobs:
       - name: Build and push container image in Azure Container Registry
         run: |
           az acr build \
-            --registry ${{ secrets.AZURE_CONTAINER_REGISTRY }} \
-            --image slh-tms-api:${{ github.sha }} \
+            --registry "$AZURE_CONTAINER_REGISTRY" \
+            --image "slh-tms-api:${{ github.sha }}" \
             --image slh-tms-api:latest \
             .
 
       - name: Deploy image and configure ingress
         run: |
           az containerapp update \
-            --name ${{ secrets.AZURE_CONTAINER_APP_NAME }} \
-            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
-            --image ${{ secrets.AZURE_CONTAINER_REGISTRY }}.azurecr.io/slh-tms-api:${{ github.sha }}
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --image "$AZURE_CONTAINER_REGISTRY.azurecr.io/slh-tms-api:${{ github.sha }}"
 
           az containerapp ingress update \
-            --name ${{ secrets.AZURE_CONTAINER_APP_NAME }} \
-            --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
             --target-port 8080
 
       - name: Check health endpoint
         run: |
           for attempt in {1..12}; do
             if curl --fail --silent --show-error \
-              "https://${{ secrets.AZURE_CONTAINER_APP_FQDN }}/api/v1/health"; then
+              "https://$AZURE_CONTAINER_APP_FQDN/health"; then
               exit 0
             fi
             sleep 10
