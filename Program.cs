@@ -8,6 +8,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models.Tracking;
+using Slh.Tms.Api.Models.Integrations;
 using Slh.Tms.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -25,6 +26,10 @@ builder.Services.AddScoped<StagingService>();
 var dotTrackingOptions = new DotTrackingOptions();
 builder.Configuration.GetSection("Tracking:Dot").Bind(dotTrackingOptions);
 builder.Services.AddSingleton(dotTrackingOptions);
+var sageHrOptions = new SageHrOptions();
+builder.Configuration.GetSection("Integrations:SageHr").Bind(sageHrOptions);
+builder.Services.AddSingleton(sageHrOptions);
+builder.Services.AddHttpClient<SageHrClient>();
 builder.Services.AddHttpClient<DotTrackingClient>();
 
 // Health checks registered but the exposed health endpoint is deliberately minimal and anonymous
