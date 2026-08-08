@@ -37,6 +37,14 @@ jobs:
             --image slh-tms-api:latest \
             .
 
+      - name: Configure the app to pull from the private registry
+        run: |
+          az containerapp registry set \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --server "$AZURE_CONTAINER_REGISTRY.azurecr.io" \
+            --identity system
+
       - name: Deploy image and configure ingress
         run: |
           az containerapp update \
