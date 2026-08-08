@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -18,6 +19,13 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddDbContext<TmsDbContext>(o => o.UseSqlServer(builder.Configuration.GetConnectionString("TmsDb")));
 builder.Services.AddScoped<StagingService>();
+
+// Bind DOT tracking configuration from Tracking:Dot section
+// Sensitive values (BaseUrl, Username, Password) are loaded from environment variables or Azure Key Vault at runtime
+var dotTrackingOptions = new DotTrackingOptions();
+builder.Configuration.GetSection("Tracking:Dot").Bind(dotTrackingOptions);
+builder.Services.AddSingleton(dotTrackingOptions);
+
 // Health checks registered but the exposed health endpoint is deliberately minimal and anonymous
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
 
