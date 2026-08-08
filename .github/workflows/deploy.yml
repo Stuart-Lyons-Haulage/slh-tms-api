@@ -13,10 +13,10 @@ jobs:
     environment:
       name: production
     env:
-      AZURE_CONTAINER_REGISTRY: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
-      AZURE_CONTAINER_APP_NAME: ${{ secrets.AZURE_CONTAINER_APP_NAME }}
-      AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
-      AZURE_CONTAINER_APP_FQDN: ${{ secrets.AZURE_CONTAINER_APP_FQDN }}
+      AZURE_CONTAINER_REGISTRY: slhtmsacrprod
+      AZURE_CONTAINER_APP_NAME: slh-tms-api-prod
+      AZURE_RESOURCE_GROUP: slh-tms-prod-rg
+      AZURE_CONTAINER_APP_FQDN: slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
 
     steps:
       - name: Check out source
