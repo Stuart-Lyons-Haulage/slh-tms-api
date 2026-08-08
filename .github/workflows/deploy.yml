@@ -59,7 +59,7 @@ jobs:
           az containerapp ingress update \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --target-port 8080
+            --target-port 80
 
       - name: Check versioned TMS health endpoint
         run: |
