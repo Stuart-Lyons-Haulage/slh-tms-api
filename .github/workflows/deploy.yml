@@ -61,11 +61,11 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --target-port 8080
 
-      - name: Check health endpoint
+      - name: Check versioned TMS health endpoint
         run: |
           for attempt in {1..12}; do
             if curl --fail --silent --show-error \
-              "https://$AZURE_CONTAINER_APP_FQDN/health"; then
+              "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health"; then
               exit 0
             fi
             sleep 10
