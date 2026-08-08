@@ -25,6 +25,7 @@ builder.Services.AddScoped<StagingService>();
 var dotTrackingOptions = new DotTrackingOptions();
 builder.Configuration.GetSection("Tracking:Dot").Bind(dotTrackingOptions);
 builder.Services.AddSingleton(dotTrackingOptions);
+builder.Services.AddHttpClient<DotTrackingClient>();
 
 // Health checks registered but the exposed health endpoint is deliberately minimal and anonymous
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
