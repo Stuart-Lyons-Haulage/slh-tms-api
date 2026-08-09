@@ -35,15 +35,24 @@ paths:
       summary: Search active drivers
       parameters: [{ name: q, in: query, type: string, required: false }]
       responses: { '200': { description: Driver results, schema: { type: array, items: { $ref: '#/definitions/Driver' } } } }
-  /tracking/dot/telemetry:
+  /trailers:
     get:
-      operationId: GetDotTelemetry
-      summary: Retrieve current DOT Tracking telemetry
-      description: Authenticated read-only RoadTech Falcon telemetry preview. It does not create or update TMS records.
-      responses:
-        '200': { description: Current RoadTech Falcon telemetry, schema: { $ref: '#/definitions/DotTelemetryResponse' } }
-        '502': { description: RoadTech Falcon request failed }
-        '503': { description: DOT Tracking configuration is not ready }
+      operationId: GetTrailers
+      summary: Search active trailers and capacities
+      parameters: [{ name: q, in: query, type: string, required: false }]
+      responses: { '200': { description: Trailer results, schema: { type: array, items: { $ref: '#/definitions/Trailer' } } } }
+  /sites:
+    get:
+      operationId: GetSites
+      summary: Search active collection and delivery sites
+      parameters: [{ name: q, in: query, type: string, required: false }]
+      responses: { '200': { description: Site results, schema: { type: array, items: { $ref: '#/definitions/Site' } } } }
+  /market-contacts:
+    get:
+      operationId: GetMarketContacts
+      summary: Search active market contacts
+      parameters: [{ name: q, in: query, type: string, required: false }]
+      responses: { '200': { description: Market-contact results, schema: { type: array, items: { $ref: '#/definitions/MarketContact' } } } }
   /staging:
     post:
       operationId: SubmitStagedImport
@@ -79,20 +88,11 @@ paths:
         - { name: body, in: body, required: true, schema: { $ref: '#/definitions/ReviewRequest' } }
       responses: { '200': { description: Rejected record } }
 definitions:
-  DotTelemetryResponse:
-    type: object
-    properties:
-      provider: { type: string, example: RoadTech Falcon }
-      retrievedAtUtc: { type: string, format: date-time }
-      recordCount: { type: integer }
-      records:
-        type: array
-        items: { type: object, additionalProperties: true }
   StageImportRequest:
     type: object
     required: [entityType, idempotencyKey, payload]
     properties:
-      entityType: { type: string, enum: [customer, vehicle, driver, order] }
+      entityType: { type: string, enum: [customer, vehicle, driver, trailer, site, marketcontact, order] }
       idempotencyKey: { type: string, example: email-message-id-or-source-key }
       source: { type: string, example: PowerAutomate/InfoMailbox }
       payload: { type: object, additionalProperties: true }
@@ -111,7 +111,16 @@ definitions:
     properties: { id: { type: string, format: uuid }, code: { type: string }, name: { type: string }, active: { type: boolean } }
   Vehicle:
     type: object
-    properties: { id: { type: string, format: uuid }, registration: { type: string }, fleetNumber: { type: string }, active: { type: boolean } }
+    properties: { id: { type: string, format: uuid }, registration: { type: string }, fleetNumber: { type: string }, abbreviation: { type: string }, transmission: { type: string }, dvsCompliant: { type: boolean }, fuelProvider: { type: string }, fuelPinSecretName: { type: string }, fuelCardLastFour: { type: string }, active: { type: boolean } }
   Driver:
     type: object
-    properties: { id: { type: string, format: uuid }, employeeNumber: { type: string }, displayName: { type: string }, active: { type: boolean } }
+    properties: { id: { type: string, format: uuid }, employeeNumber: { type: string }, displayName: { type: string }, tachoName: { type: string }, driverType: { type: string }, driverGroup: { type: string }, skills: { type: string }, active: { type: boolean } }
+  Trailer:
+    type: object
+    properties: { id: { type: string, format: uuid }, trailerNumber: { type: string }, type: { type: string }, standardCapacity: { type: integer }, euroCapacity: { type: integer }, active: { type: boolean } }
+  Site:
+    type: object
+    properties: { id: { type: string, format: uuid }, externalCode: { type: string }, name: { type: string }, driverTextName: { type: string }, collectionAddress: { type: string }, collectionInstructions: { type: string }, mapLink: { type: string }, active: { type: boolean } }
+  MarketContact:
+    type: object
+    properties: { id: { type: string, format: uuid }, market: { type: string }, name: { type: string }, standOrLocation: { type: string }, active: { type: boolean } }
