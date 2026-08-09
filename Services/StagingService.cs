@@ -8,7 +8,7 @@ using Slh.Tms.Api.Models;
 namespace Slh.Tms.Api.Services;
 public sealed class StagingService(TmsDbContext db)
 {
-    private static readonly HashSet<string> Types = new(StringComparer.OrdinalIgnoreCase) { "customer", "vehicle", "driver", "order" };
+    private static readonly HashSet<string> Types = new(StringComparer.OrdinalIgnoreCase) { "customer", "vehicle", "driver", "trailer", "site", "marketcontact", "order" };
     public StagedImport Create(StageImportRequest r)
     {
         if (!Types.Contains(r.EntityType)) throw new ArgumentException("Unsupported entityType");
@@ -32,6 +32,9 @@ public sealed class StagingService(TmsDbContext db)
             case "customer": db.Customers.Add(JsonSerializer.Deserialize<Customer>(item.PayloadJson, o) ?? throw new JsonException()); break;
             case "vehicle": db.Vehicles.Add(JsonSerializer.Deserialize<Vehicle>(item.PayloadJson, o) ?? throw new JsonException()); break;
             case "driver": db.Drivers.Add(JsonSerializer.Deserialize<Driver>(item.PayloadJson, o) ?? throw new JsonException()); break;
+            case "trailer": db.Trailers.Add(JsonSerializer.Deserialize<Trailer>(item.PayloadJson, o) ?? throw new JsonException()); break;
+            case "site": db.Sites.Add(JsonSerializer.Deserialize<Site>(item.PayloadJson, o) ?? throw new JsonException()); break;
+            case "marketcontact": db.MarketContacts.Add(JsonSerializer.Deserialize<MarketContact>(item.PayloadJson, o) ?? throw new JsonException()); break;
             case "order": break; // Order promotion is added when the final order aggregate is agreed.
         }
         await db.SaveChangesAsync(ct);
