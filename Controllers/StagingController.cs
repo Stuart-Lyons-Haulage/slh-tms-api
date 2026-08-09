@@ -10,6 +10,22 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize]
 public sealed class StagingController(TmsDbContext db, StagingService service) : ControllerBase
 {
+    [HttpGet]
+    public async Task<IActionResult> List(
+        [FromQuery] StagingStatus? status,
+        [FromQuery] string? entityType,
+        [FromQuery] int take = 100,
+        CancellationToken ct = default)
+    {
+        take = Math.Clamp(take, 1, 500);
+        var query = db.StagedImports.AsNoTracking().AsQueryable();
+        if (status is not null) query = query.Where(x => x.Status == status);
+        if (!string.IsNullOrWhiteSpace(entityType))
+            query = query.Where(x => x.EntityType == entityType.Trim().ToLowerInvariant());
+
+        return Ok(await query.OrderBy(x => x.ReceivedAtUtc).Take(take).ToListAsync(ct));
+    }
+
     [HttpPost, Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> Stage(StageImportRequest request, CancellationToken ct)
     {
