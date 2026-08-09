@@ -54,6 +54,14 @@ paths:
       parameters: [{ name: q, in: query, type: string, required: false }]
       responses: { '200': { description: Market-contact results, schema: { type: array, items: { $ref: '#/definitions/MarketContact' } } } }
   /staging:
+    get:
+      operationId: ListStagedImports
+      summary: List staged records for review
+      parameters:
+        - { name: status, in: query, type: string, required: false, enum: [PendingReview, Approved, Rejected, Promoted, Failed] }
+        - { name: entityType, in: query, type: string, required: false }
+        - { name: take, in: query, type: integer, required: false, default: 100, maximum: 500 }
+      responses: { '200': { description: Staged records } }
     post:
       operationId: SubmitStagedImport
       summary: Submit an import for review
