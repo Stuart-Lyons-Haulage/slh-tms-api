@@ -32,7 +32,7 @@ builder.Services.AddSingleton(sageHrOptions);
 builder.Services.AddHttpClient<SageHrClient>();
 builder.Services.AddHttpClient<DotTrackingClient>();
 
-// Health checks registered but the exposed health endpoint is deliberately minimal and anonymous
+// Database readiness is checked separately from the public liveness check.
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
 
 // JWT Bearer authentication - validate tenant and audience
@@ -103,8 +103,9 @@ app.UseHttpsRedirection();
 app.UseAuthentication();
 app.UseAuthorization();
 
-// Minimal anonymous health endpoint (explicitly under /api/v1)
+// Anonymous liveness is intentionally lightweight; readiness verifies Azure SQL connectivity.
 app.MapGet("/api/v1/health", () => Results.Ok(new { status = "healthy" })).AllowAnonymous();
+app.MapHealthChecks("/api/v1/health/ready").AllowAnonymous();
 
 // Keep all operational endpoints under /api/v1 via controller routes
 app.MapControllers();
