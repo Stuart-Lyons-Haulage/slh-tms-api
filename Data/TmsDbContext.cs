@@ -8,6 +8,9 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<Customer> Customers => Set<Customer>();
     public DbSet<Vehicle> Vehicles => Set<Vehicle>();
     public DbSet<Driver> Drivers => Set<Driver>();
+    public DbSet<Trailer> Trailers => Set<Trailer>();
+    public DbSet<Site> Sites => Set<Site>();
+    public DbSet<MarketContact> MarketContacts => Set<MarketContact>();
     public DbSet<StagedImport> StagedImports => Set<StagedImport>();
     public DbSet<VehicleTrackingEvent> VehicleTrackingEvents => Set<VehicleTrackingEvent>();
     public DbSet<VehicleLiveStatus> VehicleLiveStatuses => Set<VehicleLiveStatus>();
@@ -17,6 +20,9 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<Customer>().HasIndex(x => x.Code).IsUnique();
         b.Entity<Vehicle>().HasIndex(x => x.Registration).IsUnique();
         b.Entity<Driver>().HasIndex(x => x.EmployeeNumber).IsUnique();
+        b.Entity<Trailer>().HasIndex(x => x.TrailerNumber).IsUnique();
+        b.Entity<Site>().HasIndex(x => x.ExternalCode).IsUnique();
+        b.Entity<MarketContact>().HasIndex(x => new { x.Market, x.Name }).IsUnique();
         b.Entity<StagedImport>().HasIndex(x => x.IdempotencyKey).IsUnique();
         b.Entity<StagedImport>().Property(x => x.RowVersion).IsRowVersion();
 
@@ -34,6 +40,10 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
             .HasIndex(x => x.EventTimeUtc)
             .HasDatabaseName("IX_VehicleTrackingEvent_EventTimeUtc");
 
+        b.Entity<VehicleTrackingEvent>().Property(x => x.Latitude).HasPrecision(9, 6);
+        b.Entity<VehicleTrackingEvent>().Property(x => x.Longitude).HasPrecision(9, 6);
+        b.Entity<VehicleTrackingEvent>().Property(x => x.SpeedKph).HasPrecision(10, 2);
+
         b.Entity<VehicleLiveStatus>()
             .HasIndex(x => x.VehicleIdentifier)
             .IsUnique()
@@ -42,5 +52,9 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<VehicleLiveStatus>()
             .HasIndex(x => x.LastEventTimeUtc)
             .HasDatabaseName("IX_VehicleLiveStatus_LastEventTimeUtc");
+
+        b.Entity<VehicleLiveStatus>().Property(x => x.Latitude).HasPrecision(9, 6);
+        b.Entity<VehicleLiveStatus>().Property(x => x.Longitude).HasPrecision(9, 6);
+        b.Entity<VehicleLiveStatus>().Property(x => x.SpeedKph).HasPrecision(10, 2);
     }
 }
