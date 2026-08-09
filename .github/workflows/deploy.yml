@@ -68,7 +68,14 @@ jobs:
           az containerapp update \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --image "$AZURE_CONTAINER_REGISTRY.azurecr.io/slh-tms-api:${{ github.sha }}"
+            --image "$AZURE_CONTAINER_REGISTRY.azurecr.io/slh-tms-api:${{ github.sha }}" \
+            --set-env-vars \
+              "Tracking__Dot__Enabled=true" \
+              "Tracking__Dot__BaseUrl=secretref:dot-base-url" \
+              "Tracking__Dot__ApiKey=secretref:dot-api-key" \
+              "Tracking__Dot__CompanyCode=secretref:dot-company-code" \
+              "Tracking__Dot__Username=secretref:dot-username" \
+              "Tracking__Dot__Password=secretref:dot-password"
 
           az containerapp ingress update \
             --name "$AZURE_CONTAINER_APP_NAME" \
