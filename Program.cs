@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Slh.Tms.Api.Data;
@@ -105,7 +106,29 @@ app.UseAuthorization();
 
 // Anonymous liveness is intentionally lightweight; readiness verifies Azure SQL connectivity.
 app.MapGet("/api/v1/health", () => Results.Ok(new { status = "healthy" })).AllowAnonymous();
-app.MapHealthChecks("/api/v1/health/ready").AllowAnonymous();
+app.MapHealthChecks("/api/v1/health/ready", new HealthCheckOptions
+{
+    ResponseWriter = async (context, report) =>
+    {
+        if (report.Status != Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Healthy)
+        {
+            var logger = context.RequestServices
+                .GetRequiredService<ILoggerFactory>()
+                .CreateLogger("Tms.SqlReadiness");
+
+            foreach (var entry in report.Entries)
+            {
+                logger.LogError(entry.Value.Exception,
+                    "Health check {HealthCheckName} returned {HealthStatus}.",
+                    entry.Key,
+                    entry.Value.Status);
+            }
+        }
+
+        context.Response.ContentType = "application/json";
+        await context.Response.WriteAsJsonAsync(new { status = report.Status.ToString() });
+    }
+}).AllowAnonymous();
 
 // Keep all operational endpoints under /api/v1 via controller routes
 app.MapControllers();
