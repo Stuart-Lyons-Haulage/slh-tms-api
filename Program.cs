@@ -44,7 +44,15 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJw
     o.TokenValidationParameters = new TokenValidationParameters
     {
         ValidateIssuer = true,
-        ValidIssuer = $"https://login.microsoftonline.com/{tenantId}/v2.0",
+        // Power Automate may request delegated Entra tokens using either the
+        // v2 issuer or the tenant's established v1 issuer. Both are restricted
+        // to this configured tenant; audience, lifetime and Tms.Access scope
+        // remain mandatory below.
+        ValidIssuers = new[]
+        {
+            $"https://login.microsoftonline.com/{tenantId}/v2.0",
+            $"https://sts.windows.net/{tenantId}/"
+        },
         ValidateAudience = true,
         ValidAudience = audience,
         ValidateLifetime = true
