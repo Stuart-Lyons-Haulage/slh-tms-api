@@ -35,6 +35,15 @@ paths:
       summary: Search active drivers
       parameters: [{ name: q, in: query, type: string, required: false }]
       responses: { '200': { description: Driver results, schema: { type: array, items: { $ref: '#/definitions/Driver' } } } }
+  /tracking/dot/telemetry:
+    get:
+      operationId: GetDotTelemetry
+      summary: Retrieve current DOT Tracking telemetry
+      description: Authenticated read-only RoadTech Falcon telemetry preview. It does not create or update TMS records.
+      responses:
+        '200': { description: Current RoadTech Falcon telemetry, schema: { $ref: '#/definitions/DotTelemetryResponse' } }
+        '502': { description: RoadTech Falcon request failed }
+        '503': { description: DOT Tracking configuration is not ready }
   /staging:
     post:
       operationId: SubmitStagedImport
@@ -70,6 +79,15 @@ paths:
         - { name: body, in: body, required: true, schema: { $ref: '#/definitions/ReviewRequest' } }
       responses: { '200': { description: Rejected record } }
 definitions:
+  DotTelemetryResponse:
+    type: object
+    properties:
+      provider: { type: string, example: RoadTech Falcon }
+      retrievedAtUtc: { type: string, format: date-time }
+      recordCount: { type: integer }
+      records:
+        type: array
+        items: { type: object, additionalProperties: true }
   StageImportRequest:
     type: object
     required: [entityType, idempotencyKey, payload]
