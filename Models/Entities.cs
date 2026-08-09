@@ -2,8 +2,58 @@ using System.ComponentModel.DataAnnotations;
 
 namespace Slh.Tms.Api.Models;
 public sealed class Customer { public Guid Id { get; set; } = Guid.NewGuid(); [MaxLength(40)] public required string Code { get; set; } [MaxLength(200)] public required string Name { get; set; } public bool Active { get; set; } = true; }
-public sealed class Vehicle { public Guid Id { get; set; } = Guid.NewGuid(); [MaxLength(20)] public required string Registration { get; set; } [MaxLength(40)] public string? FleetNumber { get; set; } public bool Active { get; set; } = true; }
-public sealed class Driver { public Guid Id { get; set; } = Guid.NewGuid(); [MaxLength(40)] public required string EmployeeNumber { get; set; } [MaxLength(160)] public required string DisplayName { get; set; } public bool Active { get; set; } = true; }
+public sealed class Vehicle
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    [MaxLength(20)] public required string Registration { get; set; }
+    [MaxLength(40)] public string? FleetNumber { get; set; }
+    [MaxLength(20)] public string? Abbreviation { get; set; }
+    [MaxLength(20)] public string? Transmission { get; set; }
+    public bool? DvsCompliant { get; set; }
+    [MaxLength(30)] public string? FuelProvider { get; set; }
+    [MaxLength(120)] public string? FuelPinSecretName { get; set; }
+    [MaxLength(4)] public string? FuelCardLastFour { get; set; }
+    public bool Active { get; set; } = true;
+}
+public sealed class Driver
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    [MaxLength(40)] public required string EmployeeNumber { get; set; }
+    [MaxLength(160)] public required string DisplayName { get; set; }
+    [MaxLength(160)] public string? TachoName { get; set; }
+    [MaxLength(80)] public string? DriverType { get; set; }
+    [MaxLength(80)] public string? DriverGroup { get; set; }
+    [MaxLength(160)] public string? Skills { get; set; }
+    public bool Active { get; set; } = true;
+}
+public sealed class Trailer
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    [MaxLength(40)] public required string TrailerNumber { get; set; }
+    [MaxLength(80)] public string? Type { get; set; }
+    public int? StandardCapacity { get; set; }
+    public int? EuroCapacity { get; set; }
+    public bool Active { get; set; } = true;
+}
+public sealed class Site
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    [MaxLength(40)] public required string ExternalCode { get; set; }
+    [MaxLength(200)] public required string Name { get; set; }
+    [MaxLength(200)] public string? DriverTextName { get; set; }
+    [MaxLength(500)] public string? CollectionAddress { get; set; }
+    [MaxLength(1000)] public string? CollectionInstructions { get; set; }
+    [MaxLength(1000)] public string? MapLink { get; set; }
+    public bool Active { get; set; } = true;
+}
+public sealed class MarketContact
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    [MaxLength(80)] public required string Market { get; set; }
+    [MaxLength(200)] public required string Name { get; set; }
+    [MaxLength(200)] public string? StandOrLocation { get; set; }
+    public bool Active { get; set; } = true;
+}
 public enum StagingStatus { PendingReview, Approved, Rejected, Promoted, Failed }
 public sealed class StagedImport
 {
