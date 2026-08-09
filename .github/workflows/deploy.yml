@@ -21,6 +21,7 @@ jobs:
       AZURE_CONTAINER_APP_NAME: slh-tms-api-prod
       AZURE_RESOURCE_GROUP: slh-tms-prod-rg
       AZURE_CONTAINER_APP_FQDN: slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+      AZURE_KEY_VAULT_URI: https://slh-tms-kv-prod.vault.azure.net
 
     steps:
       - name: Check out source
@@ -48,6 +49,21 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --server "$AZURE_CONTAINER_REGISTRY.azurecr.io" \
             --identity system
+
+      - name: Reference runtime secrets from Azure Key Vault
+        run: |
+          az containerapp secret set \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --secrets \
+              "tms-db-connection=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-tms-db-connection,identityref:system" \
+              "dot-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-api-key,identityref:system" \
+              "dot-base-url=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-base-url,identityref:system" \
+              "dot-company-code=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-company-code,identityref:system" \
+              "dot-password=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-password,identityref:system" \
+              "dot-username=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-username,identityref:system" \
+              "sagehr-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-sagehr-api-key,identityref:system" \
+              "sagehr-base-url=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-sagehr-base-url,identityref:system"
 
       - name: Deploy image and configure ingress
         run: |
