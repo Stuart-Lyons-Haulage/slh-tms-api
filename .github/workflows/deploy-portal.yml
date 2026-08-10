@@ -1,0 +1,73 @@
+name: CD - Deploy SLH TMS Portal
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [agent/slh-tms-portal]
+    paths:
+      - 'Portal/**'
+      - '.github/workflows/deploy-portal.yml'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      AZURE_CONTAINER_REGISTRY: slhtmsacrprod
+      AZURE_RESOURCE_GROUP: slh-tms-prod-rg
+      AZURE_CONTAINER_ENVIRONMENT: slh-tms-prod-env
+      PORTAL_APP_NAME: slh-tms-portal-prod
+      API_APP_NAME: slh-tms-api-prod
+      ENTRA_PORTAL_CLIENT_ID: b4d086ae-6e9d-4578-8861-e61410127359
+      ENTRA_TENANT_ID: 5aec48a1-c3c7-4cfd-a073-b38ae50041b1
+      TMS_API_URL: https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+      TMS_API_SCOPE: api://497f6ea5-9753-43ee-8ccf-afaa0a3869c2/Tms.Access
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sign in to Azure with OpenID Connect
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Build and push portal image
+        run: |
+          az acr build --registry "$AZURE_CONTAINER_REGISTRY" \
+            --image "slh-tms-portal:${{ github.sha }}" \
+            --image slh-tms-portal:latest \
+            --file Portal/Dockerfile Portal
+      - name: Create or update the portal
+        run: |
+          image="$AZURE_CONTAINER_REGISTRY.azurecr.io/slh-tms-portal:${{ github.sha }}"
+          envs=(
+            "VITE_ENTRA_CLIENT_ID=$ENTRA_PORTAL_CLIENT_ID"
+            "VITE_ENTRA_TENANT_ID=$ENTRA_TENANT_ID"
+            "VITE_TMS_API_URL=$TMS_API_URL"
+            "VITE_TMS_API_SCOPE=$TMS_API_SCOPE"
+          )
+          if az containerapp show --name "$PORTAL_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" >/dev/null 2>&1; then
+            az containerapp update --name "$PORTAL_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --image "$image" --set-env-vars "${envs[@]}"
+          else
+            az containerapp create --name "$PORTAL_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" \
+              --environment "$AZURE_CONTAINER_ENVIRONMENT" --image "$image" --target-port 80 --ingress external \
+              --registry-server "$AZURE_CONTAINER_REGISTRY.azurecr.io" --registry-identity system \
+              --min-replicas 1 --max-replicas 2 --env-vars "${envs[@]}"
+          fi
+      - name: Restrict the API to the portal origin
+        run: |
+          portal_fqdn="$(az containerapp show --name "$PORTAL_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.configuration.ingress.fqdn -o tsv)"
+          az containerapp update --name "$API_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" \
+            --set-env-vars "Cors__PortalOrigins__0=https://$portal_fqdn"
+          echo "PORTAL_URL=https://$portal_fqdn" >> "$GITHUB_ENV"
+      - name: Verify portal is available
+        run: |
+          for attempt in {1..12}; do
+            if curl --fail --silent --show-error "$PORTAL_URL/config.js"; then exit 0; fi
+            sleep 10
+          done
+          exit 1
