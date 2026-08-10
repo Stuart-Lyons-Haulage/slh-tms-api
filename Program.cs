@@ -33,6 +33,13 @@ builder.Services.AddSingleton(sageHrOptions);
 builder.Services.AddHttpClient<SageHrClient>();
 builder.Services.AddHttpClient<DotTrackingClient>();
 
+var portalOrigins = builder.Configuration.GetSection("Cors:PortalOrigins").Get<string[]>() ?? [];
+builder.Services.AddCors(options => options.AddPolicy("Portal", policy =>
+{
+    if (portalOrigins.Length > 0)
+        policy.WithOrigins(portalOrigins).AllowAnyHeader().AllowAnyMethod();
+}));
+
 // Database readiness is checked separately from the public liveness check.
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
 
@@ -109,6 +116,7 @@ builder.Services.AddAuthorization(options =>
 
 var app = builder.Build();
 app.UseHttpsRedirection();
+app.UseCors("Portal");
 app.UseAuthentication();
 app.UseAuthorization();
 
