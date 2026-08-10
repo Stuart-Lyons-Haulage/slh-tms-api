@@ -1,0 +1,6 @@
+window.__SLH_TMS_CONFIG__ = {
+  entraClientId: "${VITE_ENTRA_CLIENT_ID}",
+  entraTenantId: "${VITE_ENTRA_TENANT_ID}",
+  apiUrl: "${VITE_TMS_API_URL}",
+  apiScope: "${VITE_TMS_API_SCOPE}"
+};
