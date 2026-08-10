@@ -69,3 +69,40 @@ public sealed class StagedImport
     [MaxLength(1000)] public string? ReviewNote { get; set; }
     public byte[] RowVersion { get; set; } = [];
 }
+public enum OrderStatus { Draft, ReadyToPlan, Planned, InTransit, Delivered, Cancelled }
+public sealed class TransportOrder
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    [MaxLength(80)] public required string Reference { get; set; }
+    [MaxLength(40)] public required string CustomerCode { get; set; }
+    public DateOnly CollectionDate { get; set; }
+    public DateOnly? DeliveryDate { get; set; }
+    public int? Pallets { get; set; }
+    public OrderStatus Status { get; set; } = OrderStatus.ReadyToPlan;
+    public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
+public enum LoadStatus { Draft, Planned, Dispatched, InProgress, Completed, Cancelled }
+public sealed class Load
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    [MaxLength(80)] public required string Reference { get; set; }
+    public DateOnly PlanningDate { get; set; }
+    public LoadStatus Status { get; set; } = LoadStatus.Draft;
+    public Guid? VehicleId { get; set; }
+    public Guid? DriverId { get; set; }
+    public Guid? TrailerId { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public List<LoadStop> Stops { get; set; } = [];
+}
+public sealed class LoadStop
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid LoadId { get; set; }
+    public Guid? OrderId { get; set; }
+    public int Sequence { get; set; }
+    [MaxLength(200)] public required string Name { get; set; }
+    [MaxLength(500)] public string? Address { get; set; }
+    public decimal? Latitude { get; set; }
+    public decimal? Longitude { get; set; }
+    public DateTimeOffset? PlannedArrivalUtc { get; set; }
+}

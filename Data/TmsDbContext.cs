@@ -12,6 +12,9 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<Site> Sites => Set<Site>();
     public DbSet<MarketContact> MarketContacts => Set<MarketContact>();
     public DbSet<StagedImport> StagedImports => Set<StagedImport>();
+    public DbSet<TransportOrder> TransportOrders => Set<TransportOrder>();
+    public DbSet<Load> Loads => Set<Load>();
+    public DbSet<LoadStop> LoadStops => Set<LoadStop>();
     public DbSet<VehicleTrackingEvent> VehicleTrackingEvents => Set<VehicleTrackingEvent>();
     public DbSet<VehicleLiveStatus> VehicleLiveStatuses => Set<VehicleLiveStatus>();
 
@@ -25,6 +28,14 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<MarketContact>().HasIndex(x => new { x.Market, x.Name }).IsUnique();
         b.Entity<StagedImport>().HasIndex(x => x.IdempotencyKey).IsUnique();
         b.Entity<StagedImport>().Property(x => x.RowVersion).IsRowVersion();
+        b.Entity<TransportOrder>().HasIndex(x => x.Reference).IsUnique();
+        b.Entity<TransportOrder>().HasIndex(x => x.CollectionDate);
+        b.Entity<Load>().HasIndex(x => x.Reference).IsUnique();
+        b.Entity<Load>().HasIndex(x => x.PlanningDate);
+        b.Entity<LoadStop>().HasIndex(x => new { x.LoadId, x.Sequence }).IsUnique();
+        b.Entity<Load>().HasMany(x => x.Stops).WithOne().HasForeignKey(x => x.LoadId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<LoadStop>().Property(x => x.Latitude).HasPrecision(9, 6);
+        b.Entity<LoadStop>().Property(x => x.Longitude).HasPrecision(9, 6);
 
         // Tracking entities configuration
         b.Entity<VehicleTrackingEvent>()
