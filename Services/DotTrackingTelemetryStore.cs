@@ -15,7 +15,7 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db)
             {
                 ProviderName = "RoadTech Falcon", ProviderEventId = record.ProviderEventId, VehicleIdentifier = record.VehicleIdentifier,
                 EventTimeUtc = record.EventTimeUtc, Latitude = record.Latitude!.Value, Longitude = record.Longitude!.Value,
-                SpeedKph = record.SpeedKph, IsMoving = record.IsMoving, RawPayload = record.RawPayload, MatchStatus = "Received"
+                SpeedKph = record.SpeedKph, IgnitionOn = record.IgnitionOn, IsMoving = record.IsMoving, RawPayload = record.RawPayload, MatchStatus = "Received"
             });
             var live = await db.VehicleLiveStatuses.SingleOrDefaultAsync(item => item.VehicleIdentifier == record.VehicleIdentifier, ct);
             if (live is null)
@@ -23,13 +23,13 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db)
                 db.VehicleLiveStatuses.Add(new VehicleLiveStatus
                 {
                     VehicleIdentifier = record.VehicleIdentifier, LastEventTimeUtc = record.EventTimeUtc, Latitude = record.Latitude!.Value,
-                    Longitude = record.Longitude!.Value, SpeedKph = record.SpeedKph, IsMoving = record.IsMoving, LastKnownStatus = record.Status
+                    Longitude = record.Longitude!.Value, SpeedKph = record.SpeedKph, IgnitionOn = record.IgnitionOn, IsMoving = record.IsMoving, LastKnownStatus = record.Status
                 });
             }
             else if (record.EventTimeUtc >= live.LastEventTimeUtc)
             {
                 live.LastEventTimeUtc = record.EventTimeUtc; live.LastReceivedAtUtc = DateTimeOffset.UtcNow; live.Latitude = record.Latitude!.Value;
-                live.Longitude = record.Longitude!.Value; live.SpeedKph = record.SpeedKph; live.IsMoving = record.IsMoving; live.LastKnownStatus = record.Status;
+                live.Longitude = record.Longitude!.Value; live.SpeedKph = record.SpeedKph; live.IgnitionOn = record.IgnitionOn; live.IsMoving = record.IsMoving; live.LastKnownStatus = record.Status;
             }
         }
         if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync(ct);

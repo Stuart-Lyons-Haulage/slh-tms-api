@@ -75,6 +75,35 @@ public sealed class DotTrackingController(
         }).ToListAsync(cancellationToken);
         return Ok(new { provider = "RoadTech Falcon", date = selectedDate, recordCount = records.Count, records });
     }
+
+    [HttpGet("fleet-status")]
+    public async Task<ActionResult<FleetStatusResponse>> GetFleetStatus(CancellationToken cancellationToken)
+    {
+        var vehicles = await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(cancellationToken);
+        var liveStatuses = await db.VehicleLiveStatuses.AsNoTracking().ToListAsync(cancellationToken);
+        var latestByIdentifier = liveStatuses.GroupBy(status => NormaliseIdentifier(status.VehicleIdentifier)).ToDictionary(group => group.Key, group => group.OrderByDescending(status => status.LastEventTimeUtc).First());
+        var now = DateTimeOffset.UtcNow;
+        var records = vehicles.Select(vehicle =>
+        {
+            var keys = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => NormaliseIdentifier(value!));
+            var live = keys.Select(key => latestByIdentifier.GetValueOrDefault(key)).Where(status => status is not null).OrderByDescending(status => status!.LastEventTimeUtc).FirstOrDefault();
+            var age = live is null ? (TimeSpan?)null : now - live.LastEventTimeUtc;
+            var condition = DetermineCondition(live, now);
+            return new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, live?.VehicleIdentifier, condition, live?.LastEventTimeUtc, live?.IgnitionOn, live?.IsMoving, live?.SpeedKph, live?.Latitude, live?.Longitude, age is null ? null : (int)Math.Max(0, age.Value.TotalMinutes));
+        }).ToList();
+        return Ok(new FleetStatusResponse("RoadTech Falcon", now, records.Count, records.Count(record => record.Condition is "Moving" or "Started"), records.Count(record => record.Condition is "NotSignedOn" or "Stale"), records));
+    }
+
+    private static string NormaliseIdentifier(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static string DetermineCondition(VehicleLiveStatus? live, DateTimeOffset now)
+    {
+        if (live is null || live.LastEventTimeUtc.UtcDateTime.Date < now.UtcDateTime.Date) return "NotSignedOn";
+        if (now - live.LastEventTimeUtc > TimeSpan.FromMinutes(30)) return "Stale";
+        if (live.IsMoving == true || live.SpeedKph.GetValueOrDefault() > 3) return "Moving";
+        if (live.IgnitionOn == true) return "Started";
+        if (live.IgnitionOn == false) return "Stationary";
+        return "SignedOn";
+    }
 }
 
 public sealed record DotTelemetryResponse(
@@ -82,3 +111,6 @@ public sealed record DotTelemetryResponse(
     DateTimeOffset RetrievedAtUtc,
     int RecordCount,
     IReadOnlyList<DotTelemetryRecord> Records);
+
+public sealed record FleetStatusResponse(string Provider, DateTimeOffset RetrievedAtUtc, int VehicleCount, int ReadyCount, int AttentionCount, IReadOnlyList<FleetVehicleStatus> Vehicles);
+public sealed record FleetVehicleStatus(Guid VehicleId, string Registration, string? FleetNumber, string? TrackingIdentifier, string Condition, DateTimeOffset? LastEventTimeUtc, bool? IgnitionOn, bool? IsMoving, decimal? SpeedKph, decimal? Latitude, decimal? Longitude, int? AgeMinutes);

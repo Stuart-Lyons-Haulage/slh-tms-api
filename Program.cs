@@ -118,7 +118,7 @@ var app = builder.Build();
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-    await PlanningSchemaInitializer.Apply(db, CancellationToken.None);
+    if (db.Database.IsRelational()) await PlanningSchemaInitializer.Apply(db, CancellationToken.None);
 }
 app.UseHttpsRedirection();
 app.UseAuthentication();
