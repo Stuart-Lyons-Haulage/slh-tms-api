@@ -88,30 +88,19 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJw
 // Authorization: require authenticated users by default for all endpoints except explicitly allowed ones (health)
 builder.Services.AddAuthorization(options =>
 {
-    options.FallbackPolicy = new AuthorizationPolicyBuilder()
+    var tmsAccessPolicy = new AuthorizationPolicyBuilder()
         .RequireAuthenticatedUser()
+        .RequireAssertion(context =>
+        {
+            var scopes = context.User.FindFirst(claim => claim.Type == "scp")?.Value;
+            return !string.IsNullOrWhiteSpace(scopes) && scopes.Split(' ').Contains("Tms.Access");
+        })
         .Build();
-
-    // Require the delegated scope Tms.Access - scp claim contains space-delimited scopes for Delegated tokens
-    options.AddPolicy("TmsAccess", policy => policy.RequireAssertion(context =>
-    {
-        if (!context.User.Identity?.IsAuthenticated ?? true) return false;
-        var scp = context.User.FindFirst(c => c.Type == "scp")?.Value;
-        if (string.IsNullOrEmpty(scp)) return false;
-        return scp.Split(' ').Contains("Tms.Access");
-    }));
-
-    // Keep named policies used by controllers but map them to require the Tms.Access scope
-    options.AddPolicy("TmsWrite", p => p.RequireAssertion(context =>
-    {
-        var scp = context.User.FindFirst(c => c.Type == "scp")?.Value;
-        return !string.IsNullOrEmpty(scp) && scp.Split(' ').Contains("Tms.Access");
-    }));
-    options.AddPolicy("TmsApprove", p => p.RequireAssertion(context =>
-    {
-        var scp = context.User.FindFirst(c => c.Type == "scp")?.Value;
-        return !string.IsNullOrEmpty(scp) && scp.Split(' ').Contains("Tms.Access");
-    }));
+    options.DefaultPolicy = tmsAccessPolicy;
+    options.FallbackPolicy = tmsAccessPolicy;
+    options.AddPolicy("TmsAccess", tmsAccessPolicy);
+    options.AddPolicy("TmsWrite", tmsAccessPolicy);
+    options.AddPolicy("TmsApprove", tmsAccessPolicy);
 });
 
 var app = builder.Build();

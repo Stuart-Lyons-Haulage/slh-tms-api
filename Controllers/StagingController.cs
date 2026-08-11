@@ -39,7 +39,15 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
 
     [HttpGet("{id:guid}")] public async Task<IActionResult> Get(Guid id, CancellationToken ct) => (await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct)) is { } x ? Ok(x) : NotFound();
     [HttpPost("{id:guid}/approve"), Authorize(Policy = "TmsApprove")]
-    public async Task<IActionResult> Approve(Guid id, ReviewRequest request, CancellationToken ct) => Ok(await service.ReviewAndPromote(id, true, request.Note, User, ct));
+    public async Task<IActionResult> Approve(Guid id, ReviewRequest request, CancellationToken ct)
+    {
+        try { return Ok(await service.ReviewAndPromote(id, true, request.Note, User, ct)); }
+        catch (KeyNotFoundException) { return NotFound(); }
+    }
     [HttpPost("{id:guid}/reject"), Authorize(Policy = "TmsApprove")]
-    public async Task<IActionResult> Reject(Guid id, ReviewRequest request, CancellationToken ct) => Ok(await service.ReviewAndPromote(id, false, request.Note, User, ct));
+    public async Task<IActionResult> Reject(Guid id, ReviewRequest request, CancellationToken ct)
+    {
+        try { return Ok(await service.ReviewAndPromote(id, false, request.Note, User, ct)); }
+        catch (KeyNotFoundException) { return NotFound(); }
+    }
 }
