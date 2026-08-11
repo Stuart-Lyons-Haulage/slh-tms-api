@@ -9,7 +9,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1")]
 [Authorize]
-public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient maps) : ControllerBase
+public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient maps, AzureSmsDispatchService sms) : ControllerBase
 {
     [HttpGet("orders")]
     public async Task<IActionResult> Orders([FromQuery] DateOnly? from, [FromQuery] DateOnly? to, CancellationToken ct)
@@ -121,6 +121,39 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
                 } : null
             })
         });
+    }
+
+    [HttpPost("loads/{id:guid}/dispatch/sms"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> SendDispatchSms(Guid id, CancellationToken ct)
+    {
+        var load = await db.Loads.Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == id, ct);
+        if (load is null) return NotFound();
+        if (load.DriverId is null || load.VehicleId is null) return BadRequest("Allocate both a driver and vehicle before sending a dispatch.");
+        var driver = await db.Drivers.SingleOrDefaultAsync(item => item.Id == load.DriverId, ct);
+        var vehicle = await db.Vehicles.SingleOrDefaultAsync(item => item.Id == load.VehicleId, ct);
+        if (driver is null || vehicle is null) return BadRequest("The allocated driver or vehicle could not be found.");
+        if (string.IsNullOrWhiteSpace(driver.MobileNumber)) return BadRequest("The assigned driver has no approved mobile number.");
+
+        var orderIds = load.Stops.Where(stop => stop.OrderId is not null).Select(stop => stop.OrderId!.Value).Distinct().ToList();
+        var orders = await db.TransportOrders.AsNoTracking().Where(order => orderIds.Contains(order.Id)).ToDictionaryAsync(order => order.Id, ct);
+        var stops = load.Stops.OrderBy(stop => stop.Sequence).Select(stop =>
+        {
+            orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
+            return string.Join("\n", new[]
+            {
+                $"{stop.Sequence}. {stop.Name}",
+                order?.MarketName is null ? null : $"Market: {order.MarketName}{(string.IsNullOrWhiteSpace(order.StallNumber) ? string.Empty : $" · Stall {order.StallNumber}")}",
+                order?.SellerName is null ? null : $"Seller: {order.SellerName}",
+                string.IsNullOrWhiteSpace(stop.Address) ? null : $"Address: {stop.Address}",
+                string.IsNullOrWhiteSpace(order?.DriverInstructions) ? null : $"Notes: {order!.DriverInstructions}",
+                string.IsNullOrWhiteSpace(order?.MapLink) ? null : $"Map: {order!.MapLink}"
+            }.Where(line => line is not null));
+        });
+        var message = string.Join("\n\n", new[] { $"SLH run {load.Reference}", $"Driver: {driver.DisplayName}", $"Vehicle: {vehicle.Registration}", string.Empty, string.Join("\n\n", stops) });
+        var receipt = await sms.SendAsync(driver.MobileNumber, message, ct);
+        if (load.Status == LoadStatus.Planned) load.Status = LoadStatus.Dispatched;
+        await db.SaveChangesAsync(ct);
+        return Accepted(new { receipt.MessageId, receipt.MobileSuffix, load.Status });
     }
 
     [HttpGet("maps/geocode")]
