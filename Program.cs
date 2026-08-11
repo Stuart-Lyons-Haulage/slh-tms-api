@@ -15,6 +15,7 @@ using Slh.Tms.Api.Services;
 var builder = WebApplication.CreateBuilder(args);
 var tenantId = builder.Configuration["Entra:TenantId"] ?? throw new InvalidOperationException("Entra:TenantId is required");
 var audience = builder.Configuration["Entra:Audience"] ?? throw new InvalidOperationException("Entra:Audience is required");
+var deploymentRevision = builder.Configuration["Deployment:Revision"] ?? "local";
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -117,7 +118,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 // Anonymous liveness is intentionally lightweight; readiness verifies Azure SQL connectivity.
-app.MapGet("/api/v1/health", () => Results.Ok(new { status = "healthy" })).AllowAnonymous();
+app.MapGet("/api/v1/health", () => Results.Ok(new { status = "healthy", revision = deploymentRevision })).AllowAnonymous();
 app.MapHealthChecks("/api/v1/health/ready", new HealthCheckOptions
 {
     ResponseWriter = async (context, report) =>

@@ -75,7 +75,9 @@ jobs:
               "Tracking__Dot__ApiKey=secretref:dot-api-key" \
               "Tracking__Dot__CompanyCode=secretref:dot-company-code" \
               "Tracking__Dot__Username=secretref:dot-username" \
-              "Tracking__Dot__Password=secretref:dot-password"
+              "Tracking__Dot__Password=secretref:dot-password" \
+              "Cors__AllowedOrigins__0=https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io" \
+              "Deployment__Revision=${{ github.sha }}"
 
           az containerapp ingress update \
             --name "$AZURE_CONTAINER_APP_NAME" \
