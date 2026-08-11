@@ -51,6 +51,32 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         await db.SaveChangesAsync(ct); return Ok(load);
     }
 
+    [HttpPut("loads/{id:guid}/status"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> UpdateStatus(Guid id, UpdateLoadStatusRequest request, CancellationToken ct)
+    {
+        var load = await db.Loads.Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == id, ct);
+        if (load is null) return NotFound();
+        if (!Enum.TryParse<LoadStatus>(request.Status, true, out var next)) return BadRequest("The requested load status is not valid.");
+        if (!CanTransition(load.Status, next)) return BadRequest($"A load cannot move from {load.Status} to {next}.");
+        if ((next is LoadStatus.Dispatched or LoadStatus.InProgress) && (load.DriverId is null || load.VehicleId is null)) return BadRequest("Allocate both a driver and vehicle before dispatching a load.");
+
+        load.Status = next;
+        var orderIds = load.Stops.Where(stop => stop.OrderId is not null).Select(stop => stop.OrderId!.Value).ToList();
+        if (orderIds.Count > 0)
+        {
+            var orders = await db.TransportOrders.Where(order => orderIds.Contains(order.Id)).ToListAsync(ct);
+            foreach (var order in orders)
+            {
+                if (next is LoadStatus.Planned or LoadStatus.Dispatched) order.Status = OrderStatus.Planned;
+                else if (next == LoadStatus.InProgress) order.Status = OrderStatus.InTransit;
+                else if (next == LoadStatus.Completed) order.Status = OrderStatus.Delivered;
+                else if (next == LoadStatus.Cancelled) order.Status = OrderStatus.Cancelled;
+            }
+        }
+        await db.SaveChangesAsync(ct);
+        return Ok(load);
+    }
+
     [HttpPut("loads/{id:guid}/stops"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> UpdateStops(Guid id, List<UpdateLoadStopRequest> request, CancellationToken ct)
     {
@@ -103,9 +129,23 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         if (string.IsNullOrWhiteSpace(address)) return BadRequest("An address is required.");
         return Ok(await maps.SearchAddress(address, ct));
     }
+
+    private static bool CanTransition(LoadStatus current, LoadStatus next) => current == next || (current, next) switch
+    {
+        (LoadStatus.Draft, LoadStatus.Planned) => true,
+        (LoadStatus.Draft, LoadStatus.Cancelled) => true,
+        (LoadStatus.Planned, LoadStatus.Draft) => true,
+        (LoadStatus.Planned, LoadStatus.Dispatched) => true,
+        (LoadStatus.Planned, LoadStatus.Cancelled) => true,
+        (LoadStatus.Dispatched, LoadStatus.InProgress) => true,
+        (LoadStatus.Dispatched, LoadStatus.Cancelled) => true,
+        (LoadStatus.InProgress, LoadStatus.Completed) => true,
+        _ => false
+    };
 }
 
 public sealed record CreateLoadRequest(string Reference, DateOnly PlanningDate, Guid? VehicleId, Guid? DriverId, Guid? TrailerId, List<CreateLoadStopRequest> Stops);
 public sealed record CreateLoadStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc);
 public sealed record UpdateLoadAllocationRequest(Guid? VehicleId, Guid? DriverId, Guid? TrailerId);
+public sealed record UpdateLoadStatusRequest(string Status);
 public sealed record UpdateLoadStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc);
