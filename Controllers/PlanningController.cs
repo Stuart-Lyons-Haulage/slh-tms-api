@@ -51,6 +51,17 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         await db.SaveChangesAsync(ct); return Ok(load);
     }
 
+    [HttpPut("loads/{id:guid}/stops"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> UpdateStops(Guid id, List<UpdateLoadStopRequest> request, CancellationToken ct)
+    {
+        var load = await db.Loads.Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == id, ct);
+        if (load is null) return NotFound();
+        if (request.Count == 0 || request.Any(stop => string.IsNullOrWhiteSpace(stop.Name))) return BadRequest("At least one named stop is required.");
+        db.LoadStops.RemoveRange(load.Stops);
+        load.Stops = request.Select((stop, index) => new LoadStop { OrderId = stop.OrderId, Sequence = index + 1, Name = stop.Name.Trim(), Address = stop.Address, Latitude = stop.Latitude, Longitude = stop.Longitude, PlannedArrivalUtc = stop.PlannedArrivalUtc }).ToList();
+        await db.SaveChangesAsync(ct); return Ok(load);
+    }
+
     [HttpGet("loads/{id:guid}/route")]
     public async Task<IActionResult> Route(Guid id, CancellationToken ct)
     {
@@ -63,3 +74,4 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
 public sealed record CreateLoadRequest(string Reference, DateOnly PlanningDate, Guid? VehicleId, Guid? DriverId, Guid? TrailerId, List<CreateLoadStopRequest> Stops);
 public sealed record CreateLoadStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc);
 public sealed record UpdateLoadAllocationRequest(Guid? VehicleId, Guid? DriverId, Guid? TrailerId);
+public sealed record UpdateLoadStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc);
