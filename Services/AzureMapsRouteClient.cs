@@ -19,4 +19,16 @@ public sealed class AzureMapsRouteClient(HttpClient client, IConfiguration confi
         using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(ct));
         return document.RootElement.Clone();
     }
+
+    public async Task<object> SearchAddress(string address, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(address)) throw new ArgumentException("An address is required.");
+        var token = await new DefaultAzureCredential().GetTokenAsync(TokenContext, ct);
+        var endpoint = configuration["Maps:Endpoint"] ?? "https://atlas.microsoft.com";
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"{endpoint.TrimEnd('/')}/search/address/json?api-version=1.0&limit=1&query={Uri.EscapeDataString(address.Trim())}");
+        request.Headers.Authorization = new("Bearer", token.Token);
+        using var response = await client.SendAsync(request, ct); response.EnsureSuccessStatusCode();
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(ct));
+        return document.RootElement.Clone();
+    }
 }

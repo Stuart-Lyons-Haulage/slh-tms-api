@@ -69,6 +69,13 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
             .OrderBy(stop => stop.Sequence).Select(stop => new { stop.Longitude, stop.Latitude }).ToListAsync(ct);
         return Ok(await maps.Directions(points.Select(point => (point.Longitude!.Value, point.Latitude!.Value)).ToList(), ct));
     }
+
+    [HttpGet("maps/geocode")]
+    public async Task<IActionResult> Geocode([FromQuery] string address, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return BadRequest("An address is required.");
+        return Ok(await maps.SearchAddress(address, ct));
+    }
 }
 
 public sealed record CreateLoadRequest(string Reference, DateOnly PlanningDate, Guid? VehicleId, Guid? DriverId, Guid? TrailerId, List<CreateLoadStopRequest> Stops);
