@@ -32,6 +32,7 @@ builder.Configuration.GetSection("Integrations:SageHr").Bind(sageHrOptions);
 builder.Services.AddSingleton(sageHrOptions);
 builder.Services.AddHttpClient<SageHrClient>();
 builder.Services.AddHttpClient<DotTrackingClient>();
+builder.Services.AddHttpClient<AzureMapsRouteClient>();
 
 // Database readiness is checked separately from the public liveness check.
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
