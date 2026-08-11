@@ -35,7 +35,25 @@ public sealed class StagingService(TmsDbContext db)
             case "trailer": db.Trailers.Add(JsonSerializer.Deserialize<Trailer>(item.PayloadJson, o) ?? throw new JsonException()); break;
             case "site": db.Sites.Add(JsonSerializer.Deserialize<Site>(item.PayloadJson, o) ?? throw new JsonException()); break;
             case "marketcontact": db.MarketContacts.Add(JsonSerializer.Deserialize<MarketContact>(item.PayloadJson, o) ?? throw new JsonException()); break;
-            case "order": break; // Order promotion is added when the final order aggregate is agreed.
+            case "order":
+                using (var document = JsonDocument.Parse(item.PayloadJson))
+                {
+                    var payload = document.RootElement;
+                    var reference = payload.GetProperty("poNumber").GetString();
+                    var customerCode = payload.GetProperty("customerCode").GetString();
+                    var collectionDateText = payload.GetProperty("collectionDate").GetString();
+                    if (string.IsNullOrWhiteSpace(reference) || string.IsNullOrWhiteSpace(customerCode) || !DateOnly.TryParse(collectionDateText, out var collectionDate))
+                        throw new JsonException("Order payload requires poNumber, customerCode and collectionDate.");
+                    if (!await db.TransportOrders.AnyAsync(order => order.Reference == reference, ct))
+                    {
+                        DateOnly? deliveryDate = null;
+                        if (payload.TryGetProperty("deliveryDate", out var delivery) && DateOnly.TryParse(delivery.GetString(), out var parsedDelivery)) deliveryDate = parsedDelivery;
+                        int? pallets = null;
+                        if (payload.TryGetProperty("pallets", out var palletValue) && int.TryParse(palletValue.GetString(), out var parsedPallets)) pallets = parsedPallets;
+                        db.TransportOrders.Add(new TransportOrder { Reference = reference, CustomerCode = customerCode, CollectionDate = collectionDate, DeliveryDate = deliveryDate, Pallets = pallets });
+                    }
+                }
+                break;
         }
         await db.SaveChangesAsync(ct);
     }
