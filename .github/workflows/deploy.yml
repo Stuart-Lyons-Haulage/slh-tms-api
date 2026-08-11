@@ -65,6 +65,11 @@ jobs:
 
       - name: Deploy image and configure ingress
         run: |
+          az containerapp revision set-mode \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --mode single
+
           az containerapp update \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -83,11 +88,6 @@ jobs:
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --target-port 80
-
-          az containerapp revision set-mode \
-            --name "$AZURE_CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --mode single
 
       - name: Check versioned TMS health endpoint
         run: |
