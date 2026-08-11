@@ -70,6 +70,33 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         return Ok(await maps.Directions(points.Select(point => (point.Longitude!.Value, point.Latitude!.Value)).ToList(), ct));
     }
 
+    [HttpGet("loads/{id:guid}/dispatch")]
+    public async Task<IActionResult> Dispatch(Guid id, CancellationToken ct)
+    {
+        var load = await db.Loads.AsNoTracking().Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == id, ct);
+        if (load is null) return NotFound();
+        var orderIds = load.Stops.Where(stop => stop.OrderId is not null).Select(stop => stop.OrderId!.Value).Distinct().ToList();
+        var orders = await db.TransportOrders.AsNoTracking().Where(order => orderIds.Contains(order.Id)).ToDictionaryAsync(order => order.Id, ct);
+        var driver = load.DriverId is null ? null : await db.Drivers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.DriverId, ct);
+        var vehicle = load.VehicleId is null ? null : await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.VehicleId, ct);
+        var trailer = load.TrailerId is null ? null : await db.Trailers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.TrailerId, ct);
+        return Ok(new
+        {
+            load.Id, load.Reference, load.PlanningDate, load.Status,
+            driver = driver is null ? null : new { driver.DisplayName, driver.EmployeeNumber },
+            vehicle = vehicle is null ? null : new { vehicle.Registration, vehicle.FleetNumber },
+            trailer = trailer is null ? null : new { trailer.TrailerNumber, trailer.Type },
+            stops = load.Stops.OrderBy(stop => stop.Sequence).Select(stop => new
+            {
+                stop.Id, stop.Sequence, stop.Name, stop.Address, stop.Latitude, stop.Longitude, stop.PlannedArrivalUtc,
+                order = stop.OrderId is not null && orders.TryGetValue(stop.OrderId.Value, out var order) ? new
+                {
+                    order.Reference, order.CustomerCode, order.SellerName, order.MarketName, order.StallNumber, order.DriverInstructions, order.MapLink
+                } : null
+            })
+        });
+    }
+
     [HttpGet("maps/geocode")]
     public async Task<IActionResult> Geocode([FromQuery] string address, CancellationToken ct)
     {
