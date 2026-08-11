@@ -6,6 +6,7 @@ namespace Slh.Tms.Api.Data;
 public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbContext(options)
 {
     public DbSet<Customer> Customers => Set<Customer>();
+    public DbSet<CustomerContact> CustomerContacts => Set<CustomerContact>();
     public DbSet<Vehicle> Vehicles => Set<Vehicle>();
     public DbSet<Driver> Drivers => Set<Driver>();
     public DbSet<Trailer> Trailers => Set<Trailer>();
@@ -21,6 +22,7 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     protected override void OnModelCreating(ModelBuilder b)
     {
         b.Entity<Customer>().HasIndex(x => x.Code).IsUnique();
+        b.Entity<CustomerContact>().HasIndex(x => new { x.CustomerCode, x.Name }).IsUnique();
         b.Entity<Vehicle>().HasIndex(x => x.Registration).IsUnique();
         b.Entity<Driver>().HasIndex(x => x.EmployeeNumber).IsUnique();
         b.Entity<Trailer>().HasIndex(x => x.TrailerNumber).IsUnique();

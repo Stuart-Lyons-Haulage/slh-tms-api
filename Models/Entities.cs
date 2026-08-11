@@ -2,6 +2,16 @@ using System.ComponentModel.DataAnnotations;
 
 namespace Slh.Tms.Api.Models;
 public sealed class Customer { public Guid Id { get; set; } = Guid.NewGuid(); [MaxLength(40)] public required string Code { get; set; } [MaxLength(200)] public required string Name { get; set; } public bool Active { get; set; } = true; }
+public sealed class CustomerContact
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    [MaxLength(40)] public required string CustomerCode { get; set; }
+    [MaxLength(200)] public required string Name { get; set; }
+    [EmailAddress, MaxLength(320)] public string? Email { get; set; }
+    [MaxLength(40)] public string? MobileNumber { get; set; }
+    public bool ReceivesEtaUpdates { get; set; } = true;
+    public bool Active { get; set; } = true;
+}
 public sealed class Vehicle
 {
     public Guid Id { get; set; } = Guid.NewGuid();

@@ -16,5 +16,6 @@
     <EmbeddedResource Include="Database/003_Market_Order_Details.sql" />
     <EmbeddedResource Include="Database/004_Driver_Mobile_Number.sql" />
     <EmbeddedResource Include="Database/005_Delivery_Windows.sql" />
+    <EmbeddedResource Include="Database/006_Customer_Contacts.sql" />
   </ItemGroup>
 </Project>
