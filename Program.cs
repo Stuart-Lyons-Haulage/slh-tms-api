@@ -109,6 +109,11 @@ builder.Services.AddAuthorization(options =>
 });
 
 var app = builder.Build();
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+    await PlanningSchemaInitializer.Apply(db, CancellationToken.None);
+}
 app.UseHttpsRedirection();
 app.UseAuthentication();
 app.UseAuthorization();
