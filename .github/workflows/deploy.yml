@@ -84,10 +84,10 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --target-port 80
 
-          az containerapp ingress traffic set \
+          az containerapp revision set-mode \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --revision-weight latest=100
+            --mode single
 
       - name: Check versioned TMS health endpoint
         run: |
