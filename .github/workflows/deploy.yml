@@ -68,7 +68,7 @@ jobs:
           az containerapp revision set-mode \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --mode single
+            --mode multiple
 
           az containerapp update \
             --name "$AZURE_CONTAINER_APP_NAME" \
@@ -88,6 +88,23 @@ jobs:
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --target-port 80
+
+          latest_revision="$(az containerapp revision list \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query 'sort_by(@, &properties.createdTime)[-1].name' \
+            --output tsv)"
+          test -n "$latest_revision"
+
+          az containerapp revision activate \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision "$latest_revision"
+
+          az containerapp ingress traffic set \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision-weight "$latest_revision=100"
 
       - name: Check versioned TMS health endpoint
         run: |
