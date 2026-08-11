@@ -1,3 +1,5 @@
+using Slh.Tms.Api.Models.Tracking;
+
 namespace Slh.Tms.Api.Services;
 
 public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactory, ILogger<DotTrackingIngestionService> logger) : BackgroundService
