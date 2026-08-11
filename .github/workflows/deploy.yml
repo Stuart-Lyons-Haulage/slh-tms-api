@@ -84,13 +84,21 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --target-port 80
 
+          az containerapp ingress traffic set \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision-weight latest=100
+
       - name: Check versioned TMS health endpoint
         run: |
           for attempt in {1..12}; do
-            if curl --fail --silent --show-error \
-              "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health"; then
+            health="$(curl --fail --silent --show-error \
+              "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health" || true)"
+            if echo "$health" | grep --quiet "${{ github.sha }}"; then
+              echo "$health"
               exit 0
             fi
+            echo "Latest API revision is not serving traffic yet, retrying..."
             sleep 10
           done
           exit 1
