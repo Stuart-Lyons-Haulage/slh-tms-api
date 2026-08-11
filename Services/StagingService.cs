@@ -50,7 +50,9 @@ public sealed class StagingService(TmsDbContext db)
                         if (payload.TryGetProperty("deliveryDate", out var delivery) && DateOnly.TryParse(delivery.GetString(), out var parsedDelivery)) deliveryDate = parsedDelivery;
                         int? pallets = null;
                         if (payload.TryGetProperty("pallets", out var palletValue) && int.TryParse(palletValue.GetString(), out var parsedPallets)) pallets = parsedPallets;
-                        db.TransportOrders.Add(new TransportOrder { Reference = reference, CustomerCode = customerCode, CollectionDate = collectionDate, DeliveryDate = deliveryDate, Pallets = pallets });
+                        db.TransportOrders.Add(new TransportOrder { Reference = reference, CustomerCode = customerCode, CollectionDate = collectionDate, DeliveryDate = deliveryDate, Pallets = pallets,
+                            SellerName = Read("sellerName"), MarketName = Read("marketName"), StallNumber = Read("stallNumber"), DriverInstructions = Read("driverInstructions"), MapLink = Read("mapLink") });
+                        string? Read(string name) => payload.TryGetProperty(name, out var value) ? value.GetString() : null;
                     }
                 }
                 break;

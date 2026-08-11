@@ -8,10 +8,11 @@ public static class PlanningSchemaInitializer
     public static async Task Apply(TmsDbContext db, CancellationToken ct)
     {
         var assembly = typeof(PlanningSchemaInitializer).Assembly;
-        await using var stream = assembly.GetManifestResourceStream("Slh.Tms.Api.Database.002_Planning_Loads_Schema.sql")
-            ?? throw new InvalidOperationException("Planning schema script was not found.");
-        using var reader = new StreamReader(stream);
-        var script = await reader.ReadToEndAsync(ct);
-        await db.Database.ExecuteSqlRawAsync(script, ct);
+        foreach (var resourceName in new[] { "Slh.Tms.Api.Database.002_Planning_Loads_Schema.sql", "Slh.Tms.Api.Database.003_Market_Order_Details.sql" })
+        {
+            await using var stream = assembly.GetManifestResourceStream(resourceName) ?? throw new InvalidOperationException($"Schema script {resourceName} was not found.");
+            using var reader = new StreamReader(stream);
+            await db.Database.ExecuteSqlRawAsync(await reader.ReadToEndAsync(ct), ct);
+        }
     }
 }

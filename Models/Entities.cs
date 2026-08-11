@@ -78,6 +78,11 @@ public sealed class TransportOrder
     public DateOnly CollectionDate { get; set; }
     public DateOnly? DeliveryDate { get; set; }
     public int? Pallets { get; set; }
+    [MaxLength(200)] public string? SellerName { get; set; }
+    [MaxLength(80)] public string? MarketName { get; set; }
+    [MaxLength(200)] public string? StallNumber { get; set; }
+    [MaxLength(1000)] public string? DriverInstructions { get; set; }
+    [MaxLength(1000)] public string? MapLink { get; set; }
     public OrderStatus Status { get; set; } = OrderStatus.ReadyToPlan;
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
 }
