@@ -109,7 +109,7 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         return Ok(new
         {
             load.Id, load.Reference, load.PlanningDate, load.Status,
-            driver = driver is null ? null : new { driver.DisplayName, driver.EmployeeNumber },
+            driver = driver is null ? null : new { driver.DisplayName, driver.EmployeeNumber, driver.MobileNumber },
             vehicle = vehicle is null ? null : new { vehicle.Registration, vehicle.FleetNumber },
             trailer = trailer is null ? null : new { trailer.TrailerNumber, trailer.Type },
             stops = load.Stops.OrderBy(stop => stop.Sequence).Select(stop => new

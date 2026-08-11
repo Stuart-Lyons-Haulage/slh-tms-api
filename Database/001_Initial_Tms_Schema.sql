@@ -40,6 +40,7 @@ CREATE TABLE dbo.Drivers (
     EmployeeNumber nvarchar(40) NOT NULL,
     DisplayName nvarchar(160) NOT NULL,
     TachoName nvarchar(160) NULL,
+    MobileNumber nvarchar(40) NULL,
     DriverType nvarchar(80) NULL,
     DriverGroup nvarchar(80) NULL,
     Skills nvarchar(160) NULL,
