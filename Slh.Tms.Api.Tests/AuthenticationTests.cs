@@ -26,6 +26,19 @@ public class AuthenticationTests : IClassFixture<CustomWebFactory>
     }
 
     [Fact]
+    public async Task Production_portal_preflight_is_allowed()
+    {
+        var client = _factory.CreateClient();
+        var request = new HttpRequestMessage(HttpMethod.Options, "/api/v1/customers");
+        request.Headers.Add("Origin", "https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io");
+        request.Headers.Add("Access-Control-Request-Method", "GET");
+        request.Headers.Add("Access-Control-Request-Headers", "authorization");
+        var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal("https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io", response.Headers.GetValues("Access-Control-Allow-Origin").Single());
+    }
+
+    [Fact]
     public async Task Missing_TmsAccess_scope_results_in_Forbidden()
     {
         var client = _factory.CreateClientWithUser("tester", "other.scope");

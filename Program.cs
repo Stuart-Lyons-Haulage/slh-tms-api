@@ -19,6 +19,8 @@ var audience = builder.Configuration["Entra:Audience"] ?? throw new InvalidOpera
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
+builder.Services.AddCors(options => options.AddPolicy("Portal", policy => policy.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod()));
 builder.Services.AddDbContext<TmsDbContext>(o => o.UseSqlServer(builder.Configuration.GetConnectionString("TmsDb")));
 builder.Services.AddScoped<StagingService>();
 builder.Services.AddScoped<DotTrackingTelemetryStore>();
@@ -110,6 +112,7 @@ using (var scope = app.Services.CreateScope())
     if (db.Database.IsRelational()) await PlanningSchemaInitializer.Apply(db, CancellationToken.None);
 }
 app.UseHttpsRedirection();
+app.UseCors("Portal");
 app.UseAuthentication();
 app.UseAuthorization();
 
