@@ -38,6 +38,19 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         db.Loads.Add(load); await db.SaveChangesAsync(ct); return Created($"/api/v1/loads/{load.Id}", load);
     }
 
+    [HttpPut("loads/{id:guid}/allocation"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> Allocate(Guid id, UpdateLoadAllocationRequest request, CancellationToken ct)
+    {
+        var load = await db.Loads.SingleOrDefaultAsync(item => item.Id == id, ct);
+        if (load is null) return NotFound();
+        if (request.VehicleId is not null && !await db.Vehicles.AnyAsync(vehicle => vehicle.Id == request.VehicleId && vehicle.Active, ct)) return BadRequest("Vehicle is not active.");
+        if (request.DriverId is not null && !await db.Drivers.AnyAsync(driver => driver.Id == request.DriverId && driver.Active, ct)) return BadRequest("Driver is not active.");
+        if (request.TrailerId is not null && !await db.Trailers.AnyAsync(trailer => trailer.Id == request.TrailerId && trailer.Active, ct)) return BadRequest("Trailer is not active.");
+        load.VehicleId = request.VehicleId; load.DriverId = request.DriverId; load.TrailerId = request.TrailerId;
+        load.Status = request.VehicleId is not null && request.DriverId is not null ? LoadStatus.Planned : LoadStatus.Draft;
+        await db.SaveChangesAsync(ct); return Ok(load);
+    }
+
     [HttpGet("loads/{id:guid}/route")]
     public async Task<IActionResult> Route(Guid id, CancellationToken ct)
     {
@@ -49,3 +62,4 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
 
 public sealed record CreateLoadRequest(string Reference, DateOnly PlanningDate, Guid? VehicleId, Guid? DriverId, Guid? TrailerId, List<CreateLoadStopRequest> Stops);
 public sealed record CreateLoadStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc);
+public sealed record UpdateLoadAllocationRequest(Guid? VehicleId, Guid? DriverId, Guid? TrailerId);
