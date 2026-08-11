@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
 
@@ -14,6 +16,7 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize(Policy = "TmsWrite")]
 public sealed class DotTrackingController(
     DotTrackingClient trackingClient,
+    TmsDbContext db,
     ILogger<DotTrackingController> logger) : ControllerBase
 {
     [HttpGet("telemetry")]
@@ -46,6 +49,28 @@ public sealed class DotTrackingController(
                 title: "DOT Tracking is unavailable",
                 detail: "The provider could not be reached or rejected the request.");
         }
+    }
+
+    [HttpGet("history")]
+    public async Task<IActionResult> GetHistory(
+        [FromQuery] DateOnly? date,
+        [FromQuery] string? vehicle,
+        [FromQuery] int take = 1000,
+        CancellationToken cancellationToken = default)
+    {
+        var selectedDate = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
+        var from = new DateTimeOffset(selectedDate.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc));
+        var to = from.AddDays(1);
+        var query = db.VehicleTrackingEvents.AsNoTracking()
+            .Where(item => item.EventTimeUtc >= from && item.EventTimeUtc < to);
+        if (!string.IsNullOrWhiteSpace(vehicle))
+            query = query.Where(item => item.VehicleIdentifier == vehicle.Trim());
+
+        var records = await query.OrderBy(item => item.EventTimeUtc).Take(Math.Clamp(take, 1, 5000)).Select(item => new
+        {
+            item.VehicleIdentifier, item.EventTimeUtc, item.Latitude, item.Longitude, item.SpeedKph, item.IsMoving, status = item.MatchStatus
+        }).ToListAsync(cancellationToken);
+        return Ok(new { provider = "RoadTech Falcon", date = selectedDate, recordCount = records.Count, records });
     }
 }
 
