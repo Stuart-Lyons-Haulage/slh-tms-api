@@ -21,6 +21,7 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddDbContext<TmsDbContext>(o => o.UseSqlServer(builder.Configuration.GetConnectionString("TmsDb")));
 builder.Services.AddScoped<StagingService>();
+builder.Services.AddScoped<DotTrackingTelemetryStore>();
 
 // Bind DOT tracking configuration from Tracking:Dot section
 // Sensitive values (BaseUrl, Username, Password) are loaded from environment variables or Azure Key Vault at runtime
@@ -33,6 +34,7 @@ builder.Services.AddSingleton(sageHrOptions);
 builder.Services.AddHttpClient<SageHrClient>();
 builder.Services.AddHttpClient<DotTrackingClient>();
 builder.Services.AddHttpClient<AzureMapsRouteClient>();
+builder.Services.AddHostedService<DotTrackingIngestionService>();
 
 // Database readiness is checked separately from the public liveness check.
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();

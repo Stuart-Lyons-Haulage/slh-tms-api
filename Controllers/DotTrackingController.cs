@@ -20,6 +20,7 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class DotTrackingController(
     DotTrackingClient trackingClient,
     TmsDbContext db,
+    DotTrackingTelemetryStore telemetryStore,
     ILogger<DotTrackingController> logger) : ControllerBase
 {
     [HttpGet("telemetry")]
@@ -30,32 +31,7 @@ public sealed class DotTrackingController(
         {
             var telemetry = await trackingClient.GetLatestVehicleEventsAsync(cancellationToken);
             var records = telemetry.Select(DotTelemetryRecord.FromProvider).ToList();
-            var newEvents = records.Where(record => record.Latitude is not null && record.Longitude is not null).ToList();
-            foreach (var record in newEvents)
-            {
-                var exists = await db.VehicleTrackingEvents.AnyAsync(item => item.ProviderName == "RoadTech Falcon" && item.ProviderEventId == record.ProviderEventId, cancellationToken);
-                if (!exists) db.VehicleTrackingEvents.Add(new VehicleTrackingEvent
-                {
-                    ProviderName = "RoadTech Falcon", ProviderEventId = record.ProviderEventId, VehicleIdentifier = record.VehicleIdentifier,
-                    EventTimeUtc = record.EventTimeUtc, Latitude = record.Latitude!.Value, Longitude = record.Longitude!.Value,
-                    SpeedKph = record.SpeedKph, IsMoving = record.IsMoving, RawPayload = record.RawPayload, MatchStatus = "Received"
-                });
-                var live = await db.VehicleLiveStatuses.SingleOrDefaultAsync(item => item.VehicleIdentifier == record.VehicleIdentifier, cancellationToken);
-                if (live is null)
-                {
-                    db.VehicleLiveStatuses.Add(new VehicleLiveStatus
-                    {
-                        VehicleIdentifier = record.VehicleIdentifier, LastEventTimeUtc = record.EventTimeUtc, Latitude = record.Latitude!.Value,
-                        Longitude = record.Longitude!.Value, SpeedKph = record.SpeedKph, IsMoving = record.IsMoving, LastKnownStatus = record.Status
-                    });
-                }
-                else if (record.EventTimeUtc >= live.LastEventTimeUtc)
-                {
-                    live.LastEventTimeUtc = record.EventTimeUtc; live.LastReceivedAtUtc = DateTimeOffset.UtcNow; live.Latitude = record.Latitude!.Value;
-                    live.Longitude = record.Longitude!.Value; live.SpeedKph = record.SpeedKph; live.IsMoving = record.IsMoving; live.LastKnownStatus = record.Status;
-                }
-            }
-            if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync(cancellationToken);
+            await telemetryStore.PersistAsync(records, cancellationToken);
 
             return Ok(new DotTelemetryResponse(
                 "RoadTech Falcon",
