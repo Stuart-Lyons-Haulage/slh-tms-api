@@ -4,6 +4,15 @@ using System.Text.Json;
 
 namespace Slh.Tms.Api.Models.Tracking;
 
+public sealed class RoadTechTelemetryItem
+{
+    public string VehCode { get; init; } = string.Empty;
+    public long VehRtid { get; init; }
+    public JsonElement? DataGps { get; init; }
+    public JsonElement? DataCan { get; init; }
+    public JsonElement? DataGaz { get; init; }
+}
+
 public sealed record DotTelemetryRecord(
     string ProviderEventId,
     string VehicleIdentifier,

@@ -178,20 +178,6 @@ public sealed class RoadTechTelemetryPage
     public List<RoadTechTelemetryItem> Data { get; init; } = [];
 }
 
-/// <summary>
-/// Preserves RoadTech telemetry without assuming undocumented GPS field names.
-/// The raw DataGps, DataCan and DataGaz data remains available for the mapping
-/// step once a live alpha response has been captured.
-/// </summary>
-public sealed class RoadTechTelemetryItem
-{
-    public string VehCode { get; init; } = string.Empty;
-    public long VehRtid { get; init; }
-    public JsonElement? DataGps { get; init; }
-    public JsonElement? DataCan { get; init; }
-    public JsonElement? DataGaz { get; init; }
-}
-
 internal static class RoadTechJson
 {
     internal static readonly JsonSerializerOptions Options = new()
