@@ -78,6 +78,8 @@ public sealed class TransportOrder
     [MaxLength(40)] public required string CustomerCode { get; set; }
     public DateOnly CollectionDate { get; set; }
     public DateOnly? DeliveryDate { get; set; }
+    public DateTimeOffset? DeliveryWindowStartUtc { get; set; }
+    public DateTimeOffset? DeliveryWindowEndUtc { get; set; }
     public int? Pallets { get; set; }
     [MaxLength(200)] public string? SellerName { get; set; }
     [MaxLength(80)] public string? MarketName { get; set; }

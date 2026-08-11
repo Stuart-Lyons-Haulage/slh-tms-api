@@ -9,6 +9,8 @@ CREATE TABLE dbo.TransportOrders (
     CustomerCode nvarchar(40) NOT NULL,
     CollectionDate date NOT NULL,
     DeliveryDate date NULL,
+    DeliveryWindowStartUtc datetimeoffset NULL,
+    DeliveryWindowEndUtc datetimeoffset NULL,
     Pallets int NULL,
     Status int NOT NULL,
     CreatedAtUtc datetimeoffset NOT NULL

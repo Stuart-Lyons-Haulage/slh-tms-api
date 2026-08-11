@@ -48,9 +48,13 @@ public sealed class StagingService(TmsDbContext db)
                     {
                         DateOnly? deliveryDate = null;
                         if (payload.TryGetProperty("deliveryDate", out var delivery) && DateOnly.TryParse(delivery.GetString(), out var parsedDelivery)) deliveryDate = parsedDelivery;
+                        DateTimeOffset? deliveryWindowStartUtc = null;
+                        if (payload.TryGetProperty("deliveryWindowStartUtc", out var windowStart) && DateTimeOffset.TryParse(windowStart.GetString(), out var parsedWindowStart)) deliveryWindowStartUtc = parsedWindowStart;
+                        DateTimeOffset? deliveryWindowEndUtc = null;
+                        if (payload.TryGetProperty("deliveryWindowEndUtc", out var windowEnd) && DateTimeOffset.TryParse(windowEnd.GetString(), out var parsedWindowEnd)) deliveryWindowEndUtc = parsedWindowEnd;
                         int? pallets = null;
                         if (payload.TryGetProperty("pallets", out var palletValue) && int.TryParse(palletValue.GetString(), out var parsedPallets)) pallets = parsedPallets;
-                        db.TransportOrders.Add(new TransportOrder { Reference = reference, CustomerCode = customerCode, CollectionDate = collectionDate, DeliveryDate = deliveryDate, Pallets = pallets,
+                        db.TransportOrders.Add(new TransportOrder { Reference = reference, CustomerCode = customerCode, CollectionDate = collectionDate, DeliveryDate = deliveryDate, DeliveryWindowStartUtc = deliveryWindowStartUtc, DeliveryWindowEndUtc = deliveryWindowEndUtc, Pallets = pallets,
                             SellerName = Read("sellerName"), MarketName = Read("marketName"), StallNumber = Read("stallNumber"), DriverInstructions = Read("driverInstructions"), MapLink = Read("mapLink") });
                         string? Read(string name) => payload.TryGetProperty(name, out var value) ? value.GetString() : null;
                     }
