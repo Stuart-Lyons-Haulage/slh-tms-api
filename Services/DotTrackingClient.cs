@@ -26,7 +26,7 @@ public sealed class DotTrackingClient
 
         if (!string.IsNullOrWhiteSpace(_options.BaseUrl))
         {
-            _httpClient.BaseAddress = new Uri(_options.BaseUrl.TrimEnd('/') + "/");
+            _httpClient.BaseAddress = new Uri(NormaliseBaseUrl(_options.BaseUrl));
         }
     }
 
@@ -82,7 +82,7 @@ public sealed class DotTrackingClient
 
     private async Task<string> LoginAsync(CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, "api/auth/login");
+        using var request = new HttpRequestMessage(HttpMethod.Post, "auth/login");
         request.Headers.Add("APIKEY", _options.ApiKey);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         request.Content = JsonContent.Create(new RoadTechLoginRequest(
@@ -105,7 +105,7 @@ public sealed class DotTrackingClient
         int offset,
         CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, "api/Falcon/GetCurrentTelemetry");
+        using var request = new HttpRequestMessage(HttpMethod.Post, "Falcon/GetCurrentTelemetry");
         request.Headers.Add("APIKEY", _options.ApiKey);
         request.Headers.Add("SID", sid);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
@@ -168,6 +168,12 @@ public sealed class DotTrackingClient
         int DataMask,
         int Offset,
         int OnlyLive);
+
+    public static string NormaliseBaseUrl(string baseUrl)
+    {
+        var trimmed = baseUrl.Trim().TrimEnd('/');
+        return trimmed.EndsWith("/api", StringComparison.OrdinalIgnoreCase) ? $"{trimmed}/" : $"{trimmed}/api/";
+    }
 }
 
 public sealed class RoadTechTelemetryPage
