@@ -12,6 +12,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Remove="Slh.Tms.Api.Tests/**/*.cs" />
+    <EmbeddedResource Include="Database/001_Initial_Tms_Schema.sql" />
     <EmbeddedResource Include="Database/002_Planning_Loads_Schema.sql" />
     <EmbeddedResource Include="Database/003_Market_Order_Details.sql" />
     <EmbeddedResource Include="Database/004_Driver_Mobile_Number.sql" />

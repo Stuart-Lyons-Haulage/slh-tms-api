@@ -121,7 +121,7 @@ if (!app.Environment.IsEnvironment("Testing"))
     var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Tms.SchemaInitializer");
     try
     {
-        await PlanningSchemaInitializer.Apply(db, CancellationToken.None);
+        await PlanningSchemaInitializer.Apply(db, logger, CancellationToken.None);
     }
     catch (Exception ex)
     {

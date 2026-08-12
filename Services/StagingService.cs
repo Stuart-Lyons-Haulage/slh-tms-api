@@ -21,7 +21,22 @@ public sealed class StagingService(TmsDbContext db)
         if (item.Status != StagingStatus.PendingReview) throw new InvalidOperationException("Only PendingReview items can be reviewed");
         item.ReviewedAtUtc = DateTimeOffset.UtcNow; item.ReviewedBy = user.Identity?.Name ?? user.FindFirstValue("oid"); item.ReviewNote = note;
         if (!approve) item.Status = StagingStatus.Rejected;
-        else { item.Status = StagingStatus.Approved; await Promote(item, ct); item.Status = StagingStatus.Promoted; }
+        else
+        {
+            item.Status = StagingStatus.Approved;
+            try
+            {
+                await Promote(item, ct);
+                item.Status = StagingStatus.Promoted;
+            }
+            catch (Exception ex) when (ex is JsonException or DbUpdateException or InvalidOperationException)
+            {
+                item.Status = StagingStatus.Failed;
+                item.ReviewNote = string.Join(" | ", new[] { note, $"Promotion failed: {ex.GetBaseException().Message}" }.Where(value => !string.IsNullOrWhiteSpace(value)));
+                await db.SaveChangesAsync(ct);
+                throw new InvalidOperationException($"Staged {item.EntityType} record could not be promoted: {ex.GetBaseException().Message}", ex);
+            }
+        }
         await db.SaveChangesAsync(ct); return item;
     }
     private async Task Promote(StagedImport item, CancellationToken ct)
