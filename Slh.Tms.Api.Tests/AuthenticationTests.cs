@@ -120,4 +120,36 @@ public class AuthenticationTests : IClassFixture<CustomWebFactory>
         Assert.DoesNotContain("ApiKey", body, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("X-Auth-Token", body, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public async Task Batch_staging_accepts_idempotent_email_records()
+    {
+        var client = _factory.CreateClientWithUser("automation", "Tms.Access");
+        var json = "[{ \"EntityType\": \"order\", \"IdempotencyKey\": \"email:test-message:1\", \"Source\": \"Power Automate / Orders Mailbox\", \"Payload\": { \"poNumber\": \"PO-EMAIL-1\", \"customerCode\": \"C1\", \"collectionDate\": \"2026-08-12\" } }]";
+        var response = await client.PostAsync("/api/v1/staging/batch", new StringContent(json, System.Text.Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("\"received\":1", body);
+    }
+
+    [Fact]
+    public async Task Integration_status_is_available_without_exposing_credentials()
+    {
+        var client = _factory.CreateClientWithUser("admin", "Tms.Access");
+        var response = await client.GetAsync("/api/v1/integrations/status");
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("batchIntake", body);
+        Assert.DoesNotContain("ConnectionString", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ApiKey", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Delivery_ETA_endpoint_returns_an_operational_response()
+    {
+        var client = _factory.CreateClientWithUser("planner", "Tms.Access");
+        var date = DateOnly.FromDateTime(DateTime.UtcNow).ToString("yyyy-MM-dd");
+        var response = await client.GetAsync($"/api/v1/operations/delivery-etas?date={date}");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
 }

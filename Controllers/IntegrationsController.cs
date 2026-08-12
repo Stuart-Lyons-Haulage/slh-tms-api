@@ -3,14 +3,32 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Models.Tracking;
+using Slh.Tms.Api.Models.Integrations;
 using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/integrations")]
 [Authorize]
-public sealed class IntegrationsController(SageHrClient sageHr, TmsDbContext db, ILogger<IntegrationsController> logger) : ControllerBase
+public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptions tracking, AzureSmsDispatchService sms, IConfiguration configuration, TmsDbContext db, ILogger<IntegrationsController> logger) : ControllerBase
 {
+    [HttpGet("status")]
+    public async Task<IActionResult> Status(CancellationToken ct)
+    {
+        var latestTracking = await db.VehicleLiveStatuses.AsNoTracking().MaxAsync(status => (DateTimeOffset?)status.LastEventTimeUtc, ct);
+        var latestEmailIntake = await db.StagedImports.AsNoTracking().Where(item => item.Source != null && (item.Source.Contains("Power Automate") || item.Source.Contains("Mailbox"))).MaxAsync(item => (DateTimeOffset?)item.ReceivedAtUtc, ct);
+        return Ok(new
+        {
+            roadTech = new { configured = tracking.IsConfigured, latestEventUtc = latestTracking, connected = tracking.IsConfigured && latestTracking is not null && DateTimeOffset.UtcNow - latestTracking < TimeSpan.FromMinutes(30) },
+            azureMaps = new { configured = !string.IsNullOrWhiteSpace(configuration["Maps:Endpoint"]) },
+            azureSms = new { configured = sms.IsConfigured },
+            sageHr = new { configured = sageHr.IsConfigured },
+            emailIntake = new { configured = latestEmailIntake is not null, lastReceivedUtc = latestEmailIntake },
+            batchIntake = new { configured = true, endpoint = "/api/v1/staging/batch" }
+        });
+    }
+
     [HttpGet("sage-hr/status")]
     public async Task<IActionResult> SageHrStatus(CancellationToken ct)
     {

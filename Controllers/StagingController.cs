@@ -37,6 +37,25 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
         return Accepted(service.ToResponse(item, Request));
     }
 
+    [HttpPost("batch"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> StageBatch(List<StageImportRequest> requests, CancellationToken ct)
+    {
+        if (requests.Count == 0 || requests.Count > 500) return BadRequest(new ErrorResponse("invalid_batch", "Submit between 1 and 500 records.", HttpContext.TraceIdentifier));
+        if (requests.Any(request => string.IsNullOrWhiteSpace(request.IdempotencyKey))) return BadRequest(new ErrorResponse("invalid_idempotency_key", "Every record needs an IdempotencyKey.", HttpContext.TraceIdentifier));
+        var keys = requests.Select(request => request.IdempotencyKey).ToList();
+        if (keys.Distinct(StringComparer.OrdinalIgnoreCase).Count() != keys.Count) return BadRequest(new ErrorResponse("duplicate_batch_key", "Idempotency keys must be unique within the batch.", HttpContext.TraceIdentifier));
+        var existing = await db.StagedImports.AsNoTracking().Where(item => keys.Contains(item.IdempotencyKey)).ToDictionaryAsync(item => item.IdempotencyKey, ct);
+        var existingCount = existing.Count;
+        var responses = new List<StageImportResponse>();
+        foreach (var request in requests)
+        {
+            if (existing.TryGetValue(request.IdempotencyKey, out var item)) responses.Add(service.ToResponse(item, Request));
+            else { var created = service.Create(request); db.StagedImports.Add(created); responses.Add(service.ToResponse(created, Request)); }
+        }
+        await db.SaveChangesAsync(ct);
+        return Accepted(new { received = responses.Count, existing = existingCount, created = responses.Count - existingCount, records = responses });
+    }
+
     [HttpGet("{id:guid}")] public async Task<IActionResult> Get(Guid id, CancellationToken ct) => (await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct)) is { } x ? Ok(x) : NotFound();
     [HttpPost("{id:guid}/approve"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> Approve(Guid id, ReviewRequest request, CancellationToken ct)

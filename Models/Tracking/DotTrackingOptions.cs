@@ -23,4 +23,7 @@ public sealed class DotTrackingOptions
 
     /// <summary>Safety limit for RoadTech Offset pagination.</summary>
     public int MaxPages { get; set; } = 100;
+
+    public bool IsConfigured => Enabled && !string.IsNullOrWhiteSpace(BaseUrl) && !string.IsNullOrWhiteSpace(ApiKey) &&
+        !string.IsNullOrWhiteSpace(Username) && !string.IsNullOrWhiteSpace(Password) && !string.IsNullOrWhiteSpace(CompanyCode);
 }

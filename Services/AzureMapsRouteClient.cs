@@ -31,4 +31,14 @@ public sealed class AzureMapsRouteClient(HttpClient client, IConfiguration confi
         using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(ct));
         return document.RootElement.Clone();
     }
+
+    public async Task<TimeSpan> TravelTime((decimal Longitude, decimal Latitude) from, (decimal Longitude, decimal Latitude) to, CancellationToken ct)
+    {
+        var result = await Directions([from, to], ct);
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(result));
+        if (!document.RootElement.TryGetProperty("routes", out var routes) || routes.GetArrayLength() == 0 ||
+            !routes[0].TryGetProperty("summary", out var summary) || !summary.TryGetProperty("travelTimeInSeconds", out var seconds))
+            throw new InvalidOperationException("Azure Maps did not return a route travel time.");
+        return TimeSpan.FromSeconds(seconds.GetDouble());
+    }
 }
