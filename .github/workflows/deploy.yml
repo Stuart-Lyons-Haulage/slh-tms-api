@@ -81,6 +81,11 @@ jobs:
               "Tracking__Dot__CompanyCode=secretref:dot-company-code" \
               "Tracking__Dot__Username=secretref:dot-username" \
               "Tracking__Dot__Password=secretref:dot-password" \
+              "Integrations__SageHr__Enabled=true" \
+              "Integrations__SageHr__BaseUrl=secretref:sagehr-base-url" \
+              "Integrations__SageHr__ApiKey=secretref:sagehr-api-key" \
+              "Integrations__SageHr__DriverTeamName=Drivers" \
+              "Integrations__SageHr__DriverPositionKeyword=Driver" \
               "Cors__AllowedOrigins__0=https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io" \
               "Deployment__Revision=${{ github.sha }}"
 

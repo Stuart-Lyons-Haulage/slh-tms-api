@@ -91,4 +91,33 @@ public class AuthenticationTests : IClassFixture<CustomWebFactory>
         // Expect NotFound (no direct create endpoint), Unauthorized, or Forbidden depending on configuration; ensure not 201
         Assert.NotEqual(HttpStatusCode.Created, r.StatusCode);
     }
+
+    [Fact]
+    public async Task Driver_assignment_history_is_available_to_authorised_users()
+    {
+        var client = _factory.CreateClientWithUser("planner", "Tms.Access");
+        var date = DateOnly.FromDateTime(DateTime.UtcNow).ToString("yyyy-MM-dd");
+        var response = await client.GetAsync($"/api/v1/driver-assignments?from={date}&to={date}");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Return_load_suggestions_are_available_to_authorised_users()
+    {
+        var client = _factory.CreateClientWithUser("planner", "Tms.Access");
+        var date = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(1).ToString("yyyy-MM-dd");
+        var response = await client.GetAsync($"/api/v1/planning/return-load-suggestions?date={date}");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Sage_HR_status_does_not_expose_secrets()
+    {
+        var client = _factory.CreateClientWithUser("admin", "Tms.Access");
+        var response = await client.GetAsync("/api/v1/integrations/sage-hr/status");
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.DoesNotContain("ApiKey", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("X-Auth-Token", body, StringComparison.OrdinalIgnoreCase);
+    }
 }
