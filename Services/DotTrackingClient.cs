@@ -1,4 +1,7 @@
+using System.Net;
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Slh.Tms.Api.Models.Tracking;
@@ -82,23 +85,53 @@ public sealed class DotTrackingClient
 
     private async Task<string> LoginAsync(CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, "auth/login");
+        var passwordAttempts = LoginPasswordAttempts(_options.Password);
+        List<string> failures = [];
+        foreach (var password in passwordAttempts)
+        {
+            using var request = CreateLoginRequest(password);
+            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            if (response.IsSuccessStatusCode)
+            {
+                var payload = await response.Content.ReadAsStringAsync(cancellationToken);
+                return ExtractSessionId(payload);
+            }
+
+            failures.Add(await RoadTechFailureDetail(response, "auth/login", cancellationToken));
+            if (response.StatusCode is not (HttpStatusCode.InternalServerError or HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden or HttpStatusCode.BadRequest))
+            {
+                break;
+            }
+        }
+
+        throw new HttpRequestException(string.Join(" Then ", failures));
+    }
+
+
+    private HttpRequestMessage CreateLoginRequest(string password)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "auth/login");
         request.Headers.Add("APIKEY", _options.ApiKey);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         request.Content = JsonContent.Create(new RoadTechLoginRequest(
             _options.Username,
-            _options.Password,
+            password,
             "SLH TMS API",
             "Azure App Service",
             Environment.MachineName,
             "password"), options: RoadTechJson.Options);
-
-        using var response = await _httpClient.SendAsync(request, cancellationToken);
-        await EnsureRoadTechSuccess(response, "auth/login", cancellationToken);
-
-        var payload = await response.Content.ReadAsStringAsync(cancellationToken);
-        return ExtractSessionId(payload);
+        return request;
     }
+
+    private static IReadOnlyList<string> LoginPasswordAttempts(string password)
+    {
+        var trimmed = password.Trim();
+        if (IsSha1Hex(trimmed)) return [trimmed];
+        var bytes = SHA1.HashData(Encoding.UTF8.GetBytes(trimmed));
+        return [trimmed, Convert.ToHexString(bytes).ToLowerInvariant()];
+    }
+
+    private static bool IsSha1Hex(string value) => value.Length == 40 && value.All(Uri.IsHexDigit);
 
     private async Task<RoadTechTelemetryPage> GetTelemetryPageAsync(
         string sid,
@@ -117,7 +150,7 @@ public sealed class DotTrackingClient
             _options.OnlyLive), options: RoadTechJson.Options);
 
         using var response = await _httpClient.SendAsync(request, cancellationToken);
-        await EnsureRoadTechSuccess(response, "Falcon/GetCurrentTelemetry", cancellationToken);
+        if (!response.IsSuccessStatusCode) throw new HttpRequestException(await RoadTechFailureDetail(response, "Falcon/GetCurrentTelemetry", cancellationToken), null, response.StatusCode);
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         var page = await JsonSerializer.DeserializeAsync<RoadTechTelemetryPage>(
@@ -175,13 +208,12 @@ public sealed class DotTrackingClient
         return trimmed.EndsWith("/api", StringComparison.OrdinalIgnoreCase) ? $"{trimmed}/" : $"{trimmed}/api/";
     }
 
-    private static async Task EnsureRoadTechSuccess(HttpResponseMessage response, string endpoint, CancellationToken cancellationToken)
+    private static async Task<string> RoadTechFailureDetail(HttpResponseMessage response, string endpoint, CancellationToken cancellationToken)
     {
-        if (response.IsSuccessStatusCode) return;
         var body = await response.Content.ReadAsStringAsync(cancellationToken);
         var detail = string.IsNullOrWhiteSpace(body) ? response.ReasonPhrase : body.Trim();
-        if (detail.Length > 500) detail = detail[..500];
-        throw new HttpRequestException($"RoadTech {endpoint} returned {(int)response.StatusCode} ({response.ReasonPhrase}). {detail}", null, response.StatusCode);
+        if (detail is not null && detail.Length > 500) detail = detail[..500];
+        return $"RoadTech {endpoint} returned {(int)response.StatusCode} ({response.ReasonPhrase}). {detail}";
     }
 }
 

@@ -46,8 +46,34 @@ public sealed class DotTrackingClientTests
         Assert.Equal(0, payload.RootElement.GetProperty("DataMask").GetInt32());
     }
 
+    [Fact]
+    public async Task RoadTech_login_retries_with_sha1_password_when_plain_password_is_rejected()
+    {
+        var handler = new CapturingHandler(rejectFirstLogin: true);
+        var client = new DotTrackingClient(new HttpClient(handler), new DotTrackingOptions
+        {
+            Enabled = true,
+            BaseUrl = "https://api-v1-alpha.roadtech.co.uk",
+            ApiKey = "test-key",
+            Username = "planner",
+            Password = "secret",
+            CompanyCode = "SLH"
+        }, NullLogger<DotTrackingClient>.Instance);
+
+        await client.GetLatestVehicleEventsAsync();
+
+        Assert.Equal(3, handler.Requests.Count);
+        using var firstLogin = JsonDocument.Parse(handler.Bodies[0]);
+        using var secondLogin = JsonDocument.Parse(handler.Bodies[1]);
+        Assert.Equal("secret", firstLogin.RootElement.GetProperty("Pass").GetString());
+        Assert.Equal("e5e9fa1ba31ecd1ae84f75caaa474f3a663f05f4", secondLogin.RootElement.GetProperty("Pass").GetString());
+    }
+
     private sealed class CapturingHandler : HttpMessageHandler
     {
+        private readonly bool _rejectFirstLogin;
+        private int _loginCount;
+        public CapturingHandler(bool rejectFirstLogin = false) => _rejectFirstLogin = rejectFirstLogin;
         public List<HttpRequestMessage> Requests { get; } = [];
         public List<string> Bodies { get; } = [];
 
@@ -55,7 +81,12 @@ public sealed class DotTrackingClientTests
         {
             Bodies.Add(request.Content is null ? string.Empty : await request.Content.ReadAsStringAsync(cancellationToken));
             Requests.Add(request);
-            var content = request.RequestUri!.AbsolutePath.EndsWith("/auth/login", StringComparison.OrdinalIgnoreCase)
+            var isLogin = request.RequestUri!.AbsolutePath.EndsWith("/auth/login", StringComparison.OrdinalIgnoreCase);
+            if (isLogin && _rejectFirstLogin && _loginCount++ == 0)
+            {
+                return new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("Internal Server Error") };
+            }
+            var content = isLogin
                 ? "{\"token\":\"sid-123\"}"
                 : "{\"moreData\":false,\"recordOffset\":0,\"recordCount\":0,\"data\":[]}";
             return new HttpResponseMessage(HttpStatusCode.OK)
