@@ -12,7 +12,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/integrations")]
 [Authorize]
-public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptions tracking, DotTrackingClient dotTracking, AzureSmsDispatchService sms, IConfiguration configuration, TmsDbContext db, ILogger<IntegrationsController> logger) : ControllerBase
+public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptions tracking, DotTrackingClient dotTracking, AzureSmsDispatchService sms, TextBeeOptions textBee, FleetioOptions fleetio, IConfiguration configuration, TmsDbContext db, ILogger<IntegrationsController> logger) : ControllerBase
 {
     [HttpGet("status")]
     public async Task<IActionResult> Status(CancellationToken ct)
@@ -24,6 +24,8 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
             roadTech = new { configured = tracking.IsConfigured, latestEventUtc = latestTracking, connected = tracking.IsConfigured && latestTracking is not null && DateTimeOffset.UtcNow - latestTracking < TimeSpan.FromMinutes(30) },
             azureMaps = new { configured = !string.IsNullOrWhiteSpace(configuration["Maps:Endpoint"]) },
             azureSms = new { configured = sms.IsConfigured },
+            textBee = new { configured = textBee.IsConfigured, dutyPhoneLabel = textBee.DutyPhoneLabel, missingSettings = textBee.MissingSettings },
+            fleetio = new { configured = fleetio.IsConfigured, missingSettings = fleetio.MissingSettings },
             sageHr = new { configured = sageHr.IsConfigured },
             emailIntake = new { configured = latestEmailIntake is not null, lastReceivedUtc = latestEmailIntake },
             batchIntake = new { configured = true, endpoint = "/api/v1/staging/batch" }

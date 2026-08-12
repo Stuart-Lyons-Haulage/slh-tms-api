@@ -46,8 +46,19 @@ Set these environment variables:
 | `Entra__TenantId` | Your tenant GUID |
 | `Entra__Audience` | `api://<API-CLIENT-ID>` |
 | `ConnectionStrings__TmsDb` | Azure SQL connection string; use Key Vault reference or managed identity |
+| `Integrations__SageHr__Enabled` | `true` when Sage HR driver sync should be available |
+| `Integrations__SageHr__BaseUrl` | Sage HR API base URL |
+| `Integrations__SageHr__ApiKey` | Sage HR API token, preferably Key Vault reference |
+| `Integrations__TextBee__Enabled` | `true` when TextBee duty-phone SMS dispatch is ready |
+| `Integrations__TextBee__ApiKey` | TextBee API key, preferably Key Vault reference |
+| `Integrations__TextBee__DeviceId` | TextBee device ID for the duty phone |
+| `Integrations__Fleetio__Enabled` | `true` when Fleetio service/VOR integration is ready |
+| `Integrations__Fleetio__ApiKey` | Fleetio API key, preferably Key Vault reference |
+| `Integrations__Fleetio__AccountToken` | Fleetio account token, preferably Key Vault reference |
 
 Deploy the API, run EF Core migrations, then verify `GET https://<host>/health` returns HTTP 200. Do not put SQL passwords or API secrets in source control.
+
+`GET /api/v1/diagnostics/tables` verifies each operational table without exposing data. Use it when portal pages show a generic request failure.
 
 ## Custom connector: exact setup
 
