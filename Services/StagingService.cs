@@ -59,7 +59,7 @@ public sealed class StagingService(TmsDbContext db)
 
     private async Task PromoteCustomer(JsonElement payload, CancellationToken ct)
     {
-        var code = Required(payload, "code"); var name = Required(payload, "name");
+        var code = ClipRequired(Required(payload, "code"), 40); var name = ClipRequired(Required(payload, "name"), 200);
         var customer = await db.Customers.SingleOrDefaultAsync(item => item.Code == code, ct);
         if (customer is null) db.Customers.Add(new Customer { Code = code, Name = name, Active = Bool(payload, "active", true) });
         else { customer.Name = name; customer.Active = Bool(payload, "active", true); }
@@ -67,55 +67,56 @@ public sealed class StagingService(TmsDbContext db)
 
     private async Task PromoteCustomerContact(JsonElement payload, CancellationToken ct)
     {
-        var customerCode = Required(payload, "customerCode"); var name = Required(payload, "name");
+        var customerCode = ClipRequired(Required(payload, "customerCode"), 40); var name = ClipRequired(Required(payload, "name"), 200);
         var contact = await db.CustomerContacts.SingleOrDefaultAsync(item => item.CustomerCode == customerCode && item.Name == name, ct);
-        if (contact is null) db.CustomerContacts.Add(new CustomerContact { CustomerCode = customerCode, Name = name, Email = Text(payload, "email"), MobileNumber = Text(payload, "mobileNumber"), ReceivesEtaUpdates = Bool(payload, "receivesEtaUpdates", true), Active = Bool(payload, "active", true) });
-        else { contact.Email = Text(payload, "email"); contact.MobileNumber = Text(payload, "mobileNumber"); contact.ReceivesEtaUpdates = Bool(payload, "receivesEtaUpdates", true); contact.Active = Bool(payload, "active", true); }
+        if (contact is null) db.CustomerContacts.Add(new CustomerContact { CustomerCode = customerCode, Name = name, Email = Clip(Text(payload, "email"), 320), MobileNumber = Clip(Text(payload, "mobileNumber"), 40), ReceivesEtaUpdates = Bool(payload, "receivesEtaUpdates", true), Active = Bool(payload, "active", true) });
+        else { contact.Email = Clip(Text(payload, "email"), 320); contact.MobileNumber = Clip(Text(payload, "mobileNumber"), 40); contact.ReceivesEtaUpdates = Bool(payload, "receivesEtaUpdates", true); contact.Active = Bool(payload, "active", true); }
     }
 
     private async Task PromoteVehicle(JsonElement payload, CancellationToken ct)
     {
-        var registration = Required(payload, "registration").Replace(" ", "").ToUpperInvariant();
+        var registration = ClipRequired(Required(payload, "registration").Replace(" ", "").ToUpperInvariant(), 20);
         var vehicle = await db.Vehicles.SingleOrDefaultAsync(item => item.Registration == registration, ct);
-        if (vehicle is null) db.Vehicles.Add(new Vehicle { Registration = registration, FleetNumber = Text(payload, "fleetNumber"), Abbreviation = Text(payload, "abbreviation"), Transmission = Text(payload, "transmission"), DvsCompliant = BoolOrNull(payload, "dvsCompliant"), FuelProvider = Text(payload, "fuelProvider"), FuelPinSecretName = Text(payload, "fuelPinSecretName"), FuelCardLastFour = Text(payload, "fuelCardLastFour"), Active = Bool(payload, "active", true) });
-        else { vehicle.FleetNumber = Text(payload, "fleetNumber"); vehicle.Abbreviation = Text(payload, "abbreviation"); vehicle.Transmission = Text(payload, "transmission"); vehicle.DvsCompliant = BoolOrNull(payload, "dvsCompliant"); vehicle.FuelProvider = Text(payload, "fuelProvider"); vehicle.FuelPinSecretName = Text(payload, "fuelPinSecretName"); vehicle.FuelCardLastFour = Text(payload, "fuelCardLastFour"); vehicle.Active = Bool(payload, "active", true); }
+        if (vehicle is null) db.Vehicles.Add(new Vehicle { Registration = registration, FleetNumber = Clip(Text(payload, "fleetNumber"), 40), Abbreviation = Clip(Text(payload, "abbreviation"), 20), Transmission = Clip(Text(payload, "transmission"), 20), DvsCompliant = BoolOrNull(payload, "dvsCompliant"), FuelProvider = Clip(Text(payload, "fuelProvider"), 30), FuelPinSecretName = Clip(Text(payload, "fuelPinSecretName"), 120), FuelCardLastFour = Clip(Text(payload, "fuelCardLastFour"), 4), Active = Bool(payload, "active", true) });
+        else { vehicle.FleetNumber = Clip(Text(payload, "fleetNumber"), 40); vehicle.Abbreviation = Clip(Text(payload, "abbreviation"), 20); vehicle.Transmission = Clip(Text(payload, "transmission"), 20); vehicle.DvsCompliant = BoolOrNull(payload, "dvsCompliant"); vehicle.FuelProvider = Clip(Text(payload, "fuelProvider"), 30); vehicle.FuelPinSecretName = Clip(Text(payload, "fuelPinSecretName"), 120); vehicle.FuelCardLastFour = Clip(Text(payload, "fuelCardLastFour"), 4); vehicle.Active = Bool(payload, "active", true); }
     }
 
     private async Task PromoteDriver(JsonElement payload, CancellationToken ct)
     {
-        var employeeNumber = Text(payload, "employeeNumber") ?? Text(payload, "driverId") ?? Text(payload, "driverID") ?? Text(payload, "DriverID");
-        var displayName = Text(payload, "displayName") ?? Text(payload, "driver") ?? Text(payload, "Driver") ?? Text(payload, "name");
+        var employeeNumber = Text(payload, "employeeNumber") ?? Text(payload, "driverId") ?? Text(payload, "driverID") ?? Text(payload, "DriverID") ?? Text(payload, "employeeNo") ?? Text(payload, "payrollNumber");
+        var displayName = Text(payload, "displayName") ?? Text(payload, "driver") ?? Text(payload, "Driver") ?? Text(payload, "name") ?? Text(payload, "driverName");
         if (string.IsNullOrWhiteSpace(employeeNumber) && !string.IsNullOrWhiteSpace(displayName)) employeeNumber = displayName.Trim().ToUpperInvariant().Replace(" ", "-");
         if (string.IsNullOrWhiteSpace(employeeNumber) || string.IsNullOrWhiteSpace(displayName)) throw new JsonException("Driver payload requires employeeNumber and displayName.");
+        employeeNumber = ClipRequired(employeeNumber, 40); displayName = ClipRequired(displayName, 160);
         var driver = await db.Drivers.SingleOrDefaultAsync(item => item.EmployeeNumber == employeeNumber, ct);
-        if (driver is null) db.Drivers.Add(new Driver { EmployeeNumber = employeeNumber, DisplayName = displayName, TachoName = Text(payload, "tachoName"), MobileNumber = Text(payload, "mobileNumber"), DriverType = Text(payload, "driverType"), DriverGroup = Text(payload, "driverGroup"), Skills = Text(payload, "skills"), Active = Bool(payload, "active", true) });
-        else { driver.DisplayName = displayName; driver.TachoName = Text(payload, "tachoName"); driver.MobileNumber = Text(payload, "mobileNumber"); driver.DriverType = Text(payload, "driverType"); driver.DriverGroup = Text(payload, "driverGroup"); driver.Skills = Text(payload, "skills"); driver.Active = Bool(payload, "active", true); }
+        if (driver is null) db.Drivers.Add(new Driver { EmployeeNumber = employeeNumber, DisplayName = displayName, TachoName = Clip(Text(payload, "tachoName"), 160), MobileNumber = Clip(Text(payload, "mobileNumber"), 40), DriverType = Clip(Text(payload, "driverType"), 80), DriverGroup = Clip(Text(payload, "driverGroup"), 80), Skills = Clip(Text(payload, "skills"), 160), Active = Bool(payload, "active", true) });
+        else { driver.DisplayName = displayName; driver.TachoName = Clip(Text(payload, "tachoName"), 160); driver.MobileNumber = Clip(Text(payload, "mobileNumber"), 40); driver.DriverType = Clip(Text(payload, "driverType"), 80); driver.DriverGroup = Clip(Text(payload, "driverGroup"), 80); driver.Skills = Clip(Text(payload, "skills"), 160); driver.Active = Bool(payload, "active", true); }
     }
 
     private async Task PromoteTrailer(JsonElement payload, CancellationToken ct)
     {
-        var trailerNumber = Required(payload, "trailerNumber");
+        var trailerNumber = ClipRequired(Required(payload, "trailerNumber"), 40);
         var trailer = await db.Trailers.SingleOrDefaultAsync(item => item.TrailerNumber == trailerNumber, ct);
-        if (trailer is null) db.Trailers.Add(new Trailer { TrailerNumber = trailerNumber, Type = Text(payload, "type"), StandardCapacity = IntOrNull(payload, "standardCapacity"), EuroCapacity = IntOrNull(payload, "euroCapacity"), Active = Bool(payload, "active", true) });
-        else { trailer.Type = Text(payload, "type"); trailer.StandardCapacity = IntOrNull(payload, "standardCapacity"); trailer.EuroCapacity = IntOrNull(payload, "euroCapacity"); trailer.Active = Bool(payload, "active", true); }
+        if (trailer is null) db.Trailers.Add(new Trailer { TrailerNumber = trailerNumber, Type = Clip(Text(payload, "type"), 80), StandardCapacity = IntOrNull(payload, "standardCapacity"), EuroCapacity = IntOrNull(payload, "euroCapacity"), Active = Bool(payload, "active", true) });
+        else { trailer.Type = Clip(Text(payload, "type"), 80); trailer.StandardCapacity = IntOrNull(payload, "standardCapacity"); trailer.EuroCapacity = IntOrNull(payload, "euroCapacity"); trailer.Active = Bool(payload, "active", true); }
     }
 
     private async Task PromoteSite(JsonElement payload, CancellationToken ct)
     {
-        var externalCode = Required(payload, "externalCode"); var name = Required(payload, "name");
+        var externalCode = ClipRequired(Required(payload, "externalCode"), 40); var name = ClipRequired(Required(payload, "name"), 200);
         var site = await db.Sites.SingleOrDefaultAsync(item => item.ExternalCode == externalCode, ct);
-        if (site is null) db.Sites.Add(new Site { ExternalCode = externalCode, Name = name, DriverTextName = Text(payload, "driverTextName"), CollectionAddress = Text(payload, "collectionAddress"), CollectionInstructions = Text(payload, "collectionInstructions"), MapLink = Text(payload, "mapLink"), Active = Bool(payload, "active", true) });
-        else { site.Name = name; site.DriverTextName = Text(payload, "driverTextName"); site.CollectionAddress = Text(payload, "collectionAddress"); site.CollectionInstructions = Text(payload, "collectionInstructions"); site.MapLink = Text(payload, "mapLink"); site.Active = Bool(payload, "active", true); }
+        if (site is null) db.Sites.Add(new Site { ExternalCode = externalCode, Name = name, DriverTextName = Clip(Text(payload, "driverTextName"), 200), CollectionAddress = Clip(Text(payload, "collectionAddress"), 500), CollectionInstructions = Clip(Text(payload, "collectionInstructions"), 1000), MapLink = Clip(Text(payload, "mapLink"), 1000), Active = Bool(payload, "active", true) });
+        else { site.Name = name; site.DriverTextName = Clip(Text(payload, "driverTextName"), 200); site.CollectionAddress = Clip(Text(payload, "collectionAddress"), 500); site.CollectionInstructions = Clip(Text(payload, "collectionInstructions"), 1000); site.MapLink = Clip(Text(payload, "mapLink"), 1000); site.Active = Bool(payload, "active", true); }
     }
 
     private async Task PromoteMarketContact(JsonElement payload, CancellationToken ct)
     {
-        var market = Text(payload, "market") ?? Text(payload, "marketName") ?? "General";
-        var name = Text(payload, "name") ?? Text(payload, "contactName") ?? Text(payload, "sellerName");
+        var market = ClipRequired(Text(payload, "market") ?? Text(payload, "marketName") ?? "General", 80);
+        var name = Clip(Text(payload, "name") ?? Text(payload, "contactName") ?? Text(payload, "sellerName"), 200);
         if (string.IsNullOrWhiteSpace(name)) throw new JsonException("Market contact payload requires name.");
         var contact = await db.MarketContacts.SingleOrDefaultAsync(item => item.Market == market && item.Name == name, ct);
-        if (contact is null) db.MarketContacts.Add(new MarketContact { Market = market, Name = name, StandOrLocation = Text(payload, "standOrLocation") ?? Text(payload, "stallNumber"), Active = Bool(payload, "active", true) });
-        else { contact.StandOrLocation = Text(payload, "standOrLocation") ?? Text(payload, "stallNumber"); contact.Active = Bool(payload, "active", true); }
+        if (contact is null) db.MarketContacts.Add(new MarketContact { Market = market, Name = name, StandOrLocation = Clip(Text(payload, "standOrLocation") ?? Text(payload, "stallNumber"), 200), Active = Bool(payload, "active", true) });
+        else { contact.StandOrLocation = Clip(Text(payload, "standOrLocation") ?? Text(payload, "stallNumber"), 200); contact.Active = Bool(payload, "active", true); }
     }
 
     private async Task PromoteOrder(JsonElement payload, CancellationToken ct)
@@ -130,7 +131,7 @@ public sealed class StagingService(TmsDbContext db)
             if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowStartUtc"), out var parsedWindowStart)) deliveryWindowStartUtc = parsedWindowStart;
             DateTimeOffset? deliveryWindowEndUtc = null;
             if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowEndUtc"), out var parsedWindowEnd)) deliveryWindowEndUtc = parsedWindowEnd;
-            db.TransportOrders.Add(new TransportOrder { Reference = reference, CustomerCode = customerCode, CollectionDate = collectionDate, DeliveryDate = deliveryDate, DeliveryWindowStartUtc = deliveryWindowStartUtc, DeliveryWindowEndUtc = deliveryWindowEndUtc, Pallets = IntOrNull(payload, "pallets"), SellerName = Text(payload, "sellerName"), MarketName = Text(payload, "marketName"), StallNumber = Text(payload, "stallNumber"), DriverInstructions = Text(payload, "driverInstructions"), MapLink = Text(payload, "mapLink") });
+            db.TransportOrders.Add(new TransportOrder { Reference = ClipRequired(reference, 80), CustomerCode = ClipRequired(customerCode, 40), CollectionDate = collectionDate, DeliveryDate = deliveryDate, DeliveryWindowStartUtc = deliveryWindowStartUtc, DeliveryWindowEndUtc = deliveryWindowEndUtc, Pallets = IntOrNull(payload, "pallets"), SellerName = Clip(Text(payload, "sellerName"), 200), MarketName = Clip(Text(payload, "marketName"), 80), StallNumber = Clip(Text(payload, "stallNumber"), 200), DriverInstructions = Clip(Text(payload, "driverInstructions"), 1000), MapLink = Clip(Text(payload, "mapLink"), 1000) });
         }
     }
 
@@ -158,4 +159,6 @@ public sealed class StagingService(TmsDbContext db)
     private static int? IntOrNull(JsonElement payload, string name) => int.TryParse(Text(payload, name), out var value) ? value : null;
     private static bool Bool(JsonElement payload, string name, bool fallback) => bool.TryParse(Text(payload, name), out var value) ? value : fallback;
     private static bool? BoolOrNull(JsonElement payload, string name) => bool.TryParse(Text(payload, name), out var value) ? value : null;
+    private static string? Clip(string? value, int maxLength) => string.IsNullOrWhiteSpace(value) ? null : value.Length <= maxLength ? value : value[..maxLength];
+    private static string ClipRequired(string value, int maxLength) => value.Length <= maxLength ? value : value[..maxLength];
 }

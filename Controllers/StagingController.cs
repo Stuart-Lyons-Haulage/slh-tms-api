@@ -20,7 +20,7 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
     {
         take = Math.Clamp(take, 1, 500);
         var query = db.StagedImports.AsNoTracking().AsQueryable();
-        if (status is not null) query = query.Where(x => x.Status == status);
+        query = query.Where(x => x.Status == (status ?? StagingStatus.PendingReview));
         if (!string.IsNullOrWhiteSpace(entityType))
             query = query.Where(x => x.EntityType == entityType.Trim().ToLowerInvariant());
 

@@ -84,7 +84,16 @@ public sealed class DotTrackingController(
     public async Task<ActionResult<FleetStatusResponse>> GetFleetStatus(CancellationToken cancellationToken)
     {
         var vehicles = await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(cancellationToken);
-        var liveStatuses = await db.VehicleLiveStatuses.AsNoTracking().ToListAsync(cancellationToken);
+        List<VehicleLiveStatus> liveStatuses;
+        try
+        {
+            liveStatuses = await db.VehicleLiveStatuses.AsNoTracking().ToListAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or DbUpdateException)
+        {
+            logger.LogWarning(ex, "Vehicle live status is unavailable; returning master-data fleet fallback.");
+            return Ok(MasterFleetFallback(vehicles, "Master data"));
+        }
         var latestByIdentifier = liveStatuses.GroupBy(status => NormaliseIdentifier(status.VehicleIdentifier)).ToDictionary(group => group.Key, group => group.OrderByDescending(status => status.LastEventTimeUtc).First());
         var now = DateTimeOffset.UtcNow;
         var today = DateOnly.FromDateTime(now.UtcDateTime);
@@ -102,6 +111,13 @@ public sealed class DotTrackingController(
             return new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, live?.VehicleIdentifier, condition, live?.LastEventTimeUtc, live?.IgnitionOn, live?.IsMoving, live?.SpeedKph, live?.Latitude, live?.Longitude, age is null ? null : (int)Math.Max(0, age.Value.TotalMinutes), assignment?.Reference, assignment?.Status.ToString(), driverName);
         }).ToList();
         return Ok(new FleetStatusResponse("RoadTech Falcon", now, records.Count, records.Count(record => record.Condition is "Moving" or "Started"), records.Count(record => record.Condition is "NotSignedOn" or "Stale"), records));
+    }
+
+    private static FleetStatusResponse MasterFleetFallback(IReadOnlyList<Vehicle> vehicles, string provider)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var records = vehicles.Select(vehicle => new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, null, "NotSignedOn", null, null, null, null, null, null, null, null, null, null)).ToList();
+        return new FleetStatusResponse(provider, now, records.Count, 0, records.Count, records);
     }
 
     private static string NormaliseIdentifier(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
