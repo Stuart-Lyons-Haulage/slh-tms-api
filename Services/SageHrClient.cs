@@ -17,9 +17,9 @@ public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, I
         get
         {
             var missing = new List<string>();
-            if (!options.Enabled) missing.Add("Integrations:SageHr:Enabled");
-            if (string.IsNullOrWhiteSpace(options.BaseUrl)) missing.Add("Integrations:SageHr:BaseUrl");
-            if (string.IsNullOrWhiteSpace(options.ApiKey)) missing.Add("Integrations:SageHr:ApiKey");
+            if (!options.Enabled) missing.Add("Sage HR enabled flag");
+            if (string.IsNullOrWhiteSpace(options.BaseUrl)) missing.Add("Sage HR base URL");
+            if (string.IsNullOrWhiteSpace(options.ApiKey)) missing.Add("Sage HR access token");
             return missing;
         }
     }
