@@ -55,6 +55,22 @@ public class AuthenticationTests : IClassFixture<CustomWebFactory>
         Assert.True(r.StatusCode == HttpStatusCode.OK || r.StatusCode == HttpStatusCode.NoContent);
     }
 
+    [Theory]
+    [InlineData("Tms.Access")]
+    [InlineData("Tms.Write")]
+    [InlineData("Tms.Approve")]
+    [InlineData("Tms.Admin")]
+    public async Task Valid_TMS_app_role_request_succeeds(string role)
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Test-User", "planner");
+        client.DefaultRequestHeaders.Add("X-Test-Roles", role);
+
+        var response = await client.GetAsync("/api/v1/customers");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
     [Fact]
     public async Task Staging_submission_accepts_and_returns_202()
     {

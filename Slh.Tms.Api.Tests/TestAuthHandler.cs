@@ -21,6 +21,13 @@ public class TestAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions
         {
             claims.Add(new Claim("scp", scopes.ToString()));
         }
+        if (Request.Headers.TryGetValue("X-Test-Roles", out var roles))
+        {
+            foreach (var role in roles.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                claims.Add(new Claim("roles", role));
+            }
+        }
         if (Request.Headers.TryGetValue("X-Test-Oid", out var oid)) claims.Add(new Claim("oid", oid.ToString()));
 
         var identity = new ClaimsIdentity(claims, SchemeName);
