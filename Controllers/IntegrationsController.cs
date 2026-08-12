@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Tracking;
@@ -11,7 +12,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/integrations")]
 [Authorize]
-public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptions tracking, AzureSmsDispatchService sms, IConfiguration configuration, TmsDbContext db, ILogger<IntegrationsController> logger) : ControllerBase
+public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptions tracking, DotTrackingClient dotTracking, AzureSmsDispatchService sms, IConfiguration configuration, TmsDbContext db, ILogger<IntegrationsController> logger) : ControllerBase
 {
     [HttpGet("status")]
     public async Task<IActionResult> Status(CancellationToken ct)
@@ -43,6 +44,35 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
         {
             logger.LogWarning(exception, "Sage HR status check failed.");
             return Ok(new { configured = true, connected = false, employeeCount = 0, driverCandidateCount = 0, missingSettings = Array.Empty<string>(), message = "Sage HR could not be reached or rejected the API key." });
+        }
+    }
+
+    [HttpGet("roadtech/status")]
+    public async Task<IActionResult> RoadTechStatus(CancellationToken ct)
+    {
+        if (!tracking.IsConfigured)
+        {
+            var missing = new List<string>();
+            if (!tracking.Enabled) missing.Add("Tracking:Dot:Enabled");
+            if (string.IsNullOrWhiteSpace(tracking.BaseUrl)) missing.Add("Tracking:Dot:BaseUrl");
+            if (string.IsNullOrWhiteSpace(tracking.ApiKey)) missing.Add("Tracking:Dot:ApiKey");
+            if (string.IsNullOrWhiteSpace(tracking.Username)) missing.Add("Tracking:Dot:Username");
+            if (string.IsNullOrWhiteSpace(tracking.Password)) missing.Add("Tracking:Dot:Password");
+            if (string.IsNullOrWhiteSpace(tracking.CompanyCode)) missing.Add("Tracking:Dot:CompanyCode");
+            return Ok(new { configured = false, connected = false, recordCount = 0, latestEventUtc = (DateTimeOffset?)null, missingSettings = missing, message = $"RoadTech runtime settings are incomplete: {string.Join(", ", missing)}." });
+        }
+
+        try
+        {
+            var items = await dotTracking.GetLatestVehicleEventsAsync(ct);
+            var records = items.Select(DotTelemetryRecord.FromProvider).ToList();
+            var latest = records.Count == 0 ? (DateTimeOffset?)null : records.Max(record => record.EventTimeUtc);
+            return Ok(new { configured = true, connected = records.Count > 0, recordCount = records.Count, latestEventUtc = latest, missingSettings = Array.Empty<string>(), message = records.Count > 0 ? $"RoadTech connected and returned {records.Count} vehicle record(s)." : "RoadTech connected but returned zero live vehicle records." });
+        }
+        catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException or JsonException)
+        {
+            logger.LogWarning(exception, "RoadTech status check failed.");
+            return Ok(new { configured = true, connected = false, recordCount = 0, latestEventUtc = (DateTimeOffset?)null, missingSettings = Array.Empty<string>(), message = $"RoadTech could not be reached or rejected the credentials: {exception.GetBaseException().Message}" });
         }
     }
 
