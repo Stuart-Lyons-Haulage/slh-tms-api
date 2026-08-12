@@ -74,6 +74,10 @@ public sealed class StagingService(TmsDbContext db)
     private async Task PromoteCustomerContact(JsonElement payload, CancellationToken ct)
     {
         var customerCode = ClipRequired(Required(payload, "customerCode"), 40); var name = ClipRequired(Required(payload, "name"), 200);
+        var customerName = Clip(Text(payload, "customerName") ?? Text(payload, "customer") ?? customerCode, 200) ?? customerCode;
+        var customer = await db.Customers.SingleOrDefaultAsync(item => item.Code == customerCode, ct);
+        if (customer is null) db.Customers.Add(new Customer { Code = customerCode, Name = customerName, Active = true });
+        else if (customer.Name == customer.Code && !string.Equals(customerName, customerCode, StringComparison.OrdinalIgnoreCase)) customer.Name = customerName;
         var contact = await db.CustomerContacts.SingleOrDefaultAsync(item => item.CustomerCode == customerCode && item.Name == name, ct);
         if (contact is null) db.CustomerContacts.Add(new CustomerContact { CustomerCode = customerCode, Name = name, Email = Clip(Text(payload, "email"), 320), MobileNumber = Clip(Text(payload, "mobileNumber"), 40), ReceivesEtaUpdates = Bool(payload, "receivesEtaUpdates", true), Active = Bool(payload, "active", true) });
         else { contact.Email = Clip(Text(payload, "email"), 320); contact.MobileNumber = Clip(Text(payload, "mobileNumber"), 40); contact.ReceivesEtaUpdates = Bool(payload, "receivesEtaUpdates", true); contact.Active = Bool(payload, "active", true); }
