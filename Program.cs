@@ -113,6 +113,13 @@ static bool IsLyonsUser(ClaimsPrincipal user)
 }
 
 var app = builder.Build();
+
+await using (var scope = app.Services.CreateAsyncScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+    await PlanningSchemaInitializer.Apply(db, CancellationToken.None);
+}
+
 app.UseHttpsRedirection();
 app.UseCors("Portal");
 app.UseAuthentication();

@@ -26,42 +26,102 @@ public sealed class StagingService(TmsDbContext db)
     }
     private async Task Promote(StagedImport item, CancellationToken ct)
     {
-        var o = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        using var document = JsonDocument.Parse(item.PayloadJson);
+        var payload = document.RootElement;
         switch (item.EntityType)
         {
-            case "customer": db.Customers.Add(JsonSerializer.Deserialize<Customer>(item.PayloadJson, o) ?? throw new JsonException()); break;
-            case "customercontact": db.CustomerContacts.Add(JsonSerializer.Deserialize<CustomerContact>(item.PayloadJson, o) ?? throw new JsonException()); break;
-            case "vehicle": db.Vehicles.Add(JsonSerializer.Deserialize<Vehicle>(item.PayloadJson, o) ?? throw new JsonException()); break;
-            case "driver": db.Drivers.Add(JsonSerializer.Deserialize<Driver>(item.PayloadJson, o) ?? throw new JsonException()); break;
-            case "trailer": db.Trailers.Add(JsonSerializer.Deserialize<Trailer>(item.PayloadJson, o) ?? throw new JsonException()); break;
-            case "site": db.Sites.Add(JsonSerializer.Deserialize<Site>(item.PayloadJson, o) ?? throw new JsonException()); break;
-            case "marketcontact": db.MarketContacts.Add(JsonSerializer.Deserialize<MarketContact>(item.PayloadJson, o) ?? throw new JsonException()); break;
-            case "order":
-                using (var document = JsonDocument.Parse(item.PayloadJson))
-                {
-                    var payload = document.RootElement;
-                    var reference = payload.GetProperty("poNumber").GetString();
-                    var customerCode = payload.GetProperty("customerCode").GetString();
-                    var collectionDateText = payload.GetProperty("collectionDate").GetString();
-                    if (string.IsNullOrWhiteSpace(reference) || string.IsNullOrWhiteSpace(customerCode) || !DateOnly.TryParse(collectionDateText, out var collectionDate))
-                        throw new JsonException("Order payload requires poNumber, customerCode and collectionDate.");
-                    if (!await db.TransportOrders.AnyAsync(order => order.Reference == reference, ct))
-                    {
-                        DateOnly? deliveryDate = null;
-                        if (payload.TryGetProperty("deliveryDate", out var delivery) && DateOnly.TryParse(delivery.GetString(), out var parsedDelivery)) deliveryDate = parsedDelivery;
-                        DateTimeOffset? deliveryWindowStartUtc = null;
-                        if (payload.TryGetProperty("deliveryWindowStartUtc", out var windowStart) && DateTimeOffset.TryParse(windowStart.GetString(), out var parsedWindowStart)) deliveryWindowStartUtc = parsedWindowStart;
-                        DateTimeOffset? deliveryWindowEndUtc = null;
-                        if (payload.TryGetProperty("deliveryWindowEndUtc", out var windowEnd) && DateTimeOffset.TryParse(windowEnd.GetString(), out var parsedWindowEnd)) deliveryWindowEndUtc = parsedWindowEnd;
-                        int? pallets = null;
-                        if (payload.TryGetProperty("pallets", out var palletValue) && int.TryParse(palletValue.GetString(), out var parsedPallets)) pallets = parsedPallets;
-                        db.TransportOrders.Add(new TransportOrder { Reference = reference, CustomerCode = customerCode, CollectionDate = collectionDate, DeliveryDate = deliveryDate, DeliveryWindowStartUtc = deliveryWindowStartUtc, DeliveryWindowEndUtc = deliveryWindowEndUtc, Pallets = pallets,
-                            SellerName = Read("sellerName"), MarketName = Read("marketName"), StallNumber = Read("stallNumber"), DriverInstructions = Read("driverInstructions"), MapLink = Read("mapLink") });
-                        string? Read(string name) => payload.TryGetProperty(name, out var value) ? value.GetString() : null;
-                    }
-                }
-                break;
+            case "customer": await PromoteCustomer(payload, ct); break;
+            case "customercontact": await PromoteCustomerContact(payload, ct); break;
+            case "vehicle": await PromoteVehicle(payload, ct); break;
+            case "driver": await PromoteDriver(payload, ct); break;
+            case "trailer": await PromoteTrailer(payload, ct); break;
+            case "site": await PromoteSite(payload, ct); break;
+            case "marketcontact": await PromoteMarketContact(payload, ct); break;
+            case "order": await PromoteOrder(payload, ct); break;
         }
         await db.SaveChangesAsync(ct);
     }
+
+    private async Task PromoteCustomer(JsonElement payload, CancellationToken ct)
+    {
+        var code = Required(payload, "code"); var name = Required(payload, "name");
+        var customer = await db.Customers.SingleOrDefaultAsync(item => item.Code == code, ct);
+        if (customer is null) db.Customers.Add(new Customer { Code = code, Name = name, Active = Bool(payload, "active", true) });
+        else { customer.Name = name; customer.Active = Bool(payload, "active", true); }
+    }
+
+    private async Task PromoteCustomerContact(JsonElement payload, CancellationToken ct)
+    {
+        var customerCode = Required(payload, "customerCode"); var name = Required(payload, "name");
+        var contact = await db.CustomerContacts.SingleOrDefaultAsync(item => item.CustomerCode == customerCode && item.Name == name, ct);
+        if (contact is null) db.CustomerContacts.Add(new CustomerContact { CustomerCode = customerCode, Name = name, Email = Text(payload, "email"), MobileNumber = Text(payload, "mobileNumber"), ReceivesEtaUpdates = Bool(payload, "receivesEtaUpdates", true), Active = Bool(payload, "active", true) });
+        else { contact.Email = Text(payload, "email"); contact.MobileNumber = Text(payload, "mobileNumber"); contact.ReceivesEtaUpdates = Bool(payload, "receivesEtaUpdates", true); contact.Active = Bool(payload, "active", true); }
+    }
+
+    private async Task PromoteVehicle(JsonElement payload, CancellationToken ct)
+    {
+        var registration = Required(payload, "registration").Replace(" ", "").ToUpperInvariant();
+        var vehicle = await db.Vehicles.SingleOrDefaultAsync(item => item.Registration == registration, ct);
+        if (vehicle is null) db.Vehicles.Add(new Vehicle { Registration = registration, FleetNumber = Text(payload, "fleetNumber"), Abbreviation = Text(payload, "abbreviation"), Transmission = Text(payload, "transmission"), DvsCompliant = BoolOrNull(payload, "dvsCompliant"), FuelProvider = Text(payload, "fuelProvider"), FuelPinSecretName = Text(payload, "fuelPinSecretName"), FuelCardLastFour = Text(payload, "fuelCardLastFour"), Active = Bool(payload, "active", true) });
+        else { vehicle.FleetNumber = Text(payload, "fleetNumber"); vehicle.Abbreviation = Text(payload, "abbreviation"); vehicle.Transmission = Text(payload, "transmission"); vehicle.DvsCompliant = BoolOrNull(payload, "dvsCompliant"); vehicle.FuelProvider = Text(payload, "fuelProvider"); vehicle.FuelPinSecretName = Text(payload, "fuelPinSecretName"); vehicle.FuelCardLastFour = Text(payload, "fuelCardLastFour"); vehicle.Active = Bool(payload, "active", true); }
+    }
+
+    private async Task PromoteDriver(JsonElement payload, CancellationToken ct)
+    {
+        var employeeNumber = Text(payload, "employeeNumber") ?? Text(payload, "driverId") ?? Text(payload, "driverID");
+        var displayName = Text(payload, "displayName") ?? Text(payload, "driver") ?? Text(payload, "name");
+        if (string.IsNullOrWhiteSpace(employeeNumber) && !string.IsNullOrWhiteSpace(displayName)) employeeNumber = displayName.Trim().ToUpperInvariant().Replace(" ", "-");
+        if (string.IsNullOrWhiteSpace(employeeNumber) || string.IsNullOrWhiteSpace(displayName)) throw new JsonException("Driver payload requires employeeNumber and displayName.");
+        var driver = await db.Drivers.SingleOrDefaultAsync(item => item.EmployeeNumber == employeeNumber, ct);
+        if (driver is null) db.Drivers.Add(new Driver { EmployeeNumber = employeeNumber, DisplayName = displayName, TachoName = Text(payload, "tachoName"), MobileNumber = Text(payload, "mobileNumber"), DriverType = Text(payload, "driverType"), DriverGroup = Text(payload, "driverGroup"), Skills = Text(payload, "skills"), Active = Bool(payload, "active", true) });
+        else { driver.DisplayName = displayName; driver.TachoName = Text(payload, "tachoName"); driver.MobileNumber = Text(payload, "mobileNumber"); driver.DriverType = Text(payload, "driverType"); driver.DriverGroup = Text(payload, "driverGroup"); driver.Skills = Text(payload, "skills"); driver.Active = Bool(payload, "active", true); }
+    }
+
+    private async Task PromoteTrailer(JsonElement payload, CancellationToken ct)
+    {
+        var trailerNumber = Required(payload, "trailerNumber");
+        var trailer = await db.Trailers.SingleOrDefaultAsync(item => item.TrailerNumber == trailerNumber, ct);
+        if (trailer is null) db.Trailers.Add(new Trailer { TrailerNumber = trailerNumber, Type = Text(payload, "type"), StandardCapacity = IntOrNull(payload, "standardCapacity"), EuroCapacity = IntOrNull(payload, "euroCapacity"), Active = Bool(payload, "active", true) });
+        else { trailer.Type = Text(payload, "type"); trailer.StandardCapacity = IntOrNull(payload, "standardCapacity"); trailer.EuroCapacity = IntOrNull(payload, "euroCapacity"); trailer.Active = Bool(payload, "active", true); }
+    }
+
+    private async Task PromoteSite(JsonElement payload, CancellationToken ct)
+    {
+        var externalCode = Required(payload, "externalCode"); var name = Required(payload, "name");
+        var site = await db.Sites.SingleOrDefaultAsync(item => item.ExternalCode == externalCode, ct);
+        if (site is null) db.Sites.Add(new Site { ExternalCode = externalCode, Name = name, DriverTextName = Text(payload, "driverTextName"), CollectionAddress = Text(payload, "collectionAddress"), CollectionInstructions = Text(payload, "collectionInstructions"), MapLink = Text(payload, "mapLink"), Active = Bool(payload, "active", true) });
+        else { site.Name = name; site.DriverTextName = Text(payload, "driverTextName"); site.CollectionAddress = Text(payload, "collectionAddress"); site.CollectionInstructions = Text(payload, "collectionInstructions"); site.MapLink = Text(payload, "mapLink"); site.Active = Bool(payload, "active", true); }
+    }
+
+    private async Task PromoteMarketContact(JsonElement payload, CancellationToken ct)
+    {
+        var market = Text(payload, "market") ?? Text(payload, "marketName") ?? "General";
+        var name = Text(payload, "name") ?? Text(payload, "contactName") ?? Text(payload, "sellerName");
+        if (string.IsNullOrWhiteSpace(name)) throw new JsonException("Market contact payload requires name.");
+        var contact = await db.MarketContacts.SingleOrDefaultAsync(item => item.Market == market && item.Name == name, ct);
+        if (contact is null) db.MarketContacts.Add(new MarketContact { Market = market, Name = name, StandOrLocation = Text(payload, "standOrLocation") ?? Text(payload, "stallNumber"), Active = Bool(payload, "active", true) });
+        else { contact.StandOrLocation = Text(payload, "standOrLocation") ?? Text(payload, "stallNumber"); contact.Active = Bool(payload, "active", true); }
+    }
+
+    private async Task PromoteOrder(JsonElement payload, CancellationToken ct)
+    {
+        var reference = Required(payload, "poNumber"); var customerCode = Required(payload, "customerCode"); var collectionDateText = Required(payload, "collectionDate");
+        if (!DateOnly.TryParse(collectionDateText, out var collectionDate)) throw new JsonException("Order payload requires a valid collectionDate.");
+        if (!await db.TransportOrders.AnyAsync(order => order.Reference == reference, ct))
+        {
+            DateOnly? deliveryDate = null;
+            if (DateOnly.TryParse(Text(payload, "deliveryDate"), out var parsedDelivery)) deliveryDate = parsedDelivery;
+            DateTimeOffset? deliveryWindowStartUtc = null;
+            if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowStartUtc"), out var parsedWindowStart)) deliveryWindowStartUtc = parsedWindowStart;
+            DateTimeOffset? deliveryWindowEndUtc = null;
+            if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowEndUtc"), out var parsedWindowEnd)) deliveryWindowEndUtc = parsedWindowEnd;
+            db.TransportOrders.Add(new TransportOrder { Reference = reference, CustomerCode = customerCode, CollectionDate = collectionDate, DeliveryDate = deliveryDate, DeliveryWindowStartUtc = deliveryWindowStartUtc, DeliveryWindowEndUtc = deliveryWindowEndUtc, Pallets = IntOrNull(payload, "pallets"), SellerName = Text(payload, "sellerName"), MarketName = Text(payload, "marketName"), StallNumber = Text(payload, "stallNumber"), DriverInstructions = Text(payload, "driverInstructions"), MapLink = Text(payload, "mapLink") });
+        }
+    }
+
+    private static string Required(JsonElement payload, string name) => Text(payload, name) ?? throw new JsonException($"Payload requires {name}.");
+    private static string? Text(JsonElement payload, string name) => payload.TryGetProperty(name, out var value) ? value.ValueKind switch { JsonValueKind.String => string.IsNullOrWhiteSpace(value.GetString()) ? null : value.GetString()!.Trim(), JsonValueKind.Number => value.GetRawText(), JsonValueKind.True => "true", JsonValueKind.False => "false", _ => null } : null;
+    private static int? IntOrNull(JsonElement payload, string name) => int.TryParse(Text(payload, name), out var value) ? value : null;
+    private static bool Bool(JsonElement payload, string name, bool fallback) => bool.TryParse(Text(payload, name), out var value) ? value : fallback;
+    private static bool? BoolOrNull(JsonElement payload, string name) => bool.TryParse(Text(payload, name), out var value) ? value : null;
 }
