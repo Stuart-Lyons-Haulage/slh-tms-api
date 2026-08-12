@@ -40,19 +40,21 @@ public sealed class DotTrackingController(
         catch (InvalidOperationException ex)
         {
             logger.LogWarning(ex, "DOT Tracking configuration is not ready.");
-            return Problem(
-                statusCode: StatusCodes.Status503ServiceUnavailable,
-                title: "DOT Tracking is not configured",
-                detail: "The provider settings are incomplete or the integration is disabled.");
+            return Ok(await StoredTelemetry("RoadTech Falcon · stored fallback", cancellationToken));
         }
         catch (HttpRequestException ex)
         {
             logger.LogWarning(ex, "RoadTech Falcon telemetry request failed.");
-            return Problem(
-                statusCode: StatusCodes.Status502BadGateway,
-                title: "DOT Tracking is unavailable",
-                detail: "The provider could not be reached or rejected the request.");
+            return Ok(await StoredTelemetry("RoadTech Falcon · stored fallback", cancellationToken));
         }
+    }
+
+    private async Task<DotTelemetryResponse> StoredTelemetry(string provider, CancellationToken ct)
+    {
+        var statuses = await db.VehicleLiveStatuses.AsNoTracking().OrderBy(status => status.VehicleIdentifier).ToListAsync(ct);
+        var records = statuses.Select(status => new DotTelemetryRecord($"stored-{status.Id}", status.VehicleIdentifier, status.LastEventTimeUtc,
+            status.Latitude, status.Longitude, status.SpeedKph, status.IgnitionOn, status.IsMoving, status.LastKnownStatus ?? "Stored position", "{}")).ToList();
+        return new DotTelemetryResponse(provider, DateTimeOffset.UtcNow, records.Count, records);
     }
 
     [HttpGet("history")]

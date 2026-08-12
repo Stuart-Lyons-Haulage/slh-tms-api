@@ -152,4 +152,14 @@ public class AuthenticationTests : IClassFixture<CustomWebFactory>
         var response = await client.GetAsync($"/api/v1/operations/delivery-etas?date={date}");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
+
+    [Fact]
+    public async Task Tracking_returns_stored_fallback_when_provider_is_not_configured()
+    {
+        var client = _factory.CreateClientWithUser("planner", "Tms.Access");
+        var response = await client.GetAsync("/api/v1/tracking/dot/telemetry");
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("stored fallback", body, StringComparison.OrdinalIgnoreCase);
+    }
 }
