@@ -12,7 +12,8 @@ public static class PlanningSchemaInitializer
         "Slh.Tms.Api.Database.003_Market_Order_Details.sql",
         "Slh.Tms.Api.Database.004_Driver_Mobile_Number.sql",
         "Slh.Tms.Api.Database.005_Delivery_Windows.sql",
-        "Slh.Tms.Api.Database.006_Customer_Contacts.sql"
+        "Slh.Tms.Api.Database.006_Customer_Contacts.sql",
+        "Slh.Tms.Api.Database.007_Market_Contact_Salesman.sql"
     ];
 
     public static async Task Apply(TmsDbContext db, ILogger logger, CancellationToken ct)

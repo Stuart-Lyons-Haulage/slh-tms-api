@@ -98,6 +98,7 @@ CREATE TABLE dbo.MarketContacts (
     Market nvarchar(80) NOT NULL,
     Name nvarchar(200) NOT NULL,
     StandOrLocation nvarchar(200) NULL,
+    Salesman nvarchar(200) NULL,
     Active bit NOT NULL CONSTRAINT DF_MarketContacts_Active DEFAULT (1),
     CONSTRAINT PK_MarketContacts PRIMARY KEY (Id)
 );

@@ -115,8 +115,10 @@ public sealed class StagingService(TmsDbContext db)
         var name = Clip(Text(payload, "name") ?? Text(payload, "contactName") ?? Text(payload, "sellerName"), 200);
         if (string.IsNullOrWhiteSpace(name)) throw new JsonException("Market contact payload requires name.");
         var contact = await db.MarketContacts.SingleOrDefaultAsync(item => item.Market == market && item.Name == name, ct);
-        if (contact is null) db.MarketContacts.Add(new MarketContact { Market = market, Name = name, StandOrLocation = Clip(Text(payload, "standOrLocation") ?? Text(payload, "stallNumber"), 200), Active = Bool(payload, "active", true) });
-        else { contact.StandOrLocation = Clip(Text(payload, "standOrLocation") ?? Text(payload, "stallNumber"), 200); contact.Active = Bool(payload, "active", true); }
+        var standOrLocation = Clip(Text(payload, "standOrLocation") ?? Text(payload, "stallNumber"), 200);
+        var salesman = Clip(Text(payload, "salesman"), 200);
+        if (contact is null) db.MarketContacts.Add(new MarketContact { Market = market, Name = name, StandOrLocation = standOrLocation, Salesman = salesman, Active = Bool(payload, "active", true) });
+        else { contact.StandOrLocation = standOrLocation; contact.Salesman = salesman; contact.Active = Bool(payload, "active", true); }
     }
 
     private async Task PromoteOrder(JsonElement payload, CancellationToken ct)
