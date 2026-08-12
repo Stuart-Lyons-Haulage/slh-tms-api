@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
@@ -39,22 +40,28 @@ public sealed class DotTrackingClientTests
             "https://api-v1-alpha.roadtech.co.uk/api/auth/login",
             "https://api-v1-alpha.roadtech.co.uk/api/Falcon/GetCurrentTelemetry"
         }, handler.Requests.Select(request => request.RequestUri!.ToString()));
+
+        var telemetryJson = handler.Bodies[1];
+        using var payload = JsonDocument.Parse(telemetryJson);
+        Assert.Equal(0, payload.RootElement.GetProperty("DataMask").GetInt32());
     }
 
     private sealed class CapturingHandler : HttpMessageHandler
     {
         public List<HttpRequestMessage> Requests { get; } = [];
+        public List<string> Bodies { get; } = [];
 
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            Bodies.Add(request.Content is null ? string.Empty : await request.Content.ReadAsStringAsync(cancellationToken));
             Requests.Add(request);
             var content = request.RequestUri!.AbsolutePath.EndsWith("/auth/login", StringComparison.OrdinalIgnoreCase)
                 ? "{\"token\":\"sid-123\"}"
                 : "{\"moreData\":false,\"recordOffset\":0,\"recordCount\":0,\"data\":[]}";
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            return new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(content, Encoding.UTF8, "application/json")
-            });
+            };
         }
     }
 }

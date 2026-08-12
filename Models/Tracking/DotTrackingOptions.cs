@@ -15,8 +15,8 @@ public sealed class DotTrackingOptions
     public bool Enabled { get; set; }
     public int StaleAfterMinutes { get; set; } = 10;
 
-    /// <summary>RoadTech telemetry data mask. 1 requests GPS only.</summary>
-    public int DataMask { get; set; } = 1;
+    /// <summary>RoadTech telemetry data mask. 0 matches RoadTech's documented current telemetry sample.</summary>
+    public int DataMask { get; set; } = 0;
 
     /// <summary>RoadTech flag to include active vehicles only.</summary>
     public int OnlyLive { get; set; } = 1;

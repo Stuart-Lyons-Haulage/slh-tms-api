@@ -91,10 +91,10 @@ public sealed class DotTrackingClient
             "SLH TMS API",
             "Azure App Service",
             Environment.MachineName,
-            "password"));
+            "password"), options: RoadTechJson.Options);
 
         using var response = await _httpClient.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        await EnsureRoadTechSuccess(response, "auth/login", cancellationToken);
 
         var payload = await response.Content.ReadAsStringAsync(cancellationToken);
         return ExtractSessionId(payload);
@@ -114,10 +114,10 @@ public sealed class DotTrackingClient
             DateOnly.FromDateTime(DateTime.UtcNow).ToString("yyyy-MM-dd"),
             _options.DataMask,
             offset,
-            _options.OnlyLive));
+            _options.OnlyLive), options: RoadTechJson.Options);
 
         using var response = await _httpClient.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        await EnsureRoadTechSuccess(response, "Falcon/GetCurrentTelemetry", cancellationToken);
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         var page = await JsonSerializer.DeserializeAsync<RoadTechTelemetryPage>(
@@ -173,6 +173,15 @@ public sealed class DotTrackingClient
     {
         var trimmed = baseUrl.Trim().TrimEnd('/');
         return trimmed.EndsWith("/api", StringComparison.OrdinalIgnoreCase) ? $"{trimmed}/" : $"{trimmed}/api/";
+    }
+
+    private static async Task EnsureRoadTechSuccess(HttpResponseMessage response, string endpoint, CancellationToken cancellationToken)
+    {
+        if (response.IsSuccessStatusCode) return;
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        var detail = string.IsNullOrWhiteSpace(body) ? response.ReasonPhrase : body.Trim();
+        if (detail.Length > 500) detail = detail[..500];
+        throw new HttpRequestException($"RoadTech {endpoint} returned {(int)response.StatusCode} ({response.ReasonPhrase}). {detail}", null, response.StatusCode);
     }
 }
 
