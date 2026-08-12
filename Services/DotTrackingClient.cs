@@ -126,12 +126,12 @@ public sealed class DotTrackingClient
     private static IReadOnlyList<string> LoginPasswordAttempts(string password)
     {
         var trimmed = password.Trim();
-        if (IsSha1Hex(trimmed)) return [trimmed];
+        if (IsProviderHash(trimmed)) return [trimmed];
         var bytes = SHA1.HashData(Encoding.UTF8.GetBytes(trimmed));
         return [trimmed, Convert.ToHexString(bytes).ToLowerInvariant()];
     }
 
-    private static bool IsSha1Hex(string value) => value.Length == 40 && value.All(Uri.IsHexDigit);
+    private static bool IsProviderHash(string value) => value.All(Uri.IsHexDigit) && value.Length is 32 or 40 or 64;
 
     private async Task<RoadTechTelemetryPage> GetTelemetryPageAsync(
         string sid,

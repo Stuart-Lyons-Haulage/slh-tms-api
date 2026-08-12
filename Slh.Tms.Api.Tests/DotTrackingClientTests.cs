@@ -69,6 +69,30 @@ public sealed class DotTrackingClientTests
         Assert.Equal("e5e9fa1ba31ecd1ae84f75caaa474f3a663f05f4", secondLogin.RootElement.GetProperty("Pass").GetString());
     }
 
+
+    [Theory]
+    [InlineData("01a036dbdb381bd1009ae2d604eeaaca", 2)]
+    [InlineData("e5e9fa1ba31ecd1ae84f75caaa474f3a663f05f4", 2)]
+    public async Task RoadTech_login_does_not_rehash_provider_supplied_hashes(string password, int expectedRequests)
+    {
+        var handler = new CapturingHandler();
+        var client = new DotTrackingClient(new HttpClient(handler), new DotTrackingOptions
+        {
+            Enabled = true,
+            BaseUrl = "https://api-v1-alpha.roadtech.co.uk",
+            ApiKey = "test-key",
+            Username = "planner",
+            Password = password,
+            CompanyCode = "SLH"
+        }, NullLogger<DotTrackingClient>.Instance);
+
+        await client.GetLatestVehicleEventsAsync();
+
+        Assert.Equal(expectedRequests, handler.Requests.Count);
+        using var login = JsonDocument.Parse(handler.Bodies[0]);
+        Assert.Equal(password, login.RootElement.GetProperty("Pass").GetString());
+    }
+
     private sealed class CapturingHandler : HttpMessageHandler
     {
         private readonly bool _rejectFirstLogin;
