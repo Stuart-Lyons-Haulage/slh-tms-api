@@ -73,6 +73,16 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
     }
 
     [HttpGet("{id:guid}")] public async Task<IActionResult> Get(Guid id, CancellationToken ct) => (await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct)) is { } x ? Ok(x) : NotFound();
+    [HttpDelete("pending"), Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> ClearPending([FromQuery] string confirm, CancellationToken ct)
+    {
+        if (!string.Equals(confirm, "CLEAR-PENDING", StringComparison.Ordinal))
+            return BadRequest(new ErrorResponse("confirmation_required", "Add confirm=CLEAR-PENDING to clear pending staging records.", HttpContext.TraceIdentifier));
+
+        var count = await db.StagedImports.Where(item => item.Status == StagingStatus.PendingReview).ExecuteDeleteAsync(ct);
+        return Ok(new { deleted = count });
+    }
+
     [HttpPost("{id:guid}/approve"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> Approve(Guid id, ReviewRequest request, CancellationToken ct)
     {
