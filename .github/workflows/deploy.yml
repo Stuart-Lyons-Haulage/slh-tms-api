@@ -46,7 +46,10 @@ jobs:
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --server "$AZURE_CONTAINER_REGISTRY.azurecr.io" \
-            --identity system
+            --identity system || {
+              echo "Registry pull identity is already configured or could not be changed by this workflow."
+              echo "Continuing because the image update step will verify whether the app can pull the new image."
+            }
 
       - name: Reference runtime secrets from Azure Key Vault
         run: |
