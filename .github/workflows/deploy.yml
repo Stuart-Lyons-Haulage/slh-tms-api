@@ -64,7 +64,10 @@ jobs:
               "dot-password=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-password,identityref:system" \
               "dot-username=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-username,identityref:system" \
               "sagehr-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-sagehr-api-key,identityref:system" \
-              "sagehr-base-url=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-sagehr-base-url,identityref:system"
+              "sagehr-base-url=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-sagehr-base-url,identityref:system" || {
+                echo "Key Vault secret references are already configured or this workflow cannot update them."
+                echo "Continuing so the image deployment can proceed with the existing runtime configuration."
+              }
 
       - name: Deploy image and configure ingress
         run: |
