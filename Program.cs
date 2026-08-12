@@ -48,6 +48,7 @@ builder.Services.AddHttpClient<DriverSmsDispatchService>();
 builder.Services.AddHttpClient<SageHrClient>();
 builder.Services.AddHttpClient<DotTrackingClient>();
 builder.Services.AddHttpClient<AzureMapsRouteClient>();
+builder.Services.AddHttpClient<FleetioClient>();
 builder.Services.AddHostedService<DotTrackingIngestionService>();
 
 // Database readiness is checked separately from the public liveness check.
