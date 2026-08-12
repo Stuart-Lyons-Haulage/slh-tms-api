@@ -117,8 +117,9 @@ public sealed class StagingService(TmsDbContext db)
         var contact = await db.MarketContacts.SingleOrDefaultAsync(item => item.Market == market && item.Name == name, ct);
         var standOrLocation = Clip(Text(payload, "standOrLocation") ?? Text(payload, "stallNumber"), 200);
         var salesman = Clip(Text(payload, "salesman"), 200);
-        if (contact is null) db.MarketContacts.Add(new MarketContact { Market = market, Name = name, StandOrLocation = standOrLocation, Salesman = salesman, Active = Bool(payload, "active", true) });
-        else { contact.StandOrLocation = standOrLocation; contact.Salesman = salesman; contact.Active = Bool(payload, "active", true); }
+        var sender = Clip(Text(payload, "sender"), 200);
+        if (contact is null) db.MarketContacts.Add(new MarketContact { Market = market, Name = name, StandOrLocation = standOrLocation, Salesman = salesman, Sender = sender, Active = Bool(payload, "active", true) });
+        else { contact.StandOrLocation = standOrLocation; contact.Salesman = salesman; contact.Sender = sender; contact.Active = Bool(payload, "active", true); }
     }
 
     private async Task PromoteOrder(JsonElement payload, CancellationToken ct)

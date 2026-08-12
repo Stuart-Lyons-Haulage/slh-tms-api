@@ -64,6 +64,7 @@ public sealed class MarketContact
     [MaxLength(200)] public required string Name { get; set; }
     [MaxLength(200)] public string? StandOrLocation { get; set; }
     [MaxLength(200)] public string? Salesman { get; set; }
+    [MaxLength(200)] public string? Sender { get; set; }
     public bool Active { get; set; } = true;
 }
 public enum StagingStatus { PendingReview, Approved, Rejected, Promoted, Failed }
