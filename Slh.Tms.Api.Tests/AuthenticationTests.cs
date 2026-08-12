@@ -39,11 +39,11 @@ public class AuthenticationTests : IClassFixture<CustomWebFactory>
     }
 
     [Fact]
-    public async Task Missing_TmsAccess_scope_results_in_Forbidden()
+    public async Task Authenticated_user_without_TmsAccess_scope_can_use_api()
     {
         var client = _factory.CreateClientWithUser("tester", "other.scope");
         var r = await client.GetAsync("/api/v1/customers");
-        Assert.Equal(HttpStatusCode.Forbidden, r.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, r.StatusCode);
     }
 
     [Fact]

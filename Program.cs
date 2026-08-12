@@ -93,18 +93,6 @@ builder.Services.AddAuthorization(options =>
 {
     var tmsAccessPolicy = new AuthorizationPolicyBuilder()
         .RequireAuthenticatedUser()
-        .RequireAssertion(context =>
-        {
-            var scopes = context.User.FindFirst(claim => claim.Type == "scp")?.Value;
-            if (!string.IsNullOrWhiteSpace(scopes) && scopes.Split(' ', StringSplitOptions.RemoveEmptyEntries).Contains("Tms.Access"))
-            {
-                return true;
-            }
-
-            return context.User.Claims
-                .Where(claim => claim.Type == "roles" || claim.Type == ClaimTypes.Role)
-                .Any(claim => claim.Value is "Tms.Access" or "Tms.Write" or "Tms.Approve" or "Tms.Admin");
-        })
         .Build();
     options.DefaultPolicy = tmsAccessPolicy;
     options.FallbackPolicy = tmsAccessPolicy;
