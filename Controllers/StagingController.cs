@@ -18,7 +18,7 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
         [FromQuery] int take = 100,
         CancellationToken ct = default)
     {
-        take = Math.Clamp(take, 1, 500);
+        take = Math.Clamp(take, 1, 2000);
         var query = db.StagedImports.AsNoTracking().AsQueryable();
         query = query.Where(x => x.Status == (status ?? StagingStatus.PendingReview));
         if (!string.IsNullOrWhiteSpace(entityType))
@@ -31,6 +31,7 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
     public async Task<IActionResult> Stage(StageImportRequest request, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.IdempotencyKey)) return BadRequest(new ErrorResponse("invalid_idempotency_key", "IdempotencyKey is required", HttpContext.TraceIdentifier));
+        if (request.IdempotencyKey.Length > 200) return BadRequest(new ErrorResponse("invalid_idempotency_key", "IdempotencyKey must be 200 characters or fewer.", HttpContext.TraceIdentifier));
         var existing = await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(x => x.IdempotencyKey == request.IdempotencyKey, ct);
         if (existing is not null) return Ok(service.ToResponse(existing, Request));
         try
@@ -49,6 +50,7 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
     {
         if (requests.Count == 0 || requests.Count > 500) return BadRequest(new ErrorResponse("invalid_batch", "Submit between 1 and 500 records.", HttpContext.TraceIdentifier));
         if (requests.Any(request => string.IsNullOrWhiteSpace(request.IdempotencyKey))) return BadRequest(new ErrorResponse("invalid_idempotency_key", "Every record needs an IdempotencyKey.", HttpContext.TraceIdentifier));
+        if (requests.Any(request => request.IdempotencyKey.Length > 200)) return BadRequest(new ErrorResponse("invalid_idempotency_key", "Every IdempotencyKey must be 200 characters or fewer.", HttpContext.TraceIdentifier));
         var keys = requests.Select(request => request.IdempotencyKey).ToList();
         if (keys.Distinct(StringComparer.OrdinalIgnoreCase).Count() != keys.Count) return BadRequest(new ErrorResponse("duplicate_batch_key", "Idempotency keys must be unique within the batch.", HttpContext.TraceIdentifier));
         var existing = await db.StagedImports.AsNoTracking().Where(item => keys.Contains(item.IdempotencyKey)).ToDictionaryAsync(item => item.IdempotencyKey, ct);
