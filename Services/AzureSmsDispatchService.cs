@@ -20,8 +20,6 @@ public sealed class AzureSmsDispatchService(AzureSmsOptions options, ILogger<Azu
         var result = response.Value;
         if (!result.Successful) throw new InvalidOperationException(result.ErrorMessage ?? "Azure SMS did not accept the driver dispatch.");
         logger.LogInformation("Sent dispatch SMS {MessageId} to driver mobile ending {MobileSuffix}", result.MessageId, destination[^4..]);
-        return new SmsDispatchResult(result.MessageId, destination[^4..]);
+        return new SmsDispatchResult(result.MessageId, destination[^4..], "Azure SMS");
     }
 }
-
-public sealed record SmsDispatchResult(string MessageId, string MobileSuffix);

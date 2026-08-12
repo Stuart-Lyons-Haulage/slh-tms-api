@@ -9,7 +9,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1")]
 [Authorize]
-public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient maps, AzureSmsDispatchService sms) : ControllerBase
+public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient maps, DriverSmsDispatchService sms) : ControllerBase
 {
     [HttpGet("orders")]
     public async Task<IActionResult> Orders([FromQuery] DateOnly? from, [FromQuery] DateOnly? to, CancellationToken ct)
@@ -153,7 +153,7 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         var receipt = await sms.SendAsync(driver.MobileNumber, message, ct);
         if (load.Status == LoadStatus.Planned) load.Status = LoadStatus.Dispatched;
         await db.SaveChangesAsync(ct);
-        return Accepted(new { receipt.MessageId, receipt.MobileSuffix, load.Status });
+        return Accepted(new { receipt.MessageId, receipt.MobileSuffix, receipt.Provider, load.Status });
     }
 
     [HttpGet("maps/geocode")]

@@ -52,6 +52,7 @@ Set these environment variables:
 | `Integrations__TextBee__Enabled` | `true` when TextBee duty-phone SMS dispatch is ready |
 | `Integrations__TextBee__ApiKey` | TextBee API key, preferably Key Vault reference |
 | `Integrations__TextBee__DeviceId` | TextBee device ID for the duty phone |
+| `Integrations__TextBee__DutyPhoneLabel` | Friendly label shown in Admin, e.g. `SLH duty phone` |
 | `Integrations__Fleetio__Enabled` | `true` when Fleetio service/VOR integration is ready |
 | `Integrations__Fleetio__ApiKey` | Fleetio API key, preferably Key Vault reference |
 | `Integrations__Fleetio__AccountToken` | Fleetio account token, preferably Key Vault reference |

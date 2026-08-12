@@ -44,6 +44,7 @@ var fleetioOptions = new FleetioOptions();
 builder.Configuration.GetSection("Integrations:Fleetio").Bind(fleetioOptions);
 builder.Services.AddSingleton(fleetioOptions);
 builder.Services.AddScoped<AzureSmsDispatchService>();
+builder.Services.AddHttpClient<DriverSmsDispatchService>();
 builder.Services.AddHttpClient<SageHrClient>();
 builder.Services.AddHttpClient<DotTrackingClient>();
 builder.Services.AddHttpClient<AzureMapsRouteClient>();
