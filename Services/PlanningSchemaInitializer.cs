@@ -5,22 +5,15 @@ namespace Slh.Tms.Api.Services;
 
 public static class PlanningSchemaInitializer
 {
-    private static readonly string[] Scripts =
-    [
-        "Slh.Tms.Api.Database.001_Initial_Tms_Schema.sql",
-        "Slh.Tms.Api.Database.002_Planning_Loads_Schema.sql",
-        "Slh.Tms.Api.Database.003_Market_Order_Details.sql",
-        "Slh.Tms.Api.Database.004_Driver_Mobile_Number.sql",
-        "Slh.Tms.Api.Database.005_Delivery_Windows.sql",
-        "Slh.Tms.Api.Database.006_Customer_Contacts.sql",
-        "Slh.Tms.Api.Database.007_Market_Contact_Salesman.sql",
-        "Slh.Tms.Api.Database.008_Customer_Contacts_Repair.sql"
-    ];
-
     public static async Task Apply(TmsDbContext db, ILogger logger, CancellationToken ct)
     {
         var assembly = typeof(PlanningSchemaInitializer).Assembly;
-        foreach (var resourceName in Scripts)
+        var scripts = assembly.GetManifestResourceNames()
+            .Where(name => name.StartsWith("Slh.Tms.Api.Database.", StringComparison.Ordinal) && name.EndsWith(".sql", StringComparison.Ordinal))
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToList();
+
+        foreach (var resourceName in scripts)
         {
             try
             {
