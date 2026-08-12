@@ -101,10 +101,18 @@ jobs:
             --output tsv)"
           test -n "$latest_revision"
 
-          az containerapp revision activate \
+          active="$(az containerapp revision show \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --revision "$latest_revision"
+            --revision "$latest_revision" \
+            --query properties.active \
+            --output tsv)"
+          if test "$active" != "true"; then
+            az containerapp revision activate \
+              --name "$AZURE_CONTAINER_APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --revision "$latest_revision"
+          fi
 
           az containerapp ingress traffic set \
             --name "$AZURE_CONTAINER_APP_NAME" \
