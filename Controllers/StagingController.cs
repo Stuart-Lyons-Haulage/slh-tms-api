@@ -24,7 +24,7 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
         if (!string.IsNullOrWhiteSpace(entityType))
             query = query.Where(x => x.EntityType == entityType.Trim().ToLowerInvariant());
 
-        return Ok(await query.OrderBy(x => x.ReceivedAtUtc).Take(take).ToListAsync(ct));
+        return Ok(await query.OrderByDescending(x => x.ReceivedAtUtc).Take(take).ToListAsync(ct));
     }
 
     [HttpPost, Authorize(Policy = "TmsWrite")]
