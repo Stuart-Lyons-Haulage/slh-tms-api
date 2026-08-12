@@ -9,8 +9,20 @@ namespace Slh.Tms.Api.Services;
 public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, ILogger<SageHrClient> logger)
 {
     public bool IsConfigured => options.Enabled && !string.IsNullOrWhiteSpace(options.BaseUrl) && !string.IsNullOrWhiteSpace(options.ApiKey);
+    public bool IsEnabled => options.Enabled;
     public string DriverTeamName => options.DriverTeamName;
     public string DriverPositionKeyword => options.DriverPositionKeyword;
+    public IReadOnlyList<string> MissingSettings
+    {
+        get
+        {
+            var missing = new List<string>();
+            if (!options.Enabled) missing.Add("Integrations:SageHr:Enabled");
+            if (string.IsNullOrWhiteSpace(options.BaseUrl)) missing.Add("Integrations:SageHr:BaseUrl");
+            if (string.IsNullOrWhiteSpace(options.ApiKey)) missing.Add("Integrations:SageHr:ApiKey");
+            return missing;
+        }
+    }
 
     public async Task<IReadOnlyList<SageHrEmployee>> GetActiveEmployeesAsync(CancellationToken cancellationToken = default)
     {

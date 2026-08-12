@@ -32,45 +32,58 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
     [HttpGet("sage-hr/status")]
     public async Task<IActionResult> SageHrStatus(CancellationToken ct)
     {
-        if (!sageHr.IsConfigured) return Ok(new { configured = false, connected = false, employeeCount = 0, driverCandidateCount = 0, message = "Sage HR runtime settings are incomplete." });
+        if (!sageHr.IsConfigured) return Ok(new { configured = false, connected = false, employeeCount = 0, driverCandidateCount = 0, missingSettings = sageHr.MissingSettings, message = $"Sage HR runtime settings are incomplete: {string.Join(", ", sageHr.MissingSettings)}." });
         try
         {
             var employees = await sageHr.GetActiveEmployeesAsync(ct);
             var candidates = employees.Count(IsDriver);
-            return Ok(new { configured = true, connected = true, employeeCount = employees.Count, driverCandidateCount = candidates, message = "Sage HR is connected." });
+            return Ok(new { configured = true, connected = true, employeeCount = employees.Count, driverCandidateCount = candidates, missingSettings = Array.Empty<string>(), message = "Sage HR is connected." });
         }
         catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException)
         {
             logger.LogWarning(exception, "Sage HR status check failed.");
-            return Ok(new { configured = true, connected = false, employeeCount = 0, driverCandidateCount = 0, message = "Sage HR could not be reached or rejected the API key." });
+            return Ok(new { configured = true, connected = false, employeeCount = 0, driverCandidateCount = 0, missingSettings = Array.Empty<string>(), message = "Sage HR could not be reached or rejected the API key." });
         }
     }
 
     [HttpPost("sage-hr/sync-drivers"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> SyncDrivers(CancellationToken ct)
     {
-        var employees = await sageHr.GetActiveEmployeesAsync(ct);
-        var candidates = employees.Where(IsDriver).ToList();
-        var created = 0; var updated = 0; var skipped = 0;
-        foreach (var employee in candidates)
+        if (!sageHr.IsConfigured)
         {
-            var employeeNumber = string.IsNullOrWhiteSpace(employee.EmployeeNumber) ? $"SAGE-{employee.Id}" : employee.EmployeeNumber.Trim();
-            var displayName = $"{employee.FirstName} {employee.LastName}".Trim();
-            if (string.IsNullOrWhiteSpace(displayName)) { skipped++; continue; }
-            var driver = await db.Drivers.SingleOrDefaultAsync(item => item.EmployeeNumber == employeeNumber, ct);
-            if (driver is null)
-            {
-                db.Drivers.Add(new Driver { EmployeeNumber = employeeNumber, DisplayName = displayName, MobileNumber = employee.MobilePhone, DriverType = employee.Position, DriverGroup = employee.Team, Active = true });
-                created++;
-            }
-            else
-            {
-                driver.DisplayName = displayName; driver.MobileNumber = employee.MobilePhone; driver.DriverType = employee.Position; driver.DriverGroup = employee.Team; driver.Active = true;
-                updated++;
-            }
+            return BadRequest(new { configured = false, missingSettings = sageHr.MissingSettings, message = $"Sage HR cannot sync until these settings are complete: {string.Join(", ", sageHr.MissingSettings)}." });
         }
-        await db.SaveChangesAsync(ct);
-        return Ok(new { sourceEmployeeCount = employees.Count, driverCandidateCount = candidates.Count, created, updated, skipped, syncedAtUtc = DateTimeOffset.UtcNow });
+
+        try
+        {
+            var employees = await sageHr.GetActiveEmployeesAsync(ct);
+            var candidates = employees.Where(IsDriver).ToList();
+            var created = 0; var updated = 0; var skipped = 0;
+            foreach (var employee in candidates)
+            {
+                var employeeNumber = string.IsNullOrWhiteSpace(employee.EmployeeNumber) ? $"SAGE-{employee.Id}" : employee.EmployeeNumber.Trim();
+                var displayName = $"{employee.FirstName} {employee.LastName}".Trim();
+                if (string.IsNullOrWhiteSpace(displayName)) { skipped++; continue; }
+                var driver = await db.Drivers.SingleOrDefaultAsync(item => item.EmployeeNumber == employeeNumber, ct);
+                if (driver is null)
+                {
+                    db.Drivers.Add(new Driver { EmployeeNumber = employeeNumber, DisplayName = displayName, MobileNumber = employee.MobilePhone, DriverType = employee.Position, DriverGroup = employee.Team, Active = true });
+                    created++;
+                }
+                else
+                {
+                    driver.DisplayName = displayName; driver.MobileNumber = employee.MobilePhone; driver.DriverType = employee.Position; driver.DriverGroup = employee.Team; driver.Active = true;
+                    updated++;
+                }
+            }
+            await db.SaveChangesAsync(ct);
+            return Ok(new { sourceEmployeeCount = employees.Count, driverCandidateCount = candidates.Count, created, updated, skipped, syncedAtUtc = DateTimeOffset.UtcNow });
+        }
+        catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException)
+        {
+            logger.LogWarning(exception, "Sage HR driver sync failed.");
+            return StatusCode(StatusCodes.Status502BadGateway, new { configured = true, message = "Sage HR could not be reached or rejected the API key. No driver records were changed." });
+        }
     }
 
     private bool IsDriver(SageHrEmployee employee) =>
