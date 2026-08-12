@@ -114,8 +114,9 @@ static bool IsLyonsUser(ClaimsPrincipal user)
 
 var app = builder.Build();
 
-await using (var scope = app.Services.CreateAsyncScope())
+if (!app.Environment.IsEnvironment("Testing"))
 {
+    await using var scope = app.Services.CreateAsyncScope();
     var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
     await PlanningSchemaInitializer.Apply(db, CancellationToken.None);
 }
