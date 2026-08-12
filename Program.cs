@@ -118,7 +118,15 @@ if (!app.Environment.IsEnvironment("Testing"))
 {
     await using var scope = app.Services.CreateAsyncScope();
     var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-    await PlanningSchemaInitializer.Apply(db, CancellationToken.None);
+    var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Tms.SchemaInitializer");
+    try
+    {
+        await PlanningSchemaInitializer.Apply(db, CancellationToken.None);
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "TMS schema repair failed during startup; continuing so health and diagnostics remain available.");
+    }
 }
 
 app.UseHttpsRedirection();
