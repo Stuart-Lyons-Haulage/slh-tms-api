@@ -13,7 +13,8 @@ public static class PlanningSchemaInitializer
         "Slh.Tms.Api.Database.004_Driver_Mobile_Number.sql",
         "Slh.Tms.Api.Database.005_Delivery_Windows.sql",
         "Slh.Tms.Api.Database.006_Customer_Contacts.sql",
-        "Slh.Tms.Api.Database.007_Market_Contact_Salesman.sql"
+        "Slh.Tms.Api.Database.007_Market_Contact_Salesman.sql",
+        "Slh.Tms.Api.Database.008_Customer_Contacts_Repair.sql"
     ];
 
     public static async Task Apply(TmsDbContext db, ILogger logger, CancellationToken ct)
