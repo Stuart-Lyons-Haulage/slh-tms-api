@@ -29,6 +29,7 @@ public sealed class DotTrackingController(
         {
             var telemetry = await trackingClient.GetLatestVehicleEventsAsync(cancellationToken);
             var records = telemetry.Select(DotTelemetryRecord.FromProvider).ToList();
+            if (records.Count == 0) return Ok(await StoredTelemetry("RoadTech Falcon · stored fallback", cancellationToken));
             await telemetryStore.PersistAsync(records, cancellationToken);
 
             return Ok(new DotTelemetryResponse(
