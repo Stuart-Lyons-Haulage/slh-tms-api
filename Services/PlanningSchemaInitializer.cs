@@ -5,13 +5,15 @@ namespace Slh.Tms.Api.Services;
 
 public static class PlanningSchemaInitializer
 {
+    public static IReadOnlyList<string> GetSchemaScripts() => typeof(PlanningSchemaInitializer).Assembly.GetManifestResourceNames()
+        .Where(name => name.StartsWith("Slh.Tms.Api.Database.", StringComparison.Ordinal) && name.EndsWith(".sql", StringComparison.Ordinal))
+        .OrderBy(name => name, StringComparer.Ordinal)
+        .ToList();
+
     public static async Task Apply(TmsDbContext db, ILogger logger, CancellationToken ct)
     {
         var assembly = typeof(PlanningSchemaInitializer).Assembly;
-        var scripts = assembly.GetManifestResourceNames()
-            .Where(name => name.StartsWith("Slh.Tms.Api.Database.", StringComparison.Ordinal) && name.EndsWith(".sql", StringComparison.Ordinal))
-            .OrderBy(name => name, StringComparer.Ordinal)
-            .ToList();
+        var scripts = GetSchemaScripts();
 
         foreach (var resourceName in scripts)
         {
