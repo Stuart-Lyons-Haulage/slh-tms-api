@@ -16,7 +16,13 @@ public class TestAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions
         // If no test header present, do not authenticate - this allows testing 401 behavior
         if (!Request.Headers.TryGetValue("X-Test-User", out var user)) return Task.FromResult(AuthenticateResult.NoResult());
 
-        var claims = new List<Claim> { new Claim(ClaimTypes.Name, user.ToString()) };
+        var claims = new List<Claim>
+        {
+            new(ClaimTypes.Name, user.ToString()),
+            new("preferred_username", user.ToString()),
+            new("upn", user.ToString()),
+            new(ClaimTypes.Email, user.ToString())
+        };
         if (Request.Headers.TryGetValue("X-Test-Scopes", out var scopes))
         {
             claims.Add(new Claim("scp", scopes.ToString()));

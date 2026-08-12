@@ -93,6 +93,7 @@ builder.Services.AddAuthorization(options =>
 {
     var tmsAccessPolicy = new AuthorizationPolicyBuilder()
         .RequireAuthenticatedUser()
+        .RequireAssertion(context => IsLyonsUser(context.User))
         .Build();
     options.DefaultPolicy = tmsAccessPolicy;
     options.FallbackPolicy = tmsAccessPolicy;
@@ -100,6 +101,16 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("TmsWrite", tmsAccessPolicy);
     options.AddPolicy("TmsApprove", tmsAccessPolicy);
 });
+
+static bool IsLyonsUser(ClaimsPrincipal user)
+{
+    var values = user.Claims
+        .Where(claim => claim.Type is "preferred_username" or "upn" or "email" || claim.Type == ClaimTypes.Email || claim.Type == ClaimTypes.Name)
+        .Select(claim => claim.Value)
+        .Where(value => !string.IsNullOrWhiteSpace(value));
+
+    return values.Any(value => value.EndsWith("@lyonshaulage.com", StringComparison.OrdinalIgnoreCase));
+}
 
 var app = builder.Build();
 app.UseHttpsRedirection();
