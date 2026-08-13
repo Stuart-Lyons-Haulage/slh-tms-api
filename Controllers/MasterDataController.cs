@@ -14,7 +14,21 @@ public sealed class MasterDataController(StagingService staging) : ControllerBas
     [HttpPost("apply"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> Apply(List<StageImportRequest> requests, CancellationToken ct)
     {
-        if (requests.Count == 0 || requests.Count > 1000) return BadRequest(new ErrorResponse("invalid_batch", "Submit between 1 and 1000 master-data records.", HttpContext.TraceIdentifier));
+        if (requests.Count == 0 || requests.Count > 10000) return BadRequest(new ErrorResponse("invalid_batch", "Submit between 1 and 10000 master-data records.", HttpContext.TraceIdentifier));
+        requests = requests
+            .OrderBy(request => request.EntityType.ToLowerInvariant() switch
+            {
+                "customer" => 0,
+                "site" => 1,
+                "customercontact" => 2,
+                "driver" => 3,
+                "vehicle" => 4,
+                "trailer" => 5,
+                "marketcontact" => 6,
+                "fuelprice" => 7,
+                _ => 99
+            })
+            .ToList();
         var results = new List<object>();
         var applied = 0;
         var failed = 0;
@@ -69,6 +83,7 @@ public sealed class MasterDataController(StagingService staging) : ControllerBas
     {
         var message = exception.GetBaseException().Message;
         return message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase)
             || message.Contains("does not exist or you do not have permissions", StringComparison.OrdinalIgnoreCase)
             || message.Contains("permission was denied", StringComparison.OrdinalIgnoreCase);
     }

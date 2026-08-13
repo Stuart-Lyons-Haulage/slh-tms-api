@@ -53,6 +53,29 @@ jobs:
 
       - name: Reference runtime secrets from Azure Key Vault
         run: |
+          key_vault_name="${AZURE_KEY_VAULT_URI##*/}"
+          key_vault_secrets="$(az keyvault secret list \
+            --vault-name "$key_vault_name" \
+            --query '[].name' --output tsv 2>/dev/null || true)"
+          find_key_vault_secret() {
+            for requested in "$@"; do
+              found="$(printf '%s\n' "$key_vault_secrets" | awk -v requested="$requested" 'tolower($0) == tolower(requested) { print; exit }')"
+              if test -n "$found"; then
+                printf '%s' "$found"
+                return 0
+              fi
+            done
+            return 1
+          }
+          fleetio_enabled_kv="$(find_key_vault_secret fleetio-enabled fleetio-enabled-flag Fleetio-Enabled || true)"
+          fleetio_api_key_kv="$(find_key_vault_secret fleetio-api-key fleetio-access-token Fleetio-ApiKey || true)"
+          fleetio_account_token_kv="$(find_key_vault_secret fleetio-account-token Fleetio-AccountToken || true)"
+          fleetio_base_url_kv="$(find_key_vault_secret fleetio-base-url Fleetio-BaseUrl || true)"
+          fleetio_key_vault_args=()
+          test -n "$fleetio_enabled_kv" && fleetio_key_vault_args+=("fleetio-enabled=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/$fleetio_enabled_kv,identityref:system")
+          test -n "$fleetio_api_key_kv" && fleetio_key_vault_args+=("fleetio-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/$fleetio_api_key_kv,identityref:system")
+          test -n "$fleetio_account_token_kv" && fleetio_key_vault_args+=("fleetio-account-token=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/$fleetio_account_token_kv,identityref:system")
+          test -n "$fleetio_base_url_kv" && fleetio_key_vault_args+=("fleetio-base-url=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/$fleetio_base_url_kv,identityref:system")
           az containerapp secret set \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -64,10 +87,16 @@ jobs:
               "dot-password=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-password,identityref:system" \
               "dot-username=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-username,identityref:system" \
               "sagehr-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-sagehr-api-key,identityref:system" \
-              "sagehr-base-url=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-sagehr-base-url,identityref:system" || {
+              "sagehr-base-url=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-sagehr-base-url,identityref:system" \
+              "${fleetio_key_vault_args[@]}" || {
                 echo "Key Vault secret references are already configured or this workflow cannot update them."
                 echo "Continuing so the image deployment can proceed with the existing runtime configuration."
               }
+          if test -n "$fleetio_enabled_kv" || test -n "$fleetio_api_key_kv" || test -n "$fleetio_account_token_kv" || test -n "$fleetio_base_url_kv"; then
+            echo "Fleetio Key Vault aliases detected and promoted to Container App secret references."
+          else
+            echo "No Fleetio Key Vault aliases detected; existing Container App Fleetio secrets will be preserved."
+          fi
 
       - name: Deploy image and configure ingress
         run: |
@@ -86,7 +115,7 @@ jobs:
             return 1
           }
           fleetio_enabled_secret="$(find_secret fleetio-enabled Fleetio--Enabled || true)"
-          fleetio_api_key_secret="$(find_secret Fleetio--ApiKey fleetio-api-key Integrations--Fleetio--ApiKey || true)"
+          fleetio_api_key_secret="$(find_secret Fleetio--ApiKey fleetio-api-key fleetio-access-token Integrations--Fleetio--ApiKey || true)"
           fleetio_account_token_secret="$(find_secret fleetio-account-token Fleetio--AccountToken Integrations--Fleetio--AccountToken || true)"
           fleetio_base_url_secret="$(find_secret Fleetio--BaseUrl fleetio-base-url Integrations--Fleetio--BaseUrl || true)"
           fleetio_env_args=()
@@ -99,15 +128,7 @@ jobs:
             )
             echo "Fleetio secrets found; Fleetio integration will be enabled."
           else
-            echo "Fleetio secrets are not all present on the API Container App; removing stale Fleetio references and deploying safely without Fleetio."
-            az containerapp update \
-              --name "$AZURE_CONTAINER_APP_NAME" \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --remove-env-vars \
-                Integrations__Fleetio__Enabled \
-                Integrations__Fleetio__ApiKey \
-                Integrations__Fleetio__AccountToken \
-                Integrations__Fleetio__BaseUrl || true
+            echo "Fleetio secrets are not all present on the API Container App; preserving existing Fleetio environment references."
           fi
 
           az containerapp revision set-mode \
