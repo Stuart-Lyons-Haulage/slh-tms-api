@@ -9,7 +9,7 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize]
 public sealed class MasterDataController(StagingService staging) : ControllerBase
 {
-    private static readonly HashSet<string> DirectTypes = new(StringComparer.OrdinalIgnoreCase) { "customer", "customercontact", "vehicle", "driver", "trailer", "site", "marketcontact" };
+    private static readonly HashSet<string> DirectTypes = new(StringComparer.OrdinalIgnoreCase) { "customer", "customercontact", "vehicle", "driver", "trailer", "site", "marketcontact", "fuelprice" };
 
     [HttpPost("apply"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> Apply(List<StageImportRequest> requests, CancellationToken ct)

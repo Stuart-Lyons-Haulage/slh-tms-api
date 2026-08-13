@@ -8,7 +8,7 @@ using Slh.Tms.Api.Models;
 namespace Slh.Tms.Api.Services;
 public sealed class StagingService(TmsDbContext db)
 {
-    private static readonly HashSet<string> Types = new(StringComparer.OrdinalIgnoreCase) { "customer", "customercontact", "vehicle", "driver", "trailer", "site", "marketcontact", "order" };
+    private static readonly HashSet<string> Types = new(StringComparer.OrdinalIgnoreCase) { "customer", "customercontact", "vehicle", "driver", "trailer", "site", "marketcontact", "fuelprice", "order" };
     public StagedImport Create(StageImportRequest r)
     {
         if (!Types.Contains(r.EntityType)) throw new ArgumentException("Unsupported entityType");
@@ -58,6 +58,7 @@ public sealed class StagingService(TmsDbContext db)
             case "trailer": await PromoteTrailer(payload, ct); break;
             case "site": await PromoteSite(payload, ct); break;
             case "marketcontact": await PromoteMarketContact(payload, ct); break;
+            case "fuelprice": await PromoteFuelPrice(payload, ct); break;
             case "order": await PromoteOrder(payload, ct); break;
         }
         await db.SaveChangesAsync(ct);
@@ -130,6 +131,16 @@ public sealed class StagingService(TmsDbContext db)
         var sender = Clip(Text(payload, "sender"), 200);
         if (contact is null) db.MarketContacts.Add(new MarketContact { Market = market, Name = name, StandOrLocation = standOrLocation, Salesman = salesman, Sender = sender, Active = Bool(payload, "active", true) });
         else { contact.StandOrLocation = standOrLocation; contact.Salesman = salesman; contact.Sender = sender; contact.Active = Bool(payload, "active", true); }
+    }
+
+    private async Task PromoteFuelPrice(JsonElement payload, CancellationToken ct)
+    {
+        var provider = ClipRequired(Required(payload, "provider"), 120);
+        if (!DateOnly.TryParse(Required(payload, "weekCommencing"), out var weekCommencing)) throw new JsonException("Fuel price payload requires a valid weekCommencing.");
+        if (!decimal.TryParse(Required(payload, "pricePencePerLitre"), out var pricePencePerLitre)) throw new JsonException("Fuel price payload requires a valid pricePencePerLitre.");
+        var fuelPrice = await db.FuelPrices.SingleOrDefaultAsync(item => item.Provider == provider && item.WeekCommencing == weekCommencing, ct);
+        if (fuelPrice is null) db.FuelPrices.Add(new FuelPrice { Provider = provider, WeekCommencing = weekCommencing, PricePencePerLitre = pricePencePerLitre, IsPricingMaximum = Bool(payload, "isPricingMaximum", false), Source = Clip(Text(payload, "source"), 200), Notes = Clip(Text(payload, "notes"), 500) });
+        else { fuelPrice.PricePencePerLitre = pricePencePerLitre; fuelPrice.IsPricingMaximum = Bool(payload, "isPricingMaximum", false); fuelPrice.Source = Clip(Text(payload, "source"), 200); fuelPrice.Notes = Clip(Text(payload, "notes"), 500); }
     }
 
     private async Task PromoteOrder(JsonElement payload, CancellationToken ct)
