@@ -106,20 +106,29 @@ public sealed class DotTrackingController(
         var assignments = await db.Loads.AsNoTracking().Include(load => load.Stops).Where(load => load.PlanningDate == today && load.VehicleId != null && load.Status != LoadStatus.Cancelled && load.Status != LoadStatus.Completed).ToListAsync(cancellationToken);
         var driverIds = assignments.Where(load => load.DriverId != null).Select(load => load.DriverId!.Value).Distinct().ToList();
         var drivers = await db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id)).ToDictionaryAsync(driver => driver.Id, cancellationToken);
+        var matchedLiveIds = new HashSet<Guid>();
         var records = vehicles.Select(vehicle =>
         {
-            var keys = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => NormaliseIdentifier(value!));
+            var keys = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => NormaliseIdentifier(value!)).ToList();
             var exactLive = keys.Select(key => latestByIdentifier.GetValueOrDefault(key)).Where(status => status is not null);
             var suffixLive = keys.Select(key => latestBySuffix.GetValueOrDefault(IdentifierSuffix(key))).Where(status => status is not null);
-            var live = exactLive.Concat(suffixLive).OrderByDescending(status => status!.LastEventTimeUtc).FirstOrDefault();
-            var age = live is null ? (TimeSpan?)null : now - live.LastEventTimeUtc;
+            var live = exactLive.Concat(suffixLive).OrderByDescending(status => ObservedAt(status!, now)).FirstOrDefault();
+            if (live is not null) matchedLiveIds.Add(live.Id);
+            var observedAt = live is null ? (DateTimeOffset?)null : ObservedAt(live, now);
+            var age = observedAt is null ? (TimeSpan?)null : now - observedAt;
             var condition = DetermineCondition(live, now);
             var assignment = assignments.Where(load => load.VehicleId == vehicle.Id).OrderByDescending(load => LoadPriority(load.Status)).FirstOrDefault();
             var driverName = assignment?.DriverId is Guid driverId && drivers.TryGetValue(driverId, out var driver) ? driver.DisplayName : null;
             var plannedDutyUtc = assignment?.Stops.Where(stop => stop.PlannedArrivalUtc != null).OrderBy(stop => stop.PlannedArrivalUtc).Select(stop => stop.PlannedArrivalUtc).FirstOrDefault();
-            return new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, live?.VehicleIdentifier, condition, live?.LastEventTimeUtc, live?.IgnitionOn, live?.IsMoving, live?.SpeedKph, live?.Latitude, live?.Longitude, age is null ? null : (int)Math.Max(0, age.Value.TotalMinutes), assignment?.Reference, assignment?.Status.ToString(), driverName, plannedDutyUtc);
+            return new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, live?.VehicleIdentifier, condition, observedAt, live?.IgnitionOn, live?.IsMoving, live?.SpeedKph, LiveLatitude(live), LiveLongitude(live), age is null ? null : (int)Math.Max(0, age.Value.TotalMinutes), assignment?.Reference, assignment?.Status.ToString(), driverName, plannedDutyUtc);
         }).ToList();
-        return Ok(new FleetStatusResponse("RoadTech Falcon", now, records.Count, records.Count(record => record.Condition is "Moving" or "Started"), records.Count(record => record.Condition is "NotSignedOn" or "Stale"), records));
+        records.AddRange(liveStatuses.Where(status => !matchedLiveIds.Contains(status.Id)).OrderBy(status => status.VehicleIdentifier).Select(status =>
+        {
+            var observedAt = ObservedAt(status, now);
+            var age = now - observedAt;
+            return new FleetVehicleStatus(status.Id, status.VehicleIdentifier, null, status.VehicleIdentifier, DetermineCondition(status, now), observedAt, status.IgnitionOn, status.IsMoving, status.SpeedKph, LiveLatitude(status), LiveLongitude(status), (int)Math.Max(0, age.TotalMinutes), null, null, null, null);
+        }));
+        return Ok(new FleetStatusResponse("RoadTech Falcon", now, records.Count, records.Count(record => record.Condition is "Moving" or "Started" or "Stationary" or "SignedOn"), records.Count(record => record.Condition is "NotSignedOn" or "Stale"), records));
     }
 
     private async Task RefreshProviderTelemetry(CancellationToken cancellationToken)
@@ -153,10 +162,15 @@ public sealed class DotTrackingController(
         return normalised.Length <= 3 ? normalised : normalised[^3..];
     }
     private static int LoadPriority(LoadStatus status) => status switch { LoadStatus.InProgress => 4, LoadStatus.Dispatched => 3, LoadStatus.Planned => 2, LoadStatus.Draft => 1, _ => 0 };
+    private static DateTimeOffset ObservedAt(VehicleLiveStatus live, DateTimeOffset now) => live.LastReceivedAtUtc.UtcDateTime.Date == now.UtcDateTime.Date ? live.LastReceivedAtUtc : live.LastEventTimeUtc;
+    private static decimal? LiveLatitude(VehicleLiveStatus? live) => live is null || (live.Latitude == 0 && live.Longitude == 0) ? null : live.Latitude;
+    private static decimal? LiveLongitude(VehicleLiveStatus? live) => live is null || (live.Latitude == 0 && live.Longitude == 0) ? null : live.Longitude;
     private static string DetermineCondition(VehicleLiveStatus? live, DateTimeOffset now)
     {
-        if (live is null || live.LastEventTimeUtc.UtcDateTime.Date < now.UtcDateTime.Date) return "NotSignedOn";
-        if (now - live.LastEventTimeUtc > TimeSpan.FromMinutes(30)) return "Stale";
+        if (live is null) return "NotSignedOn";
+        var observedAt = ObservedAt(live, now);
+        if (observedAt.UtcDateTime.Date < now.UtcDateTime.Date) return "NotSignedOn";
+        if (now - observedAt > TimeSpan.FromMinutes(30)) return "Stale";
         if (live.IsMoving == true || live.SpeedKph.GetValueOrDefault() > 3) return "Moving";
         if (live.IgnitionOn == true) return "Started";
         if (live.IgnitionOn == false) return "Stationary";
