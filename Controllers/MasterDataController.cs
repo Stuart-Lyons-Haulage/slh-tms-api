@@ -36,11 +36,40 @@ public sealed class MasterDataController(StagingService staging) : ControllerBas
             catch (Exception ex)
             {
                 staging.ClearTrackedChanges();
+                if (IsDatabaseUnavailable(ex))
+                {
+                    try
+                    {
+                        await staging.RegisterFallback(request.EntityType, request.Payload, request.Source, ct);
+                        applied++;
+                        results.Add(new { request.EntityType, request.IdempotencyKey, applied = true, registered = true, error = "Stored in the section register while the live SQL table is repaired." });
+                        continue;
+                    }
+                    catch (Exception registerException)
+                    {
+                        ex = registerException;
+                    }
+                }
                 failed++;
                 results.Add(new { request.EntityType, request.IdempotencyKey, applied = false, error = ex.GetBaseException().Message });
             }
         }
 
         return Ok(new { received = requests.Count, applied, failed, results });
+    }
+
+    [HttpPost("register/link"), Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> LinkRegister(CancellationToken ct)
+    {
+        var linked = await staging.LinkRegistered(ct);
+        return Ok(new { linked, message = linked == 0 ? "No registered rows could be linked yet." : $"Linked {linked} registered rows into the live master tables." });
+    }
+
+    private static bool IsDatabaseUnavailable(Exception exception)
+    {
+        var message = exception.GetBaseException().Message;
+        return message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("does not exist or you do not have permissions", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("permission was denied", StringComparison.OrdinalIgnoreCase);
     }
 }

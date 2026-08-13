@@ -130,6 +130,8 @@ if (!app.Environment.IsEnvironment("Testing"))
     try
     {
         await PlanningSchemaInitializer.Apply(db, logger, CancellationToken.None);
+        var register = scope.ServiceProvider.GetRequiredService<StagingService>();
+        await register.LinkRegistered(CancellationToken.None);
     }
     catch (Exception ex)
     {

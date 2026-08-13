@@ -21,6 +21,45 @@ public sealed class StagingService(TmsDbContext db)
         await Promote(item, ct);
     }
 
+    public async Task RegisterFallback(string entityType, JsonElement payload, string? source, CancellationToken ct)
+    {
+        var registerType = $"register:{entityType.ToLowerInvariant()}";
+        db.StagedImports.Add(new StagedImport
+        {
+            EntityType = registerType,
+            IdempotencyKey = $"{registerType}:{Guid.NewGuid():N}",
+            PayloadJson = payload.GetRawText(),
+            Source = source ?? "Master register fallback",
+            Status = StagingStatus.Promoted,
+            ReviewedAtUtc = DateTimeOffset.UtcNow,
+            ReviewNote = "Stored in the section register because the live SQL table was unavailable."
+        });
+        await db.SaveChangesAsync(ct);
+    }
+
+    public async Task<int> LinkRegistered(CancellationToken ct)
+    {
+        var items = await db.StagedImports.Where(x => x.EntityType.StartsWith("register:") && x.Status == StagingStatus.Promoted).ToListAsync(ct);
+        var linked = 0;
+        foreach (var item in items)
+        {
+            try
+            {
+                var entityType = item.EntityType["register:".Length..];
+                await Promote(new StagedImport { EntityType = entityType, PayloadJson = item.PayloadJson }, ct);
+                item.Status = StagingStatus.Approved;
+                item.ReviewNote = "Linked into the live master table.";
+                linked++;
+            }
+            catch (Exception ex) when (ex is JsonException or DbUpdateException or InvalidOperationException)
+            {
+                item.ReviewNote = $"Waiting to link: {ex.GetBaseException().Message}";
+            }
+        }
+        await db.SaveChangesAsync(ct);
+        return linked;
+    }
+
     public void ClearTrackedChanges() => db.ChangeTracker.Clear();
 
     public async Task<StagedImport> ReviewAndPromote(Guid id, bool approve, string? note, ClaimsPrincipal user, CancellationToken ct)
