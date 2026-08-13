@@ -19,7 +19,7 @@ public sealed class DotTrackingOptions
     public int DataMask { get; set; } = 0;
 
     /// <summary>RoadTech flag to include active vehicles only.</summary>
-    public int OnlyLive { get; set; } = 1;
+    public bool OnlyLive { get; set; } = true;
 
     /// <summary>Safety limit for RoadTech Offset pagination.</summary>
     public int MaxPages { get; set; } = 100;

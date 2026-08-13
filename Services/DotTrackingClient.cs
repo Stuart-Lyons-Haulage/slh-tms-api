@@ -200,7 +200,7 @@ public sealed class DotTrackingClient
         string T,
         int DataMask,
         int Offset,
-        int OnlyLive);
+        bool OnlyLive);
 
     public static string NormaliseBaseUrl(string baseUrl)
     {
