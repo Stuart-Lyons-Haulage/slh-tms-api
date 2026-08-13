@@ -130,7 +130,7 @@ static bool IsLyonsUser(ClaimsPrincipal user)
 }
 
 static string ReadSetting(IConfiguration configuration, string fallback, params string[] keys) =>
-    keys.Select(configuration[key]).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim() ?? fallback;
+    keys.Select(key => configuration[key]).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim() ?? fallback;
 
 static bool ReadBool(IConfiguration configuration, bool fallback, params string[] keys) =>
     bool.TryParse(ReadSetting(configuration, fallback.ToString(), keys), out var value) ? value : fallback;
