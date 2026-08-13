@@ -124,13 +124,13 @@ public sealed class DotTrackingController(
             var assignment = assignments.Where(load => load.VehicleId == vehicle.Id).OrderByDescending(load => LoadPriority(load.Status)).FirstOrDefault();
             var driverName = assignment?.DriverId is Guid driverId && drivers.TryGetValue(driverId, out var driver) ? driver.DisplayName : null;
             var plannedDutyUtc = assignment?.Stops.Where(stop => stop.PlannedArrivalUtc != null).OrderBy(stop => stop.PlannedArrivalUtc).Select(stop => stop.PlannedArrivalUtc).FirstOrDefault();
-            return new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, live?.VehicleIdentifier, condition, observedAt, live?.IgnitionOn, live?.IsMoving, live?.SpeedKph, LiveLatitude(live), LiveLongitude(live), age is null ? null : (int)Math.Max(0, age.Value.TotalMinutes), assignment?.Reference, assignment?.Status.ToString(), driverName, plannedDutyUtc);
+            return new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, live?.VehicleIdentifier, condition, observedAt, live?.IgnitionOn, live?.IsMoving, live?.SpeedKph, LiveLatitude(live), LiveLongitude(live), age is null ? null : (int)Math.Max(0, age.Value.TotalMinutes), assignment?.Reference, assignment?.Status.ToString(), driverName, plannedDutyUtc, vehicle.FleetioId, vehicle.FleetioName, vehicle.FleetioStatus);
         }).ToList();
         records.AddRange(liveStatuses.Where(status => !matchedLiveIds.Contains(status.Id)).OrderBy(status => status.VehicleIdentifier).Select(status =>
         {
             var observedAt = ObservedAt(status, now);
             var age = now - observedAt;
-            return new FleetVehicleStatus(status.Id, status.VehicleIdentifier, null, status.VehicleIdentifier, DetermineCondition(status, now), observedAt, status.IgnitionOn, status.IsMoving, status.SpeedKph, LiveLatitude(status), LiveLongitude(status), (int)Math.Max(0, age.TotalMinutes), null, null, null, null);
+            return new FleetVehicleStatus(status.Id, status.VehicleIdentifier, null, status.VehicleIdentifier, DetermineCondition(status, now), observedAt, status.IgnitionOn, status.IsMoving, status.SpeedKph, LiveLatitude(status), LiveLongitude(status), (int)Math.Max(0, age.TotalMinutes), null, null, null, null, null, null, null);
         }));
         return Ok(new FleetStatusResponse("RoadTech Falcon", now, records.Count, records.Count(record => record.Condition is "Moving" or "Started" or "Stationary" or "SignedOn"), records.Count(record => record.Condition is "NotSignedOn" or "Stale"), records));
     }
@@ -175,7 +175,7 @@ public sealed class DotTrackingController(
     private static FleetStatusResponse MasterFleetFallback(IReadOnlyList<Vehicle> vehicles, string provider)
     {
         var now = DateTimeOffset.UtcNow;
-        var records = vehicles.Select(vehicle => new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, null, "NotSignedOn", null, null, null, null, null, null, null, null, null, null, null)).ToList();
+        var records = vehicles.Select(vehicle => new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, null, "NotSignedOn", null, null, null, null, null, null, null, null, null, null, null, vehicle.FleetioId, vehicle.FleetioName, vehicle.FleetioStatus)).ToList();
         return new FleetStatusResponse(provider, now, records.Count, 0, records.Count, records);
     }
 
@@ -219,4 +219,4 @@ public sealed record DotTelemetryResponse(
     IReadOnlyList<DotTelemetryRecord> Records);
 
 public sealed record FleetStatusResponse(string Provider, DateTimeOffset RetrievedAtUtc, int VehicleCount, int ReadyCount, int AttentionCount, IReadOnlyList<FleetVehicleStatus> Vehicles);
-public sealed record FleetVehicleStatus(Guid VehicleId, string Registration, string? FleetNumber, string? TrackingIdentifier, string Condition, DateTimeOffset? LastEventTimeUtc, bool? IgnitionOn, bool? IsMoving, decimal? SpeedKph, decimal? Latitude, decimal? Longitude, int? AgeMinutes, string? LoadReference, string? LoadStatus, string? DriverName, DateTimeOffset? PlannedDutyUtc);
+public sealed record FleetVehicleStatus(Guid VehicleId, string Registration, string? FleetNumber, string? TrackingIdentifier, string Condition, DateTimeOffset? LastEventTimeUtc, bool? IgnitionOn, bool? IsMoving, decimal? SpeedKph, decimal? Latitude, decimal? Longitude, int? AgeMinutes, string? LoadReference, string? LoadStatus, string? DriverName, DateTimeOffset? PlannedDutyUtc, string? FleetioId, string? FleetioName, string? FleetioStatus);

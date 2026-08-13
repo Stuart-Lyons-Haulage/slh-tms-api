@@ -146,19 +146,15 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
         {
             var fleetioVehicles = await fleetioClient.GetVehiclesAsync(100, ct);
             var tmsVehicles = await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(ct);
-            var fleetioByRegistration = fleetioVehicles
-                .Where(vehicle => !string.IsNullOrWhiteSpace(vehicle.Registration))
-                .GroupBy(vehicle => NormaliseVehicleKey(vehicle.Registration!))
-                .ToDictionary(group => group.Key, group => group.First());
-            var matchedKeys = new HashSet<string>();
+            var fleetioLookup = BuildFleetioLookup(fleetioVehicles);
+            var matchedFleetioIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var records = tmsVehicles.Select(vehicle =>
             {
-                var keys = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => NormaliseVehicleKey(value!)).ToList();
-                var match = keys.Select(key => fleetioByRegistration.GetValueOrDefault(key)).FirstOrDefault(item => item is not null);
-                if (match is not null && !string.IsNullOrWhiteSpace(match.Registration)) matchedKeys.Add(NormaliseVehicleKey(match.Registration!));
+                var match = VehicleKeys(vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation).Select(key => fleetioLookup.GetValueOrDefault(key)).FirstOrDefault(item => item is not null);
+                if (match is not null && !string.IsNullOrWhiteSpace(match.Id)) matchedFleetioIds.Add(match.Id);
                 return new FleetioVehicleAlignmentRecord(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation, match?.Id, match?.Registration, match?.Name, match?.FleetNumber, match?.Status, match is not null ? "Matched" : "MissingInFleetio");
             }).ToList();
-            var unmatched = fleetioVehicles.Where(vehicle => !string.IsNullOrWhiteSpace(vehicle.Registration) && !matchedKeys.Contains(NormaliseVehicleKey(vehicle.Registration!)))
+            var unmatched = fleetioVehicles.Where(vehicle => string.IsNullOrWhiteSpace(vehicle.Id) || !matchedFleetioIds.Contains(vehicle.Id))
                 .Select(vehicle => new FleetioVehicleAlignmentRecord(null, null, null, null, vehicle.Id, vehicle.Registration, vehicle.Name, vehicle.FleetNumber, vehicle.Status, "UnmatchedFleetio"));
             records.AddRange(unmatched);
             return Ok(new { configured = true, connected = true, matched = records.Count(item => item.Status == "Matched"), unmatchedFleetio = records.Count(item => item.Status == "UnmatchedFleetio"), missingInFleetio = records.Count(item => item.Status == "MissingInFleetio"), missingSettings = Array.Empty<string>(), records, message = $"Fleetio returned {fleetioVehicles.Count} vehicle record(s) for alignment." });
@@ -179,16 +175,12 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
         {
             var fleetioVehicles = await fleetioClient.GetVehiclesAsync(100, ct);
             var tmsVehicles = await db.Vehicles.Where(vehicle => vehicle.Active).ToListAsync(ct);
-            var fleetioByRegistration = fleetioVehicles
-                .Where(vehicle => !string.IsNullOrWhiteSpace(vehicle.Registration))
-                .GroupBy(vehicle => NormaliseVehicleKey(vehicle.Registration!))
-                .ToDictionary(group => group.Key, group => group.First());
+            var fleetioLookup = BuildFleetioLookup(fleetioVehicles);
             var updated = 0;
             var missingInFleetio = 0;
             foreach (var vehicle in tmsVehicles)
             {
-                var keys = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => NormaliseVehicleKey(value!)).ToList();
-                var match = keys.Select(key => fleetioByRegistration.GetValueOrDefault(key)).FirstOrDefault(item => item is not null);
+                var match = VehicleKeys(vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation).Select(key => fleetioLookup.GetValueOrDefault(key)).FirstOrDefault(item => item is not null);
                 if (match is null) { missingInFleetio++; continue; }
                 vehicle.FleetioId = match.Id;
                 vehicle.FleetioName = Clip(match.Name, 160);
@@ -204,6 +196,33 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
             logger.LogWarning(exception, "Fleetio vehicle sync failed.");
             return Ok(new { configured = true, connected = false, sourceVehicleCount = 0, tmsVehicleCount = 0, updated = 0, missingInFleetio = 0, syncedAtUtc = DateTimeOffset.UtcNow, message = $"Fleetio vehicle sync failed: {exception.GetBaseException().Message}. No vehicle records were changed." });
         }
+    }
+
+    private static Dictionary<string, FleetioVehicle> BuildFleetioLookup(IReadOnlyList<FleetioVehicle> fleetioVehicles)
+    {
+        var lookup = new Dictionary<string, FleetioVehicle>(StringComparer.OrdinalIgnoreCase);
+        foreach (var vehicle in fleetioVehicles)
+        {
+            foreach (var key in VehicleKeys(vehicle.Registration, vehicle.FleetNumber, vehicle.Name))
+            {
+                lookup.TryAdd(key, vehicle);
+            }
+        }
+        return lookup;
+    }
+
+    private static IReadOnlyList<string> VehicleKeys(params string?[] values)
+    {
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var value in values.Where(item => !string.IsNullOrWhiteSpace(item)))
+        {
+            var key = NormaliseVehicleKey(value!);
+            if (key.Length == 0) continue;
+            keys.Add(key);
+            if (key.Length > 3) keys.Add(key[^3..]);
+            if (key.EndsWith("H", StringComparison.OrdinalIgnoreCase) && key.Length > 4) keys.Add(key[..^1]);
+        }
+        return keys.ToList();
     }
 
     private static string? Clip(string? value, int maxLength) => string.IsNullOrWhiteSpace(value) ? null : value.Trim().Length <= maxLength ? value.Trim() : value.Trim()[..maxLength];
