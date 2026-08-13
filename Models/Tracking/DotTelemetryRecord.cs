@@ -8,6 +8,8 @@ public sealed class RoadTechTelemetryItem
 {
     public string VehCode { get; init; } = string.Empty;
     public long VehRtid { get; init; }
+    public bool? Ign { get; init; }
+    public bool? Moving { get; init; }
     public JsonElement? DataGps { get; init; }
     public JsonElement? DataCan { get; init; }
     public JsonElement? DataGaz { get; init; }
@@ -30,14 +32,15 @@ public sealed record DotTelemetryRecord(
         var rawPayload = JsonSerializer.Serialize(item);
         var gps = item.DataGps;
         var latitude = ReadDecimal(gps, "latitude", "lat");
-        var longitude = ReadDecimal(gps, "longitude", "lon", "lng");
-        var speed = ReadDecimal(gps, "speedKph", "speed", "speedkmh");
+        var longitude = ReadDecimal(gps, "longitude", "long", "lon", "lng");
+        var speed = ReadDecimal(gps, "speedKph", "speed", "speedkmh", "kmh");
         var timestamp = ReadString(gps, "eventTimeUtc", "timestamp", "time", "datetime");
         var eventTime = DateTimeOffset.TryParse(timestamp, out var parsed) ? parsed.ToUniversalTime() : DateTimeOffset.UtcNow;
-        var moving = ReadBoolean(gps, "isMoving", "moving");
-        var ignitionOn = ReadBoolean(item.DataCan, "ignitionOn", "ignition", "engineOn", "engineRunning")
-            ?? ReadBoolean(gps, "ignitionOn", "ignition", "engineOn", "engineRunning")
-            ?? ReadBoolean(item.DataGaz, "ignitionOn", "ignition", "engineOn", "engineRunning");
+        var moving = item.Moving ?? ReadBoolean(gps, "isMoving", "moving");
+        var ignitionOn = item.Ign
+            ?? ReadBoolean(item.DataCan, "ignitionOn", "ignition", "ign", "engineOn", "engineRunning")
+            ?? ReadBoolean(gps, "ignitionOn", "ignition", "ign", "engineOn", "engineRunning")
+            ?? ReadBoolean(item.DataGaz, "ignitionOn", "ignition", "ign", "engineOn", "engineRunning");
         var fingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(rawPayload)))[..24];
         return new DotTelemetryRecord(fingerprint, string.IsNullOrWhiteSpace(item.VehCode) ? item.VehRtid.ToString() : item.VehCode, eventTime, latitude, longitude, speed, ignitionOn, moving, latitude is null || longitude is null ? "GPS coordinates unavailable" : "Received", rawPayload);
     }

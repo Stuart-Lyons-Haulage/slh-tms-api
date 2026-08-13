@@ -116,6 +116,35 @@ public sealed class DotTrackingClientTests
         Assert.Equal("sid-123", handler.Requests[1].Headers.GetValues("SID").Single());
     }
 
+    [Fact]
+    public void RoadTech_record_reads_documented_falcon_live_fields()
+    {
+        var item = JsonSerializer.Deserialize<RoadTechTelemetryItem>("""
+            {
+              "vehCode": "AB12 CDE",
+              "vehRtid": 1234567,
+              "Ign": true,
+              "Moving": true,
+              "dataGps": {
+                "Time": "2026-08-13T08:30:00Z",
+                "Lat": 54.957858,
+                "Long": -1.653757,
+                "KmH": 42,
+                "Head": 331
+              }
+            }
+            """, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+
+        var record = DotTelemetryRecord.FromProvider(item);
+
+        Assert.Equal("AB12 CDE", record.VehicleIdentifier);
+        Assert.Equal(54.957858m, record.Latitude);
+        Assert.Equal(-1.653757m, record.Longitude);
+        Assert.Equal(42m, record.SpeedKph);
+        Assert.True(record.IgnitionOn);
+        Assert.True(record.IsMoving);
+    }
+
     private sealed class CapturingHandler : HttpMessageHandler
     {
         private readonly bool _rejectFirstLogin;

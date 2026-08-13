@@ -83,6 +83,8 @@ public sealed class DotTrackingController(
     [HttpGet("fleet-status")]
     public async Task<ActionResult<FleetStatusResponse>> GetFleetStatus(CancellationToken cancellationToken)
     {
+        await RefreshProviderTelemetry(cancellationToken);
+
         var vehicles = await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(cancellationToken);
         List<VehicleLiveStatus> liveStatuses;
         try
@@ -111,6 +113,23 @@ public sealed class DotTrackingController(
             return new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, live?.VehicleIdentifier, condition, live?.LastEventTimeUtc, live?.IgnitionOn, live?.IsMoving, live?.SpeedKph, live?.Latitude, live?.Longitude, age is null ? null : (int)Math.Max(0, age.Value.TotalMinutes), assignment?.Reference, assignment?.Status.ToString(), driverName);
         }).ToList();
         return Ok(new FleetStatusResponse("RoadTech Falcon", now, records.Count, records.Count(record => record.Condition is "Moving" or "Started"), records.Count(record => record.Condition is "NotSignedOn" or "Stale"), records));
+    }
+
+    private async Task RefreshProviderTelemetry(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var telemetry = await trackingClient.GetLatestVehicleEventsAsync(cancellationToken);
+            var records = telemetry.Select(DotTelemetryRecord.FromProvider).ToList();
+            if (records.Count > 0)
+            {
+                await telemetryStore.PersistAsync(records, cancellationToken);
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or TaskCanceledException)
+        {
+            logger.LogWarning(ex, "RoadTech Falcon live refresh failed; using stored fleet status.");
+        }
     }
 
     private static FleetStatusResponse MasterFleetFallback(IReadOnlyList<Vehicle> vehicles, string provider)
