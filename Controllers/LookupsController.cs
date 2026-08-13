@@ -33,6 +33,12 @@ public sealed class LookupsController(TmsDbContext db) : ControllerBase
         vehicle.Transmission = Clip(request.Transmission, 20);
         vehicle.DvsCompliant = request.DvsCompliant;
         vehicle.FuelProvider = Clip(request.FuelProvider, 30);
+        vehicle.CabMobile = Clip(request.CabMobile, 40);
+        vehicle.FuelPin = Clip(request.FuelPin, 80);
+        vehicle.ShellCard = Clip(request.ShellCard, 80);
+        vehicle.BpRedCard = Clip(request.BpRedCard, 80);
+        vehicle.BpPlainCard = Clip(request.BpPlainCard, 80);
+        vehicle.Notes = Clip(request.Notes, 500);
         vehicle.FuelPinSecretName = Clip(request.FuelPinSecretName, 120);
         vehicle.FuelCardLastFour = Clip(request.FuelCardLastFour, 4);
         vehicle.Active = request.Active;
@@ -44,4 +50,4 @@ public sealed class LookupsController(TmsDbContext db) : ControllerBase
     private static string ClipRequired(string value, int maxLength) => value.Trim().Length <= maxLength ? value.Trim() : value.Trim()[..maxLength];
 }
 
-public sealed record VehicleUpdateRequest(string Registration, string? FleetNumber, string? Abbreviation, string? Transmission, bool? DvsCompliant, string? FuelProvider, string? FuelPinSecretName, string? FuelCardLastFour, bool Active);
+public sealed record VehicleUpdateRequest(string Registration, string? FleetNumber, string? Abbreviation, string? Transmission, bool? DvsCompliant, string? FuelProvider, string? CabMobile, string? FuelPin, string? ShellCard, string? BpRedCard, string? BpPlainCard, string? Notes, string? FuelPinSecretName, string? FuelCardLastFour, bool Active);

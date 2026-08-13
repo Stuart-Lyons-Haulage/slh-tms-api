@@ -21,6 +21,8 @@ public sealed class StagingService(TmsDbContext db)
         await Promote(item, ct);
     }
 
+    public void ClearTrackedChanges() => db.ChangeTracker.Clear();
+
     public async Task<StagedImport> ReviewAndPromote(Guid id, bool approve, string? note, ClaimsPrincipal user, CancellationToken ct)
     {
         var item = await db.StagedImports.SingleOrDefaultAsync(x => x.Id == id, ct) ?? throw new KeyNotFoundException("Staged item not found");
@@ -88,8 +90,25 @@ public sealed class StagingService(TmsDbContext db)
     {
         var registration = ClipRequired(Required(payload, "registration").Replace(" ", "").ToUpperInvariant(), 20);
         var vehicle = await db.Vehicles.SingleOrDefaultAsync(item => item.Registration == registration, ct);
-        if (vehicle is null) db.Vehicles.Add(new Vehicle { Registration = registration, FleetNumber = Clip(Text(payload, "fleetNumber"), 40), Abbreviation = Clip(Text(payload, "abbreviation"), 20), Transmission = Clip(Text(payload, "transmission"), 20), DvsCompliant = BoolOrNull(payload, "dvsCompliant"), FuelProvider = Clip(Text(payload, "fuelProvider"), 30), FuelPinSecretName = Clip(Text(payload, "fuelPinSecretName"), 120), FuelCardLastFour = Clip(Text(payload, "fuelCardLastFour"), 4), Active = Bool(payload, "active", true) });
-        else { vehicle.FleetNumber = Clip(Text(payload, "fleetNumber"), 40); vehicle.Abbreviation = Clip(Text(payload, "abbreviation"), 20); vehicle.Transmission = Clip(Text(payload, "transmission"), 20); vehicle.DvsCompliant = BoolOrNull(payload, "dvsCompliant"); vehicle.FuelProvider = Clip(Text(payload, "fuelProvider"), 30); vehicle.FuelPinSecretName = Clip(Text(payload, "fuelPinSecretName"), 120); vehicle.FuelCardLastFour = Clip(Text(payload, "fuelCardLastFour"), 4); vehicle.Active = Bool(payload, "active", true); }
+        if (vehicle is null)
+        {
+            vehicle = new Vehicle { Registration = registration };
+            db.Vehicles.Add(vehicle);
+        }
+        vehicle.FleetNumber = Clip(Text(payload, "fleetNumber"), 40);
+        vehicle.Abbreviation = Clip(Text(payload, "abbreviation"), 20);
+        vehicle.Transmission = Clip(Text(payload, "transmission"), 20);
+        vehicle.DvsCompliant = BoolOrNull(payload, "dvsCompliant");
+        vehicle.CabMobile = Clip(Text(payload, "cabMobile") ?? Text(payload, "cabPhone") ?? Text(payload, "cabPhoneNumber"), 40);
+        vehicle.FuelPin = Clip(Text(payload, "fuelPin"), 80);
+        vehicle.ShellCard = Clip(Text(payload, "shellCard"), 80);
+        vehicle.BpRedCard = Clip(Text(payload, "bpRedCard"), 80);
+        vehicle.BpPlainCard = Clip(Text(payload, "bpPlainCard"), 80);
+        vehicle.Notes = Clip(Text(payload, "notes"), 500);
+        vehicle.FuelProvider = Clip(Text(payload, "fuelProvider"), 30);
+        vehicle.FuelPinSecretName = Clip(Text(payload, "fuelPinSecretName"), 120);
+        vehicle.FuelCardLastFour = Clip(Text(payload, "fuelCardLastFour"), 4);
+        vehicle.Active = Bool(payload, "active", true);
     }
 
     private async Task PromoteDriver(JsonElement payload, CancellationToken ct)

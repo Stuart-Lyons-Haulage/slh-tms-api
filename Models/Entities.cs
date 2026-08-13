@@ -21,6 +21,12 @@ public sealed class Vehicle
     [MaxLength(20)] public string? Transmission { get; set; }
     public bool? DvsCompliant { get; set; }
     [MaxLength(30)] public string? FuelProvider { get; set; }
+    [MaxLength(40)] public string? CabMobile { get; set; }
+    [MaxLength(80)] public string? FuelPin { get; set; }
+    [MaxLength(80)] public string? ShellCard { get; set; }
+    [MaxLength(80)] public string? BpRedCard { get; set; }
+    [MaxLength(80)] public string? BpPlainCard { get; set; }
+    [MaxLength(500)] public string? Notes { get; set; }
     [MaxLength(120)] public string? FuelPinSecretName { get; set; }
     [MaxLength(4)] public string? FuelCardLastFour { get; set; }
     [MaxLength(80)] public string? FleetioId { get; set; }

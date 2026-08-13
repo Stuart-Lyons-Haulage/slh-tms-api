@@ -35,6 +35,7 @@ public sealed class MasterDataController(StagingService staging) : ControllerBas
             }
             catch (Exception ex) when (ex is ArgumentException or System.Text.Json.JsonException or InvalidOperationException or Microsoft.EntityFrameworkCore.DbUpdateException)
             {
+                staging.ClearTrackedChanges();
                 failed++;
                 results.Add(new { request.EntityType, request.IdempotencyKey, applied = false, error = ex.GetBaseException().Message });
             }
