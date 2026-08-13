@@ -138,4 +138,39 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
             return Ok(new { configured = true, connected = false, sampleVehicleCount = 0, missingSettings = Array.Empty<string>(), message = $"Fleetio could not be reached or rejected the credentials: {exception.GetBaseException().Message}" });
         }
     }
+    [HttpGet("fleetio/vehicle-alignment")]
+    public async Task<IActionResult> FleetioVehicleAlignment(CancellationToken ct)
+    {
+        if (!fleetioClient.IsConfigured) return Ok(new { configured = false, connected = false, matched = 0, unmatchedFleetio = 0, missingInFleetio = 0, missingSettings = fleetioClient.MissingSettings, records = Array.Empty<object>(), message = $"Fleetio runtime settings are incomplete: {string.Join(", ", fleetioClient.MissingSettings)}." });
+        try
+        {
+            var fleetioVehicles = await fleetioClient.GetVehiclesAsync(100, ct);
+            var tmsVehicles = await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(ct);
+            var fleetioByRegistration = fleetioVehicles
+                .Where(vehicle => !string.IsNullOrWhiteSpace(vehicle.Registration))
+                .GroupBy(vehicle => NormaliseVehicleKey(vehicle.Registration!))
+                .ToDictionary(group => group.Key, group => group.First());
+            var matchedKeys = new HashSet<string>();
+            var records = tmsVehicles.Select(vehicle =>
+            {
+                var keys = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => NormaliseVehicleKey(value!)).ToList();
+                var match = keys.Select(key => fleetioByRegistration.GetValueOrDefault(key)).FirstOrDefault(item => item is not null);
+                if (match is not null && !string.IsNullOrWhiteSpace(match.Registration)) matchedKeys.Add(NormaliseVehicleKey(match.Registration!));
+                return new FleetioVehicleAlignmentRecord(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation, match?.Id, match?.Registration, match?.Name, match?.FleetNumber, match?.Status, match is not null ? "Matched" : "MissingInFleetio");
+            }).ToList();
+            var unmatched = fleetioVehicles.Where(vehicle => !string.IsNullOrWhiteSpace(vehicle.Registration) && !matchedKeys.Contains(NormaliseVehicleKey(vehicle.Registration!)))
+                .Select(vehicle => new FleetioVehicleAlignmentRecord(null, null, null, null, vehicle.Id, vehicle.Registration, vehicle.Name, vehicle.FleetNumber, vehicle.Status, "UnmatchedFleetio"));
+            records.AddRange(unmatched);
+            return Ok(new { configured = true, connected = true, matched = records.Count(item => item.Status == "Matched"), unmatchedFleetio = records.Count(item => item.Status == "UnmatchedFleetio"), missingInFleetio = records.Count(item => item.Status == "MissingInFleetio"), missingSettings = Array.Empty<string>(), records, message = $"Fleetio returned {fleetioVehicles.Count} vehicle record(s) for alignment." });
+        }
+        catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException)
+        {
+            logger.LogWarning(exception, "Fleetio vehicle alignment failed.");
+            return Ok(new { configured = true, connected = false, matched = 0, unmatchedFleetio = 0, missingInFleetio = 0, missingSettings = Array.Empty<string>(), records = Array.Empty<object>(), message = $"Fleetio could not be reached or rejected the credentials: {exception.GetBaseException().Message}" });
+        }
+    }
+
+    private static string NormaliseVehicleKey(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 }
+
+public sealed record FleetioVehicleAlignmentRecord(Guid? TmsVehicleId, string? TmsRegistration, string? TmsFleetNumber, string? TmsAbbreviation, string? FleetioId, string? FleetioRegistration, string? FleetioName, string? FleetioFleetNumber, string? FleetioStatus, string Status);
