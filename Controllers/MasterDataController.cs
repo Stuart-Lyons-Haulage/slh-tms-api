@@ -83,6 +83,7 @@ public sealed class MasterDataController(StagingService staging) : ControllerBas
     {
         var message = exception.GetBaseException().Message;
         return message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase)
             || message.Contains("does not exist or you do not have permissions", StringComparison.OrdinalIgnoreCase)
             || message.Contains("permission was denied", StringComparison.OrdinalIgnoreCase);
     }
