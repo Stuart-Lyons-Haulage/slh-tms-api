@@ -40,7 +40,7 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
     {
         var request = new HttpRequestMessage(HttpMethod.Get, $"{options.BaseUrl.TrimEnd('/')}/{path.TrimStart('/')}");
         request.Headers.Authorization = new AuthenticationHeaderValue("Token", options.ApiKey);
-        request.Headers.Add("Account-Token", options.AccountToken);
+        if (!string.IsNullOrWhiteSpace(options.AccountToken)) request.Headers.Add("Account-Token", options.AccountToken);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         return request;
     }

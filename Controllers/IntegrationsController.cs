@@ -94,28 +94,28 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
             var created = 0; var updated = 0; var skipped = 0;
             foreach (var employee in candidates)
             {
-                var employeeNumber = string.IsNullOrWhiteSpace(employee.EmployeeNumber) ? $"SAGE-{employee.Id}" : employee.EmployeeNumber.Trim();
-                var displayName = $"{employee.FirstName} {employee.LastName}".Trim();
+                var employeeNumber = ClipRequired(string.IsNullOrWhiteSpace(employee.EmployeeNumber) ? $"SAGE-{employee.Id}" : employee.EmployeeNumber.Trim(), 40);
+                var displayName = ClipRequired($"{employee.FirstName} {employee.LastName}".Trim(), 160);
                 if (string.IsNullOrWhiteSpace(displayName)) { skipped++; continue; }
                 var driver = await db.Drivers.SingleOrDefaultAsync(item => item.EmployeeNumber == employeeNumber, ct);
                 if (driver is null)
                 {
-                    db.Drivers.Add(new Driver { EmployeeNumber = employeeNumber, DisplayName = displayName, MobileNumber = employee.MobilePhone, DriverType = employee.Position, DriverGroup = employee.Team, Active = true });
+                    db.Drivers.Add(new Driver { EmployeeNumber = employeeNumber, DisplayName = displayName, MobileNumber = Clip(employee.MobilePhone, 40), DriverType = Clip(employee.Position, 80), DriverGroup = Clip(employee.Team, 80), Active = true });
                     created++;
                 }
                 else
                 {
-                    driver.DisplayName = displayName; driver.MobileNumber = employee.MobilePhone; driver.DriverType = employee.Position; driver.DriverGroup = employee.Team; driver.Active = true;
+                    driver.DisplayName = displayName; driver.MobileNumber = Clip(employee.MobilePhone, 40); driver.DriverType = Clip(employee.Position, 80); driver.DriverGroup = Clip(employee.Team, 80); driver.Active = true;
                     updated++;
                 }
             }
             await db.SaveChangesAsync(ct);
             return Ok(new { sourceEmployeeCount = employees.Count, driverCandidateCount = candidates.Count, created, updated, skipped, syncedAtUtc = DateTimeOffset.UtcNow });
         }
-        catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException)
+        catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException or DbUpdateException)
         {
             logger.LogWarning(exception, "Sage HR driver sync failed.");
-            return StatusCode(StatusCodes.Status502BadGateway, new { configured = true, message = "Sage HR could not be reached or rejected the API key. No driver records were changed." });
+            return StatusCode(StatusCodes.Status502BadGateway, new { configured = true, message = $"Sage HR driver sync failed: {exception.GetBaseException().Message}. No driver records were changed." });
         }
     }
 
@@ -170,6 +170,44 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
         }
     }
 
+
+    [HttpPost("fleetio/sync-vehicles"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> SyncFleetioVehicles(CancellationToken ct)
+    {
+        if (!fleetioClient.IsConfigured) return BadRequest(new { configured = false, missingSettings = fleetioClient.MissingSettings, message = $"Fleetio cannot sync until these settings are complete: {string.Join(", ", fleetioClient.MissingSettings)}." });
+        try
+        {
+            var fleetioVehicles = await fleetioClient.GetVehiclesAsync(100, ct);
+            var tmsVehicles = await db.Vehicles.Where(vehicle => vehicle.Active).ToListAsync(ct);
+            var fleetioByRegistration = fleetioVehicles
+                .Where(vehicle => !string.IsNullOrWhiteSpace(vehicle.Registration))
+                .GroupBy(vehicle => NormaliseVehicleKey(vehicle.Registration!))
+                .ToDictionary(group => group.Key, group => group.First());
+            var updated = 0;
+            var missingInFleetio = 0;
+            foreach (var vehicle in tmsVehicles)
+            {
+                var keys = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => NormaliseVehicleKey(value!)).ToList();
+                var match = keys.Select(key => fleetioByRegistration.GetValueOrDefault(key)).FirstOrDefault(item => item is not null);
+                if (match is null) { missingInFleetio++; continue; }
+                vehicle.FleetioId = match.Id;
+                vehicle.FleetioName = Clip(match.Name, 160);
+                vehicle.FleetioStatus = Clip(match.Status, 80);
+                if (string.IsNullOrWhiteSpace(vehicle.FleetNumber)) vehicle.FleetNumber = Clip(match.FleetNumber, 40);
+                updated++;
+            }
+            await db.SaveChangesAsync(ct);
+            return Ok(new { sourceVehicleCount = fleetioVehicles.Count, tmsVehicleCount = tmsVehicles.Count, updated, missingInFleetio, syncedAtUtc = DateTimeOffset.UtcNow });
+        }
+        catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException)
+        {
+            logger.LogWarning(exception, "Fleetio vehicle sync failed.");
+            return StatusCode(StatusCodes.Status502BadGateway, new { configured = true, message = $"Fleetio could not be reached or rejected the credentials: {exception.GetBaseException().Message}. No vehicle records were changed." });
+        }
+    }
+
+    private static string? Clip(string? value, int maxLength) => string.IsNullOrWhiteSpace(value) ? null : value.Trim().Length <= maxLength ? value.Trim() : value.Trim()[..maxLength];
+    private static string ClipRequired(string value, int maxLength) => value.Trim().Length <= maxLength ? value.Trim() : value.Trim()[..maxLength];
     private static string NormaliseVehicleKey(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 }
 

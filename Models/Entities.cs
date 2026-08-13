@@ -23,6 +23,9 @@ public sealed class Vehicle
     [MaxLength(30)] public string? FuelProvider { get; set; }
     [MaxLength(120)] public string? FuelPinSecretName { get; set; }
     [MaxLength(4)] public string? FuelCardLastFour { get; set; }
+    [MaxLength(80)] public string? FleetioId { get; set; }
+    [MaxLength(160)] public string? FleetioName { get; set; }
+    [MaxLength(80)] public string? FleetioStatus { get; set; }
     public bool Active { get; set; } = true;
 }
 public sealed class Driver
