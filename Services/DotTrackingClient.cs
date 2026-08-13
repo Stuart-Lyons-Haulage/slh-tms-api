@@ -176,15 +176,61 @@ public sealed class DotTrackingClient
             return root.GetString() ?? throw new InvalidOperationException("RoadTech returned an empty SID.");
         }
 
-        foreach (var name in new[] { "token", "sid", "SID" })
+        if (TryExtractSessionId(root, out var sessionId))
         {
-            if (root.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.String or JsonValueKind.Number)
-            {
-                return value.ToString();
-            }
+            return sessionId;
         }
 
         throw new InvalidOperationException("RoadTech login response did not contain a SID.");
+    }
+
+    private static bool TryExtractSessionId(JsonElement element, out string sessionId)
+    {
+        sessionId = string.Empty;
+
+        if (element.ValueKind is JsonValueKind.String or JsonValueKind.Number)
+        {
+            sessionId = element.ToString();
+            return !string.IsNullOrWhiteSpace(sessionId);
+        }
+
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        foreach (var property in element.EnumerateObject())
+        {
+            if (property.NameEquals("token") ||
+                property.NameEquals("Token") ||
+                property.NameEquals("sid") ||
+                property.NameEquals("Sid") ||
+                property.NameEquals("SID") ||
+                property.NameEquals("sessionId") ||
+                property.NameEquals("SessionId") ||
+                property.NameEquals("sessionID") ||
+                property.NameEquals("SessionID"))
+            {
+                sessionId = property.Value.ToString();
+                return !string.IsNullOrWhiteSpace(sessionId);
+            }
+        }
+
+        foreach (var property in element.EnumerateObject())
+        {
+            if ((property.NameEquals("data") ||
+                 property.NameEquals("Data") ||
+                 property.NameEquals("result") ||
+                 property.NameEquals("Result") ||
+                 property.NameEquals("session") ||
+                 property.NameEquals("Session")) &&
+                TryExtractSessionId(property.Value, out sessionId))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private sealed record RoadTechLoginRequest(

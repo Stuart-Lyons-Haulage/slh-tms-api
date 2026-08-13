@@ -94,11 +94,38 @@ public sealed class DotTrackingClientTests
         Assert.Equal(password, login.RootElement.GetProperty("Pass").GetString());
     }
 
+
+    [Theory]
+    [InlineData("{\"Token\":\"sid-123\"}")]
+    [InlineData("{\"Result\":{\"SessionId\":\"sid-123\"}}")]
+    public async Task RoadTech_login_accepts_common_sid_response_shapes(string loginResponse)
+    {
+        var handler = new CapturingHandler(loginResponse: loginResponse);
+        var client = new DotTrackingClient(new HttpClient(handler), new DotTrackingOptions
+        {
+            Enabled = true,
+            BaseUrl = "https://api-v1-alpha.roadtech.co.uk",
+            ApiKey = "test-key",
+            Username = "planner",
+            Password = "secret",
+            CompanyCode = "SLH"
+        }, NullLogger<DotTrackingClient>.Instance);
+
+        await client.GetLatestVehicleEventsAsync();
+
+        Assert.Equal("sid-123", handler.Requests[1].Headers.GetValues("SID").Single());
+    }
+
     private sealed class CapturingHandler : HttpMessageHandler
     {
         private readonly bool _rejectFirstLogin;
+        private readonly string _loginResponse;
         private int _loginCount;
-        public CapturingHandler(bool rejectFirstLogin = false) => _rejectFirstLogin = rejectFirstLogin;
+        public CapturingHandler(bool rejectFirstLogin = false, string loginResponse = "{\"token\":\"sid-123\"}")
+        {
+            _rejectFirstLogin = rejectFirstLogin;
+            _loginResponse = loginResponse;
+        }
         public List<HttpRequestMessage> Requests { get; } = [];
         public List<string> Bodies { get; } = [];
 
@@ -112,7 +139,7 @@ public sealed class DotTrackingClientTests
                 return new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("Internal Server Error") };
             }
             var content = isLogin
-                ? "{\"token\":\"sid-123\"}"
+                ? _loginResponse
                 : "{\"moreData\":false,\"recordOffset\":0,\"recordCount\":0,\"data\":[]}";
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
