@@ -42,6 +42,15 @@ builder.Configuration.GetSection("Integrations:TextBee").Bind(textBeeOptions);
 builder.Services.AddSingleton(textBeeOptions);
 var fleetioOptions = new FleetioOptions();
 builder.Configuration.GetSection("Integrations:Fleetio").Bind(fleetioOptions);
+fleetioOptions.Enabled = ReadBool(builder.Configuration, fleetioOptions.Enabled,
+    "Integrations:Fleetio:Enabled", "Integrations__Fleetio__Enabled", "fleetio-enabled", "Fleetio--Enabled");
+fleetioOptions.BaseUrl = ReadSetting(builder.Configuration, fleetioOptions.BaseUrl,
+    "Integrations:Fleetio:BaseUrl", "Integrations__Fleetio__BaseUrl", "fleetio-base-url", "Fleetio--BaseUrl");
+fleetioOptions.ApiKey = ReadSetting(builder.Configuration, fleetioOptions.ApiKey,
+    "Integrations:Fleetio:ApiKey", "Integrations__Fleetio__ApiKey", "fleetio-api-key", "Fleetio--ApiKey");
+fleetioOptions.AccountToken = ReadSetting(builder.Configuration, fleetioOptions.AccountToken,
+    "Integrations:Fleetio:AccountToken", "Integrations__Fleetio__AccountToken", "fleetio-account-token", "Fleetio--AccountToken");
+if (fleetioOptions.BaseUrl.EndsWith("/api/v2", StringComparison.OrdinalIgnoreCase)) fleetioOptions.BaseUrl = fleetioOptions.BaseUrl[..^1] + "1";
 builder.Services.AddSingleton(fleetioOptions);
 builder.Services.AddScoped<AzureSmsDispatchService>();
 builder.Services.AddHttpClient<DriverSmsDispatchService>();
@@ -119,6 +128,12 @@ static bool IsLyonsUser(ClaimsPrincipal user)
 
     return values.Any(value => value.EndsWith("@lyonshaulage.com", StringComparison.OrdinalIgnoreCase));
 }
+
+static string ReadSetting(IConfiguration configuration, string fallback, params string[] keys) =>
+    keys.Select(configuration[key]).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim() ?? fallback;
+
+static bool ReadBool(IConfiguration configuration, bool fallback, params string[] keys) =>
+    bool.TryParse(ReadSetting(configuration, fallback.ToString(), keys), out var value) ? value : fallback;
 
 var app = builder.Build();
 

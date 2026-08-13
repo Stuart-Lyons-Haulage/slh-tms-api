@@ -44,7 +44,7 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
     private HttpRequestMessage CreateRequest(string path)
     {
         var request = new HttpRequestMessage(HttpMethod.Get, $"{options.BaseUrl.TrimEnd('/')}/{path.TrimStart('/')}");
-        request.Headers.TryAddWithoutValidation("Authorization", $"Token token=\"{options.ApiKey}\"");
+        request.Headers.TryAddWithoutValidation("Authorization", $"Token {options.ApiKey}");
         request.Headers.TryAddWithoutValidation("Account-Token", options.AccountToken);
         request.Headers.TryAddWithoutValidation("Accept", "application/json");
         return request;

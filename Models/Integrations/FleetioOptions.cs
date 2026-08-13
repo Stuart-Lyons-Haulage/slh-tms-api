@@ -2,7 +2,7 @@ namespace Slh.Tms.Api.Models.Integrations;
 
 public sealed class FleetioOptions
 {
-    public string BaseUrl { get; set; } = "https://secure.fleetio.com/api/v2";
+    public string BaseUrl { get; set; } = "https://secure.fleetio.com/api/v1";
     public string ApiKey { get; set; } = string.Empty;
     public string AccountToken { get; set; } = string.Empty;
     public bool Enabled { get; set; }

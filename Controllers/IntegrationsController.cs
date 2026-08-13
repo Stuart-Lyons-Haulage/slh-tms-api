@@ -177,6 +177,7 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
             var tmsVehicles = await db.Vehicles.Where(vehicle => vehicle.Active).ToListAsync(ct);
             var fleetioLookup = BuildFleetioLookup(fleetioVehicles);
             var updated = 0;
+            var created = 0;
             var missingInFleetio = 0;
             foreach (var vehicle in tmsVehicles)
             {
@@ -188,8 +189,23 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
                 if (string.IsNullOrWhiteSpace(vehicle.FleetNumber)) vehicle.FleetNumber = Clip(match.FleetNumber, 40);
                 updated++;
             }
+            foreach (var fleetioVehicle in fleetioVehicles.Where(vehicle => !string.IsNullOrWhiteSpace(vehicle.Registration)))
+            {
+                var registration = NormaliseVehicleKey(fleetioVehicle.Registration!);
+                if (tmsVehicles.Any(vehicle => NormaliseVehicleKey(vehicle.Registration) == registration)) continue;
+                db.Vehicles.Add(new Vehicle
+                {
+                    Registration = ClipRequired(registration, 20),
+                    FleetNumber = Clip(fleetioVehicle.FleetNumber, 40),
+                    FleetioId = Clip(fleetioVehicle.Id, 80),
+                    FleetioName = Clip(fleetioVehicle.Name, 160),
+                    FleetioStatus = Clip(fleetioVehicle.Status, 80),
+                    Active = true
+                });
+                created++;
+            }
             await db.SaveChangesAsync(ct);
-            return Ok(new { sourceVehicleCount = fleetioVehicles.Count, tmsVehicleCount = tmsVehicles.Count, updated, missingInFleetio, syncedAtUtc = DateTimeOffset.UtcNow });
+            return Ok(new { sourceVehicleCount = fleetioVehicles.Count, tmsVehicleCount = tmsVehicles.Count + created, updated, created, missingInFleetio, syncedAtUtc = DateTimeOffset.UtcNow });
         }
         catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException)
         {
