@@ -125,35 +125,32 @@ public sealed class StagingService(TmsDbContext db)
         var driverGroup = Clip(Text(payload, "driverGroup"), 80);
         var skills = Clip(Text(payload, "skills"), 160);
         var active = Bool(payload, "active", true);
-        var id = Guid.NewGuid();
 
-        await EnsureDriverColumns(ct);
-        await db.Database.ExecuteSqlInterpolatedAsync($@"
-UPDATE dbo.Drivers
-SET DisplayName = {displayName},
-    TachoName = {tachoName},
-    MobileNumber = {mobileNumber},
-    DriverType = {driverType},
-    DriverGroup = {driverGroup},
-    Skills = {skills},
-    Active = {active}
-WHERE EmployeeNumber = {employeeNumber};
-IF @@ROWCOUNT = 0
-BEGIN
-    INSERT INTO dbo.Drivers (Id, EmployeeNumber, DisplayName, TachoName, MobileNumber, DriverType, DriverGroup, Skills, Active)
-    VALUES ({id}, {employeeNumber}, {displayName}, {tachoName}, {mobileNumber}, {driverType}, {driverGroup}, {skills}, {active});
-END", ct);
-    }
-
-    private async Task EnsureDriverColumns(CancellationToken ct)
-    {
-        await db.Database.ExecuteSqlRawAsync(@"
-IF COL_LENGTH('dbo.Drivers', 'TachoName') IS NULL ALTER TABLE dbo.Drivers ADD TachoName nvarchar(160) NULL;
-IF COL_LENGTH('dbo.Drivers', 'MobileNumber') IS NULL ALTER TABLE dbo.Drivers ADD MobileNumber nvarchar(40) NULL;
-IF COL_LENGTH('dbo.Drivers', 'DriverType') IS NULL ALTER TABLE dbo.Drivers ADD DriverType nvarchar(80) NULL;
-IF COL_LENGTH('dbo.Drivers', 'DriverGroup') IS NULL ALTER TABLE dbo.Drivers ADD DriverGroup nvarchar(80) NULL;
-IF COL_LENGTH('dbo.Drivers', 'Skills') IS NULL ALTER TABLE dbo.Drivers ADD Skills nvarchar(160) NULL;
-IF COL_LENGTH('dbo.Drivers', 'Active') IS NULL ALTER TABLE dbo.Drivers ADD Active bit NOT NULL CONSTRAINT DF_Drivers_Active DEFAULT(1);", ct);
+        var driver = await db.Drivers.SingleOrDefaultAsync(item => item.EmployeeNumber == employeeNumber, ct);
+        if (driver is null)
+        {
+            db.Drivers.Add(new Driver
+            {
+                EmployeeNumber = employeeNumber,
+                DisplayName = displayName,
+                TachoName = tachoName,
+                MobileNumber = mobileNumber,
+                DriverType = driverType,
+                DriverGroup = driverGroup,
+                Skills = skills,
+                Active = active
+            });
+        }
+        else
+        {
+            driver.DisplayName = displayName;
+            driver.TachoName = tachoName;
+            driver.MobileNumber = mobileNumber;
+            driver.DriverType = driverType;
+            driver.DriverGroup = driverGroup;
+            driver.Skills = skills;
+            driver.Active = active;
+        }
     }
 
     private async Task PromoteTrailer(JsonElement payload, CancellationToken ct)
