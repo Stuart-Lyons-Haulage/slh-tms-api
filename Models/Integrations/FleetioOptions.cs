@@ -10,9 +10,9 @@ public sealed class FleetioOptions
     public bool IsConfigured => Enabled && !string.IsNullOrWhiteSpace(BaseUrl) && !string.IsNullOrWhiteSpace(ApiKey) && !string.IsNullOrWhiteSpace(AccountToken);
     public string[] MissingSettings => new[]
     {
-        Enabled ? string.Empty : "Integrations:Fleetio:Enabled",
-        string.IsNullOrWhiteSpace(BaseUrl) ? "Integrations:Fleetio:BaseUrl" : string.Empty,
-        string.IsNullOrWhiteSpace(ApiKey) ? "Integrations:Fleetio:ApiKey" : string.Empty,
-        string.IsNullOrWhiteSpace(AccountToken) ? "Integrations:Fleetio:AccountToken" : string.Empty
+        Enabled ? string.Empty : "Fleetio enabled flag",
+        string.IsNullOrWhiteSpace(BaseUrl) ? "Fleetio base URL" : string.Empty,
+        string.IsNullOrWhiteSpace(ApiKey) ? "Fleetio access token" : string.Empty,
+        string.IsNullOrWhiteSpace(AccountToken) ? "Fleetio account token" : string.Empty
     }.Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
 }

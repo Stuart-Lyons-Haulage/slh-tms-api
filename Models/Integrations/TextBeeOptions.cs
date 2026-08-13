@@ -11,9 +11,9 @@ public sealed class TextBeeOptions
     public bool IsConfigured => Enabled && !string.IsNullOrWhiteSpace(BaseUrl) && !string.IsNullOrWhiteSpace(ApiKey) && !string.IsNullOrWhiteSpace(DeviceId);
     public string[] MissingSettings => new[]
     {
-        Enabled ? string.Empty : "Integrations:TextBee:Enabled",
-        string.IsNullOrWhiteSpace(BaseUrl) ? "Integrations:TextBee:BaseUrl" : string.Empty,
-        string.IsNullOrWhiteSpace(ApiKey) ? "Integrations:TextBee:ApiKey" : string.Empty,
-        string.IsNullOrWhiteSpace(DeviceId) ? "Integrations:TextBee:DeviceId" : string.Empty
+        Enabled ? string.Empty : "TextBee enabled flag",
+        string.IsNullOrWhiteSpace(BaseUrl) ? "TextBee base URL" : string.Empty,
+        string.IsNullOrWhiteSpace(ApiKey) ? "TextBee access token" : string.Empty,
+        string.IsNullOrWhiteSpace(DeviceId) ? "TextBee device ID" : string.Empty
     }.Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
 }

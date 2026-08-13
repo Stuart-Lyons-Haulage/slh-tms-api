@@ -56,12 +56,12 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
         if (!tracking.IsConfigured)
         {
             var missing = new List<string>();
-            if (!tracking.Enabled) missing.Add("Tracking:Dot:Enabled");
-            if (string.IsNullOrWhiteSpace(tracking.BaseUrl)) missing.Add("Tracking:Dot:BaseUrl");
-            if (string.IsNullOrWhiteSpace(tracking.ApiKey)) missing.Add("Tracking:Dot:ApiKey");
-            if (string.IsNullOrWhiteSpace(tracking.Username)) missing.Add("Tracking:Dot:Username");
-            if (string.IsNullOrWhiteSpace(tracking.Password)) missing.Add("Tracking:Dot:Password");
-            if (string.IsNullOrWhiteSpace(tracking.CompanyCode)) missing.Add("Tracking:Dot:CompanyCode");
+            if (!tracking.Enabled) missing.Add("RoadTech enabled flag");
+            if (string.IsNullOrWhiteSpace(tracking.BaseUrl)) missing.Add("RoadTech base URL");
+            if (string.IsNullOrWhiteSpace(tracking.ApiKey)) missing.Add("RoadTech access token");
+            if (string.IsNullOrWhiteSpace(tracking.Username)) missing.Add("RoadTech username");
+            if (string.IsNullOrWhiteSpace(tracking.Password)) missing.Add("RoadTech password");
+            if (string.IsNullOrWhiteSpace(tracking.CompanyCode)) missing.Add("RoadTech company code");
             return Ok(new { configured = false, connected = false, recordCount = 0, latestEventUtc = (DateTimeOffset?)null, missingSettings = missing, message = $"RoadTech runtime settings are incomplete: {string.Join(", ", missing)}." });
         }
 
