@@ -1,4 +1,3 @@
-using System.Net.Http.Headers;
 using System.Text.Json;
 using Slh.Tms.Api.Models.Integrations;
 
@@ -26,8 +25,14 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
         try
         {
             using var document = JsonDocument.Parse(body);
-            if (document.RootElement.ValueKind != JsonValueKind.Array) return [];
-            return document.RootElement.EnumerateArray().Select(ParseVehicle).Where(item => !string.IsNullOrWhiteSpace(item.Registration) || !string.IsNullOrWhiteSpace(item.Name)).ToList();
+            IEnumerable<JsonElement> vehicles = document.RootElement.ValueKind switch
+            {
+                JsonValueKind.Array => document.RootElement.EnumerateArray(),
+                JsonValueKind.Object when TryFindProperty(document.RootElement, "records", out var records) && records.ValueKind == JsonValueKind.Array => records.EnumerateArray(),
+                JsonValueKind.Object when TryFindProperty(document.RootElement, "vehicles", out var nestedVehicles) && nestedVehicles.ValueKind == JsonValueKind.Array => nestedVehicles.EnumerateArray(),
+                _ => []
+            };
+            return vehicles.Select(ParseVehicle).Where(item => !string.IsNullOrWhiteSpace(item.Registration) || !string.IsNullOrWhiteSpace(item.Name)).ToList();
         }
         catch (JsonException exception)
         {
@@ -39,9 +44,9 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
     private HttpRequestMessage CreateRequest(string path)
     {
         var request = new HttpRequestMessage(HttpMethod.Get, $"{options.BaseUrl.TrimEnd('/')}/{path.TrimStart('/')}");
-        request.Headers.Authorization = new AuthenticationHeaderValue("Token", options.ApiKey);
-        if (!string.IsNullOrWhiteSpace(options.AccountToken)) request.Headers.Add("Account-Token", options.AccountToken);
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        request.Headers.TryAddWithoutValidation("Authorization", $"Token token=\"{options.ApiKey}\"");
+        request.Headers.TryAddWithoutValidation("Account-Token", options.AccountToken);
+        request.Headers.TryAddWithoutValidation("Accept", "application/json");
         return request;
     }
 
