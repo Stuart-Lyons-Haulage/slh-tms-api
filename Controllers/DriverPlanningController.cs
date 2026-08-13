@@ -19,15 +19,23 @@ public sealed class DriverPlanningController(TmsDbContext db) : ControllerBase
         if (lastDate < firstDate || lastDate.DayNumber - firstDate.DayNumber > 92)
             return BadRequest("Choose a valid date range of no more than 93 days.");
 
-        var loads = await db.Loads.AsNoTracking().Include(load => load.Stops)
-            .Where(load => load.PlanningDate >= firstDate && load.PlanningDate <= lastDate)
-            .OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).Take(2000).ToListAsync(ct);
+        List<Load> loads;
+        try
+        {
+            loads = await db.Loads.AsNoTracking().Include(load => load.Stops)
+                .Where(load => load.PlanningDate >= firstDate && load.PlanningDate <= lastDate)
+                .OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).Take(2000).ToListAsync(ct);
+        }
+        catch (Exception exception) when (IsSchemaUnavailable(exception))
+        {
+            return Ok(Array.Empty<DriverAssignmentResponse>());
+        }
         var driverIds = loads.Where(load => load.DriverId != null).Select(load => load.DriverId!.Value).Distinct().ToList();
         var vehicleIds = loads.Where(load => load.VehicleId != null).Select(load => load.VehicleId!.Value).Distinct().ToList();
         var trailerIds = loads.Where(load => load.TrailerId != null).Select(load => load.TrailerId!.Value).Distinct().ToList();
-        var drivers = await db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id)).ToDictionaryAsync(driver => driver.Id, ct);
-        var vehicles = await db.Vehicles.AsNoTracking().Where(vehicle => vehicleIds.Contains(vehicle.Id)).ToDictionaryAsync(vehicle => vehicle.Id, ct);
-        var trailers = await db.Trailers.AsNoTracking().Where(trailer => trailerIds.Contains(trailer.Id)).ToDictionaryAsync(trailer => trailer.Id, ct);
+        var drivers = await SafeDictionary(db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id)), driver => driver.Id, ct);
+        var vehicles = await SafeDictionary(db.Vehicles.AsNoTracking().Where(vehicle => vehicleIds.Contains(vehicle.Id)), vehicle => vehicle.Id, ct);
+        var trailers = await SafeDictionary(db.Trailers.AsNoTracking().Where(trailer => trailerIds.Contains(trailer.Id)), trailer => trailer.Id, ct);
 
         return Ok(loads.Select(load =>
         {
@@ -45,14 +53,23 @@ public sealed class DriverPlanningController(TmsDbContext db) : ControllerBase
     {
         var planningDate = date ?? DateOnly.FromDateTime(DateTime.UtcNow).AddDays(1);
         var lookback = planningDate.AddDays(-7);
-        var recentLoads = await db.Loads.AsNoTracking().Include(load => load.Stops)
-            .Where(load => load.PlanningDate >= lookback && load.PlanningDate < planningDate && load.DriverId != null && load.Status != LoadStatus.Cancelled)
-            .OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).ToListAsync(ct);
-        var targetLoads = await db.Loads.AsNoTracking().Include(load => load.Stops)
-            .Where(load => load.PlanningDate == planningDate && load.DriverId == null && load.Status != LoadStatus.Cancelled)
-            .OrderBy(load => load.Reference).ToListAsync(ct);
+        List<Load> recentLoads;
+        List<Load> targetLoads;
+        try
+        {
+            recentLoads = await db.Loads.AsNoTracking().Include(load => load.Stops)
+                .Where(load => load.PlanningDate >= lookback && load.PlanningDate < planningDate && load.DriverId != null && load.Status != LoadStatus.Cancelled)
+                .OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).ToListAsync(ct);
+            targetLoads = await db.Loads.AsNoTracking().Include(load => load.Stops)
+                .Where(load => load.PlanningDate == planningDate && load.DriverId == null && load.Status != LoadStatus.Cancelled)
+                .OrderBy(load => load.Reference).ToListAsync(ct);
+        }
+        catch (Exception exception) when (IsSchemaUnavailable(exception))
+        {
+            return Ok(new { planningDate, generatedAtUtc = DateTimeOffset.UtcNow, suggestions = Array.Empty<ReturnLoadSuggestion>() });
+        }
         var driverIds = recentLoads.Select(load => load.DriverId!.Value).Distinct().ToList();
-        var drivers = await db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id) && driver.Active).ToDictionaryAsync(driver => driver.Id, ct);
+        var drivers = await SafeDictionary(db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id) && driver.Active), driver => driver.Id, ct);
 
         var suggestions = new List<ReturnLoadSuggestion>();
         foreach (var driverLoads in recentLoads.GroupBy(load => load.DriverId!.Value))
@@ -101,6 +118,18 @@ public sealed class DriverPlanningController(TmsDbContext db) : ControllerBase
         var keys = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(Normalise).ToList();
         var statuses = await db.VehicleLiveStatuses.AsNoTracking().ToListAsync(ct);
         return statuses.Where(status => keys.Contains(Normalise(status.VehicleIdentifier))).OrderByDescending(status => status.LastEventTimeUtc).FirstOrDefault();
+    }
+
+    private static async Task<Dictionary<TKey, T>> SafeDictionary<T, TKey>(IQueryable<T> query, Func<T, TKey> keySelector, CancellationToken ct) where TKey : notnull
+    {
+        try { return await query.ToDictionaryAsync(keySelector, ct); }
+        catch (Exception exception) when (IsSchemaUnavailable(exception)) { return []; }
+    }
+
+    private static bool IsSchemaUnavailable(Exception exception)
+    {
+        var message = exception.GetBaseException().Message;
+        return exception is InvalidOperationException or DbUpdateException || message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase) || message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string Normalise(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());

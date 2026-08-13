@@ -16,14 +16,22 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
     public async Task<IActionResult> DeliveryEtas([FromQuery] DateOnly? date, CancellationToken ct)
     {
         var planningDate = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
-        var loads = await db.Loads.AsNoTracking().Include(load => load.Stops)
-            .Where(load => load.PlanningDate == planningDate && load.Status != LoadStatus.Cancelled)
-            .OrderBy(load => load.Reference).Take(200).ToListAsync(ct);
+        List<Load> loads;
+        try
+        {
+            loads = await db.Loads.AsNoTracking().Include(load => load.Stops)
+                .Where(load => load.PlanningDate == planningDate && load.Status != LoadStatus.Cancelled)
+                .OrderBy(load => load.Reference).Take(200).ToListAsync(ct);
+        }
+        catch (Exception exception) when (IsSchemaUnavailable(exception))
+        {
+            return Ok(new { planningDate, calculatedAtUtc = DateTimeOffset.UtcNow, records = Array.Empty<DeliveryEtaResponse>() });
+        }
         var orderIds = loads.SelectMany(load => load.Stops).Where(stop => stop.OrderId != null).Select(stop => stop.OrderId!.Value).Distinct().ToList();
-        var orders = await db.TransportOrders.AsNoTracking().Where(order => orderIds.Contains(order.Id)).ToDictionaryAsync(order => order.Id, ct);
+        var orders = await SafeDictionary(db.TransportOrders.AsNoTracking().Where(order => orderIds.Contains(order.Id)), order => order.Id, ct);
         var vehicleIds = loads.Where(load => load.VehicleId != null).Select(load => load.VehicleId!.Value).Distinct().ToList();
-        var vehicles = await db.Vehicles.AsNoTracking().Where(vehicle => vehicleIds.Contains(vehicle.Id)).ToDictionaryAsync(vehicle => vehicle.Id, ct);
-        var statuses = await db.VehicleLiveStatuses.AsNoTracking().ToListAsync(ct);
+        var vehicles = await SafeDictionary(db.Vehicles.AsNoTracking().Where(vehicle => vehicleIds.Contains(vehicle.Id)), vehicle => vehicle.Id, ct);
+        var statuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
         var now = DateTimeOffset.UtcNow;
         var records = new List<DeliveryEtaResponse>();
 
@@ -56,6 +64,24 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
             }
         }
         return Ok(new { planningDate, calculatedAtUtc = now, records });
+    }
+
+    private static async Task<Dictionary<TKey, T>> SafeDictionary<T, TKey>(IQueryable<T> query, Func<T, TKey> keySelector, CancellationToken ct) where TKey : notnull
+    {
+        try { return await query.ToDictionaryAsync(keySelector, ct); }
+        catch (Exception exception) when (IsSchemaUnavailable(exception)) { return []; }
+    }
+
+    private static async Task<List<T>> SafeList<T>(IQueryable<T> query, CancellationToken ct)
+    {
+        try { return await query.ToListAsync(ct); }
+        catch (Exception exception) when (IsSchemaUnavailable(exception)) { return []; }
+    }
+
+    private static bool IsSchemaUnavailable(Exception exception)
+    {
+        var message = exception.GetBaseException().Message;
+        return exception is InvalidOperationException or DbUpdateException || message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase) || message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
     }
 
     private static VehicleLiveStatus? MatchLive(Vehicle vehicle, List<VehicleLiveStatus> statuses)

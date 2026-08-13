@@ -106,9 +106,19 @@ public sealed class DotTrackingController(
             .ToDictionary(group => group.Key, group => group.Select(item => item.Status).OrderByDescending(status => status.LastEventTimeUtc).First());
         var now = DateTimeOffset.UtcNow;
         var today = DateOnly.FromDateTime(now.UtcDateTime);
-        var assignments = await db.Loads.AsNoTracking().Include(load => load.Stops).Where(load => load.PlanningDate == today && load.VehicleId != null && load.Status != LoadStatus.Cancelled && load.Status != LoadStatus.Completed).ToListAsync(cancellationToken);
-        var driverIds = assignments.Where(load => load.DriverId != null).Select(load => load.DriverId!.Value).Distinct().ToList();
-        var drivers = await db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id)).ToDictionaryAsync(driver => driver.Id, cancellationToken);
+        List<Load> assignments;
+        Dictionary<Guid, Driver> drivers;
+        try
+        {
+            assignments = await db.Loads.AsNoTracking().Include(load => load.Stops).Where(load => load.PlanningDate == today && load.VehicleId != null && load.Status != LoadStatus.Cancelled && load.Status != LoadStatus.Completed).ToListAsync(cancellationToken);
+            var driverIds = assignments.Where(load => load.DriverId != null).Select(load => load.DriverId!.Value).Distinct().ToList();
+            drivers = await db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id)).ToDictionaryAsync(driver => driver.Id, cancellationToken);
+        }
+        catch (Exception exception) when (IsSchemaUnavailable(exception))
+        {
+            assignments = [];
+            drivers = [];
+        }
         var matchedLiveIds = new HashSet<Guid>();
         var records = vehicles.Select(vehicle =>
         {
@@ -177,6 +187,12 @@ public sealed class DotTrackingController(
         var now = DateTimeOffset.UtcNow;
         var records = vehicles.Select(vehicle => new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, null, "NotSignedOn", null, null, null, null, null, null, null, null, null, null, null, vehicle.FleetioId, vehicle.FleetioName, vehicle.FleetioStatus)).ToList();
         return new FleetStatusResponse(provider, now, records.Count, 0, records.Count, records);
+    }
+
+    private static bool IsSchemaUnavailable(Exception exception)
+    {
+        var message = exception.GetBaseException().Message;
+        return exception is InvalidOperationException or DbUpdateException || message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase) || message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string NormaliseIdentifier(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());

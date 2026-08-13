@@ -14,18 +14,32 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
     [HttpGet("orders")]
     public async Task<IActionResult> Orders([FromQuery] DateOnly? from, [FromQuery] DateOnly? to, CancellationToken ct)
     {
-        var query = db.TransportOrders.AsNoTracking().AsQueryable();
-        if (from is not null) query = query.Where(order => order.CollectionDate >= from);
-        if (to is not null) query = query.Where(order => order.CollectionDate <= to);
-        return Ok(await query.OrderBy(order => order.CollectionDate).ThenBy(order => order.Reference).Take(1000).ToListAsync(ct));
+        try
+        {
+            var query = db.TransportOrders.AsNoTracking().AsQueryable();
+            if (from is not null) query = query.Where(order => order.CollectionDate >= from);
+            if (to is not null) query = query.Where(order => order.CollectionDate <= to);
+            return Ok(await query.OrderBy(order => order.CollectionDate).ThenBy(order => order.Reference).Take(1000).ToListAsync(ct));
+        }
+        catch (Exception exception) when (IsSchemaUnavailable(exception))
+        {
+            return Ok(Array.Empty<TransportOrder>());
+        }
     }
 
     [HttpGet("loads")]
     public async Task<IActionResult> Loads([FromQuery] DateOnly? date, CancellationToken ct)
     {
-        var query = db.Loads.AsNoTracking().Include(load => load.Stops).AsQueryable();
-        if (date is not null) query = query.Where(load => load.PlanningDate == date);
-        return Ok(await query.OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).Take(500).ToListAsync(ct));
+        try
+        {
+            var query = db.Loads.AsNoTracking().Include(load => load.Stops).AsQueryable();
+            if (date is not null) query = query.Where(load => load.PlanningDate == date);
+            return Ok(await query.OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).Take(500).ToListAsync(ct));
+        }
+        catch (Exception exception) when (IsSchemaUnavailable(exception))
+        {
+            return Ok(Array.Empty<Load>());
+        }
     }
 
     [HttpPost("loads"), Authorize(Policy = "TmsWrite")]
@@ -161,6 +175,12 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
     {
         if (string.IsNullOrWhiteSpace(address)) return BadRequest("An address is required.");
         return Ok(await maps.SearchAddress(address, ct));
+    }
+
+    private static bool IsSchemaUnavailable(Exception exception)
+    {
+        var message = exception.GetBaseException().Message;
+        return exception is InvalidOperationException or DbUpdateException || message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase) || message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool CanTransition(LoadStatus current, LoadStatus next) => current == next || (current, next) switch
