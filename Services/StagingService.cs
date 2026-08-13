@@ -51,7 +51,7 @@ public sealed class StagingService(TmsDbContext db)
                 item.ReviewNote = "Linked into the live master table.";
                 linked++;
             }
-            catch (Exception ex) when (ex is JsonException or DbUpdateException or InvalidOperationException)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 item.ReviewNote = $"Waiting to link: {ex.GetBaseException().Message}";
             }

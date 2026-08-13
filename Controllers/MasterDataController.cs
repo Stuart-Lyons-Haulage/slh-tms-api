@@ -69,7 +69,17 @@ public sealed class MasterDataController(StagingService staging) : ControllerBas
             }
         }
 
-        return Ok(new { received = requests.Count, applied, failed, results });
+        var linked = 0;
+        try
+        {
+            linked = await staging.LinkRegistered(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            results.Add(new { entityType = "register-link", applied = false, error = ex.GetBaseException().Message });
+        }
+
+        return Ok(new { received = requests.Count, applied, failed, linked, results });
     }
 
     [HttpPost("register/link"), Authorize(Policy = "TmsApprove")]
