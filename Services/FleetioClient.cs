@@ -30,6 +30,8 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
                 JsonValueKind.Array => document.RootElement.EnumerateArray(),
                 JsonValueKind.Object when TryFindProperty(document.RootElement, "records", out var records) && records.ValueKind == JsonValueKind.Array => records.EnumerateArray(),
                 JsonValueKind.Object when TryFindProperty(document.RootElement, "vehicles", out var nestedVehicles) && nestedVehicles.ValueKind == JsonValueKind.Array => nestedVehicles.EnumerateArray(),
+                JsonValueKind.Object when TryFindProperty(document.RootElement, "data", out var data) && data.ValueKind == JsonValueKind.Array => data.EnumerateArray(),
+                JsonValueKind.Object when TryFindProperty(document.RootElement, "results", out var results) && results.ValueKind == JsonValueKind.Array => results.EnumerateArray(),
                 _ => []
             };
             return vehicles.Select(ParseVehicle).Where(item => !string.IsNullOrWhiteSpace(item.Registration) || !string.IsNullOrWhiteSpace(item.Name)).ToList();
@@ -46,6 +48,7 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
         var request = new HttpRequestMessage(HttpMethod.Get, $"{options.BaseUrl.TrimEnd('/')}/{path.TrimStart('/')}");
         request.Headers.TryAddWithoutValidation("Authorization", $"Token {options.ApiKey}");
         request.Headers.TryAddWithoutValidation("Account-Token", options.AccountToken);
+        request.Headers.TryAddWithoutValidation("X-Api-Version", options.ApiVersion);
         request.Headers.TryAddWithoutValidation("Accept", "application/json");
         return request;
     }

@@ -63,6 +63,8 @@ fleetioOptions.ApiKey = ReadSetting(builder.Configuration, fleetioOptions.ApiKey
     "Integrations:Fleetio:ApiKey", "Integrations__Fleetio__ApiKey", "fleetio-api-key", "Fleetio--ApiKey");
 fleetioOptions.AccountToken = ReadSetting(builder.Configuration, fleetioOptions.AccountToken,
     "Integrations:Fleetio:AccountToken", "Integrations__Fleetio__AccountToken", "fleetio-account-token", "Fleetio--AccountToken");
+fleetioOptions.ApiVersion = ReadSetting(builder.Configuration, fleetioOptions.ApiVersion,
+    "Integrations:Fleetio:ApiVersion", "Integrations__Fleetio__ApiVersion", "fleetio-api-version", "Fleetio--ApiVersion");
 if (fleetioOptions.BaseUrl.EndsWith("/api/v2", StringComparison.OrdinalIgnoreCase)) fleetioOptions.BaseUrl = fleetioOptions.BaseUrl[..^1] + "1";
 builder.Services.AddSingleton(fleetioOptions);
 builder.Services.AddScoped<AzureSmsDispatchService>();
