@@ -31,6 +31,19 @@ builder.Services.AddScoped<DotTrackingTelemetryStore>();
 var dotTrackingOptions = new DotTrackingOptions();
 builder.Configuration.GetSection("Tracking:Dot").Bind(dotTrackingOptions);
 builder.Services.AddSingleton(dotTrackingOptions);
+var tachoMasterOptions = new TachoMasterOptions();
+builder.Configuration.GetSection("Integrations:TachoMaster").Bind(tachoMasterOptions);
+tachoMasterOptions.Enabled = ReadBool(builder.Configuration, tachoMasterOptions.Enabled,
+    "Integrations:TachoMaster:Enabled", "Integrations__TachoMaster__Enabled", "tachomaster-enabled", "tacho-enabled", "TachoMaster--Enabled");
+tachoMasterOptions.BaseUrl = ReadSetting(builder.Configuration, tachoMasterOptions.BaseUrl,
+    "Integrations:TachoMaster:BaseUrl", "Integrations__TachoMaster__BaseUrl", "tachomaster-base-url", "tacho-base-url", "TachoMaster--BaseUrl");
+tachoMasterOptions.ApiKey = ReadSetting(builder.Configuration, tachoMasterOptions.ApiKey,
+    "Integrations:TachoMaster:ApiKey", "Integrations__TachoMaster__ApiKey", "tachomaster-api-key", "tacho-api-key", "TachoMaster--ApiKey");
+tachoMasterOptions.Username = ReadSetting(builder.Configuration, tachoMasterOptions.Username,
+    "Integrations:TachoMaster:Username", "Integrations__TachoMaster__Username", "tachomaster-username", "tacho-username", "TachoMaster--Username");
+tachoMasterOptions.Password = ReadSetting(builder.Configuration, tachoMasterOptions.Password,
+    "Integrations:TachoMaster:Password", "Integrations__TachoMaster__Password", "tachomaster-password", "tacho-password", "TachoMaster--Password");
+builder.Services.AddSingleton(tachoMasterOptions);
 var sageHrOptions = new SageHrOptions();
 builder.Configuration.GetSection("Integrations:SageHr").Bind(sageHrOptions);
 builder.Services.AddSingleton(sageHrOptions);
@@ -56,6 +69,7 @@ builder.Services.AddScoped<AzureSmsDispatchService>();
 builder.Services.AddHttpClient<DriverSmsDispatchService>();
 builder.Services.AddHttpClient<SageHrClient>();
 builder.Services.AddHttpClient<DotTrackingClient>();
+builder.Services.AddHttpClient<TachoMasterClient>();
 builder.Services.AddHttpClient<AzureMapsRouteClient>();
 builder.Services.AddHttpClient<FleetioClient>();
 builder.Services.AddHostedService<DotTrackingIngestionService>();

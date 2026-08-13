@@ -131,6 +131,29 @@ jobs:
             echo "Fleetio secrets are not all present on the API Container App; preserving existing Fleetio environment references."
           fi
 
+          tacho_enabled_secret="$(find_secret tachomaster-enabled tacho-enabled TachoMaster--Enabled Integrations--TachoMaster--Enabled || true)"
+          tacho_api_key_secret="$(find_secret tachomaster-api-key tacho-api-key TachoMaster--ApiKey Integrations--TachoMaster--ApiKey || true)"
+          tacho_username_secret="$(find_secret tachomaster-username tacho-username TachoMaster--Username Integrations--TachoMaster--Username || true)"
+          tacho_password_secret="$(find_secret tachomaster-password tacho-password TachoMaster--Password Integrations--TachoMaster--Password || true)"
+          tacho_base_url_secret="$(find_secret tachomaster-base-url tacho-base-url TachoMaster--BaseUrl Integrations--TachoMaster--BaseUrl || true)"
+          tacho_env_args=()
+          if test -n "$tacho_enabled_secret" && test -n "$tacho_api_key_secret" && test -n "$tacho_username_secret" && test -n "$tacho_password_secret"; then
+            tacho_env_args+=(
+              "Integrations__TachoMaster__Enabled=secretref:$tacho_enabled_secret"
+              "Integrations__TachoMaster__ApiKey=secretref:$tacho_api_key_secret"
+              "Integrations__TachoMaster__Username=secretref:$tacho_username_secret"
+              "Integrations__TachoMaster__Password=secretref:$tacho_password_secret"
+            )
+            if test -n "$tacho_base_url_secret"; then
+              tacho_env_args+=("Integrations__TachoMaster__BaseUrl=secretref:$tacho_base_url_secret")
+            else
+              tacho_env_args+=("Integrations__TachoMaster__BaseUrl=https://api-v1-alpha.roadtech.co.uk")
+            fi
+            echo "TachoMaster secrets found; driver-duty lookup will be enabled."
+          else
+            echo "TachoMaster secrets are not all present on the API Container App; preserving existing TachoMaster environment references."
+          fi
+
           az containerapp revision set-mode \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -153,6 +176,7 @@ jobs:
               "Integrations__SageHr__DriverTeamName=Drivers" \
               "Integrations__SageHr__DriverPositionKeyword=Driver" \
               "${fleetio_env_args[@]}" \
+              "${tacho_env_args[@]}" \
               "Cors__AllowedOrigins__0=https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io" \
               "Deployment__Revision=${{ github.sha }}"
 

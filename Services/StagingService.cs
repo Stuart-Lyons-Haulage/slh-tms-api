@@ -39,24 +39,36 @@ public sealed class StagingService(TmsDbContext db)
 
     public async Task<int> LinkRegistered(CancellationToken ct)
     {
-        var items = await db.StagedImports.Where(x => x.EntityType.StartsWith("register:") && x.Status == StagingStatus.Promoted).ToListAsync(ct);
+        var items = await db.StagedImports
+            .AsNoTracking()
+            .Where(x => x.EntityType.StartsWith("register:") && x.Status == StagingStatus.Promoted)
+            .OrderBy(x => x.ReceivedAtUtc)
+            .ToListAsync(ct);
         var linked = 0;
         foreach (var item in items)
         {
+            db.ChangeTracker.Clear();
             try
             {
                 var entityType = item.EntityType["register:".Length..];
                 await Promote(new StagedImport { EntityType = entityType, IdempotencyKey = item.IdempotencyKey, PayloadJson = item.PayloadJson }, ct);
-                item.Status = StagingStatus.Approved;
-                item.ReviewNote = "Linked into the live master table.";
+                db.ChangeTracker.Clear();
+                var linkedItem = await db.StagedImports.SingleAsync(x => x.Id == item.Id, ct);
+                linkedItem.Status = StagingStatus.Approved;
+                linkedItem.ReviewNote = "Linked into the live master table.";
+                linkedItem.ReviewedAtUtc = DateTimeOffset.UtcNow;
+                await db.SaveChangesAsync(ct);
                 linked++;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                item.ReviewNote = $"Waiting to link: {ex.GetBaseException().Message}";
+                db.ChangeTracker.Clear();
+                var waitingItem = await db.StagedImports.SingleAsync(x => x.Id == item.Id, ct);
+                waitingItem.ReviewNote = $"Waiting to link: {ex.GetBaseException().Message}";
+                waitingItem.ReviewedAtUtc = DateTimeOffset.UtcNow;
+                await db.SaveChangesAsync(ct);
             }
         }
-        await db.SaveChangesAsync(ct);
         return linked;
     }
 
@@ -101,6 +113,7 @@ public sealed class StagingService(TmsDbContext db)
             case "marketcontact": await PromoteMarketContact(payload, ct); break;
             case "fuelprice": await PromoteFuelPrice(payload, ct); break;
             case "order": await PromoteOrder(payload, ct); break;
+            default: throw new JsonException($"Unsupported registered entity type '{item.EntityType}'.");
         }
         await db.SaveChangesAsync(ct);
     }

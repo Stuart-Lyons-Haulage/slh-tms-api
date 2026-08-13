@@ -17,6 +17,7 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize(Policy = "TmsWrite")]
 public sealed class DotTrackingController(
     DotTrackingClient trackingClient,
+    TachoMasterClient tachoMasterClient,
     TmsDbContext db,
     DotTrackingTelemetryStore telemetryStore,
     ILogger<DotTrackingController> logger) : ControllerBase
@@ -106,6 +107,15 @@ public sealed class DotTrackingController(
             .ToDictionary(group => group.Key, group => group.Select(item => item.Status).OrderByDescending(status => status.LastEventTimeUtc).First());
         var now = DateTimeOffset.UtcNow;
         var today = DateOnly.FromDateTime(now.UtcDateTime);
+        IReadOnlyDictionary<string, string> tachoDriverNames = new Dictionary<string, string>();
+        try
+        {
+            tachoDriverNames = await tachoMasterClient.GetCurrentDriverNamesByVehicleAsync(today, cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "TachoMaster driver lookup failed; continuing with allocation names.");
+        }
         List<Load> assignments;
         Dictionary<Guid, Driver> drivers;
         try
@@ -132,7 +142,9 @@ public sealed class DotTrackingController(
             var age = observedAt is null ? (TimeSpan?)null : now - observedAt;
             var condition = DetermineCondition(live, now);
             var assignment = assignments.Where(load => load.VehicleId == vehicle.Id).OrderByDescending(load => LoadPriority(load.Status)).FirstOrDefault();
-            var driverName = assignment?.DriverId is Guid driverId && drivers.TryGetValue(driverId, out var driver) ? driver.DisplayName : null;
+            var driverName = assignment?.DriverId is Guid driverId && drivers.TryGetValue(driverId, out var driver)
+                ? driver.DisplayName
+                : TachoDriverName(aliases, tachoDriverNames);
             var plannedDutyUtc = assignment?.Stops.Where(stop => stop.PlannedArrivalUtc != null).OrderBy(stop => stop.PlannedArrivalUtc).Select(stop => stop.PlannedArrivalUtc).FirstOrDefault();
             return new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, live?.VehicleIdentifier, condition, observedAt, live?.IgnitionOn, live?.IsMoving, live?.SpeedKph, LiveLatitude(live), LiveLongitude(live), age is null ? null : (int)Math.Max(0, age.Value.TotalMinutes), assignment?.Reference, assignment?.Status.ToString(), driverName, plannedDutyUtc, vehicle.FleetioId, vehicle.FleetioName, vehicle.FleetioStatus);
         }).ToList();
@@ -140,9 +152,9 @@ public sealed class DotTrackingController(
         {
             var observedAt = ObservedAt(status, now);
             var age = now - observedAt;
-            return new FleetVehicleStatus(status.Id, status.VehicleIdentifier, null, status.VehicleIdentifier, DetermineCondition(status, now), observedAt, status.IgnitionOn, status.IsMoving, status.SpeedKph, LiveLatitude(status), LiveLongitude(status), (int)Math.Max(0, age.TotalMinutes), null, null, null, null, null, null, null);
+            return new FleetVehicleStatus(status.Id, status.VehicleIdentifier, null, status.VehicleIdentifier, DetermineCondition(status, now), observedAt, status.IgnitionOn, status.IsMoving, status.SpeedKph, LiveLatitude(status), LiveLongitude(status), (int)Math.Max(0, age.TotalMinutes), null, null, TachoDriverName(IdentifierAliases(status.VehicleIdentifier), tachoDriverNames), null, null, null, null);
         }));
-        return Ok(new FleetStatusResponse("RoadTech Falcon", now, records.Count, records.Count(record => record.Condition is "Moving" or "Started" or "Stationary" or "SignedOn"), records.Count(record => record.Condition is "NotSignedOn" or "Stale"), records));
+        return Ok(new FleetStatusResponse("RoadTech Falcon + TachoMaster", now, records.Count, records.Count(record => record.Condition is "Moving" or "Started"), records.Count(record => record.Condition is "NotSignedOn" or "Stale"), records));
     }
 
     private async Task<List<VehicleLiveStatus>> TryGetProviderLiveStatuses(CancellationToken cancellationToken)
@@ -223,9 +235,12 @@ public sealed class DotTrackingController(
         if (now - observedAt > TimeSpan.FromMinutes(30)) return "Stale";
         if (live.IsMoving == true || live.SpeedKph.GetValueOrDefault() > 3) return "Moving";
         if (live.IgnitionOn == true) return "Started";
-        if (live.IgnitionOn == false) return "Stationary";
-        return "SignedOn";
+        if (live.IgnitionOn == false || live.IsMoving == false) return "Parked";
+        return "Parked";
     }
+
+    private static string? TachoDriverName(IEnumerable<string> identifiers, IReadOnlyDictionary<string, string> names) =>
+        identifiers.Select(NormaliseIdentifier).Select(identifier => names.GetValueOrDefault(identifier)).FirstOrDefault(name => !string.IsNullOrWhiteSpace(name));
 }
 
 public sealed record DotTelemetryResponse(
