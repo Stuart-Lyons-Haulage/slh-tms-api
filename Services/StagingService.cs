@@ -46,7 +46,7 @@ public sealed class StagingService(TmsDbContext db)
             try
             {
                 var entityType = item.EntityType["register:".Length..];
-                await Promote(new StagedImport { EntityType = entityType, PayloadJson = item.PayloadJson }, ct);
+                await Promote(new StagedImport { EntityType = entityType, IdempotencyKey = item.IdempotencyKey, PayloadJson = item.PayloadJson }, ct);
                 item.Status = StagingStatus.Approved;
                 item.ReviewNote = "Linked into the live master table.";
                 linked++;
