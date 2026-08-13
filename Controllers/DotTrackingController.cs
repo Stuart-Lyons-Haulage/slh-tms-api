@@ -83,18 +83,21 @@ public sealed class DotTrackingController(
     [HttpGet("fleet-status")]
     public async Task<ActionResult<FleetStatusResponse>> GetFleetStatus(CancellationToken cancellationToken)
     {
-        await RefreshProviderTelemetry(cancellationToken);
+        var freshLiveStatuses = await TryGetProviderLiveStatuses(cancellationToken);
 
         var vehicles = await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(cancellationToken);
-        List<VehicleLiveStatus> liveStatuses;
-        try
+        List<VehicleLiveStatus> liveStatuses = freshLiveStatuses;
+        if (liveStatuses.Count == 0)
         {
-            liveStatuses = await db.VehicleLiveStatuses.AsNoTracking().ToListAsync(cancellationToken);
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or DbUpdateException)
-        {
-            logger.LogWarning(ex, "Vehicle live status is unavailable; returning master-data fleet fallback.");
-            return Ok(MasterFleetFallback(vehicles, "Master data"));
+            try
+            {
+                liveStatuses = await db.VehicleLiveStatuses.AsNoTracking().ToListAsync(cancellationToken);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or DbUpdateException)
+            {
+                logger.LogWarning(ex, "Vehicle live status is unavailable; returning master-data fleet fallback.");
+                return Ok(MasterFleetFallback(vehicles, "Master data"));
+            }
         }
         var latestByIdentifier = liveStatuses.GroupBy(status => NormaliseIdentifier(status.VehicleIdentifier)).ToDictionary(group => group.Key, group => group.OrderByDescending(status => status.LastEventTimeUtc).First());
         var latestBySuffix = liveStatuses.SelectMany(status => IdentifierAliases(status.VehicleIdentifier).Select(alias => new { Status = status, Alias = alias }))
@@ -132,20 +135,40 @@ public sealed class DotTrackingController(
         return Ok(new FleetStatusResponse("RoadTech Falcon", now, records.Count, records.Count(record => record.Condition is "Moving" or "Started" or "Stationary" or "SignedOn"), records.Count(record => record.Condition is "NotSignedOn" or "Stale"), records));
     }
 
-    private async Task RefreshProviderTelemetry(CancellationToken cancellationToken)
+    private async Task<List<VehicleLiveStatus>> TryGetProviderLiveStatuses(CancellationToken cancellationToken)
     {
         try
         {
             var telemetry = await trackingClient.GetLatestVehicleEventsAsync(cancellationToken);
             var records = telemetry.Select(DotTelemetryRecord.FromProvider).ToList();
-            if (records.Count > 0)
+            if (records.Count == 0) return [];
+            try
             {
                 await telemetryStore.PersistAsync(records, cancellationToken);
             }
+            catch (Exception ex) when (ex is InvalidOperationException or DbUpdateException)
+            {
+                logger.LogWarning(ex, "RoadTech Falcon cache write failed; using fresh provider telemetry for this response.");
+            }
+            var receivedAt = DateTimeOffset.UtcNow;
+            return records.Select(record => new VehicleLiveStatus
+            {
+                Id = Guid.NewGuid(),
+                VehicleIdentifier = record.VehicleIdentifier,
+                LastEventTimeUtc = record.EventTimeUtc,
+                LastReceivedAtUtc = receivedAt,
+                Latitude = record.Latitude ?? 0,
+                Longitude = record.Longitude ?? 0,
+                SpeedKph = record.SpeedKph,
+                IgnitionOn = record.IgnitionOn,
+                IsMoving = record.IsMoving,
+                LastKnownStatus = record.Status
+            }).ToList();
         }
         catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or TaskCanceledException)
         {
             logger.LogWarning(ex, "RoadTech Falcon live refresh failed; using stored fleet status.");
+            return [];
         }
     }
 
