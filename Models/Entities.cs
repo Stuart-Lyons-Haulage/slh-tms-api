@@ -67,6 +67,17 @@ public sealed class MarketContact
     [MaxLength(200)] public string? Sender { get; set; }
     public bool Active { get; set; } = true;
 }
+public sealed class FuelPrice
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public DateOnly WeekCommencing { get; set; }
+    [MaxLength(120)] public required string Provider { get; set; }
+    public decimal PricePencePerLitre { get; set; }
+    public bool IsPricingMaximum { get; set; }
+    [MaxLength(200)] public string? Source { get; set; }
+    [MaxLength(500)] public string? Notes { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
 public enum StagingStatus { PendingReview, Approved, Rejected, Promoted, Failed }
 public sealed class StagedImport
 {

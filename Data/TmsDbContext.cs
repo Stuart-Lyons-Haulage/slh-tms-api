@@ -18,6 +18,7 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<LoadStop> LoadStops => Set<LoadStop>();
     public DbSet<VehicleTrackingEvent> VehicleTrackingEvents => Set<VehicleTrackingEvent>();
     public DbSet<VehicleLiveStatus> VehicleLiveStatuses => Set<VehicleLiveStatus>();
+    public DbSet<FuelPrice> FuelPrices => Set<FuelPrice>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -28,6 +29,8 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<Trailer>().HasIndex(x => x.TrailerNumber).IsUnique();
         b.Entity<Site>().HasIndex(x => x.ExternalCode).IsUnique();
         b.Entity<MarketContact>().HasIndex(x => new { x.Market, x.Name }).IsUnique();
+        b.Entity<FuelPrice>().HasIndex(x => new { x.WeekCommencing, x.Provider }).IsUnique();
+        b.Entity<FuelPrice>().Property(x => x.PricePencePerLitre).HasPrecision(10, 2);
         b.Entity<StagedImport>().HasIndex(x => x.IdempotencyKey).IsUnique();
         b.Entity<StagedImport>().Property(x => x.RowVersion).IsRowVersion();
         b.Entity<TransportOrder>().HasIndex(x => x.Reference).IsUnique();
