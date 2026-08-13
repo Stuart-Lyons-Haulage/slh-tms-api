@@ -92,6 +92,10 @@ jobs:
               "Integrations__SageHr__ApiKey=secretref:sagehr-api-key" \
               "Integrations__SageHr__DriverTeamName=Drivers" \
               "Integrations__SageHr__DriverPositionKeyword=Driver" \
+              "Integrations__Fleetio__Enabled=secretref:fleetio-enabled" \
+              "Integrations__Fleetio__ApiKey=secretref:Fleetio--ApiKey" \
+              "Integrations__Fleetio__AccountToken=secretref:fleetio-account-token" \
+              "Integrations__Fleetio__BaseUrl=secretref:Fleetio--BaseUrl" \
               "Cors__AllowedOrigins__0=https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io" \
               "Deployment__Revision=${{ github.sha }}"
 
