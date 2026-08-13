@@ -43,10 +43,10 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
             var candidates = employees.Count(IsDriver);
             return Ok(new { configured = true, connected = true, employeeCount = employees.Count, driverCandidateCount = candidates, missingSettings = Array.Empty<string>(), message = "Sage HR is connected." });
         }
-        catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException)
+        catch (Exception exception)
         {
             logger.LogWarning(exception, "Sage HR status check failed.");
-            return Ok(new { configured = true, connected = false, employeeCount = 0, driverCandidateCount = 0, missingSettings = Array.Empty<string>(), message = "Sage HR could not be reached or rejected the API key." });
+            return Ok(new { configured = true, connected = false, employeeCount = 0, driverCandidateCount = 0, missingSettings = Array.Empty<string>(), message = $"Sage HR could not be reached or rejected the API key: {exception.GetBaseException().Message}" });
         }
     }
 
@@ -112,10 +112,10 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
             await db.SaveChangesAsync(ct);
             return Ok(new { sourceEmployeeCount = employees.Count, driverCandidateCount = candidates.Count, created, updated, skipped, syncedAtUtc = DateTimeOffset.UtcNow });
         }
-        catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException or DbUpdateException)
+        catch (Exception exception)
         {
             logger.LogWarning(exception, "Sage HR driver sync failed.");
-            return StatusCode(StatusCodes.Status502BadGateway, new { configured = true, message = $"Sage HR driver sync failed: {exception.GetBaseException().Message}. No driver records were changed." });
+            return Ok(new { configured = true, connected = false, sourceEmployeeCount = 0, driverCandidateCount = 0, created = 0, updated = 0, skipped = 0, syncedAtUtc = DateTimeOffset.UtcNow, message = $"Sage HR driver sync failed: {exception.GetBaseException().Message}. No driver records were changed." });
         }
     }
 
@@ -202,7 +202,7 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
         catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException)
         {
             logger.LogWarning(exception, "Fleetio vehicle sync failed.");
-            return StatusCode(StatusCodes.Status502BadGateway, new { configured = true, message = $"Fleetio could not be reached or rejected the credentials: {exception.GetBaseException().Message}. No vehicle records were changed." });
+            return Ok(new { configured = true, connected = false, sourceVehicleCount = 0, tmsVehicleCount = 0, updated = 0, missingInFleetio = 0, syncedAtUtc = DateTimeOffset.UtcNow, message = $"Fleetio vehicle sync failed: {exception.GetBaseException().Message}. No vehicle records were changed." });
         }
     }
 

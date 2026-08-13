@@ -29,7 +29,7 @@ public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, I
         if (!options.Enabled) throw new InvalidOperationException("Sage HR integration is disabled.");
         if (string.IsNullOrWhiteSpace(options.BaseUrl) || string.IsNullOrWhiteSpace(options.ApiKey))
             throw new InvalidOperationException("Sage HR runtime settings are incomplete.");
-        httpClient.BaseAddress = new Uri(options.BaseUrl.TrimEnd('/') + "/");
+        httpClient.BaseAddress = new Uri(NormaliseBaseUrl(options.BaseUrl));
         httpClient.Timeout = TimeSpan.FromSeconds(30);
         var employees = new List<SageHrEmployee>();
         for (var page = 1; page <= 100; page++)
@@ -38,7 +38,11 @@ public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, I
             request.Headers.Add("X-Auth-Token", options.ApiKey);
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
             using var response = await httpClient.SendAsync(request, cancellationToken);
-            response.EnsureSuccessStatusCode();
+            if (!response.IsSuccessStatusCode)
+            {
+                var detail = await response.Content.ReadAsStringAsync(cancellationToken);
+                throw new HttpRequestException($"Sage HR employees returned {(int)response.StatusCode} ({response.ReasonPhrase}). {ClipDetail(detail)}", null, response.StatusCode);
+            }
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             var payload = await JsonSerializer.DeserializeAsync<SageHrEmployeePage>(stream, SageHrJson.Options, cancellationToken)
                 ?? throw new InvalidOperationException("Sage HR returned an empty employee response.");
@@ -48,6 +52,15 @@ public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, I
         logger.LogInformation("Retrieved {Count} active Sage HR employees.", employees.Count);
         return employees;
     }
+
+    private static string NormaliseBaseUrl(string value)
+    {
+        var trimmed = value.Trim().TrimEnd('/');
+        if (trimmed.EndsWith("/api", StringComparison.OrdinalIgnoreCase)) return trimmed + "/";
+        return trimmed + "/api/";
+    }
+
+    private static string ClipDetail(string value) => string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim().Length <= 300 ? value.Trim() : value.Trim()[..300];
 }
 
 public sealed record SageHrEmployee(
