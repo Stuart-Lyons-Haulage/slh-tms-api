@@ -117,10 +117,43 @@ public sealed class StagingService(TmsDbContext db)
         var displayName = Text(payload, "displayName") ?? Text(payload, "driver") ?? Text(payload, "Driver") ?? Text(payload, "name") ?? Text(payload, "driverName");
         if (string.IsNullOrWhiteSpace(employeeNumber) && !string.IsNullOrWhiteSpace(displayName)) employeeNumber = displayName.Trim().ToUpperInvariant().Replace(" ", "-");
         if (string.IsNullOrWhiteSpace(employeeNumber) || string.IsNullOrWhiteSpace(displayName)) throw new JsonException("Driver payload requires employeeNumber and displayName.");
-        employeeNumber = ClipRequired(employeeNumber, 40); displayName = ClipRequired(displayName, 160);
-        var driver = await db.Drivers.SingleOrDefaultAsync(item => item.EmployeeNumber == employeeNumber, ct);
-        if (driver is null) db.Drivers.Add(new Driver { EmployeeNumber = employeeNumber, DisplayName = displayName, TachoName = Clip(Text(payload, "tachoName"), 160), MobileNumber = Clip(Text(payload, "mobileNumber"), 40), DriverType = Clip(Text(payload, "driverType"), 80), DriverGroup = Clip(Text(payload, "driverGroup"), 80), Skills = Clip(Text(payload, "skills"), 160), Active = Bool(payload, "active", true) });
-        else { driver.DisplayName = displayName; driver.TachoName = Clip(Text(payload, "tachoName"), 160); driver.MobileNumber = Clip(Text(payload, "mobileNumber"), 40); driver.DriverType = Clip(Text(payload, "driverType"), 80); driver.DriverGroup = Clip(Text(payload, "driverGroup"), 80); driver.Skills = Clip(Text(payload, "skills"), 160); driver.Active = Bool(payload, "active", true); }
+        employeeNumber = ClipRequired(employeeNumber, 40);
+        displayName = ClipRequired(displayName, 160);
+        var tachoName = Clip(Text(payload, "tachoName"), 160);
+        var mobileNumber = Clip(Text(payload, "mobileNumber"), 40);
+        var driverType = Clip(Text(payload, "driverType"), 80);
+        var driverGroup = Clip(Text(payload, "driverGroup"), 80);
+        var skills = Clip(Text(payload, "skills"), 160);
+        var active = Bool(payload, "active", true);
+        var id = Guid.NewGuid();
+
+        await EnsureDriverColumns(ct);
+        await db.Database.ExecuteSqlInterpolatedAsync($@"
+UPDATE dbo.Drivers
+SET DisplayName = {displayName},
+    TachoName = {tachoName},
+    MobileNumber = {mobileNumber},
+    DriverType = {driverType},
+    DriverGroup = {driverGroup},
+    Skills = {skills},
+    Active = {active}
+WHERE EmployeeNumber = {employeeNumber};
+IF @@ROWCOUNT = 0
+BEGIN
+    INSERT INTO dbo.Drivers (Id, EmployeeNumber, DisplayName, TachoName, MobileNumber, DriverType, DriverGroup, Skills, Active)
+    VALUES ({id}, {employeeNumber}, {displayName}, {tachoName}, {mobileNumber}, {driverType}, {driverGroup}, {skills}, {active});
+END", ct);
+    }
+
+    private async Task EnsureDriverColumns(CancellationToken ct)
+    {
+        await db.Database.ExecuteSqlRawAsync(@"
+IF COL_LENGTH('dbo.Drivers', 'TachoName') IS NULL ALTER TABLE dbo.Drivers ADD TachoName nvarchar(160) NULL;
+IF COL_LENGTH('dbo.Drivers', 'MobileNumber') IS NULL ALTER TABLE dbo.Drivers ADD MobileNumber nvarchar(40) NULL;
+IF COL_LENGTH('dbo.Drivers', 'DriverType') IS NULL ALTER TABLE dbo.Drivers ADD DriverType nvarchar(80) NULL;
+IF COL_LENGTH('dbo.Drivers', 'DriverGroup') IS NULL ALTER TABLE dbo.Drivers ADD DriverGroup nvarchar(80) NULL;
+IF COL_LENGTH('dbo.Drivers', 'Skills') IS NULL ALTER TABLE dbo.Drivers ADD Skills nvarchar(160) NULL;
+IF COL_LENGTH('dbo.Drivers', 'Active') IS NULL ALTER TABLE dbo.Drivers ADD Active bit NOT NULL CONSTRAINT DF_Drivers_Active DEFAULT(1);", ct);
     }
 
     private async Task PromoteTrailer(JsonElement payload, CancellationToken ct)
