@@ -71,6 +71,32 @@ jobs:
 
       - name: Deploy image and configure ingress
         run: |
+          existing_secrets="$(az containerapp secret list \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query '[].name' --output tsv 2>/dev/null || true)"
+          has_secret() { printf '%s\n' "$existing_secrets" | grep --fixed-strings --line-regexp --quiet "$1"; }
+          fleetio_env_args=()
+          if has_secret fleetio-enabled && has_secret Fleetio--ApiKey && has_secret fleetio-account-token && has_secret Fleetio--BaseUrl; then
+            fleetio_env_args+=(
+              "Integrations__Fleetio__Enabled=secretref:fleetio-enabled"
+              "Integrations__Fleetio__ApiKey=secretref:Fleetio--ApiKey"
+              "Integrations__Fleetio__AccountToken=secretref:fleetio-account-token"
+              "Integrations__Fleetio__BaseUrl=secretref:Fleetio--BaseUrl"
+            )
+            echo "Fleetio secrets found; Fleetio integration will be enabled."
+          else
+            echo "Fleetio secrets are not all present on the API Container App; removing stale Fleetio references and deploying safely without Fleetio."
+            az containerapp update \
+              --name "$AZURE_CONTAINER_APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --remove-env-vars \
+                Integrations__Fleetio__Enabled \
+                Integrations__Fleetio__ApiKey \
+                Integrations__Fleetio__AccountToken \
+                Integrations__Fleetio__BaseUrl || true
+          fi
+
           az containerapp revision set-mode \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -92,10 +118,7 @@ jobs:
               "Integrations__SageHr__ApiKey=secretref:sagehr-api-key" \
               "Integrations__SageHr__DriverTeamName=Drivers" \
               "Integrations__SageHr__DriverPositionKeyword=Driver" \
-              "Integrations__Fleetio__Enabled=secretref:fleetio-enabled" \
-              "Integrations__Fleetio__ApiKey=secretref:Fleetio--ApiKey" \
-              "Integrations__Fleetio__AccountToken=secretref:fleetio-account-token" \
-              "Integrations__Fleetio__BaseUrl=secretref:Fleetio--BaseUrl" \
+              "${fleetio_env_args[@]}" \
               "Cors__AllowedOrigins__0=https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io" \
               "Deployment__Revision=${{ github.sha }}"
 
