@@ -97,6 +97,10 @@ public sealed class DotTrackingController(
             return Ok(MasterFleetFallback(vehicles, "Master data"));
         }
         var latestByIdentifier = liveStatuses.GroupBy(status => NormaliseIdentifier(status.VehicleIdentifier)).ToDictionary(group => group.Key, group => group.OrderByDescending(status => status.LastEventTimeUtc).First());
+        var latestBySuffix = liveStatuses.Select(status => new { Status = status, Suffix = IdentifierSuffix(status.VehicleIdentifier) })
+            .Where(item => item.Suffix.Length >= 3)
+            .GroupBy(item => item.Suffix)
+            .ToDictionary(group => group.Key, group => group.Select(item => item.Status).OrderByDescending(status => status.LastEventTimeUtc).First());
         var now = DateTimeOffset.UtcNow;
         var today = DateOnly.FromDateTime(now.UtcDateTime);
         var assignments = await db.Loads.AsNoTracking().Where(load => load.PlanningDate == today && load.VehicleId != null && load.Status != LoadStatus.Cancelled && load.Status != LoadStatus.Completed).ToListAsync(cancellationToken);
@@ -105,7 +109,9 @@ public sealed class DotTrackingController(
         var records = vehicles.Select(vehicle =>
         {
             var keys = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => NormaliseIdentifier(value!));
-            var live = keys.Select(key => latestByIdentifier.GetValueOrDefault(key)).Where(status => status is not null).OrderByDescending(status => status!.LastEventTimeUtc).FirstOrDefault();
+            var exactLive = keys.Select(key => latestByIdentifier.GetValueOrDefault(key)).Where(status => status is not null);
+            var suffixLive = keys.Select(key => latestBySuffix.GetValueOrDefault(IdentifierSuffix(key))).Where(status => status is not null);
+            var live = exactLive.Concat(suffixLive).OrderByDescending(status => status!.LastEventTimeUtc).FirstOrDefault();
             var age = live is null ? (TimeSpan?)null : now - live.LastEventTimeUtc;
             var condition = DetermineCondition(live, now);
             var assignment = assignments.Where(load => load.VehicleId == vehicle.Id).OrderByDescending(load => LoadPriority(load.Status)).FirstOrDefault();
@@ -140,6 +146,11 @@ public sealed class DotTrackingController(
     }
 
     private static string NormaliseIdentifier(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static string IdentifierSuffix(string value)
+    {
+        var normalised = NormaliseIdentifier(value);
+        return normalised.Length <= 3 ? normalised : normalised[^3..];
+    }
     private static int LoadPriority(LoadStatus status) => status switch { LoadStatus.InProgress => 4, LoadStatus.Dispatched => 3, LoadStatus.Planned => 2, LoadStatus.Draft => 1, _ => 0 };
     private static string DetermineCondition(VehicleLiveStatus? live, DateTimeOffset now)
     {
