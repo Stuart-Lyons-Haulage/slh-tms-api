@@ -97,9 +97,9 @@ public sealed class DotTrackingController(
             return Ok(MasterFleetFallback(vehicles, "Master data"));
         }
         var latestByIdentifier = liveStatuses.GroupBy(status => NormaliseIdentifier(status.VehicleIdentifier)).ToDictionary(group => group.Key, group => group.OrderByDescending(status => status.LastEventTimeUtc).First());
-        var latestBySuffix = liveStatuses.Select(status => new { Status = status, Suffix = IdentifierSuffix(status.VehicleIdentifier) })
-            .Where(item => item.Suffix.Length >= 3)
-            .GroupBy(item => item.Suffix)
+        var latestBySuffix = liveStatuses.SelectMany(status => IdentifierAliases(status.VehicleIdentifier).Select(alias => new { Status = status, Alias = alias }))
+            .Where(item => item.Alias.Length >= 3)
+            .GroupBy(item => item.Alias)
             .ToDictionary(group => group.Key, group => group.Select(item => item.Status).OrderByDescending(status => status.LastEventTimeUtc).First());
         var now = DateTimeOffset.UtcNow;
         var today = DateOnly.FromDateTime(now.UtcDateTime);
@@ -110,8 +110,9 @@ public sealed class DotTrackingController(
         var records = vehicles.Select(vehicle =>
         {
             var keys = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => NormaliseIdentifier(value!)).ToList();
-            var exactLive = keys.Select(key => latestByIdentifier.GetValueOrDefault(key)).Where(status => status is not null);
-            var suffixLive = keys.Select(key => latestBySuffix.GetValueOrDefault(IdentifierSuffix(key))).Where(status => status is not null);
+            var aliases = keys.SelectMany(IdentifierAliases).Distinct().ToList();
+            var exactLive = aliases.Select(key => latestByIdentifier.GetValueOrDefault(key)).Where(status => status is not null);
+            var suffixLive = aliases.Select(key => latestBySuffix.GetValueOrDefault(key)).Where(status => status is not null);
             var live = exactLive.Concat(suffixLive).OrderByDescending(status => ObservedAt(status!, now)).FirstOrDefault();
             if (live is not null) matchedLiveIds.Add(live.Id);
             var observedAt = live is null ? (DateTimeOffset?)null : ObservedAt(live, now);
@@ -156,6 +157,16 @@ public sealed class DotTrackingController(
     }
 
     private static string NormaliseIdentifier(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static IReadOnlyList<string> IdentifierAliases(string value)
+    {
+        var normalised = NormaliseIdentifier(value);
+        if (string.IsNullOrWhiteSpace(normalised)) return [];
+        var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { normalised };
+        aliases.Add(IdentifierSuffix(normalised));
+        if (normalised.Length > 3 && char.IsLetter(normalised[^1]) && normalised[^3..].All(char.IsLetter)) aliases.Add(normalised[^3..]);
+        if (normalised.EndsWith("H", StringComparison.OrdinalIgnoreCase) && normalised.Length > 4) aliases.Add(normalised[..^1]);
+        return aliases.Where(alias => !string.IsNullOrWhiteSpace(alias)).ToList();
+    }
     private static string IdentifierSuffix(string value)
     {
         var normalised = NormaliseIdentifier(value);
