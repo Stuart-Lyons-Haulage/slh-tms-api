@@ -7,6 +7,7 @@ using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Models.Integrations;
 using Slh.Tms.Api.Services;
+using System.Text.RegularExpressions;
 
 namespace Slh.Tms.Api.Controllers;
 
@@ -200,6 +201,16 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
             var missingInFleetio = 0;
             foreach (var vehicle in tmsVehicles)
             {
+                // Fleetio can expose unregistered assets as C###### identifiers.
+                // They are not TMS vehicles and must not be promoted into the
+                // master register when the workbook is the source of truth.
+                if (Regex.IsMatch(vehicle.Registration, "^C\\d{6}$", RegexOptions.IgnoreCase) &&
+                    string.IsNullOrWhiteSpace(vehicle.FleetNumber) &&
+                    string.IsNullOrWhiteSpace(vehicle.Abbreviation))
+                {
+                    vehicle.Active = false;
+                    continue;
+                }
                 var match = VehicleKeys(vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation).Select(key => fleetioLookup.GetValueOrDefault(key)).FirstOrDefault(item => item is not null);
                 if (match is null) { missingInFleetio++; continue; }
                 vehicle.FleetioId = match.Id;
@@ -208,21 +219,8 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
                 if (string.IsNullOrWhiteSpace(vehicle.FleetNumber)) vehicle.FleetNumber = Clip(match.FleetNumber, 40);
                 updated++;
             }
-            foreach (var fleetioVehicle in fleetioVehicles.Where(vehicle => !string.IsNullOrWhiteSpace(vehicle.Registration)))
-            {
-                var registration = NormaliseVehicleKey(fleetioVehicle.Registration!);
-                if (tmsVehicles.Any(vehicle => NormaliseVehicleKey(vehicle.Registration) == registration)) continue;
-                db.Vehicles.Add(new Vehicle
-                {
-                    Registration = ClipRequired(registration, 20),
-                    FleetNumber = Clip(fleetioVehicle.FleetNumber, 40),
-                    FleetioId = Clip(fleetioVehicle.Id, 80),
-                    FleetioName = Clip(fleetioVehicle.Name, 160),
-                    FleetioStatus = Clip(fleetioVehicle.Status, 80),
-                    Active = true
-                });
-                created++;
-            }
+            // Do not create Fleetio-only vehicles. The workbook/master register
+            // is authoritative; Fleetio is an enrichment source only.
             await db.SaveChangesAsync(ct);
             return Ok(new { sourceVehicleCount = fleetioVehicles.Count, tmsVehicleCount = tmsVehicles.Count + created, updated, created, missingInFleetio, syncedAtUtc = DateTimeOffset.UtcNow });
         }
