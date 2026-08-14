@@ -179,12 +179,12 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
             var matchedFleetioIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var records = tmsVehicles.Select(vehicle =>
             {
-                var match = VehicleKeys(vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation).Select(key => fleetioLookup.GetValueOrDefault(key)).FirstOrDefault(item => item is not null);
+                var match = VehicleKeys(vehicle.Registration).Select(key => fleetioLookup.GetValueOrDefault(key)).FirstOrDefault(item => item is not null);
                 if (match is not null && !string.IsNullOrWhiteSpace(match.Id)) matchedFleetioIds.Add(match.Id);
-                return new FleetioVehicleAlignmentRecord(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation, match?.Id, match?.Registration, match?.Name, match?.FleetNumber, match?.Status, match is not null ? "Matched" : "MissingInFleetio");
+                return new FleetioVehicleAlignmentRecord(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation, match?.Id, match?.Registration, match?.Name, match?.FleetNumber, match?.Status, match?.Vor, match?.PmiDueUtc, match?.MotDueUtc, match?.ServiceStatus, match is not null ? "Matched" : "MissingInFleetio");
             }).ToList();
             var unmatched = fleetioVehicles.Where(vehicle => string.IsNullOrWhiteSpace(vehicle.Id) || !matchedFleetioIds.Contains(vehicle.Id))
-                .Select(vehicle => new FleetioVehicleAlignmentRecord(null, null, null, null, vehicle.Id, vehicle.Registration, vehicle.Name, vehicle.FleetNumber, vehicle.Status, "UnmatchedFleetio"));
+                .Select(vehicle => new FleetioVehicleAlignmentRecord(null, null, null, null, vehicle.Id, vehicle.Registration, vehicle.Name, vehicle.FleetNumber, vehicle.Status, vehicle.Vor, vehicle.PmiDueUtc, vehicle.MotDueUtc, vehicle.ServiceStatus, "UnmatchedFleetio"));
             records.AddRange(unmatched);
             return Ok(new { configured = true, connected = true, matched = records.Count(item => item.Status == "Matched"), unmatchedFleetio = records.Count(item => item.Status == "UnmatchedFleetio"), missingInFleetio = records.Count(item => item.Status == "MissingInFleetio"), missingSettings = Array.Empty<string>(), records, message = $"Fleetio returned {fleetioVehicles.Count} vehicle record(s) for alignment." });
         }
@@ -220,11 +220,16 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
                     vehicle.Active = false;
                     continue;
                 }
-                var match = VehicleKeys(vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation).Select(key => fleetioLookup.GetValueOrDefault(key)).FirstOrDefault(item => item is not null);
+                var match = VehicleKeys(vehicle.Registration).Select(key => fleetioLookup.GetValueOrDefault(key)).FirstOrDefault(item => item is not null);
                 if (match is null) { missingInFleetio++; continue; }
                 vehicle.FleetioId = match.Id;
                 vehicle.FleetioName = Clip(match.Name, 160);
                 vehicle.FleetioStatus = Clip(match.Status, 80);
+                vehicle.FleetioVor = match.Vor;
+                vehicle.FleetioPmiDueUtc = match.PmiDueUtc;
+                vehicle.FleetioMotDueUtc = match.MotDueUtc;
+                vehicle.FleetioServiceStatus = Clip(match.ServiceStatus, 160);
+                vehicle.FleetioLastSyncedUtc = DateTimeOffset.UtcNow;
                 if (string.IsNullOrWhiteSpace(vehicle.FleetNumber)) vehicle.FleetNumber = Clip(match.FleetNumber, 40);
                 updated++;
             }
@@ -245,7 +250,7 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
         var lookup = new Dictionary<string, FleetioVehicle>(StringComparer.OrdinalIgnoreCase);
         foreach (var vehicle in fleetioVehicles)
         {
-            foreach (var key in VehicleKeys(vehicle.Registration, vehicle.FleetNumber, vehicle.Name))
+            foreach (var key in VehicleKeys(vehicle.Registration))
             {
                 lookup.TryAdd(key, vehicle);
             }
@@ -272,4 +277,4 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
     private static string NormaliseVehicleKey(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 }
 
-public sealed record FleetioVehicleAlignmentRecord(Guid? TmsVehicleId, string? TmsRegistration, string? TmsFleetNumber, string? TmsAbbreviation, string? FleetioId, string? FleetioRegistration, string? FleetioName, string? FleetioFleetNumber, string? FleetioStatus, string Status);
+public sealed record FleetioVehicleAlignmentRecord(Guid? TmsVehicleId, string? TmsRegistration, string? TmsFleetNumber, string? TmsAbbreviation, string? FleetioId, string? FleetioRegistration, string? FleetioName, string? FleetioFleetNumber, string? FleetioStatus, bool? FleetioVor, DateTimeOffset? PmiDueUtc, DateTimeOffset? MotDueUtc, string? ServiceStatus, string Status);
