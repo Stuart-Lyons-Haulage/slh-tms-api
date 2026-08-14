@@ -38,6 +38,22 @@ public sealed class DiagnosticsController(TmsDbContext db) : ControllerBase
         return Ok(results);
     }
 
+    [HttpGet("master-data-suggestions")]
+    public async Task<IActionResult> MasterDataSuggestions(CancellationToken ct)
+    {
+        var suggestions = new List<object>();
+        var drivers = await db.Drivers.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
+        suggestions.AddRange(drivers.Where(x => string.IsNullOrWhiteSpace(x.TachoName)).Select(x => new { severity = "warning", entity = "Driver", key = x.EmployeeNumber, message = $"{x.DisplayName} has no TachoMaster name; card-holder matching may fail." }));
+        suggestions.AddRange(drivers.Where(x => string.IsNullOrWhiteSpace(x.MobileNumber)).Select(x => new { severity = "warning", entity = "Driver", key = x.EmployeeNumber, message = $"{x.DisplayName} has no mobile number for dispatch texts." }));
+        suggestions.AddRange(drivers.Where(x => x.LicenceExpiry is null || x.LicenceExpiry <= DateOnly.FromDateTime(DateTime.UtcNow.AddDays(30))).Select(x => new { severity = "warning", entity = "Driver", key = x.EmployeeNumber, message = $"{x.DisplayName} needs a licence expiry check or is due within 30 days." }));
+        var sites = await db.Sites.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
+        suggestions.AddRange(sites.Where(x => string.IsNullOrWhiteSpace(x.CollectionAddress)).Select(x => new { severity = "error", entity = "Site", key = x.ExternalCode, message = $"{x.Name} has no collection address; route calculation cannot be trusted." }));
+        suggestions.AddRange(sites.Where(x => string.IsNullOrWhiteSpace(x.MapLink)).Select(x => new { severity = "warning", entity = "Site", key = x.ExternalCode, message = $"{x.Name} has no map link; confirm the route point." }));
+        var vehicles = await db.Vehicles.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
+        suggestions.AddRange(vehicles.Where(x => string.IsNullOrWhiteSpace(x.Abbreviation)).Select(x => new { severity = "warning", entity = "Vehicle", key = x.Registration, message = $"{x.Registration} has no RoadTech matching abbreviation." }));
+        return Ok(new { generatedAtUtc = DateTimeOffset.UtcNow, source = "deterministic-master-data-rules", suggestions = suggestions.Take(200) });
+    }
+
     private static async Task<object> Verify<TEntity>(IQueryable<TEntity> query, CancellationToken ct)
     {
         var count = await query.CountAsync(ct);
