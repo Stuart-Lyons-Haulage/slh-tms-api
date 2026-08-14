@@ -12,7 +12,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/integrations")]
 [Authorize]
-public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptions tracking, DotTrackingClient dotTracking, DriverSmsDispatchService sms, AzureSmsDispatchService azureSms, TextBeeOptions textBee, FleetioOptions fleetio, FleetioClient fleetioClient, IConfiguration configuration, TmsDbContext db, ILogger<IntegrationsController> logger) : ControllerBase
+public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptions tracking, DotTrackingClient dotTracking, TachoMasterClient tachoMaster, DriverSmsDispatchService sms, AzureSmsDispatchService azureSms, TextBeeOptions textBee, FleetioOptions fleetio, FleetioClient fleetioClient, IConfiguration configuration, TmsDbContext db, ILogger<IntegrationsController> logger) : ControllerBase
 {
     [HttpGet("status")]
     public async Task<IActionResult> Status(CancellationToken ct)
@@ -27,10 +27,29 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
             textBee = new { configured = textBee.IsConfigured, dutyPhoneLabel = textBee.DutyPhoneLabel, missingSettings = textBee.MissingSettings },
             driverSms = new { configured = sms.IsConfigured, provider = textBee.IsConfigured ? "TextBee" : azureSms.IsConfigured ? "Azure SMS" : "MightyText copy" },
             fleetio = new { configured = fleetio.IsConfigured, missingSettings = fleetio.MissingSettings },
+            tachoMaster = new { configured = tachoMaster.IsConfigured, missingSettings = tachoMaster.MissingSettings },
             sageHr = new { configured = sageHr.IsConfigured },
             emailIntake = new { configured = latestEmailIntake is not null, lastReceivedUtc = latestEmailIntake },
             batchIntake = new { configured = true, endpoint = "/api/v1/staging/batch" }
         });
+    }
+
+    [HttpGet("tachomaster/status")]
+    public async Task<IActionResult> TachoMasterStatus(CancellationToken ct)
+    {
+        if (!tachoMaster.IsConfigured)
+            return Ok(new { configured = false, connected = false, matchedVehicleCount = 0, missingSettings = tachoMaster.MissingSettings, message = $"TachoMaster runtime settings are incomplete: {string.Join(", ", tachoMaster.MissingSettings)}." });
+
+        try
+        {
+            var names = await tachoMaster.GetCurrentDriverNamesByVehicleAsync(DateOnly.FromDateTime(DateTime.UtcNow), ct);
+            return Ok(new { configured = true, connected = true, matchedVehicleCount = names.Count, missingSettings = Array.Empty<string>(), message = $"TachoMaster is connected and returned {names.Count} current driver card assignment(s)." });
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "TachoMaster status check failed.");
+            return Ok(new { configured = true, connected = false, matchedVehicleCount = 0, missingSettings = Array.Empty<string>(), message = $"TachoMaster could not return current driver cards: {exception.GetBaseException().Message}" });
+        }
     }
 
     [HttpGet("sage-hr/status")]

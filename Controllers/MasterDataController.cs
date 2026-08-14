@@ -31,6 +31,7 @@ public sealed class MasterDataController(StagingService staging) : ControllerBas
             .ToList();
         var results = new List<object>();
         var applied = 0;
+        var registered = 0;
         var failed = 0;
         foreach (var request in requests)
         {
@@ -55,8 +56,8 @@ public sealed class MasterDataController(StagingService staging) : ControllerBas
                     try
                     {
                         await staging.RegisterFallback(request.EntityType, request.Payload, request.Source, ct);
-                        applied++;
-                        results.Add(new { request.EntityType, request.IdempotencyKey, applied = true, registered = true, error = "Stored in the section register while the live SQL table is repaired." });
+                        registered++;
+                        results.Add(new { request.EntityType, request.IdempotencyKey, applied = false, registered = true, error = "Accepted into the recovery register, but not yet available in the live table. The database schema must be repaired before this row is operational." });
                         continue;
                     }
                     catch (Exception registerException)
@@ -79,7 +80,7 @@ public sealed class MasterDataController(StagingService staging) : ControllerBas
             results.Add(new { entityType = "register-link", applied = false, error = ex.GetBaseException().Message });
         }
 
-        return Ok(new { received = requests.Count, applied, failed, linked, results });
+        return Ok(new { received = requests.Count, applied, registered, failed, linked, results });
     }
 
     [HttpPost("register/link"), Authorize(Policy = "TmsApprove")]
