@@ -86,7 +86,14 @@ public sealed class DotTrackingController(
     {
         var freshLiveStatuses = await TryGetProviderLiveStatuses(cancellationToken);
 
-        var vehicles = await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(cancellationToken);
+        // Keep tracking available while optional vehicle-master columns are being repaired.
+        // Materialising Vehicle would select every mapped column and currently turns one
+        // missing fuel/Fleetio column into a 500 for the whole live tracker.
+        var vehicles = await db.Vehicles.AsNoTracking()
+            .Where(vehicle => vehicle.Active)
+            .OrderBy(vehicle => vehicle.Registration)
+            .Select(vehicle => new FleetVehicleMaster(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation))
+            .ToListAsync(cancellationToken);
         List<VehicleLiveStatus> liveStatuses = freshLiveStatuses;
         if (liveStatuses.Count == 0)
         {
@@ -117,18 +124,16 @@ public sealed class DotTrackingController(
             logger.LogWarning(exception, "TachoMaster driver lookup failed; continuing with allocation names.");
         }
         List<Load> assignments;
-        Dictionary<Guid, Driver> drivers;
         try
         {
             assignments = await db.Loads.AsNoTracking().Include(load => load.Stops).Where(load => load.PlanningDate == today && load.VehicleId != null && load.Status != LoadStatus.Cancelled && load.Status != LoadStatus.Completed).ToListAsync(cancellationToken);
-            var driverIds = assignments.Where(load => load.DriverId != null).Select(load => load.DriverId!.Value).Distinct().ToList();
-            drivers = await db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id)).ToDictionaryAsync(driver => driver.Id, cancellationToken);
         }
         catch (Exception exception) when (IsSchemaUnavailable(exception))
         {
             assignments = [];
-            drivers = [];
         }
+        var driverIds = assignments.Where(load => load.DriverId != null).Select(load => load.DriverId!.Value).Distinct().ToList();
+        var drivers = await LoadDriverIdentities(driverIds, cancellationToken);
         var matchedLiveIds = new HashSet<Guid>();
         var records = vehicles.Select(vehicle =>
         {
@@ -140,21 +145,26 @@ public sealed class DotTrackingController(
             if (live is not null) matchedLiveIds.Add(live.Id);
             var observedAt = live is null ? (DateTimeOffset?)null : ObservedAt(live, now);
             var age = observedAt is null ? (TimeSpan?)null : now - observedAt;
-            var condition = DetermineCondition(live, now);
             var assignment = assignments.Where(load => load.VehicleId == vehicle.Id).OrderByDescending(load => LoadPriority(load.Status)).FirstOrDefault();
-            var driverName = assignment?.DriverId is Guid driverId && drivers.TryGetValue(driverId, out var driver)
-                ? driver.DisplayName
-                : TachoDriverName(aliases, tachoDriverNames);
+            var allocatedDriver = assignment?.DriverId is Guid driverId ? drivers.GetValueOrDefault(driverId) : null;
+            var tachoName = TachoDriverName(aliases, tachoDriverNames);
+            var condition = DetermineCondition(live, !string.IsNullOrWhiteSpace(tachoName), now);
+            var tachoDriver = MatchTachoDriver(tachoName, drivers.Values);
+            var driverName = tachoDriver?.DisplayName ?? tachoName ?? allocatedDriver?.DisplayName;
+            var driverSource = !string.IsNullOrWhiteSpace(tachoName) ? "TachoMaster" : allocatedDriver is not null ? "Allocation" : null;
+            var driverMismatch = !string.IsNullOrWhiteSpace(tachoName) && allocatedDriver is not null && !SameDriver(tachoDriver, tachoName, allocatedDriver);
             var plannedDutyUtc = assignment?.Stops.Where(stop => stop.PlannedArrivalUtc != null).OrderBy(stop => stop.PlannedArrivalUtc).Select(stop => stop.PlannedArrivalUtc).FirstOrDefault();
-            return new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, live?.VehicleIdentifier, condition, observedAt, live?.IgnitionOn, live?.IsMoving, live?.SpeedKph, LiveLatitude(live), LiveLongitude(live), age is null ? null : (int)Math.Max(0, age.Value.TotalMinutes), assignment?.Reference, assignment?.Status.ToString(), driverName, plannedDutyUtc, vehicle.FleetioId, vehicle.FleetioName, vehicle.FleetioStatus);
+            return new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, live?.VehicleIdentifier, condition, observedAt, live?.IgnitionOn, live?.IsMoving, live?.SpeedKph, LiveLatitude(live), LiveLongitude(live), age is null ? null : (int)Math.Max(0, age.Value.TotalMinutes), assignment?.Id, assignment?.Reference, assignment?.Status.ToString(), tachoDriver?.Id ?? allocatedDriver?.Id, driverName, tachoName, driverSource, allocatedDriver?.DisplayName, driverMismatch, plannedDutyUtc, null, null, null);
         }).ToList();
         records.AddRange(liveStatuses.Where(status => !matchedLiveIds.Contains(status.Id)).OrderBy(status => status.VehicleIdentifier).Select(status =>
         {
             var observedAt = ObservedAt(status, now);
             var age = now - observedAt;
-            return new FleetVehicleStatus(status.Id, status.VehicleIdentifier, null, status.VehicleIdentifier, DetermineCondition(status, now), observedAt, status.IgnitionOn, status.IsMoving, status.SpeedKph, LiveLatitude(status), LiveLongitude(status), (int)Math.Max(0, age.TotalMinutes), null, null, TachoDriverName(IdentifierAliases(status.VehicleIdentifier), tachoDriverNames), null, null, null, null);
+            var tachoName = TachoDriverName(IdentifierAliases(status.VehicleIdentifier), tachoDriverNames);
+            var tachoDriver = MatchTachoDriver(tachoName, drivers.Values);
+            return new FleetVehicleStatus(status.Id, status.VehicleIdentifier, null, status.VehicleIdentifier, DetermineCondition(status, !string.IsNullOrWhiteSpace(tachoName), now), observedAt, status.IgnitionOn, status.IsMoving, status.SpeedKph, LiveLatitude(status), LiveLongitude(status), (int)Math.Max(0, age.TotalMinutes), null, null, null, tachoDriver?.Id, tachoDriver?.DisplayName ?? tachoName, tachoName, tachoName is null ? null : "TachoMaster", null, false, null, null, null, null);
         }));
-        return Ok(new FleetStatusResponse("RoadTech Falcon + TachoMaster", now, records.Count, records.Count(record => record.Condition is "Moving" or "Started"), records.Count(record => record.Condition is "NotSignedOn" or "Stale"), records));
+        return Ok(new FleetStatusResponse("RoadTech Falcon + TachoMaster", now, records.Count, records.Count(record => record.Condition == "Moving"), records.Count(record => record.Condition != "Moving"), records));
     }
 
     private async Task<List<VehicleLiveStatus>> TryGetProviderLiveStatuses(CancellationToken cancellationToken)
@@ -194,10 +204,37 @@ public sealed class DotTrackingController(
         }
     }
 
-    private static FleetStatusResponse MasterFleetFallback(IReadOnlyList<Vehicle> vehicles, string provider)
+    private async Task<Dictionary<Guid, FleetDriverIdentity>> LoadDriverIdentities(IReadOnlyCollection<Guid> allocatedDriverIds, CancellationToken ct)
+    {
+        try
+        {
+            return await db.Drivers.AsNoTracking()
+                .Where(driver => driver.Active || allocatedDriverIds.Contains(driver.Id))
+                .Select(driver => new FleetDriverIdentity(driver.Id, driver.EmployeeNumber, driver.DisplayName, driver.TachoName))
+                .ToDictionaryAsync(driver => driver.Id, ct);
+        }
+        catch (Exception exception) when (IsSchemaUnavailable(exception))
+        {
+            logger.LogWarning(exception, "Driver TachoName column is unavailable; live TachoMaster names will be shown without master-data correlation.");
+            try
+            {
+                return await db.Drivers.AsNoTracking()
+                    .Where(driver => driver.Active || allocatedDriverIds.Contains(driver.Id))
+                    .Select(driver => new FleetDriverIdentity(driver.Id, driver.EmployeeNumber, driver.DisplayName, null))
+                    .ToDictionaryAsync(driver => driver.Id, ct);
+            }
+            catch (Exception fallbackException) when (IsSchemaUnavailable(fallbackException))
+            {
+                logger.LogWarning(fallbackException, "Driver master data is unavailable; continuing with raw TachoMaster driver names.");
+                return [];
+            }
+        }
+    }
+
+    private static FleetStatusResponse MasterFleetFallback(IReadOnlyList<FleetVehicleMaster> vehicles, string provider)
     {
         var now = DateTimeOffset.UtcNow;
-        var records = vehicles.Select(vehicle => new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, null, "NotSignedOn", null, null, null, null, null, null, null, null, null, null, null, vehicle.FleetioId, vehicle.FleetioName, vehicle.FleetioStatus)).ToList();
+        var records = vehicles.Select(vehicle => new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, null, "NotSignedOn", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, false, null, null, null, null)).ToList();
         return new FleetStatusResponse(provider, now, records.Count, 0, records.Count, records);
     }
 
@@ -224,10 +261,10 @@ public sealed class DotTrackingController(
         return normalised.Length <= 3 ? normalised : normalised[^3..];
     }
     private static int LoadPriority(LoadStatus status) => status switch { LoadStatus.InProgress => 4, LoadStatus.Dispatched => 3, LoadStatus.Planned => 2, LoadStatus.Draft => 1, _ => 0 };
-    private static DateTimeOffset ObservedAt(VehicleLiveStatus live, DateTimeOffset now) => live.LastReceivedAtUtc.UtcDateTime.Date == now.UtcDateTime.Date ? live.LastReceivedAtUtc : live.LastEventTimeUtc;
+    private static DateTimeOffset ObservedAt(VehicleLiveStatus live, DateTimeOffset now) => live.LastEventTimeUtc;
     private static decimal? LiveLatitude(VehicleLiveStatus? live) => live is null || (live.Latitude == 0 && live.Longitude == 0) ? null : live.Latitude;
     private static decimal? LiveLongitude(VehicleLiveStatus? live) => live is null || (live.Latitude == 0 && live.Longitude == 0) ? null : live.Longitude;
-    private static string DetermineCondition(VehicleLiveStatus? live, DateTimeOffset now)
+    public static string DetermineCondition(VehicleLiveStatus? live, bool hasDriverCard, DateTimeOffset now)
     {
         if (live is null) return "NotSignedOn";
         var observedAt = ObservedAt(live, now);
@@ -235,12 +272,32 @@ public sealed class DotTrackingController(
         if (now - observedAt > TimeSpan.FromMinutes(30)) return "Stale";
         if (live.IsMoving == true || live.SpeedKph.GetValueOrDefault() > 3) return "Moving";
         if (live.IgnitionOn == true) return "Started";
-        if (live.IgnitionOn == false || live.IsMoving == false) return "Parked";
-        return "Parked";
+        if (hasDriverCard) return "SignedOn";
+        return "NotSignedOn";
     }
 
     private static string? TachoDriverName(IEnumerable<string> identifiers, IReadOnlyDictionary<string, string> names) =>
         identifiers.Select(NormaliseIdentifier).Select(identifier => names.GetValueOrDefault(identifier)).FirstOrDefault(name => !string.IsNullOrWhiteSpace(name));
+
+    public static string NormalisePersonName(string? value) => string.Join(' ', (value ?? string.Empty)
+        .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+        .Select(word => new string(word.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray()))
+        .Where(word => word.Length > 0)
+        .OrderBy(word => word, StringComparer.Ordinal));
+
+    private static FleetDriverIdentity? MatchTachoDriver(string? tachoName, IEnumerable<FleetDriverIdentity> drivers)
+    {
+        var key = NormalisePersonName(tachoName);
+        if (key.Length == 0) return null;
+        return drivers.FirstOrDefault(driver => NormalisePersonName(driver.TachoName) == key)
+            ?? drivers.FirstOrDefault(driver => NormalisePersonName(driver.DisplayName) == key);
+    }
+
+    private static bool SameDriver(FleetDriverIdentity? tachoDriver, string tachoName, FleetDriverIdentity allocatedDriver) =>
+        tachoDriver is not null
+            ? tachoDriver.Id == allocatedDriver.Id
+            : NormalisePersonName(tachoName) == NormalisePersonName(allocatedDriver.TachoName)
+              || NormalisePersonName(tachoName) == NormalisePersonName(allocatedDriver.DisplayName);
 }
 
 public sealed record DotTelemetryResponse(
@@ -250,4 +307,6 @@ public sealed record DotTelemetryResponse(
     IReadOnlyList<DotTelemetryRecord> Records);
 
 public sealed record FleetStatusResponse(string Provider, DateTimeOffset RetrievedAtUtc, int VehicleCount, int ReadyCount, int AttentionCount, IReadOnlyList<FleetVehicleStatus> Vehicles);
-public sealed record FleetVehicleStatus(Guid VehicleId, string Registration, string? FleetNumber, string? TrackingIdentifier, string Condition, DateTimeOffset? LastEventTimeUtc, bool? IgnitionOn, bool? IsMoving, decimal? SpeedKph, decimal? Latitude, decimal? Longitude, int? AgeMinutes, string? LoadReference, string? LoadStatus, string? DriverName, DateTimeOffset? PlannedDutyUtc, string? FleetioId, string? FleetioName, string? FleetioStatus);
+public sealed record FleetVehicleStatus(Guid VehicleId, string Registration, string? FleetNumber, string? TrackingIdentifier, string Condition, DateTimeOffset? LastEventTimeUtc, bool? IgnitionOn, bool? IsMoving, decimal? SpeedKph, decimal? Latitude, decimal? Longitude, int? AgeMinutes, Guid? LoadId, string? LoadReference, string? LoadStatus, Guid? DriverId, string? DriverName, string? TachoName, string? DriverSource, string? AllocatedDriverName, bool DriverMismatch, DateTimeOffset? PlannedDutyUtc, string? FleetioId, string? FleetioName, string? FleetioStatus);
+public sealed record FleetVehicleMaster(Guid Id, string Registration, string? FleetNumber, string? Abbreviation);
+public sealed record FleetDriverIdentity(Guid Id, string EmployeeNumber, string DisplayName, string? TachoName);

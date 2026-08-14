@@ -22,6 +22,16 @@ public sealed class TachoMasterClient
         this.httpClient.BaseAddress = new Uri(NormaliseBaseUrl(options.BaseUrl));
     }
 
+    public bool IsConfigured => options.IsConfigured;
+    public IReadOnlyList<string> MissingSettings => new[]
+    {
+        !options.Enabled ? "TachoMaster enabled flag" : null,
+        string.IsNullOrWhiteSpace(options.BaseUrl) ? "TachoMaster base URL" : null,
+        string.IsNullOrWhiteSpace(options.ApiKey) ? "TachoMaster API key" : null,
+        string.IsNullOrWhiteSpace(options.Username) ? "TachoMaster username" : null,
+        string.IsNullOrWhiteSpace(options.Password) ? "TachoMaster password" : null
+    }.Where(value => value is not null).Select(value => value!).ToList();
+
     public async Task<IReadOnlyDictionary<string, string>> GetCurrentDriverNamesByVehicleAsync(DateOnly date, CancellationToken cancellationToken = default)
     {
         if (!options.IsConfigured) return new Dictionary<string, string>();
