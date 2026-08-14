@@ -89,6 +89,7 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
         try { return Ok(await service.ReviewAndPromote(id, true, request.Note, User, ct)); }
         catch (KeyNotFoundException) { return NotFound(); }
         catch (InvalidOperationException ex) { return BadRequest(new ErrorResponse("staging_promotion_failed", ex.Message, HttpContext.TraceIdentifier)); }
+        catch (DbUpdateException ex) { return BadRequest(new ErrorResponse("staging_promotion_failed", $"The order could not be approved because the planning schema is incomplete: {ex.GetBaseException().Message}", HttpContext.TraceIdentifier)); }
     }
     [HttpPost("{id:guid}/reject"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> Reject(Guid id, ReviewRequest request, CancellationToken ct)
