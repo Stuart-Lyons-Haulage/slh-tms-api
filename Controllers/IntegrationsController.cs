@@ -110,8 +110,17 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
         try
         {
             var employees = await sageHr.GetActiveEmployeesAsync(ct);
-            var candidates = employees.Where(IsDriver).ToList();
-            var created = 0; var updated = 0; var skipped = 0;
+            var rawCandidates = employees.Where(IsDriver).ToList();
+            // Sage can return the same employee more than once when historical
+            // team/position records are expanded. De-duplicate before touching
+            // the unique EmployeeNumber index in Azure SQL.
+            var candidates = rawCandidates
+                .GroupBy(employee => string.IsNullOrWhiteSpace(employee.EmployeeNumber)
+                    ? $"SAGE-{employee.Id}"
+                    : employee.EmployeeNumber.Trim(), StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
+                .ToList();
+            var created = 0; var updated = 0; var skipped = rawCandidates.Count - candidates.Count;
             foreach (var employee in candidates)
             {
                 var employeeNumber = ClipRequired(string.IsNullOrWhiteSpace(employee.EmployeeNumber) ? $"SAGE-{employee.Id}" : employee.EmployeeNumber.Trim(), 40);
