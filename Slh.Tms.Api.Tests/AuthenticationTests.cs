@@ -136,6 +136,28 @@ public class AuthenticationTests : IClassFixture<CustomWebFactory>
     }
 
     [Fact]
+    public async Task Assistant_snapshot_and_rule_based_advice_are_available_without_an_external_ai_key()
+    {
+        var client = _factory.CreateClientWithUser(LyonsUser, "Tms.Access");
+        var date = DateOnly.FromDateTime(DateTime.UtcNow).ToString("yyyy-MM-dd");
+        var snapshot = await client.GetAsync($"/api/v1/assistant/snapshot?date={date}");
+        Assert.Equal(HttpStatusCode.OK, snapshot.StatusCode);
+        var snapshotBody = await snapshot.Content.ReadAsStringAsync();
+        Assert.Contains("suggestions", snapshotBody);
+        Assert.Contains("SLH safety rules", snapshotBody);
+
+        var advice = await client.PostAsync("/api/v1/assistant/advice", new StringContent($"{{\"message\":\"What needs attention?\",\"date\":\"{date}\"}}", System.Text.Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.OK, advice.StatusCode);
+        Assert.Contains("answer", await advice.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public void Assistant_registration_normalisation_is_deterministic()
+    {
+        Assert.Equal("AB12CDE", Slh.Tms.Api.Services.TmsAssistantService.NormaliseRegistration(" ab12 cde "));
+    }
+
+    [Fact]
     public async Task Sage_HR_status_does_not_expose_secrets()
     {
         var client = _factory.CreateClientWithUser(LyonsUser, "Tms.Access");

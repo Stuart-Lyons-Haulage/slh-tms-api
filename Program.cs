@@ -10,6 +10,7 @@ using Microsoft.IdentityModel.Tokens;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Models.Integrations;
+using Slh.Tms.Api.Models.Assistant;
 using Slh.Tms.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -25,6 +26,16 @@ builder.Services.AddCors(options => options.AddPolicy("Portal", policy => policy
 builder.Services.AddDbContext<TmsDbContext>(o => o.UseSqlServer(builder.Configuration.GetConnectionString("TmsDb")));
 builder.Services.AddScoped<StagingService>();
 builder.Services.AddScoped<DotTrackingTelemetryStore>();
+var assistantOptions = new AssistantOptions();
+builder.Configuration.GetSection("Integrations:OpenAI").Bind(assistantOptions);
+assistantOptions.Enabled = ReadBool(builder.Configuration, assistantOptions.Enabled,
+    "Integrations:OpenAI:Enabled", "Integrations__OpenAI__Enabled", "openai-enabled", "OpenAI--Enabled");
+assistantOptions.ApiKey = ReadSetting(builder.Configuration, assistantOptions.ApiKey,
+    "Integrations:OpenAI:ApiKey", "Integrations__OpenAI__ApiKey", "openai-api-key", "OpenAI--ApiKey");
+assistantOptions.Model = ReadSetting(builder.Configuration, assistantOptions.Model,
+    "Integrations:OpenAI:Model", "Integrations__OpenAI__Model", "openai-model", "OpenAI--Model");
+builder.Services.AddSingleton(assistantOptions);
+builder.Services.AddHttpClient<TmsAssistantService>();
 
 // Bind DOT tracking configuration from Tracking:Dot section
 // Sensitive values (BaseUrl, Username, Password) are loaded from environment variables or Azure Key Vault at runtime
@@ -177,7 +188,10 @@ if (!app.Environment.IsEnvironment("Testing"))
     {
         await PlanningSchemaInitializer.Apply(db, logger, CancellationToken.None);
         var register = scope.ServiceProvider.GetRequiredService<StagingService>();
-        await register.LinkRegistered(200, CancellationToken.None);
+        // Link a small recovery batch without turning every cold start into a
+        // long-running import. Remaining rows stay safe in the register and can
+        // be linked from Master Data after the portal is serving traffic.
+        await register.LinkRegistered(25, CancellationToken.None);
     }
     catch (Exception ex)
     {

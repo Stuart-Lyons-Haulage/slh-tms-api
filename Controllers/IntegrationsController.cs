@@ -6,6 +6,7 @@ using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Models.Integrations;
+using Slh.Tms.Api.Models.Assistant;
 using Slh.Tms.Api.Services;
 using System.Text.RegularExpressions;
 
@@ -13,7 +14,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/integrations")]
 [Authorize]
-public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptions tracking, DotTrackingClient dotTracking, TachoMasterClient tachoMaster, DriverSmsDispatchService sms, AzureSmsDispatchService azureSms, TextBeeOptions textBee, FleetioOptions fleetio, FleetioClient fleetioClient, IConfiguration configuration, TmsDbContext db, ILogger<IntegrationsController> logger) : ControllerBase
+public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptions tracking, DotTrackingClient dotTracking, TachoMasterClient tachoMaster, DriverSmsDispatchService sms, AzureSmsDispatchService azureSms, TextBeeOptions textBee, FleetioOptions fleetio, FleetioClient fleetioClient, AssistantOptions assistant, IConfiguration configuration, TmsDbContext db, ILogger<IntegrationsController> logger) : ControllerBase
 {
     [HttpGet("status")]
     public async Task<IActionResult> Status(CancellationToken ct)
@@ -31,6 +32,7 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
             tachoMaster = new { configured = tachoMaster.IsConfigured, missingSettings = tachoMaster.MissingSettings },
             sageHr = new { configured = sageHr.IsConfigured },
             emailIntake = new { configured = latestEmailIntake is not null, lastReceivedUtc = latestEmailIntake },
+            assistant = new { configured = assistant.IsConfigured, model = assistant.Model, safeRulesAvailable = true },
             batchIntake = new { configured = true, endpoint = "/api/v1/staging/batch" }
         });
     }
