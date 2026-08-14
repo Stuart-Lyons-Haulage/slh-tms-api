@@ -71,6 +71,10 @@ jobs:
           fleetio_api_key_kv="$(find_key_vault_secret fleetio-api-key fleetio-access-token Fleetio-ApiKey Fleetio--ApiKey || true)"
           fleetio_account_token_kv="$(find_key_vault_secret fleetio-account-token Fleetio-AccountToken || true)"
           fleetio_base_url_kv="$(find_key_vault_secret fleetio-base-url Fleetio-BaseUrl Fleetio--BaseUrl || true)"
+          test -n "$fleetio_enabled_kv" || fleetio_enabled_kv="fleetio-enabled"
+          test -n "$fleetio_api_key_kv" || fleetio_api_key_kv="Fleetio--ApiKey"
+          test -n "$fleetio_account_token_kv" || fleetio_account_token_kv="fleetio-account-token"
+          test -n "$fleetio_base_url_kv" || fleetio_base_url_kv="Fleetio--BaseUrl"
           fleetio_key_vault_args=()
           test -n "$fleetio_enabled_kv" && fleetio_key_vault_args+=("fleetio-enabled=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/$fleetio_enabled_kv,identityref:system")
           test -n "$fleetio_api_key_kv" && fleetio_key_vault_args+=("fleetio-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/$fleetio_api_key_kv,identityref:system")
