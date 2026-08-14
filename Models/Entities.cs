@@ -44,6 +44,16 @@ public sealed class Driver
     [MaxLength(80)] public string? DriverType { get; set; }
     [MaxLength(80)] public string? DriverGroup { get; set; }
     [MaxLength(160)] public string? Skills { get; set; }
+    [MaxLength(80)] public string? Coding { get; set; }
+    [MaxLength(160)] public string? AgencyName { get; set; }
+    public bool? NorthEligible { get; set; }
+    public bool? PreloadEligible { get; set; }
+    [MaxLength(500)] public string? Notes { get; set; }
+    [MaxLength(80)] public string? TachoMasterDriverId { get; set; }
+    [MaxLength(80)] public string? DrivingLicenceNumber { get; set; }
+    public DateOnly? LicenceExpiry { get; set; }
+    [MaxLength(40)] public string? LicenceStatus { get; set; }
+    public DateTimeOffset? LastTachoSyncUtc { get; set; }
     public bool Active { get; set; } = true;
 }
 public sealed class Trailer
@@ -53,6 +63,7 @@ public sealed class Trailer
     [MaxLength(80)] public string? Type { get; set; }
     public int? StandardCapacity { get; set; }
     public int? EuroCapacity { get; set; }
+    [MaxLength(500)] public string? Notes { get; set; }
     public bool Active { get; set; } = true;
 }
 public sealed class Site
@@ -64,6 +75,10 @@ public sealed class Site
     [MaxLength(500)] public string? CollectionAddress { get; set; }
     [MaxLength(1000)] public string? CollectionInstructions { get; set; }
     [MaxLength(1000)] public string? MapLink { get; set; }
+    [MaxLength(500)] public string? Aliases { get; set; }
+    [MaxLength(200)] public string? CustomField1 { get; set; }
+    [MaxLength(200)] public string? CustomField2 { get; set; }
+    [MaxLength(200)] public string? CustomField3 { get; set; }
     public bool Active { get; set; } = true;
 }
 public sealed class MarketContact

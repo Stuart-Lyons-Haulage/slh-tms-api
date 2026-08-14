@@ -180,6 +180,15 @@ public sealed class StagingService(TmsDbContext db)
         var driverType = Clip(Text(payload, "driverType"), 80);
         var driverGroup = Clip(Text(payload, "driverGroup"), 80);
         var skills = Clip(Text(payload, "skills"), 160);
+        var coding = Clip(Text(payload, "coding"), 80);
+        var agencyName = Clip(Text(payload, "agencyName"), 160);
+        var northEligible = BoolOrNull(payload, "northEligible");
+        var preloadEligible = BoolOrNull(payload, "preloadEligible");
+        var notes = Clip(Text(payload, "notes"), 500);
+        var tachoMasterDriverId = Clip(Text(payload, "tachoMasterDriverId") ?? Text(payload, "tachomasterDriverId"), 80);
+        var drivingLicenceNumber = Clip(Text(payload, "drivingLicenceNumber") ?? Text(payload, "licenceNumber"), 80);
+        var licenceExpiry = DateOnlyOrNull(payload, "licenceExpiry");
+        var licenceStatus = Clip(Text(payload, "licenceStatus"), 40);
         var active = Bool(payload, "active", true);
 
         var driver = await db.Drivers.SingleOrDefaultAsync(item => item.EmployeeNumber == employeeNumber, ct);
@@ -194,6 +203,8 @@ public sealed class StagingService(TmsDbContext db)
                 DriverType = driverType,
                 DriverGroup = driverGroup,
                 Skills = skills,
+                Coding = coding, AgencyName = agencyName, NorthEligible = northEligible, PreloadEligible = preloadEligible, Notes = notes,
+                TachoMasterDriverId = tachoMasterDriverId, DrivingLicenceNumber = drivingLicenceNumber, LicenceExpiry = licenceExpiry, LicenceStatus = licenceStatus,
                 Active = active
             });
         }
@@ -205,6 +216,8 @@ public sealed class StagingService(TmsDbContext db)
             driver.DriverType = driverType;
             driver.DriverGroup = driverGroup;
             driver.Skills = skills;
+            driver.Coding = coding; driver.AgencyName = agencyName; driver.NorthEligible = northEligible; driver.PreloadEligible = preloadEligible; driver.Notes = notes;
+            driver.TachoMasterDriverId = tachoMasterDriverId; driver.DrivingLicenceNumber = drivingLicenceNumber; driver.LicenceExpiry = licenceExpiry; driver.LicenceStatus = licenceStatus;
             driver.Active = active;
         }
     }
@@ -213,16 +226,16 @@ public sealed class StagingService(TmsDbContext db)
     {
         var trailerNumber = ClipRequired(Required(payload, "trailerNumber"), 40);
         var trailer = await db.Trailers.SingleOrDefaultAsync(item => item.TrailerNumber == trailerNumber, ct);
-        if (trailer is null) db.Trailers.Add(new Trailer { TrailerNumber = trailerNumber, Type = Clip(Text(payload, "type"), 80), StandardCapacity = IntOrNull(payload, "standardCapacity"), EuroCapacity = IntOrNull(payload, "euroCapacity"), Active = Bool(payload, "active", true) });
-        else { trailer.Type = Clip(Text(payload, "type"), 80); trailer.StandardCapacity = IntOrNull(payload, "standardCapacity"); trailer.EuroCapacity = IntOrNull(payload, "euroCapacity"); trailer.Active = Bool(payload, "active", true); }
+        if (trailer is null) db.Trailers.Add(new Trailer { TrailerNumber = trailerNumber, Type = Clip(Text(payload, "type"), 80), StandardCapacity = IntOrNull(payload, "standardCapacity"), EuroCapacity = IntOrNull(payload, "euroCapacity"), Notes = Clip(Text(payload, "notes"), 500), Active = Bool(payload, "active", true) });
+        else { trailer.Type = Clip(Text(payload, "type"), 80); trailer.StandardCapacity = IntOrNull(payload, "standardCapacity"); trailer.EuroCapacity = IntOrNull(payload, "euroCapacity"); trailer.Notes = Clip(Text(payload, "notes"), 500); trailer.Active = Bool(payload, "active", true); }
     }
 
     private async Task PromoteSite(JsonElement payload, CancellationToken ct)
     {
         var externalCode = ClipRequired(Required(payload, "externalCode"), 40); var name = ClipRequired(Required(payload, "name"), 200);
         var site = await db.Sites.SingleOrDefaultAsync(item => item.ExternalCode == externalCode, ct);
-        if (site is null) db.Sites.Add(new Site { ExternalCode = externalCode, Name = name, DriverTextName = Clip(Text(payload, "driverTextName"), 200), CollectionAddress = Clip(Text(payload, "collectionAddress"), 500), CollectionInstructions = Clip(Text(payload, "collectionInstructions"), 1000), MapLink = Clip(Text(payload, "mapLink"), 1000), Active = Bool(payload, "active", true) });
-        else { site.Name = name; site.DriverTextName = Clip(Text(payload, "driverTextName"), 200); site.CollectionAddress = Clip(Text(payload, "collectionAddress"), 500); site.CollectionInstructions = Clip(Text(payload, "collectionInstructions"), 1000); site.MapLink = Clip(Text(payload, "mapLink"), 1000); site.Active = Bool(payload, "active", true); }
+        if (site is null) db.Sites.Add(new Site { ExternalCode = externalCode, Name = name, DriverTextName = Clip(Text(payload, "driverTextName"), 200), CollectionAddress = Clip(Text(payload, "collectionAddress"), 500), CollectionInstructions = Clip(Text(payload, "collectionInstructions"), 1000), MapLink = Clip(Text(payload, "mapLink"), 1000), Aliases = Clip(Text(payload, "aliases"), 500), CustomField1 = Clip(Text(payload, "customField1"), 200), CustomField2 = Clip(Text(payload, "customField2"), 200), CustomField3 = Clip(Text(payload, "customField3"), 200), Active = Bool(payload, "active", true) });
+        else { site.Name = name; site.DriverTextName = Clip(Text(payload, "driverTextName"), 200); site.CollectionAddress = Clip(Text(payload, "collectionAddress"), 500); site.CollectionInstructions = Clip(Text(payload, "collectionInstructions"), 1000); site.MapLink = Clip(Text(payload, "mapLink"), 1000); site.Aliases = Clip(Text(payload, "aliases"), 500); site.CustomField1 = Clip(Text(payload, "customField1"), 200); site.CustomField2 = Clip(Text(payload, "customField2"), 200); site.CustomField3 = Clip(Text(payload, "customField3"), 200); site.Active = Bool(payload, "active", true); }
     }
 
     private async Task PromoteMarketContact(JsonElement payload, CancellationToken ct)
@@ -288,6 +301,7 @@ public sealed class StagingService(TmsDbContext db)
     private static int? IntOrNull(JsonElement payload, string name) => int.TryParse(Text(payload, name), out var value) ? value : null;
     private static bool Bool(JsonElement payload, string name, bool fallback) => bool.TryParse(Text(payload, name), out var value) ? value : fallback;
     private static bool? BoolOrNull(JsonElement payload, string name) => bool.TryParse(Text(payload, name), out var value) ? value : null;
+    private static DateOnly? DateOnlyOrNull(JsonElement payload, string name) => DateOnly.TryParse(Text(payload, name), out var value) ? value : null;
     private static string? Clip(string? value, int maxLength) => string.IsNullOrWhiteSpace(value) ? null : value.Length <= maxLength ? value : value[..maxLength];
     private static string ClipRequired(string value, int maxLength) => value.Length <= maxLength ? value : value[..maxLength];
 }
