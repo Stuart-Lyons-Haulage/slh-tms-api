@@ -70,24 +70,18 @@ public sealed class MasterDataController(StagingService staging) : ControllerBas
             }
         }
 
-        var linked = 0;
-        try
-        {
-            linked = await staging.LinkRegistered(ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            results.Add(new { entityType = "register-link", applied = false, error = ex.GetBaseException().Message });
-        }
-
-        return Ok(new { received = requests.Count, applied, registered, failed, linked, results });
+        // Recovery-register linking is deliberately separate and bounded. Running the
+        // entire historic register after every workbook chunk caused otherwise-successful
+        // imports to exceed the Azure gateway request timeout.
+        return Ok(new { received = requests.Count, applied, registered, failed, linked = 0, results });
     }
 
     [HttpPost("register/link"), Authorize(Policy = "TmsApprove")]
-    public async Task<IActionResult> LinkRegister(CancellationToken ct)
+    public async Task<IActionResult> LinkRegister([FromQuery] int batchSize, CancellationToken ct)
     {
-        var linked = await staging.LinkRegistered(ct);
-        return Ok(new { linked, message = linked == 0 ? "No registered rows could be linked yet." : $"Linked {linked} registered rows into the live master tables." });
+        batchSize = Math.Clamp(batchSize <= 0 ? 100 : batchSize, 1, 200);
+        var linked = await staging.LinkRegistered(batchSize, ct);
+        return Ok(new { linked, batchSize, message = linked == 0 ? "No registered rows could be linked yet." : $"Linked {linked} registered rows into the live master tables. Run again if more recovery rows remain." });
     }
 
     private static bool IsDatabaseUnavailable(Exception exception)
