@@ -10,14 +10,17 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
 
     public async Task<FleetioVehicleSummary> GetVehicleSummaryAsync(CancellationToken ct)
     {
-        var vehicles = await GetVehiclesAsync(1, ct);
+        // Fleetio's current cursor-pagination contract requires per_page >= 2.
+        // We only need a small sample for the connectivity check, so request the
+        // minimum valid page size rather than sending an invalid value of 1.
+        var vehicles = await GetVehiclesAsync(2, ct);
         return new FleetioVehicleSummary(true, vehicles.Count);
     }
 
     public async Task<IReadOnlyList<FleetioVehicle>> GetVehiclesAsync(int perPage, CancellationToken ct)
     {
         if (!IsConfigured) throw new InvalidOperationException("Fleetio runtime settings are incomplete.");
-        using var request = CreateRequest($"vehicles?per_page={Math.Clamp(perPage, 1, 100)}");
+        using var request = CreateRequest($"vehicles?per_page={Math.Clamp(perPage, 2, 100)}");
         using var response = await httpClient.SendAsync(request, ct);
         var body = await response.Content.ReadAsStringAsync(ct);
         if (!response.IsSuccessStatusCode) throw new HttpRequestException($"Fleetio vehicles returned {(int)response.StatusCode} ({response.ReasonPhrase}). {body}", null, response.StatusCode);
