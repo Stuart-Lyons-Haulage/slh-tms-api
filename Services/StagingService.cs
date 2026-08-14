@@ -161,6 +161,9 @@ public sealed class StagingService(TmsDbContext db)
         vehicle.FuelProvider = Clip(Text(payload, "fuelProvider"), 30);
         vehicle.FuelPinSecretName = Clip(Text(payload, "fuelPinSecretName"), 120);
         vehicle.FuelCardLastFour = Clip(Text(payload, "fuelCardLastFour"), 4);
+        vehicle.FleetioId = Clip(Text(payload, "fleetioId") ?? Text(payload, "fleetioID") ?? Text(payload, "fleetioVehicleId"), 80);
+        vehicle.FleetioName = Clip(Text(payload, "fleetioName"), 160);
+        vehicle.FleetioStatus = Clip(Text(payload, "fleetioStatus"), 80);
         vehicle.Active = Bool(payload, "active", true);
     }
 
