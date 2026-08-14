@@ -116,8 +116,8 @@ public sealed class DotTrackingClient
         request.Content = JsonContent.Create(new RoadTechLoginRequest(
             _options.Username,
             password,
-            "SLH TMS API",
-            "Azure App Service",
+            "1.0",
+            "Azure Container App",
             Environment.MachineName,
             "password"), options: RoadTechJson.Options);
         return request;
