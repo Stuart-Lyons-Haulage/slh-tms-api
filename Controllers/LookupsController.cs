@@ -46,8 +46,47 @@ public sealed class LookupsController(TmsDbContext db) : ControllerBase
         return Ok(vehicle);
     }
 
+    [HttpPut("drivers/{id:guid}"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> UpdateDriver(Guid id, [FromBody] DriverUpdateRequest request, CancellationToken ct)
+    {
+        var driver = await db.Drivers.SingleOrDefaultAsync(x => x.Id == id, ct);
+        if (driver is null) return NotFound();
+        var employeeNumber = ClipRequired(request.EmployeeNumber ?? string.Empty, 40);
+        if (string.IsNullOrWhiteSpace(employeeNumber) || string.IsNullOrWhiteSpace(request.DisplayName)) return BadRequest(new { message = "Employee number and display name are required." });
+        if (await db.Drivers.AnyAsync(x => x.Id != id && x.EmployeeNumber == employeeNumber, ct)) return Conflict(new { message = $"Employee number {employeeNumber} already exists." });
+        driver.EmployeeNumber = employeeNumber; driver.DisplayName = ClipRequired(request.DisplayName, 160); driver.TachoName = Clip(request.TachoName, 160); driver.MobileNumber = Clip(request.MobileNumber, 40); driver.DriverType = Clip(request.DriverType, 80); driver.DriverGroup = Clip(request.DriverGroup, 80); driver.Skills = Clip(request.Skills, 160); driver.Coding = Clip(request.Coding, 80); driver.AgencyName = Clip(request.AgencyName, 160); driver.NorthEligible = request.NorthEligible; driver.PreloadEligible = request.PreloadEligible; driver.Notes = Clip(request.Notes, 500); driver.TachoMasterDriverId = Clip(request.TachoMasterDriverId, 80); driver.DrivingLicenceNumber = Clip(request.DrivingLicenceNumber, 80); driver.LicenceExpiry = request.LicenceExpiry; driver.LicenceStatus = Clip(request.LicenceStatus, 40); driver.Active = request.Active;
+        await db.SaveChangesAsync(ct); return Ok(driver);
+    }
+
+    [HttpPut("trailers/{id:guid}"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> UpdateTrailer(Guid id, [FromBody] TrailerUpdateRequest request, CancellationToken ct)
+    {
+        var trailer = await db.Trailers.SingleOrDefaultAsync(x => x.Id == id, ct);
+        if (trailer is null) return NotFound();
+        var number = ClipRequired(request.TrailerNumber ?? string.Empty, 40);
+        if (string.IsNullOrWhiteSpace(number)) return BadRequest(new { message = "Trailer number is required." });
+        if (await db.Trailers.AnyAsync(x => x.Id != id && x.TrailerNumber == number, ct)) return Conflict(new { message = $"Trailer {number} already exists." });
+        trailer.TrailerNumber = number; trailer.Type = Clip(request.Type, 80); trailer.StandardCapacity = request.StandardCapacity; trailer.EuroCapacity = request.EuroCapacity; trailer.Notes = Clip(request.Notes, 500); trailer.Active = request.Active;
+        await db.SaveChangesAsync(ct); return Ok(trailer);
+    }
+
+    [HttpPut("sites/{id:guid}"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> UpdateSite(Guid id, [FromBody] SiteUpdateRequest request, CancellationToken ct)
+    {
+        var site = await db.Sites.SingleOrDefaultAsync(x => x.Id == id, ct);
+        if (site is null) return NotFound();
+        var code = ClipRequired(request.ExternalCode ?? string.Empty, 40);
+        if (string.IsNullOrWhiteSpace(code) || string.IsNullOrWhiteSpace(request.Name)) return BadRequest(new { message = "Site code and name are required." });
+        if (await db.Sites.AnyAsync(x => x.Id != id && x.ExternalCode == code, ct)) return Conflict(new { message = $"Site code {code} already exists." });
+        site.ExternalCode = code; site.Name = ClipRequired(request.Name, 200); site.DriverTextName = Clip(request.DriverTextName, 200); site.Aliases = Clip(request.Aliases, 500); site.CollectionAddress = Clip(request.CollectionAddress, 500); site.CollectionInstructions = Clip(request.CollectionInstructions, 1000); site.MapLink = Clip(request.MapLink, 1000); site.CustomField1 = Clip(request.CustomField1, 200); site.CustomField2 = Clip(request.CustomField2, 200); site.CustomField3 = Clip(request.CustomField3, 200); site.Active = request.Active;
+        await db.SaveChangesAsync(ct); return Ok(site);
+    }
+
     private static string? Clip(string? value, int maxLength) => string.IsNullOrWhiteSpace(value) ? null : value.Trim().Length <= maxLength ? value.Trim() : value.Trim()[..maxLength];
     private static string ClipRequired(string value, int maxLength) => value.Trim().Length <= maxLength ? value.Trim() : value.Trim()[..maxLength];
 }
 
 public sealed record VehicleUpdateRequest(string Registration, string? FleetNumber, string? Abbreviation, string? Transmission, bool? DvsCompliant, string? FuelProvider, string? CabMobile, string? FuelPin, string? ShellCard, string? BpRedCard, string? BpPlainCard, string? Notes, string? FuelPinSecretName, string? FuelCardLastFour, bool Active);
+public sealed record DriverUpdateRequest(string? EmployeeNumber, string? DisplayName, string? TachoName, string? MobileNumber, string? DriverType, string? DriverGroup, string? Skills, string? Coding, string? AgencyName, bool? NorthEligible, bool? PreloadEligible, string? Notes, string? TachoMasterDriverId, string? DrivingLicenceNumber, DateOnly? LicenceExpiry, string? LicenceStatus, bool Active);
+public sealed record TrailerUpdateRequest(string? TrailerNumber, string? Type, int? StandardCapacity, int? EuroCapacity, string? Notes, bool Active);
+public sealed record SiteUpdateRequest(string? ExternalCode, string? Name, string? DriverTextName, string? Aliases, string? CollectionAddress, string? CollectionInstructions, string? MapLink, string? CustomField1, string? CustomField2, string? CustomField3, bool Active);
