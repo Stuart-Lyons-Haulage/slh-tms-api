@@ -68,9 +68,9 @@ jobs:
             return 1
           }
           fleetio_enabled_kv="$(find_key_vault_secret fleetio-enabled fleetio-enabled-flag Fleetio-Enabled || true)"
-          fleetio_api_key_kv="$(find_key_vault_secret fleetio-api-key fleetio-access-token Fleetio-ApiKey || true)"
+          fleetio_api_key_kv="$(find_key_vault_secret fleetio-api-key fleetio-access-token Fleetio-ApiKey Fleetio--ApiKey || true)"
           fleetio_account_token_kv="$(find_key_vault_secret fleetio-account-token Fleetio-AccountToken || true)"
-          fleetio_base_url_kv="$(find_key_vault_secret fleetio-base-url Fleetio-BaseUrl || true)"
+          fleetio_base_url_kv="$(find_key_vault_secret fleetio-base-url Fleetio-BaseUrl Fleetio--BaseUrl || true)"
           fleetio_key_vault_args=()
           test -n "$fleetio_enabled_kv" && fleetio_key_vault_args+=("fleetio-enabled=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/$fleetio_enabled_kv,identityref:system")
           test -n "$fleetio_api_key_kv" && fleetio_key_vault_args+=("fleetio-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/$fleetio_api_key_kv,identityref:system")
