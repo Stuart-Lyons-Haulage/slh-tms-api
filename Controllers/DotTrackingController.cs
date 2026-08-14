@@ -236,7 +236,7 @@ public sealed class DotTrackingController(
     private static FleetStatusResponse MasterFleetFallback(IReadOnlyList<FleetVehicleMaster> vehicles, string provider)
     {
         var now = DateTimeOffset.UtcNow;
-        var records = vehicles.Select(vehicle => new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, null, "NotSignedOn", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, false, null, null, null, null, null, null, vehicle.FleetioStatus, vehicle.FleetioVor, vehicle.FleetioPmiDueUtc, vehicle.FleetioMotDueUtc, vehicle.FleetioServiceStatus)).ToList();
+        var records = vehicles.Select(vehicle => new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, null, "NotSignedOn", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, false, null, null, null, null, vehicle.FleetioStatus, vehicle.FleetioVor, vehicle.FleetioPmiDueUtc, vehicle.FleetioMotDueUtc, vehicle.FleetioServiceStatus)).ToList();
         return new FleetStatusResponse(provider, now, records.Count, 0, records.Count, records);
     }
 
