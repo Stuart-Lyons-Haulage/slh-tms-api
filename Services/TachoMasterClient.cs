@@ -116,7 +116,7 @@ public sealed class TachoMasterClient
             {
                 User = options.Username,
                 Pass = password,
-                AppName = "SLH TMS API",
+                OsVersion = "1.0",
                 OsName = "Azure Container App",
                 PcName = Environment.MachineName,
                 AuthType = "password"
