@@ -226,7 +226,7 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
             await db.SaveChangesAsync(ct);
             return Ok(new { sourceVehicleCount = fleetioVehicles.Count, tmsVehicleCount = tmsVehicles.Count + created, updated, created, missingInFleetio, syncedAtUtc = DateTimeOffset.UtcNow });
         }
-        catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException)
+        catch (Exception exception)
         {
             logger.LogWarning(exception, "Fleetio vehicle sync failed.");
             return Ok(new { configured = true, connected = false, sourceVehicleCount = 0, tmsVehicleCount = 0, updated = 0, missingInFleetio = 0, syncedAtUtc = DateTimeOffset.UtcNow, message = $"Fleetio vehicle sync failed: {exception.GetBaseException().Message}. No vehicle records were changed." });
