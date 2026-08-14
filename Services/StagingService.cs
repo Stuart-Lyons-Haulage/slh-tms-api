@@ -37,12 +37,13 @@ public sealed class StagingService(TmsDbContext db)
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task<int> LinkRegistered(CancellationToken ct)
+    public async Task<int> LinkRegistered(int batchSize, CancellationToken ct)
     {
         var items = await db.StagedImports
             .AsNoTracking()
             .Where(x => x.EntityType.StartsWith("register:") && x.Status == StagingStatus.Promoted)
             .OrderBy(x => x.ReceivedAtUtc)
+            .Take(Math.Clamp(batchSize, 1, 200))
             .ToListAsync(ct);
         var linked = 0;
         foreach (var item in items)

@@ -162,7 +162,7 @@ if (!app.Environment.IsEnvironment("Testing"))
     {
         await PlanningSchemaInitializer.Apply(db, logger, CancellationToken.None);
         var register = scope.ServiceProvider.GetRequiredService<StagingService>();
-        await register.LinkRegistered(CancellationToken.None);
+        await register.LinkRegistered(200, CancellationToken.None);
     }
     catch (Exception ex)
     {
