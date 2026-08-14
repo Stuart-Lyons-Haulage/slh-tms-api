@@ -43,6 +43,21 @@ tachoMasterOptions.Username = ReadSetting(builder.Configuration, tachoMasterOpti
     "Integrations:TachoMaster:Username", "Integrations__TachoMaster__Username", "tachomaster-username", "tacho-username", "TachoMaster--Username");
 tachoMasterOptions.Password = ReadSetting(builder.Configuration, tachoMasterOptions.Password,
     "Integrations:TachoMaster:Password", "Integrations__TachoMaster__Password", "tachomaster-password", "tacho-password", "TachoMaster--Password");
+// TachoMaster and Falcon are exposed by the same authenticated RoadTech API.
+// When no dedicated TachoMaster login has been supplied, reuse the already
+// secured Falcon credentials rather than duplicating secrets in the app.
+var hasDedicatedTachoCredentials = !string.IsNullOrWhiteSpace(tachoMasterOptions.ApiKey) ||
+    !string.IsNullOrWhiteSpace(tachoMasterOptions.Username) ||
+    !string.IsNullOrWhiteSpace(tachoMasterOptions.Password);
+if (!hasDedicatedTachoCredentials && dotTrackingOptions.IsConfigured)
+{
+    tachoMasterOptions.Enabled = true;
+    tachoMasterOptions.BaseUrl = dotTrackingOptions.BaseUrl;
+    tachoMasterOptions.ApiKey = dotTrackingOptions.ApiKey;
+    tachoMasterOptions.Username = dotTrackingOptions.Username;
+    tachoMasterOptions.Password = dotTrackingOptions.Password;
+    tachoMasterOptions.UsesSharedRoadTechCredentials = true;
+}
 builder.Services.AddSingleton(tachoMasterOptions);
 var sageHrOptions = new SageHrOptions();
 builder.Configuration.GetSection("Integrations:SageHr").Bind(sageHrOptions);

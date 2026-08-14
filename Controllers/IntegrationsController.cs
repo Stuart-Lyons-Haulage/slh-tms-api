@@ -43,7 +43,7 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
         try
         {
             var names = await tachoMaster.GetCurrentDriverNamesByVehicleAsync(DateOnly.FromDateTime(DateTime.UtcNow), ct);
-            return Ok(new { configured = true, connected = true, matchedVehicleCount = names.Count, missingSettings = Array.Empty<string>(), message = $"TachoMaster is connected and returned {names.Count} current driver card assignment(s)." });
+            return Ok(new { configured = true, connected = true, sharedRoadTechCredentials = tachoMaster.UsesSharedRoadTechCredentials, matchedVehicleCount = names.Count, missingSettings = Array.Empty<string>(), message = $"TachoMaster is connected and returned {names.Count} current driver duty assignment(s)." });
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
