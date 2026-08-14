@@ -56,6 +56,9 @@ Set these environment variables:
 | `Integrations__Fleetio__Enabled` | `true` when Fleetio service/VOR integration is ready |
 | `Integrations__Fleetio__ApiKey` | Fleetio API key, preferably Key Vault reference |
 | `Integrations__Fleetio__AccountToken` | Fleetio account token, preferably Key Vault reference |
+| `Integrations__OpenAI__Enabled` | `true` when conversational planning advice should use OpenAI; safe rule-based advice works without it |
+| `Integrations__OpenAI__ApiKey` | OpenAI API key, always supplied through Key Vault or a secret reference |
+| `Integrations__OpenAI__Model` | OpenAI model used for advice; defaults to `gpt-5.6-luna` |
 
 Deploy the API, run EF Core migrations, then verify `GET https://<host>/health` returns HTTP 200. Do not put SQL passwords or API secrets in source control.
 

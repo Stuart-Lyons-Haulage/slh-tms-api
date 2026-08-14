@@ -71,6 +71,7 @@ jobs:
           fleetio_api_key_kv="$(find_key_vault_secret fleetio-api-key fleetio-access-token Fleetio-ApiKey Fleetio--ApiKey || true)"
           fleetio_account_token_kv="$(find_key_vault_secret fleetio-account-token Fleetio-AccountToken || true)"
           fleetio_base_url_kv="$(find_key_vault_secret fleetio-base-url Fleetio-BaseUrl Fleetio--BaseUrl || true)"
+          openai_api_key_kv="$(find_key_vault_secret slh-openai-api-key openai-api-key OpenAI-ApiKey OpenAI--ApiKey || true)"
           test -n "$fleetio_enabled_kv" || fleetio_enabled_kv="fleetio-enabled"
           test -n "$fleetio_api_key_kv" || fleetio_api_key_kv="Fleetio--ApiKey"
           test -n "$fleetio_account_token_kv" || fleetio_account_token_kv="fleetio-account-token"
@@ -80,6 +81,8 @@ jobs:
           test -n "$fleetio_api_key_kv" && fleetio_key_vault_args+=("fleetio-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/$fleetio_api_key_kv,identityref:system")
           test -n "$fleetio_account_token_kv" && fleetio_key_vault_args+=("fleetio-account-token=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/$fleetio_account_token_kv,identityref:system")
           test -n "$fleetio_base_url_kv" && fleetio_key_vault_args+=("fleetio-base-url=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/$fleetio_base_url_kv,identityref:system")
+          openai_key_vault_args=()
+          test -n "$openai_api_key_kv" && openai_key_vault_args+=("openai-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/$openai_api_key_kv,identityref:system")
           az containerapp secret set \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -92,7 +95,8 @@ jobs:
               "dot-username=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-username,identityref:system" \
               "sagehr-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-sagehr-api-key,identityref:system" \
               "sagehr-base-url=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-sagehr-base-url,identityref:system" \
-              "${fleetio_key_vault_args[@]}" || {
+              "${fleetio_key_vault_args[@]}" \
+              "${openai_key_vault_args[@]}" || {
                 echo "Key Vault secret references are already configured or this workflow cannot update them."
                 echo "Continuing so the image deployment can proceed with the existing runtime configuration."
               }
@@ -100,6 +104,11 @@ jobs:
             echo "Fleetio Key Vault aliases detected and promoted to Container App secret references."
           else
             echo "No Fleetio Key Vault aliases detected; existing Container App Fleetio secrets will be preserved."
+          fi
+          if test -n "$openai_api_key_kv"; then
+            echo "OpenAI Key Vault alias detected and promoted to a Container App secret reference."
+          else
+            echo "No OpenAI Key Vault alias detected; the assistant will use its built-in operational rules."
           fi
 
       - name: Deploy image and configure ingress
@@ -156,6 +165,19 @@ jobs:
             echo "TachoMaster secrets are not all present on the API Container App; preserving existing TachoMaster environment references."
           fi
 
+          openai_api_key_secret="$(find_secret openai-api-key OpenAI--ApiKey Integrations--OpenAI--ApiKey || true)"
+          openai_env_args=()
+          if test -n "$openai_api_key_secret"; then
+            openai_env_args+=(
+              "Integrations__OpenAI__Enabled=true"
+              "Integrations__OpenAI__ApiKey=secretref:$openai_api_key_secret"
+              "Integrations__OpenAI__Model=gpt-5.6-luna"
+            )
+            echo "OpenAI secret found; conversational planning advice will be enabled."
+          else
+            echo "No OpenAI secret found; the assistant will continue with deterministic operational advice."
+          fi
+
           az containerapp revision set-mode \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -179,6 +201,7 @@ jobs:
               "Integrations__SageHr__DriverPositionKeyword=Driver" \
               "${fleetio_env_args[@]}" \
               "${tacho_env_args[@]}" \
+              "${openai_env_args[@]}" \
               "Cors__AllowedOrigins__0=https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io" \
               "Deployment__Revision=${{ github.sha }}"
 
