@@ -32,6 +32,11 @@ public sealed class Vehicle
     [MaxLength(80)] public string? FleetioId { get; set; }
     [MaxLength(160)] public string? FleetioName { get; set; }
     [MaxLength(80)] public string? FleetioStatus { get; set; }
+    public bool? FleetioVor { get; set; }
+    public DateTimeOffset? FleetioPmiDueUtc { get; set; }
+    public DateTimeOffset? FleetioMotDueUtc { get; set; }
+    [MaxLength(160)] public string? FleetioServiceStatus { get; set; }
+    public DateTimeOffset? FleetioLastSyncedUtc { get; set; }
     public bool Active { get; set; } = true;
 }
 public sealed class Driver

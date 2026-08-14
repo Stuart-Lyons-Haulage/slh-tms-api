@@ -63,7 +63,11 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
         var vin = FirstText(element, "vin", "vin_sn", "vinSn");
         var fleetNumber = FirstText(element, "number", "vehicle_number", "vehicleNumber", "asset_number", "assetNumber");
         var status = FirstText(element, "vehicle_status_name", "status", "status_name", "statusName");
-        return new FleetioVehicle(FirstText(element, "id") ?? string.Empty, registration, name, fleetNumber, vin, status);
+        var vor = FirstBool(element, "out_of_service", "outOfService", "is_out_of_service", "isOutOfService", "vor", "is_vor");
+        var pmi = FirstDate(element, "pmi_due", "pmiDue", "next_pmi", "nextPmi", "service_due", "serviceDue", "next_service_due");
+        var mot = FirstDate(element, "mot_due", "motDue", "next_mot", "nextMot", "inspection_due", "inspectionDue", "annual_inspection_due");
+        var serviceStatus = FirstText(element, "service_status", "serviceStatus", "maintenance_status", "maintenanceStatus");
+        return new FleetioVehicle(FirstText(element, "id") ?? string.Empty, registration, name, fleetNumber, vin, status, vor, pmi, mot, serviceStatus);
     }
 
     private static string? FirstText(JsonElement element, params string[] names)
@@ -73,6 +77,18 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
             if (TryFindProperty(element, name, out var value) && value.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined)
                 return value.ToString().Trim();
         return null;
+    }
+
+    private static bool? FirstBool(JsonElement element, params string[] names)
+    {
+        var value = FirstText(element, names);
+        return bool.TryParse(value, out var parsed) ? parsed : null;
+    }
+
+    private static DateTimeOffset? FirstDate(JsonElement element, params string[] names)
+    {
+        var value = FirstText(element, names);
+        return DateTimeOffset.TryParse(value, out var parsed) ? parsed : null;
     }
 
     private static bool TryFindProperty(JsonElement element, string name, out JsonElement value)
@@ -88,4 +104,4 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
 }
 
 public sealed record FleetioVehicleSummary(bool Connected, int SampleVehicleCount);
-public sealed record FleetioVehicle(string Id, string? Registration, string? Name, string? FleetNumber, string? Vin, string? Status);
+public sealed record FleetioVehicle(string Id, string? Registration, string? Name, string? FleetNumber, string? Vin, string? Status, bool? Vor, DateTimeOffset? PmiDueUtc, DateTimeOffset? MotDueUtc, string? ServiceStatus);
