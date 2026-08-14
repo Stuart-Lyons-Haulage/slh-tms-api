@@ -8,6 +8,7 @@ public sealed class TachoMasterOptions
     public string Password { get; set; } = string.Empty;
     public bool Enabled { get; set; }
     public int MaxPages { get; set; } = 20;
+    public bool UsesSharedRoadTechCredentials { get; set; }
 
     public bool IsConfigured => Enabled && !string.IsNullOrWhiteSpace(BaseUrl) &&
         !string.IsNullOrWhiteSpace(ApiKey) && !string.IsNullOrWhiteSpace(Username) &&

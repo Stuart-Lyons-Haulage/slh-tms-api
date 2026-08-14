@@ -114,10 +114,10 @@ public sealed class DotTrackingController(
             .ToDictionary(group => group.Key, group => group.Select(item => item.Status).OrderByDescending(status => status.LastEventTimeUtc).First());
         var now = DateTimeOffset.UtcNow;
         var today = DateOnly.FromDateTime(now.UtcDateTime);
-        IReadOnlyDictionary<string, string> tachoDriverNames = new Dictionary<string, string>();
+        IReadOnlyDictionary<string, TachoVehicleDriverStatus> tachoDrivers = new Dictionary<string, TachoVehicleDriverStatus>();
         try
         {
-            tachoDriverNames = await tachoMasterClient.GetCurrentDriverNamesByVehicleAsync(today, cancellationToken);
+            tachoDrivers = await tachoMasterClient.GetCurrentDriverStatusesByVehicleAsync(today, cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -147,22 +147,24 @@ public sealed class DotTrackingController(
             var age = observedAt is null ? (TimeSpan?)null : now - observedAt;
             var assignment = assignments.Where(load => load.VehicleId == vehicle.Id).OrderByDescending(load => LoadPriority(load.Status)).FirstOrDefault();
             var allocatedDriver = assignment?.DriverId is Guid driverId ? drivers.GetValueOrDefault(driverId) : null;
-            var tachoName = TachoDriverName(aliases, tachoDriverNames);
+            var tachoStatus = TachoDriverStatus(aliases, tachoDrivers);
+            var tachoName = tachoStatus?.DriverName;
             var condition = DetermineCondition(live, !string.IsNullOrWhiteSpace(tachoName), now);
             var tachoDriver = MatchTachoDriver(tachoName, drivers.Values);
             var driverName = tachoDriver?.DisplayName ?? tachoName ?? allocatedDriver?.DisplayName;
             var driverSource = !string.IsNullOrWhiteSpace(tachoName) ? "TachoMaster" : allocatedDriver is not null ? "Allocation" : null;
             var driverMismatch = !string.IsNullOrWhiteSpace(tachoName) && allocatedDriver is not null && !SameDriver(tachoDriver, tachoName, allocatedDriver);
             var plannedDutyUtc = assignment?.Stops.Where(stop => stop.PlannedArrivalUtc != null).OrderBy(stop => stop.PlannedArrivalUtc).Select(stop => stop.PlannedArrivalUtc).FirstOrDefault();
-            return new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, live?.VehicleIdentifier, condition, observedAt, live?.IgnitionOn, live?.IsMoving, live?.SpeedKph, LiveLatitude(live), LiveLongitude(live), age is null ? null : (int)Math.Max(0, age.Value.TotalMinutes), assignment?.Id, assignment?.Reference, assignment?.Status.ToString(), tachoDriver?.Id ?? allocatedDriver?.Id, driverName, tachoName, driverSource, allocatedDriver?.DisplayName, driverMismatch, plannedDutyUtc, null, null, null);
+            return new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, live?.VehicleIdentifier, condition, observedAt, live?.IgnitionOn, live?.IsMoving, live?.SpeedKph, LiveLatitude(live), LiveLongitude(live), age is null ? null : (int)Math.Max(0, age.Value.TotalMinutes), assignment?.Id, assignment?.Reference, assignment?.Status.ToString(), tachoDriver?.Id ?? allocatedDriver?.Id, driverName, tachoName, driverSource, allocatedDriver?.DisplayName, driverMismatch, plannedDutyUtc, tachoStatus, null, null, null);
         }).ToList();
         records.AddRange(liveStatuses.Where(status => !matchedLiveIds.Contains(status.Id)).OrderBy(status => status.VehicleIdentifier).Select(status =>
         {
             var observedAt = ObservedAt(status, now);
             var age = now - observedAt;
-            var tachoName = TachoDriverName(IdentifierAliases(status.VehicleIdentifier), tachoDriverNames);
+            var tachoStatus = TachoDriverStatus(IdentifierAliases(status.VehicleIdentifier), tachoDrivers);
+            var tachoName = tachoStatus?.DriverName;
             var tachoDriver = MatchTachoDriver(tachoName, drivers.Values);
-            return new FleetVehicleStatus(status.Id, status.VehicleIdentifier, null, status.VehicleIdentifier, DetermineCondition(status, !string.IsNullOrWhiteSpace(tachoName), now), observedAt, status.IgnitionOn, status.IsMoving, status.SpeedKph, LiveLatitude(status), LiveLongitude(status), (int)Math.Max(0, age.TotalMinutes), null, null, null, tachoDriver?.Id, tachoDriver?.DisplayName ?? tachoName, tachoName, tachoName is null ? null : "TachoMaster", null, false, null, null, null, null);
+            return new FleetVehicleStatus(status.Id, status.VehicleIdentifier, null, status.VehicleIdentifier, DetermineCondition(status, !string.IsNullOrWhiteSpace(tachoName), now), observedAt, status.IgnitionOn, status.IsMoving, status.SpeedKph, LiveLatitude(status), LiveLongitude(status), (int)Math.Max(0, age.TotalMinutes), null, null, null, tachoDriver?.Id, tachoDriver?.DisplayName ?? tachoName, tachoName, tachoName is null ? null : "TachoMaster", null, false, null, tachoStatus, null, null, null);
         }));
         return Ok(new FleetStatusResponse("RoadTech Falcon + TachoMaster", now, records.Count, records.Count(record => record.Condition == "Moving"), records.Count(record => record.Condition != "Moving"), records));
     }
@@ -234,7 +236,7 @@ public sealed class DotTrackingController(
     private static FleetStatusResponse MasterFleetFallback(IReadOnlyList<FleetVehicleMaster> vehicles, string provider)
     {
         var now = DateTimeOffset.UtcNow;
-        var records = vehicles.Select(vehicle => new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, null, "NotSignedOn", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, false, null, null, null, null)).ToList();
+        var records = vehicles.Select(vehicle => new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, null, "NotSignedOn", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, false, null, null, null, null, null)).ToList();
         return new FleetStatusResponse(provider, now, records.Count, 0, records.Count, records);
     }
 
@@ -276,8 +278,10 @@ public sealed class DotTrackingController(
         return "NotSignedOn";
     }
 
-    private static string? TachoDriverName(IEnumerable<string> identifiers, IReadOnlyDictionary<string, string> names) =>
-        identifiers.Select(NormaliseIdentifier).Select(identifier => names.GetValueOrDefault(identifier)).FirstOrDefault(name => !string.IsNullOrWhiteSpace(name));
+    private static TachoVehicleDriverStatus? TachoDriverStatus(
+        IEnumerable<string> identifiers,
+        IReadOnlyDictionary<string, TachoVehicleDriverStatus> drivers) =>
+        identifiers.Select(NormaliseIdentifier).Select(identifier => drivers.GetValueOrDefault(identifier)).FirstOrDefault(status => status is not null);
 
     public static string NormalisePersonName(string? value) => string.Join(' ', (value ?? string.Empty)
         .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
@@ -307,6 +311,6 @@ public sealed record DotTelemetryResponse(
     IReadOnlyList<DotTelemetryRecord> Records);
 
 public sealed record FleetStatusResponse(string Provider, DateTimeOffset RetrievedAtUtc, int VehicleCount, int ReadyCount, int AttentionCount, IReadOnlyList<FleetVehicleStatus> Vehicles);
-public sealed record FleetVehicleStatus(Guid VehicleId, string Registration, string? FleetNumber, string? TrackingIdentifier, string Condition, DateTimeOffset? LastEventTimeUtc, bool? IgnitionOn, bool? IsMoving, decimal? SpeedKph, decimal? Latitude, decimal? Longitude, int? AgeMinutes, Guid? LoadId, string? LoadReference, string? LoadStatus, Guid? DriverId, string? DriverName, string? TachoName, string? DriverSource, string? AllocatedDriverName, bool DriverMismatch, DateTimeOffset? PlannedDutyUtc, string? FleetioId, string? FleetioName, string? FleetioStatus);
+public sealed record FleetVehicleStatus(Guid VehicleId, string Registration, string? FleetNumber, string? TrackingIdentifier, string Condition, DateTimeOffset? LastEventTimeUtc, bool? IgnitionOn, bool? IsMoving, decimal? SpeedKph, decimal? Latitude, decimal? Longitude, int? AgeMinutes, Guid? LoadId, string? LoadReference, string? LoadStatus, Guid? DriverId, string? DriverName, string? TachoName, string? DriverSource, string? AllocatedDriverName, bool DriverMismatch, DateTimeOffset? PlannedDutyUtc, TachoVehicleDriverStatus? Tacho, string? FleetioId, string? FleetioName, string? FleetioStatus);
 public sealed record FleetVehicleMaster(Guid Id, string Registration, string? FleetNumber, string? Abbreviation);
 public sealed record FleetDriverIdentity(Guid Id, string EmployeeNumber, string DisplayName, string? TachoName);
