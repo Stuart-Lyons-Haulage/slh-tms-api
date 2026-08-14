@@ -203,7 +203,11 @@ public sealed class TachoMasterClient
         for (var page = 0; page < options.MaxPages; page++)
         {
             using var request = CreateRequest(HttpMethod.Post, "Member/GetMembersLong", sid);
-            request.Content = JsonContent.Create(new { Offset = offset, OnlyLiveMembers = true });
+            // The duty feed contains all drivers working today, while
+            // OnlyLiveMembers=true returns only the small subset currently
+            // marked live in TachoMaster. Fetch the full member directory so
+            // every card/duty record can be correlated to a driver.
+            request.Content = JsonContent.Create(new { Offset = offset, OnlyLiveMembers = false });
             using var response = await httpClient.SendAsync(request, cancellationToken);
             response.EnsureSuccessStatusCode();
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
