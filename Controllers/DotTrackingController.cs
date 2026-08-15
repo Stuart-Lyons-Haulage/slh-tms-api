@@ -113,7 +113,7 @@ public sealed class DotTrackingController(
             .GroupBy(item => item.Alias)
             .ToDictionary(group => group.Key, group => group.Select(item => item.Status).OrderByDescending(status => status.LastEventTimeUtc).First());
         var now = DateTimeOffset.UtcNow;
-        var today = DateOnly.FromDateTime(now.UtcDateTime);
+        var today = UkOperatingDate(now);
         IReadOnlyDictionary<string, TachoVehicleDriverStatus> tachoDrivers = new Dictionary<string, TachoVehicleDriverStatus>();
         try
         {
@@ -247,6 +247,11 @@ public sealed class DotTrackingController(
     }
 
     private static string NormaliseIdentifier(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static DateOnly UkOperatingDate(DateTimeOffset value)
+    {
+        try { return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime); }
+        catch (TimeZoneNotFoundException) { return DateOnly.FromDateTime(value.UtcDateTime); }
+    }
     private static IReadOnlyList<string> IdentifierAliases(string value)
     {
         var normalised = NormaliseIdentifier(value);
