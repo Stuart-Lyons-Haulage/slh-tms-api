@@ -89,11 +89,12 @@ public sealed class DotTrackingController(
         // Keep tracking available while optional vehicle-master columns are being repaired.
         // Materialising Vehicle would select every mapped column and currently turns one
         // missing fuel/Fleetio column into a 500 for the whole live tracker.
-        var vehicles = await db.Vehicles.AsNoTracking()
+        var vehicleRows = await db.Vehicles.AsNoTracking()
             .Where(vehicle => vehicle.Active)
             .OrderBy(vehicle => vehicle.Registration)
-            .Select(vehicle => new FleetVehicleMaster(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation, vehicle.FleetioStatus, vehicle.FleetioVor, vehicle.FleetioPmiDueUtc, vehicle.FleetioMotDueUtc, vehicle.FleetioServiceStatus))
+            .Select(vehicle => new { vehicle.Id, vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation, vehicle.FleetioStatus })
             .ToListAsync(cancellationToken);
+        var vehicles = vehicleRows.Select(vehicle => new FleetVehicleMaster(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation, vehicle.FleetioStatus, null, null, null, null)).ToList();
         List<VehicleLiveStatus> liveStatuses = freshLiveStatuses;
         if (liveStatuses.Count == 0)
         {
@@ -130,7 +131,9 @@ public sealed class DotTrackingController(
         }
         catch (Exception exception) when (IsSchemaUnavailable(exception))
         {
-            assignments = [];
+            db.ChangeTracker.Clear();
+            assignments = (await PlanningRegisterStore.ReadLoadsAsync(db, today, cancellationToken))
+                .Where(load => load.VehicleId != null && load.Status != LoadStatus.Cancelled && load.Status != LoadStatus.Completed).ToList();
         }
         var driverIds = assignments.Where(load => load.DriverId != null).Select(load => load.DriverId!.Value).Distinct().ToList();
         var drivers = await LoadDriverIdentities(driverIds, cancellationToken);

@@ -19,6 +19,8 @@ public sealed class TmsAssistantService(HttpClient httpClient, TmsDbContext db, 
         var loads = await SafeRead(db.Loads.AsNoTracking().Include(x => x.Stops)
             .Where(x => x.PlanningDate == planningDate && x.Status != LoadStatus.Cancelled)
             .OrderBy(x => x.Reference).Take(500), "loads", ct);
+        if (orders.Count == 0) orders = await PlanningRegisterStore.ReadOrdersAsync(db, planningDate, planningDate, ct);
+        if (loads.Count == 0) loads = await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct);
         await LoadCommercialStore.EnrichAsync(db, loads, ct);
         var drivers = await db.Drivers.AsNoTracking().Where(x => x.Active).Take(1000).ToListAsync(ct);
         var vehicles = await db.Vehicles.AsNoTracking().Where(x => x.Active).Take(1000).ToListAsync(ct);

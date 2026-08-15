@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
 
@@ -23,9 +24,9 @@ public sealed class DiagnosticsController(TmsDbContext db) : ControllerBase
             ["marketContacts"] = token => Verify(db.MarketContacts.AsNoTracking(), token),
             ["fuelPrices"] = token => Verify(db.FuelPrices.AsNoTracking(), token),
             ["staging"] = token => Verify(db.StagedImports.AsNoTracking(), token),
-            ["orders"] = token => Verify(db.TransportOrders.AsNoTracking(), token),
-            ["loads"] = token => Verify(db.Loads.AsNoTracking(), token),
-            ["loadStops"] = token => Verify(db.LoadStops.AsNoTracking(), token)
+            ["orders"] = VerifyOrders,
+            ["loads"] = VerifyLoads,
+            ["loadStops"] = VerifyLoadStops
         };
 
         var results = new Dictionary<string, object>();
@@ -96,6 +97,39 @@ public sealed class DiagnosticsController(TmsDbContext db) : ControllerBase
         // row verifies the same shape used by the portal and Master Import.
         await query.Take(1).ToListAsync(ct);
         return new { ok = true, count };
+    }
+
+    private async Task<object> VerifyOrders(CancellationToken ct)
+    {
+        try { return await Verify(db.TransportOrders.AsNoTracking(), ct); }
+        catch
+        {
+            db.ChangeTracker.Clear();
+            var rows = await PlanningRegisterStore.ReadOrdersAsync(db, null, null, ct);
+            return new { ok = true, count = rows.Count, storage = "audited-register" };
+        }
+    }
+
+    private async Task<object> VerifyLoads(CancellationToken ct)
+    {
+        try { return await Verify(db.Loads.AsNoTracking(), ct); }
+        catch
+        {
+            db.ChangeTracker.Clear();
+            var rows = await PlanningRegisterStore.ReadLoadsAsync(db, null, ct);
+            return new { ok = true, count = rows.Count, storage = "audited-register" };
+        }
+    }
+
+    private async Task<object> VerifyLoadStops(CancellationToken ct)
+    {
+        try { return await Verify(db.LoadStops.AsNoTracking(), ct); }
+        catch
+        {
+            db.ChangeTracker.Clear();
+            var rows = await PlanningRegisterStore.ReadLoadsAsync(db, null, ct);
+            return new { ok = true, count = rows.Sum(load => load.Stops.Count), storage = "audited-register" };
+        }
     }
 
     private static string SanitiseSchemaError(string message)

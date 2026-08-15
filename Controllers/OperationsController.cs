@@ -25,10 +25,12 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
         }
         catch (Exception exception) when (IsSchemaUnavailable(exception))
         {
-            return Ok(new { planningDate, calculatedAtUtc = DateTimeOffset.UtcNow, records = Array.Empty<DeliveryEtaResponse>() });
+            db.ChangeTracker.Clear();
+            loads = await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct);
         }
         var orderIds = loads.SelectMany(load => load.Stops).Where(stop => stop.OrderId != null).Select(stop => stop.OrderId!.Value).Distinct().ToList();
         var orders = await SafeDictionary(db.TransportOrders.AsNoTracking().Where(order => orderIds.Contains(order.Id)), order => order.Id, ct);
+        if (orders.Count == 0 && orderIds.Count > 0) orders = (await PlanningRegisterStore.ReadOrdersAsync(db, null, null, ct)).Where(order => orderIds.Contains(order.Id)).ToDictionary(order => order.Id);
         var vehicleIds = loads.Where(load => load.VehicleId != null).Select(load => load.VehicleId!.Value).Distinct().ToList();
         var vehicles = await SafeDictionary(db.Vehicles.AsNoTracking().Where(vehicle => vehicleIds.Contains(vehicle.Id)), vehicle => vehicle.Id, ct);
         var statuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
@@ -94,15 +96,25 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
     {
         var firstDate = from ?? DateOnly.FromDateTime(DateTime.UtcNow);
         var lastDate = firstDate.AddDays(6);
-        var loads = await db.Loads.AsNoTracking().Include(load => load.Stops)
-            .Where(load => load.PlanningDate >= firstDate && load.PlanningDate <= lastDate && load.Status != LoadStatus.Cancelled)
-            .OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).Take(2000).ToListAsync(ct);
+        List<Load> loads;
+        try
+        {
+            loads = await db.Loads.AsNoTracking().Include(load => load.Stops)
+                .Where(load => load.PlanningDate >= firstDate && load.PlanningDate <= lastDate && load.Status != LoadStatus.Cancelled)
+                .OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).Take(2000).ToListAsync(ct);
+        }
+        catch (Exception exception) when (IsSchemaUnavailable(exception))
+        {
+            db.ChangeTracker.Clear();
+            loads = (await PlanningRegisterStore.ReadLoadsAsync(db, null, ct)).Where(load => load.PlanningDate >= firstDate && load.PlanningDate <= lastDate && load.Status != LoadStatus.Cancelled).ToList();
+        }
         await LoadCommercialStore.EnrichAsync(db, loads, ct);
         var orderIds = loads.SelectMany(load => load.Stops).Where(stop => stop.OrderId != null).Select(stop => stop.OrderId!.Value).Distinct().ToList();
         var orders = await SafeDictionary(db.TransportOrders.AsNoTracking().Where(order => orderIds.Contains(order.Id)), order => order.Id, ct);
+        if (orders.Count == 0 && orderIds.Count > 0) orders = (await PlanningRegisterStore.ReadOrdersAsync(db, null, null, ct)).Where(order => orderIds.Contains(order.Id)).ToDictionary(order => order.Id);
         var trailers = await SafeDictionary(db.Trailers.AsNoTracking().Where(trailer => trailer.Active), trailer => trailer.Id, ct);
         var activeDrivers = await db.Drivers.AsNoTracking().CountAsync(driver => driver.Active, ct);
-        var activeVehicles = await db.Vehicles.AsNoTracking().CountAsync(vehicle => vehicle.Active && vehicle.FleetioVor != true, ct);
+        var activeVehicles = await db.Vehicles.AsNoTracking().CountAsync(vehicle => vehicle.Active, ct);
         var activeTrailerCapacity = trailers.Values.Sum(trailer => trailer.StandardCapacity ?? 0);
         var days = Enumerable.Range(0, 7).Select(offset =>
         {

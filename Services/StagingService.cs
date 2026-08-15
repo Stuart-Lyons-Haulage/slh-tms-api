@@ -265,7 +265,15 @@ public sealed class StagingService(TmsDbContext db)
     {
         var reference = Required(payload, "poNumber"); var customerCode = Required(payload, "customerCode"); var collectionDateText = Required(payload, "collectionDate");
         if (!DateOnly.TryParse(collectionDateText, out var collectionDate)) throw new JsonException("Order payload requires a valid collectionDate.");
-        if (!await db.TransportOrders.AnyAsync(order => order.Reference == reference, ct))
+        bool exists;
+        try { exists = await db.TransportOrders.AnyAsync(order => order.Reference == reference, ct); }
+        catch (Exception ex) when (ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase))
+        {
+            // The approved staged row is itself the durable order register on
+            // legacy production databases where DDL permissions are unavailable.
+            return;
+        }
+        if (!exists)
         {
             DateOnly? deliveryDate = null;
             if (DateOnly.TryParse(Text(payload, "deliveryDate"), out var parsedDelivery)) deliveryDate = parsedDelivery;
