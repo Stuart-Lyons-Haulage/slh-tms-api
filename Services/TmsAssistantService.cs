@@ -13,12 +13,12 @@ public sealed class TmsAssistantService(HttpClient httpClient, TmsDbContext db, 
 {
     public async Task<AssistantSnapshot> GetSnapshot(DateOnly planningDate, CancellationToken ct)
     {
-        var orders = await db.TransportOrders.AsNoTracking()
+        var orders = await SafeRead(db.TransportOrders.AsNoTracking()
             .Where(x => x.CollectionDate == planningDate && x.Status != OrderStatus.Cancelled)
-            .OrderBy(x => x.Reference).Take(500).ToListAsync(ct);
-        var loads = await db.Loads.AsNoTracking().Include(x => x.Stops)
+            .OrderBy(x => x.Reference).Take(500), "orders", ct);
+        var loads = await SafeRead(db.Loads.AsNoTracking().Include(x => x.Stops)
             .Where(x => x.PlanningDate == planningDate && x.Status != LoadStatus.Cancelled)
-            .OrderBy(x => x.Reference).Take(500).ToListAsync(ct);
+            .OrderBy(x => x.Reference).Take(500), "loads", ct);
         await LoadCommercialStore.EnrichAsync(db, loads, ct);
         var drivers = await db.Drivers.AsNoTracking().Where(x => x.Active).Take(1000).ToListAsync(ct);
         var vehicles = await db.Vehicles.AsNoTracking().Where(x => x.Active).Take(1000).ToListAsync(ct);
@@ -159,6 +159,15 @@ public sealed class TmsAssistantService(HttpClient httpClient, TmsDbContext db, 
     }
 
     public static string NormaliseRegistration(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private async Task<List<T>> SafeRead<T>(IQueryable<T> query, string area, CancellationToken ct)
+    {
+        try { return await query.ToListAsync(ct); }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Assistant skipped unavailable {Area} data while building its snapshot.", area);
+            return [];
+        }
+    }
     private static string SafetyIdentifier(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant()[..32];
     private static string RuleBasedAnswer(string message, AssistantSnapshot snapshot)
     {
