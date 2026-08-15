@@ -36,6 +36,16 @@ public sealed class TmsAssistantService(HttpClient httpClient, TmsDbContext db, 
         var noMapPoints = loads.Where(x => x.Stops.Count == 0 || x.Stops.Any(stop => stop.Latitude is null || stop.Longitude is null)).ToList();
         if (noMapPoints.Count > 0)
             suggestions.Add(new("loads-unmapped", "medium", "Finish route points", $"{noMapPoints.Count} load{(noMapPoints.Count == 1 ? " has" : "s have")} missing stop coordinates, so routing and ETA checks are incomplete.", "Planner", false));
+        var unpriced = loads.Count(x => x.RevenueAmount is null);
+        if (unpriced > 0)
+            suggestions.Add(new("loads-unpriced", "high", "Complete agreed rates", $"{unpriced} load{(unpriced == 1 ? " has" : "s have")} no revenue rate, so margin and forecast knowledge is incomplete.", "Reporting", false));
+        var negativeMargin = loads.Count(x => x.RevenueAmount is not null && (x.RevenueAmount.Value + (x.FuelSurchargeAmount ?? 0)) - (x.ActualCostAmount ?? x.EstimatedCostAmount ?? 0) < 0);
+        if (negativeMargin > 0)
+            suggestions.Add(new("loads-negative-margin", "high", "Review loss-making loads", $"{negativeMargin} load{(negativeMargin == 1 ? " is" : "s are")} currently showing a negative margin.", "Reporting", false));
+        var distance = loads.Sum(x => x.EstimatedDistanceMiles ?? 0);
+        var emptyMiles = loads.Sum(x => x.EmptyMiles ?? 0);
+        if (distance > 0 && emptyMiles / distance >= 0.2m)
+            suggestions.Add(new("loads-empty-miles", "medium", "Reduce empty running", $"Empty mileage is {Math.Round(emptyMiles / distance * 100, 1)}% of recorded miles for the day. Review return-load suggestions and route pairing.", "Reporting", false));
         var missingDriverMobiles = drivers.Count(x => string.IsNullOrWhiteSpace(x.MobileNumber));
         if (missingDriverMobiles > 0)
             suggestions.Add(new("drivers-mobile", "medium", "Complete driver contact data", $"{missingDriverMobiles} active driver{(missingDriverMobiles == 1 ? " has" : "s have")} no dispatch mobile number.", "Drivers", false));
@@ -59,7 +69,7 @@ public sealed class TmsAssistantService(HttpClient httpClient, TmsDbContext db, 
             suggestions.Add(new("ready", "info", "Plan looks ready", "No blocking planning or master-data validation issue was found by the current safety rules.", "Planner", false));
 
         return new AssistantSnapshot(planningDate, DateTimeOffset.UtcNow, options.IsConfigured ? "OpenAI + SLH safety rules" : "SLH safety rules", options.IsConfigured,
-            new AssistantMetrics(orders.Count, unplanned.Count, loads.Count, unallocated.Count, drivers.Count, vehicles.Count, vehicleRisk), suggestions);
+            new AssistantMetrics(orders.Count, unplanned.Count, loads.Count, unallocated.Count, drivers.Count, vehicles.Count, vehicleRisk, unpriced, negativeMargin, emptyMiles), suggestions);
     }
 
     public async Task<AssistantAdvice> Advise(DateOnly planningDate, string message, string userKey, CancellationToken ct)
@@ -161,7 +171,7 @@ public sealed class TmsAssistantService(HttpClient httpClient, TmsDbContext db, 
 }
 
 public sealed record AssistantSuggestion(string Id, string Severity, string Title, string Detail, string Area, bool AutoFixAvailable);
-public sealed record AssistantMetrics(int Orders, int UnplannedOrders, int Loads, int UnallocatedLoads, int ActiveDrivers, int ActiveVehicles, int VehicleComplianceRisks);
+public sealed record AssistantMetrics(int Orders, int UnplannedOrders, int Loads, int UnallocatedLoads, int ActiveDrivers, int ActiveVehicles, int VehicleComplianceRisks, int UnpricedLoads, int NegativeMarginLoads, decimal EmptyMiles);
 public sealed record AssistantSnapshot(DateOnly PlanningDate, DateTimeOffset GeneratedAtUtc, string Source, bool AiConfigured, AssistantMetrics Metrics, IReadOnlyList<AssistantSuggestion> Suggestions);
 public sealed record AssistantAdvice(string Answer, string Source, IReadOnlyList<AssistantSuggestion> Suggestions);
 public sealed record SafeFixResult(int Applied, int Skipped, IReadOnlyList<string> Changes, IReadOnlyList<string> SkippedReasons);

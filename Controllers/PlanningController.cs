@@ -65,6 +65,25 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         await db.SaveChangesAsync(ct); return Ok(load);
     }
 
+    [HttpPut("loads/{id:guid}/commercial"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> UpdateCommercial(Guid id, UpdateLoadCommercialRequest request, CancellationToken ct)
+    {
+        var load = await db.Loads.SingleOrDefaultAsync(item => item.Id == id, ct);
+        if (load is null) return NotFound();
+        if (new decimal?[] { request.RevenueAmount, request.FuelSurchargeAmount, request.EstimatedCostAmount, request.ActualCostAmount, request.EstimatedDistanceMiles, request.EmptyMiles }.Any(value => value < 0))
+            return BadRequest("Commercial values cannot be negative.");
+        load.RevenueAmount = request.RevenueAmount;
+        load.FuelSurchargeAmount = request.FuelSurchargeAmount;
+        load.EstimatedCostAmount = request.EstimatedCostAmount;
+        load.ActualCostAmount = request.ActualCostAmount;
+        load.EstimatedDistanceMiles = request.EstimatedDistanceMiles;
+        load.EmptyMiles = request.EmptyMiles;
+        load.InvoiceStatus = Clip(request.InvoiceStatus, 40);
+        load.CommercialNotes = Clip(request.CommercialNotes, 500);
+        await db.SaveChangesAsync(ct);
+        return Ok(load);
+    }
+
     [HttpPut("loads/{id:guid}/status"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> UpdateStatus(Guid id, UpdateLoadStatusRequest request, CancellationToken ct)
     {
@@ -195,6 +214,8 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         (LoadStatus.InProgress, LoadStatus.Completed) => true,
         _ => false
     };
+
+    private static string? Clip(string? value, int length) => string.IsNullOrWhiteSpace(value) ? null : value.Trim()[..Math.Min(value.Trim().Length, length)];
 }
 
 public sealed record CreateLoadRequest(string Reference, DateOnly PlanningDate, Guid? VehicleId, Guid? DriverId, Guid? TrailerId, List<CreateLoadStopRequest> Stops);
@@ -202,3 +223,4 @@ public sealed record CreateLoadStopRequest(Guid? OrderId, string Name, string? A
 public sealed record UpdateLoadAllocationRequest(Guid? VehicleId, Guid? DriverId, Guid? TrailerId);
 public sealed record UpdateLoadStatusRequest(string Status);
 public sealed record UpdateLoadStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc);
+public sealed record UpdateLoadCommercialRequest(decimal? RevenueAmount, decimal? FuelSurchargeAmount, decimal? EstimatedCostAmount, decimal? ActualCostAmount, decimal? EstimatedDistanceMiles, decimal? EmptyMiles, string? InvoiceStatus, string? CommercialNotes);

@@ -201,6 +201,19 @@ public class AuthenticationTests : IClassFixture<CustomWebFactory>
     }
 
     [Fact]
+    public async Task Seven_day_capacity_and_margin_forecast_is_available()
+    {
+        var client = _factory.CreateClientWithUser(LyonsUser, "Tms.Access");
+        var date = DateOnly.FromDateTime(DateTime.UtcNow).ToString("yyyy-MM-dd");
+        var response = await client.GetAsync($"/api/v1/operations/forecast?from={date}");
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("\"days\"", body);
+        Assert.Contains("\"margin\"", body);
+        Assert.Contains("\"emptyMiles\"", body);
+    }
+
+    [Fact]
     public async Task Tracking_returns_stored_fallback_when_provider_is_not_configured()
     {
         var client = _factory.CreateClientWithUser(LyonsUser, "Tms.Access");

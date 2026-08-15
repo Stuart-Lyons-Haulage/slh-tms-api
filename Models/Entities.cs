@@ -151,6 +151,14 @@ public sealed class Load
     public Guid? VehicleId { get; set; }
     public Guid? DriverId { get; set; }
     public Guid? TrailerId { get; set; }
+    public decimal? RevenueAmount { get; set; }
+    public decimal? FuelSurchargeAmount { get; set; }
+    public decimal? EstimatedCostAmount { get; set; }
+    public decimal? ActualCostAmount { get; set; }
+    public decimal? EstimatedDistanceMiles { get; set; }
+    public decimal? EmptyMiles { get; set; }
+    [MaxLength(40)] public string? InvoiceStatus { get; set; }
+    [MaxLength(500)] public string? CommercialNotes { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public List<LoadStop> Stops { get; set; } = [];
 }

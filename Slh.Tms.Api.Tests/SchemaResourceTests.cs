@@ -15,6 +15,7 @@ public sealed class SchemaResourceTests
         Assert.Contains("Slh.Tms.Api.Database.009_Market_Contact_Sender.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.015_Driver_Existing_Table_Repair.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.023_Planning_Table_Complete_Repair.sql", resources);
+        Assert.Contains("Slh.Tms.Api.Database.024_Commercial_Intelligence.sql", resources);
     }
 
     [Fact]
