@@ -34,7 +34,9 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         {
             var query = db.Loads.AsNoTracking().Include(load => load.Stops).AsQueryable();
             if (date is not null) query = query.Where(load => load.PlanningDate == date);
-            return Ok(await query.OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).Take(500).ToListAsync(ct));
+            var loads = await query.OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).Take(500).ToListAsync(ct);
+            await LoadCommercialStore.EnrichAsync(db, loads, ct);
+            return Ok(loads);
         }
         catch (Exception exception) when (IsSchemaUnavailable(exception))
         {
@@ -72,15 +74,9 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         if (load is null) return NotFound();
         if (new decimal?[] { request.RevenueAmount, request.FuelSurchargeAmount, request.EstimatedCostAmount, request.ActualCostAmount, request.EstimatedDistanceMiles, request.EmptyMiles }.Any(value => value < 0))
             return BadRequest("Commercial values cannot be negative.");
-        load.RevenueAmount = request.RevenueAmount;
-        load.FuelSurchargeAmount = request.FuelSurchargeAmount;
-        load.EstimatedCostAmount = request.EstimatedCostAmount;
-        load.ActualCostAmount = request.ActualCostAmount;
-        load.EstimatedDistanceMiles = request.EstimatedDistanceMiles;
-        load.EmptyMiles = request.EmptyMiles;
-        load.InvoiceStatus = Clip(request.InvoiceStatus, 40);
-        load.CommercialNotes = Clip(request.CommercialNotes, 500);
-        await db.SaveChangesAsync(ct);
+        var values = new LoadCommercialValues(request.RevenueAmount, request.FuelSurchargeAmount, request.EstimatedCostAmount, request.ActualCostAmount,
+            request.EstimatedDistanceMiles, request.EmptyMiles, Clip(request.InvoiceStatus, 40), Clip(request.CommercialNotes, 500));
+        await LoadCommercialStore.SaveAsync(db, load, values, User.Identity?.Name, ct);
         return Ok(load);
     }
 

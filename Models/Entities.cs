@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
 
 namespace Slh.Tms.Api.Models;
 public sealed class Customer { public Guid Id { get; set; } = Guid.NewGuid(); [MaxLength(40)] public required string Code { get; set; } [MaxLength(200)] public required string Name { get; set; } public bool Active { get; set; } = true; }
@@ -151,14 +152,14 @@ public sealed class Load
     public Guid? VehicleId { get; set; }
     public Guid? DriverId { get; set; }
     public Guid? TrailerId { get; set; }
-    public decimal? RevenueAmount { get; set; }
-    public decimal? FuelSurchargeAmount { get; set; }
-    public decimal? EstimatedCostAmount { get; set; }
-    public decimal? ActualCostAmount { get; set; }
-    public decimal? EstimatedDistanceMiles { get; set; }
-    public decimal? EmptyMiles { get; set; }
-    [MaxLength(40)] public string? InvoiceStatus { get; set; }
-    [MaxLength(500)] public string? CommercialNotes { get; set; }
+    [NotMapped] public decimal? RevenueAmount { get; set; }
+    [NotMapped] public decimal? FuelSurchargeAmount { get; set; }
+    [NotMapped] public decimal? EstimatedCostAmount { get; set; }
+    [NotMapped] public decimal? ActualCostAmount { get; set; }
+    [NotMapped] public decimal? EstimatedDistanceMiles { get; set; }
+    [NotMapped] public decimal? EmptyMiles { get; set; }
+    [NotMapped, MaxLength(40)] public string? InvoiceStatus { get; set; }
+    [NotMapped, MaxLength(500)] public string? CommercialNotes { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public List<LoadStop> Stops { get; set; } = [];
 }

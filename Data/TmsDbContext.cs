@@ -37,12 +37,6 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<TransportOrder>().HasIndex(x => x.CollectionDate);
         b.Entity<Load>().HasIndex(x => x.Reference).IsUnique();
         b.Entity<Load>().HasIndex(x => x.PlanningDate);
-        b.Entity<Load>().Property(x => x.RevenueAmount).HasPrecision(12, 2);
-        b.Entity<Load>().Property(x => x.FuelSurchargeAmount).HasPrecision(12, 2);
-        b.Entity<Load>().Property(x => x.EstimatedCostAmount).HasPrecision(12, 2);
-        b.Entity<Load>().Property(x => x.ActualCostAmount).HasPrecision(12, 2);
-        b.Entity<Load>().Property(x => x.EstimatedDistanceMiles).HasPrecision(10, 1);
-        b.Entity<Load>().Property(x => x.EmptyMiles).HasPrecision(10, 1);
         b.Entity<LoadStop>().HasIndex(x => new { x.LoadId, x.Sequence }).IsUnique();
         b.Entity<Load>().HasMany(x => x.Stops).WithOne().HasForeignKey(x => x.LoadId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<LoadStop>().Property(x => x.Latitude).HasPrecision(9, 6);
