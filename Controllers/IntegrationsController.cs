@@ -123,24 +123,49 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
                 .Select(group => group.First())
                 .ToList();
             var created = 0; var updated = 0; var skipped = rawCandidates.Count - candidates.Count;
+            var existingNumbers = (await db.Drivers.AsNoTracking().Select(driver => driver.EmployeeNumber).ToListAsync(ct))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            await using var transaction = await db.Database.BeginTransactionAsync(ct);
             foreach (var employee in candidates)
             {
                 var employeeNumber = ClipRequired(string.IsNullOrWhiteSpace(employee.EmployeeNumber) ? $"SAGE-{employee.Id}" : employee.EmployeeNumber.Trim(), 40);
                 var displayName = ClipRequired($"{employee.FirstName} {employee.LastName}".Trim(), 160);
                 if (string.IsNullOrWhiteSpace(displayName)) { skipped++; continue; }
-                var driver = await db.Drivers.SingleOrDefaultAsync(item => item.EmployeeNumber == employeeNumber, ct);
-                if (driver is null)
+                var mobileNumber = Clip(employee.MobilePhone, 40);
+                var driverType = Clip(employee.Position, 80);
+                var driverGroup = Clip(employee.Team, 80);
+                string? tachoName = null;
+                string? skills = null;
+                if (!existingNumbers.Contains(employeeNumber))
                 {
-                    db.Drivers.Add(new Driver { EmployeeNumber = employeeNumber, DisplayName = displayName, MobileNumber = Clip(employee.MobilePhone, 40), DriverType = Clip(employee.Position, 80), DriverGroup = Clip(employee.Team, 80), Active = true });
+                    var id = Guid.NewGuid();
+                    await db.Database.ExecuteSqlInterpolatedAsync($@"
+                        INSERT INTO dbo.Drivers (Id, EmployeeNumber, DisplayName, TachoName, MobileNumber, DriverType, DriverGroup, Skills, Active)
+                        VALUES ({id}, {employeeNumber}, {displayName}, {tachoName}, {mobileNumber}, {driverType}, {driverGroup}, {skills}, {true})", ct);
+                    existingNumbers.Add(employeeNumber);
                     created++;
                 }
                 else
                 {
-                    driver.DisplayName = displayName; driver.MobileNumber = Clip(employee.MobilePhone, 40); driver.DriverType = Clip(employee.Position, 80); driver.DriverGroup = Clip(employee.Team, 80); driver.Active = true;
+                    await db.Database.ExecuteSqlInterpolatedAsync($@"
+                        UPDATE dbo.Drivers SET DisplayName = {displayName}, MobileNumber = {mobileNumber}, DriverType = {driverType}, DriverGroup = {driverGroup}, Active = {true}
+                        WHERE EmployeeNumber = {employeeNumber}", ct);
                     updated++;
                 }
             }
+            db.StagedImports.Add(new StagedImport
+            {
+                EntityType = "sagehrsync",
+                IdempotencyKey = $"sagehrsync:{Guid.NewGuid():N}",
+                PayloadJson = JsonSerializer.Serialize(new { sourceEmployeeCount = employees.Count, driverCandidateCount = candidates.Count, created, updated, skipped }),
+                Source = "Sage HR driver synchronisation",
+                Status = StagingStatus.Promoted,
+                ReviewedAtUtc = DateTimeOffset.UtcNow,
+                ReviewedBy = User.Identity?.Name,
+                ReviewNote = "Transactional Sage HR sync using the production-compatible driver columns."
+            });
             await db.SaveChangesAsync(ct);
+            await transaction.CommitAsync(ct);
             return Ok(new { sourceEmployeeCount = employees.Count, driverCandidateCount = candidates.Count, created, updated, skipped, syncedAtUtc = DateTimeOffset.UtcNow });
         }
         catch (Exception exception)
