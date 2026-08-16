@@ -3,6 +3,9 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Services;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace Slh.Tms.Api.Controllers;
 [ApiController, Route("api/v1")]
@@ -11,11 +14,25 @@ public sealed class LookupsController(TmsDbContext db) : ControllerBase
 {
     [HttpGet("customers")] public async Task<IActionResult> Customers([FromQuery] string? q, CancellationToken ct) => Ok(await db.Customers.AsNoTracking().Where(x => x.Active && (q == null || x.Code.Contains(q) || x.Name.Contains(q))).OrderBy(x => x.Name).Take(5000).ToListAsync(ct));
     [HttpGet("customer-contacts")] public async Task<IActionResult> CustomerContacts([FromQuery] string? q, CancellationToken ct) => Ok(await db.CustomerContacts.AsNoTracking().Where(x => x.Active && (q == null || x.CustomerCode.Contains(q) || x.Name.Contains(q) || (x.Email != null && x.Email.Contains(q)))).OrderBy(x => x.CustomerCode).ThenBy(x => x.Name).Take(5000).ToListAsync(ct));
-    [HttpGet("vehicles")] public async Task<IActionResult> Vehicles([FromQuery] string? q, CancellationToken ct) => Ok(await db.Vehicles.AsNoTracking().Where(x => x.Active && (q == null || x.Registration.Contains(q) || (x.FleetNumber != null && x.FleetNumber.Contains(q)))).OrderBy(x => x.Registration).Take(5000).ToListAsync(ct));
-    [HttpGet("drivers")] public async Task<IActionResult> Drivers([FromQuery] string? q, CancellationToken ct) => Ok(await db.Drivers.AsNoTracking().Where(x => x.Active && (q == null || x.EmployeeNumber.Contains(q) || x.DisplayName.Contains(q))).OrderBy(x => x.DisplayName).Take(5000).ToListAsync(ct));
+    [HttpGet("vehicles")] public async Task<IActionResult> Vehicles([FromQuery] string? q, CancellationToken ct)
+    {
+        var rows = await db.Vehicles.AsNoTracking().Where(x => x.Active && (q == null || x.Registration.Contains(q) || (x.FleetNumber != null && x.FleetNumber.Contains(q)))).OrderBy(x => x.Registration).Take(5000).ToListAsync(ct);
+        return Ok(rows.Where(vehicle => !Regex.IsMatch(vehicle.Registration, "^C\\d{5,}$", RegexOptions.IgnoreCase)));
+    }
+    [HttpGet("drivers")] public async Task<IActionResult> Drivers([FromQuery] string? q, CancellationToken ct)
+    {
+        var rows = await db.Drivers.AsNoTracking().Where(x => x.Active && (q == null || x.EmployeeNumber.Contains(q) || x.DisplayName.Contains(q))).OrderBy(x => x.DisplayName).Take(5000).ToListAsync(ct);
+        await MasterDetailStore.EnrichDriversAsync(db, rows, ct);
+        return Ok(rows);
+    }
     [HttpGet("trailers")] public async Task<IActionResult> Trailers([FromQuery] string? q, CancellationToken ct) => Ok(await db.Trailers.AsNoTracking().Where(x => x.Active && (q == null || x.TrailerNumber.Contains(q) || (x.Type != null && x.Type.Contains(q)))).OrderBy(x => x.TrailerNumber).Take(5000).ToListAsync(ct));
     [HttpGet("sites")] public async Task<IActionResult> Sites([FromQuery] string? q, CancellationToken ct) => Ok(await db.Sites.AsNoTracking().Where(x => x.Active && (q == null || x.Name.Contains(q) || (x.DriverTextName != null && x.DriverTextName.Contains(q)))).OrderBy(x => x.Name).Take(5000).ToListAsync(ct));
-    [HttpGet("market-contacts")] public async Task<IActionResult> MarketContacts([FromQuery] string? q, CancellationToken ct) => Ok(await db.MarketContacts.AsNoTracking().Where(x => x.Active && (q == null || x.Name.Contains(q) || x.Market.Contains(q))).OrderBy(x => x.Market).ThenBy(x => x.Name).Take(5000).ToListAsync(ct));
+    [HttpGet("market-contacts")] public async Task<IActionResult> MarketContacts([FromQuery] string? q, CancellationToken ct)
+    {
+        var rows = await db.MarketContacts.AsNoTracking().Where(x => x.Active && (q == null || x.Name.Contains(q) || x.Market.Contains(q))).OrderBy(x => x.Market).ThenBy(x => x.Name).Take(5000).ToListAsync(ct);
+        foreach (var row in rows) row.Market = CanonicalMarket(row.Market);
+        return Ok(rows.OrderBy(row => row.Market).ThenBy(row => row.Name));
+    }
 
 
     [HttpPut("vehicles/{id:guid}")]
@@ -55,7 +72,9 @@ public sealed class LookupsController(TmsDbContext db) : ControllerBase
         if (string.IsNullOrWhiteSpace(employeeNumber) || string.IsNullOrWhiteSpace(request.DisplayName)) return BadRequest(new { message = "Employee number and display name are required." });
         if (await db.Drivers.AnyAsync(x => x.Id != id && x.EmployeeNumber == employeeNumber, ct)) return Conflict(new { message = $"Employee number {employeeNumber} already exists." });
         driver.EmployeeNumber = employeeNumber; driver.DisplayName = ClipRequired(request.DisplayName, 160); driver.TachoName = Clip(request.TachoName, 160); driver.MobileNumber = Clip(request.MobileNumber, 40); driver.DriverType = Clip(request.DriverType, 80); driver.DriverGroup = Clip(request.DriverGroup, 80); driver.Skills = Clip(request.Skills, 160); driver.Coding = Clip(request.Coding, 80); driver.AgencyName = Clip(request.AgencyName, 160); driver.NorthEligible = request.NorthEligible; driver.PreloadEligible = request.PreloadEligible; driver.Notes = Clip(request.Notes, 500); driver.TachoMasterDriverId = Clip(request.TachoMasterDriverId, 80); driver.DrivingLicenceNumber = Clip(request.DrivingLicenceNumber, 80); driver.LicenceExpiry = request.LicenceExpiry; driver.LicenceStatus = Clip(request.LicenceStatus, 40); driver.Active = request.Active;
-        await db.SaveChangesAsync(ct); return Ok(driver);
+        await db.SaveChangesAsync(ct);
+        await MasterDetailStore.SaveAsync(db, "driver", employeeNumber, JsonSerializer.Serialize(request), "SLH driver editor", User.Identity?.Name, ct);
+        return Ok(driver);
     }
 
     [HttpPut("trailers/{id:guid}"), Authorize(Policy = "TmsWrite")]
@@ -84,6 +103,15 @@ public sealed class LookupsController(TmsDbContext db) : ControllerBase
 
     private static string? Clip(string? value, int maxLength) => string.IsNullOrWhiteSpace(value) ? null : value.Trim().Length <= maxLength ? value.Trim() : value.Trim()[..maxLength];
     private static string ClipRequired(string value, int maxLength) => value.Trim().Length <= maxLength ? value.Trim() : value.Trim()[..maxLength];
+    private static string CanonicalMarket(string value)
+    {
+        var normal = new string(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+        if (normal.Contains("covent")) return "Covent";
+        if (normal.Contains("spit")) return "Spit";
+        if (normal.Contains("western")) return "Western";
+        if (normal.Contains("sender")) return "Sender";
+        return string.IsNullOrWhiteSpace(value) ? "General" : value.Trim();
+    }
 }
 
 public sealed record VehicleUpdateRequest(string Registration, string? FleetNumber, string? Abbreviation, string? Transmission, bool? DvsCompliant, string? FuelProvider, string? CabMobile, string? FuelPin, string? ShellCard, string? BpRedCard, string? BpPlainCard, string? Notes, string? FuelPinSecretName, string? FuelCardLastFour, bool Active);

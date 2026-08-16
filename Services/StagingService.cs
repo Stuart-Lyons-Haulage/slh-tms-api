@@ -19,6 +19,16 @@ public sealed class StagingService(TmsDbContext db)
     {
         var item = new StagedImport { EntityType = entityType.ToLowerInvariant(), IdempotencyKey = $"direct:{Guid.NewGuid():N}", PayloadJson = payload.GetRawText(), Source = "Direct master-data apply" };
         await Promote(item, ct);
+        var detailKey = entityType.ToLowerInvariant() switch
+        {
+            "driver" => Text(payload, "employeeNumber") ?? Text(payload, "driverId") ?? Text(payload, "payrollNumber"),
+            "vehicle" => Text(payload, "registration"),
+            "trailer" => Text(payload, "trailerNumber"),
+            "site" => Text(payload, "externalCode"),
+            _ => null
+        };
+        if (!string.IsNullOrWhiteSpace(detailKey))
+            await MasterDetailStore.SaveAsync(db, entityType, detailKey, payload.GetRawText(), "SLH master workbook", null, ct);
     }
 
     public async Task RegisterFallback(string entityType, JsonElement payload, string? source, CancellationToken ct)
@@ -240,7 +250,7 @@ public sealed class StagingService(TmsDbContext db)
 
     private async Task PromoteMarketContact(JsonElement payload, CancellationToken ct)
     {
-        var market = ClipRequired(Text(payload, "market") ?? Text(payload, "marketName") ?? "General", 80);
+        var market = CanonicalMarket(ClipRequired(Text(payload, "market") ?? Text(payload, "marketName") ?? "General", 80));
         var name = Clip(Text(payload, "name") ?? Text(payload, "contactName") ?? Text(payload, "sellerName"), 200);
         if (string.IsNullOrWhiteSpace(name)) throw new JsonException("Market contact payload requires name.");
         var contact = await db.MarketContacts.SingleOrDefaultAsync(item => item.Market == market && item.Name == name, ct);
@@ -310,6 +320,15 @@ public sealed class StagingService(TmsDbContext db)
     private static bool Bool(JsonElement payload, string name, bool fallback) => bool.TryParse(Text(payload, name), out var value) ? value : fallback;
     private static bool? BoolOrNull(JsonElement payload, string name) => bool.TryParse(Text(payload, name), out var value) ? value : null;
     private static DateOnly? DateOnlyOrNull(JsonElement payload, string name) => DateOnly.TryParse(Text(payload, name), out var value) ? value : null;
+    private static string CanonicalMarket(string value)
+    {
+        var normal = NormaliseKey(value);
+        if (normal.Contains("covent")) return "Covent";
+        if (normal.Contains("spit")) return "Spit";
+        if (normal.Contains("western")) return "Western";
+        if (normal.Contains("sender")) return "Sender";
+        return string.IsNullOrWhiteSpace(value) ? "General" : value.Trim();
+    }
     private static string? Clip(string? value, int maxLength) => string.IsNullOrWhiteSpace(value) ? null : value.Length <= maxLength ? value : value[..maxLength];
     private static string ClipRequired(string value, int maxLength) => value.Length <= maxLength ? value : value[..maxLength];
 }

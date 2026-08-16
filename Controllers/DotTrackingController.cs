@@ -5,6 +5,7 @@ using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
+using System.Text.RegularExpressions;
 
 namespace Slh.Tms.Api.Controllers;
 
@@ -94,7 +95,8 @@ public sealed class DotTrackingController(
             .OrderBy(vehicle => vehicle.Registration)
             .Select(vehicle => new { vehicle.Id, vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation, vehicle.FleetioStatus })
             .ToListAsync(cancellationToken);
-        var vehicles = vehicleRows.Select(vehicle => new FleetVehicleMaster(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation, vehicle.FleetioStatus, null, null, null, null)).ToList();
+        var vehicles = vehicleRows.Where(vehicle => !Regex.IsMatch(vehicle.Registration, "^C\\d{5,}$", RegexOptions.IgnoreCase))
+            .Select(vehicle => new FleetVehicleMaster(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation, vehicle.FleetioStatus, null, null, null, null)).ToList();
         List<VehicleLiveStatus> liveStatuses = freshLiveStatuses;
         if (liveStatuses.Count == 0)
         {

@@ -187,6 +187,9 @@ if (!app.Environment.IsEnvironment("Testing"))
     try
     {
         await PlanningSchemaInitializer.Apply(db, logger, CancellationToken.None);
+        var quarantinedFleetioPlaceholders = await MasterDetailStore.QuarantineFleetioPlaceholdersAsync(db, CancellationToken.None);
+        if (quarantinedFleetioPlaceholders > 0)
+            logger.LogWarning("Quarantined {PlaceholderCount} Fleetio placeholder vehicle records from operational master data.", quarantinedFleetioPlaceholders);
         var register = scope.ServiceProvider.GetRequiredService<StagingService>();
         // Link a small recovery batch without turning every cold start into a
         // long-running import. Remaining rows stay safe in the register and can

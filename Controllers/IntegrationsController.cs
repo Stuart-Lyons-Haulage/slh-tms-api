@@ -201,7 +201,8 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
         try
         {
             var fleetioVehicles = await fleetioClient.GetVehiclesAsync(100, ct);
-            var tmsVehicles = await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(ct);
+            var tmsVehicles = (await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(ct))
+                .Where(vehicle => !Regex.IsMatch(vehicle.Registration, "^C\\d{5,}$", RegexOptions.IgnoreCase)).ToList();
             var fleetioLookup = BuildFleetioLookup(fleetioVehicles);
             var matchedFleetioIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var records = tmsVehicles.Select(vehicle =>
@@ -235,16 +236,16 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
             var updated = 0;
             var created = 0;
             var missingInFleetio = 0;
+            var quarantinedPlaceholders = 0;
             foreach (var vehicle in tmsVehicles)
             {
                 // Fleetio can expose unregistered assets as C###### identifiers.
                 // They are not TMS vehicles and must not be promoted into the
                 // master register when the workbook is the source of truth.
-                if (Regex.IsMatch(vehicle.Registration, "^C\\d{6}$", RegexOptions.IgnoreCase) &&
-                    string.IsNullOrWhiteSpace(vehicle.FleetNumber) &&
-                    string.IsNullOrWhiteSpace(vehicle.Abbreviation))
+                if (Regex.IsMatch(vehicle.Registration, "^C\\d{5,}$", RegexOptions.IgnoreCase))
                 {
                     vehicle.Active = false;
+                    quarantinedPlaceholders++;
                     continue;
                 }
                 var match = VehicleKeys(vehicle.Registration).Select(key => fleetioLookup.GetValueOrDefault(key)).FirstOrDefault(item => item is not null);
@@ -263,7 +264,7 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
             // Do not create Fleetio-only vehicles. The workbook/master register
             // is authoritative; Fleetio is an enrichment source only.
             await db.SaveChangesAsync(ct);
-            return Ok(new { sourceVehicleCount = fleetioVehicles.Count, tmsVehicleCount = tmsVehicles.Count + created, updated, created, missingInFleetio, syncedAtUtc = DateTimeOffset.UtcNow });
+            return Ok(new { sourceVehicleCount = fleetioVehicles.Count, tmsVehicleCount = tmsVehicles.Count - quarantinedPlaceholders, updated, created, missingInFleetio, quarantinedPlaceholders, syncedAtUtc = DateTimeOffset.UtcNow });
         }
         catch (Exception exception)
         {
