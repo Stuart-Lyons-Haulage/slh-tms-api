@@ -124,17 +124,21 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
             var pallets = (int)Math.Ceiling(dayLoads.Sum(load => load.PalletSpacesUsed ?? 0));
             if (pallets == 0) pallets = dayOrderIds.Sum(id => orders.TryGetValue(id, out var order) ? order.Pallets ?? 0 : 0);
             var plannedCapacity = (int)Math.Ceiling(dayLoads.Sum(load => load.TotalPalletSpaces ?? 0));
+            var utilisation = plannedCapacity > 0 ? Math.Round((decimal)pallets / plannedCapacity * 100, 1) : (decimal?)null;
+            var overCapacityLoads = dayLoads.Count(load => load.TotalPalletSpaces > 0 && load.PalletSpacesUsed > load.TotalPalletSpaces);
             var revenue = dayLoads.Sum(load => (load.RevenueAmount ?? 0) + (load.FuelSurchargeAmount ?? 0));
             var cost = dayLoads.Sum(load => load.ActualCostAmount ?? load.EstimatedCostAmount ?? 0);
             var distance = dayLoads.Sum(load => load.EstimatedDistanceMiles ?? 0);
             var emptyMiles = dayLoads.Sum(load => load.EmptyMiles ?? 0);
             var assignedDrivers = dayLoads.Where(load => load.DriverId != null).Select(load => load.DriverId).Distinct().Count();
             var assignedVehicles = dayLoads.Where(load => load.VehicleId != null).Select(load => load.VehicleId).Distinct().Count();
-            var exceptions = dayLoads.Count(load => load.DriverId is null || load.VehicleId is null || load.Stops.Any(stop => stop.Latitude is null || stop.Longitude is null) || load.RevenueAmount is null);
+            var exceptions = dayLoads.Count(load => load.DriverId is null || load.VehicleId is null || load.Stops.Any(stop => stop.Latitude is null || stop.Longitude is null) || load.RevenueAmount is null
+                || load.TotalPalletSpaces > 0 && load.PalletSpacesUsed > load.TotalPalletSpaces);
             return new ForecastDay(date, dayLoads.Count, assignedDrivers, activeDrivers, assignedVehicles, activeVehicles, pallets, plannedCapacity > 0 ? plannedCapacity : activeTrailerCapacity,
                 revenue, cost, revenue - cost, revenue > 0 ? Math.Round((revenue - cost) / revenue * 100, 1) : null,
                 distance, emptyMiles, distance > 0 ? Math.Round(emptyMiles / distance * 100, 1) : null,
-                dayLoads.Count(load => load.RevenueAmount is null), dayLoads.Count(load => string.IsNullOrWhiteSpace(load.InvoiceStatus)), exceptions);
+                dayLoads.Count(load => load.RevenueAmount is null), dayLoads.Count(load => string.IsNullOrWhiteSpace(load.InvoiceStatus)), exceptions,
+                utilisation, overCapacityLoads);
         }).ToList();
         return Ok(new
         {
@@ -151,7 +155,12 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
                 cost = days.Sum(day => day.Cost),
                 margin = days.Sum(day => day.Margin),
                 emptyMiles = days.Sum(day => day.EmptyMiles),
-                exceptions = days.Sum(day => day.Exceptions)
+                exceptions = days.Sum(day => day.Exceptions),
+                plannedPallets = days.Sum(day => day.PlannedPallets),
+                availableTrailerPallets = days.Sum(day => day.AvailableTrailerPallets),
+                utilisationPercent = days.Sum(day => day.AvailableTrailerPallets) > 0
+                    ? Math.Round((decimal)days.Sum(day => day.PlannedPallets) / days.Sum(day => day.AvailableTrailerPallets) * 100, 1) : (decimal?)null,
+                overCapacityLoads = days.Sum(day => day.OverCapacityLoads)
             }
         });
     }
@@ -204,4 +213,4 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
 }
 
 public sealed record DeliveryEtaResponse(Guid LoadId, string LoadReference, string LoadStatus, Guid StopId, int Sequence, string StopName, string? OrderReference, string? CustomerCode, string? VehicleRegistration, DateTimeOffset? EtaUtc, string Source, DateTimeOffset? DeliveryWindowStartUtc, DateTimeOffset? DeliveryWindowEndUtc, string Risk, DateTimeOffset? TrackingUpdatedAtUtc, string? TachoDriverName, int? DriveAvailableTodayMinutes, int RouteDrivingMinutes, int BreakMinutesIncluded, string TachoStatus, string TachoExplanation);
-public sealed record ForecastDay(DateOnly Date, int Loads, int AssignedDrivers, int AvailableDrivers, int AssignedVehicles, int AvailableVehicles, int PlannedPallets, int AvailableTrailerPallets, decimal Revenue, decimal Cost, decimal Margin, decimal? MarginPercent, decimal DistanceMiles, decimal EmptyMiles, decimal? EmptyMilePercent, int UnpricedLoads, int UninvoicedLoads, int Exceptions);
+public sealed record ForecastDay(DateOnly Date, int Loads, int AssignedDrivers, int AvailableDrivers, int AssignedVehicles, int AvailableVehicles, int PlannedPallets, int AvailableTrailerPallets, decimal Revenue, decimal Cost, decimal Margin, decimal? MarginPercent, decimal DistanceMiles, decimal EmptyMiles, decimal? EmptyMilePercent, int UnpricedLoads, int UninvoicedLoads, int Exceptions, decimal? UtilisationPercent, int OverCapacityLoads);

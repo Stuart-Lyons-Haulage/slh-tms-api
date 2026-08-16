@@ -15,7 +15,7 @@ public sealed class MasterDetailStoreTests
         var driver = new Driver { EmployeeNumber = "D-17", DisplayName = "Test Driver" };
         db.Drivers.Add(driver);
         await db.SaveChangesAsync();
-        await MasterDetailStore.SaveAsync(db, "driver", "D-17", """{"employeeNumber":"D-17","coding":"FT","agencyName":"SLH","northEligible":true,"preloadEligible":false,"drivingLicenceNumber":"LIC17","licenceExpiry":"2027-03-04","licenceStatus":"Valid","tachoMasterDriverId":"TM17","notes":"Master note"}""", "test", "tester", CancellationToken.None);
+        await MasterDetailStore.SaveAsync(db, "driver", "D-17", """{"employeeNumber":"D-17","coding":"FT","agencyName":"SLH","northEligible":true,"preloadEligible":false,"drivingLicenceNumber":"LIC17","licenceExpiry":"2027-03-04","licenceStatus":"Valid","tachoMasterDriverId":"TM17","tachoCardNumber":"CARD17","tachoDriveAvailableTodayMinutes":238,"tachoDriveAvailableWeekMinutes":1260,"tachoWorkAvailableWeekMinutes":1800,"lastTachoSyncUtc":"2026-08-16T20:00:00Z","notes":"Master note"}""", "test", "tester", CancellationToken.None);
 
         db.ChangeTracker.Clear();
         var rows = await db.Drivers.AsNoTracking().ToListAsync();
@@ -29,6 +29,11 @@ public sealed class MasterDetailStoreTests
         Assert.Equal("LIC17", enriched.DrivingLicenceNumber);
         Assert.Equal(new DateOnly(2027, 3, 4), enriched.LicenceExpiry);
         Assert.Equal("TM17", enriched.TachoMasterDriverId);
+        Assert.Equal("CARD17", enriched.TachoCardNumber);
+        Assert.Equal(238, enriched.TachoDriveAvailableTodayMinutes);
+        Assert.Equal(1260, enriched.TachoDriveAvailableWeekMinutes);
+        Assert.Equal(1800, enriched.TachoWorkAvailableWeekMinutes);
+        Assert.Equal(DateTimeOffset.Parse("2026-08-16T20:00:00Z"), enriched.LastTachoSyncUtc);
     }
 
     [Fact]

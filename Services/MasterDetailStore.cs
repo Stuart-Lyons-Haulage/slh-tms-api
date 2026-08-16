@@ -51,9 +51,14 @@ public static class MasterDetailStore
                 driver.PreloadEligible = Bool(payload, "preloadEligible");
                 driver.Notes = Text(payload, "notes");
                 driver.TachoMasterDriverId = Text(payload, "tachoMasterDriverId") ?? Text(payload, "tachomasterDriverId");
+                driver.TachoCardNumber = Text(payload, "tachoCardNumber") ?? Text(payload, "cardNumber");
+                driver.TachoDriveAvailableTodayMinutes = Int(payload, "tachoDriveAvailableTodayMinutes");
+                driver.TachoDriveAvailableWeekMinutes = Int(payload, "tachoDriveAvailableWeekMinutes");
+                driver.TachoWorkAvailableWeekMinutes = Int(payload, "tachoWorkAvailableWeekMinutes");
                 driver.DrivingLicenceNumber = Text(payload, "drivingLicenceNumber") ?? Text(payload, "licenceNumber");
                 driver.LicenceExpiry = DateOnly.TryParse(Text(payload, "licenceExpiry"), out var expiry) ? expiry : null;
                 driver.LicenceStatus = Text(payload, "licenceStatus");
+                driver.LastTachoSyncUtc = DateTimeOffset.TryParse(Text(payload, "lastTachoSyncUtc"), out var sync) ? sync : null;
             }
             catch (JsonException) { }
         }
@@ -82,4 +87,5 @@ public static class MasterDetailStore
         return null;
     }
     private static bool? Bool(JsonElement payload, string name) => bool.TryParse(Text(payload, name), out var value) ? value : null;
+    private static int? Int(JsonElement payload, string name) => int.TryParse(Text(payload, name), out var value) ? value : null;
 }

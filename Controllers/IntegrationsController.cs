@@ -72,6 +72,46 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
         }
     }
 
+    [HttpPost("tachomaster/sync-drivers"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> SyncTachoMasterDrivers(CancellationToken ct)
+    {
+        if (!tachoMaster.IsConfigured)
+            return BadRequest(new { configured = false, matched = 0, missingSettings = tachoMaster.MissingSettings, message = "TachoMaster is not configured." });
+        try
+        {
+            var profiles = await tachoMaster.GetDriverProfilesAsync(ct);
+            var drivers = await db.Drivers.Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToListAsync(ct);
+            await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
+            var byName = profiles.GroupBy(profile => NormalisePersonName(profile.DriverName)).ToDictionary(group => group.Key, group => group.First());
+            var byEmployee = profiles.Where(profile => !string.IsNullOrWhiteSpace(profile.EmployeeNumber))
+                .GroupBy(profile => NormalisePersonName(profile.EmployeeNumber)).ToDictionary(group => group.Key, group => group.First());
+            var matched = 0;
+            foreach (var driver in drivers)
+            {
+                TachoDriverProfile? profile = null;
+                if (!string.IsNullOrWhiteSpace(driver.TachoName)) byName.TryGetValue(NormalisePersonName(driver.TachoName), out profile);
+                if (profile is null && !string.IsNullOrWhiteSpace(driver.EmployeeNumber)) byEmployee.TryGetValue(NormalisePersonName(driver.EmployeeNumber), out profile);
+                if (profile is null) continue;
+                driver.TachoMasterDriverId = profile.MemberCode.ToString();
+                driver.TachoCardNumber = profile.CardNumber;
+                driver.TachoDriveAvailableTodayMinutes = profile.DriveAvailableTodayMinutes;
+                driver.TachoDriveAvailableWeekMinutes = profile.DriveAvailableWeekMinutes;
+                driver.TachoWorkAvailableWeekMinutes = profile.WorkAvailableWeekMinutes;
+                driver.LastTachoSyncUtc = DateTimeOffset.UtcNow;
+                await MasterDetailStore.SaveAsync(db, "driver", driver.EmployeeNumber, JsonSerializer.Serialize(driver), "TachoMaster driver directory", User.Identity?.Name, ct);
+                matched++;
+            }
+            return Ok(new { configured = true, connected = true, sourceDrivers = profiles.Count, matched, unmatched = Math.Max(drivers.Count - matched, 0), syncedAtUtc = DateTimeOffset.UtcNow,
+                message = $"TachoMaster matched {matched} driver(s), using the Tacho Name column first." });
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "TachoMaster driver directory sync failed.");
+            return Ok(new { configured = true, connected = false, sourceDrivers = 0, matched = 0, unmatched = 0, syncedAtUtc = DateTimeOffset.UtcNow,
+                message = $"TachoMaster driver sync failed: {exception.GetBaseException().Message}. No master driver records were changed." });
+        }
+    }
+
     [HttpGet("roadtech/status")]
     public async Task<IActionResult> RoadTechStatus(CancellationToken ct)
     {
@@ -178,6 +218,11 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
     private bool IsDriver(SageHrEmployee employee) =>
         (!string.IsNullOrWhiteSpace(sageHr.DriverTeamName) && string.Equals(employee.Team, sageHr.DriverTeamName, StringComparison.OrdinalIgnoreCase)) ||
         (!string.IsNullOrWhiteSpace(sageHr.DriverPositionKeyword) && employee.Position?.Contains(sageHr.DriverPositionKeyword, StringComparison.OrdinalIgnoreCase) == true);
+
+    private static string NormalisePersonName(string? value) => string.Join(' ', (value ?? string.Empty)
+        .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+        .Select(word => new string(word.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray()))
+        .Where(word => word.Length > 0).OrderBy(word => word, StringComparer.Ordinal));
 
     [HttpGet("fleetio/status")]
     public async Task<IActionResult> FleetioStatus(CancellationToken ct)

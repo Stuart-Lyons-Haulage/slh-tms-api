@@ -40,6 +40,23 @@ public sealed class TachoMasterClient
         return statuses.ToDictionary(item => item.Key, item => item.Value.DriverName);
     }
 
+    public async Task<IReadOnlyList<TachoDriverProfile>> GetDriverProfilesAsync(CancellationToken cancellationToken = default)
+    {
+        if (!options.IsConfigured) return [];
+        var sid = await LoginAsync(cancellationToken);
+        var membersTask = GetMembersAsync(sid, cancellationToken);
+        var metricsTask = TryGetMemberMetricsAsync(sid, cancellationToken);
+        await Task.WhenAll(membersTask, metricsTask);
+        var metrics = (await metricsTask).GroupBy(item => item.MemCode)
+            .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.DateTimeWhenValid).First());
+        return (await membersTask).GroupBy(item => item.MemCode).Select(group => group.First()).Select(member =>
+        {
+            metrics.TryGetValue(member.MemCode, out var metric);
+            return new TachoDriverProfile(member.MemCode, DriverName(member), member.CardNoShort, member.EmployeeNumber,
+                metric?.DateTimeWhenValid, metric?.DriveAvailableToday, metric?.DriveAvailableWeek, metric?.WorkAvaiableWeek);
+        }).Where(profile => !string.IsNullOrWhiteSpace(profile.DriverName)).OrderBy(profile => profile.DriverName).ToList();
+    }
+
     public async Task<IReadOnlyDictionary<string, TachoVehicleDriverStatus>> GetCurrentDriverStatusesByVehicleAsync(
         DateOnly date,
         CancellationToken cancellationToken = default)
@@ -342,3 +359,6 @@ public sealed record TachoVehicleDriverStatus(
     int? LongDaysWorkedThisWeek,
     int? ShortDailyRestTakenThisWeek,
     int? WorkAvailableWeekMinutes);
+
+public sealed record TachoDriverProfile(int MemberCode, string DriverName, string? CardNumber, string? EmployeeNumber,
+    DateTimeOffset? MetricsValidAtUtc, int? DriveAvailableTodayMinutes, int? DriveAvailableWeekMinutes, int? WorkAvailableWeekMinutes);

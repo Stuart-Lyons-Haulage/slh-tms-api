@@ -129,8 +129,6 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
     public async Task<IActionResult> UpdateUtilisation(Guid id, UpdateLoadUtilisationRequest request, CancellationToken ct)
     {
         if (request.PalletSpacesUsed < 0 || request.TotalPalletSpaces < 0) return BadRequest("Capacity values cannot be negative.");
-        if (request.TotalPalletSpaces > 0 && request.PalletSpacesUsed > request.TotalPalletSpaces)
-            return BadRequest("Pallet spaces used cannot exceed the available capacity. Split the work across another load or confirm a larger capacity.");
         Load? load;
         var register = false;
         try

@@ -32,4 +32,18 @@ public sealed class LoadUtilisationTests
 
         Assert.Null(load.UtilisationPercent);
     }
+
+    [Fact]
+    public void ShowsOverCapacityAsAVisiblePercentage()
+    {
+        var load = new Load
+        {
+            Reference = "SLH1208C",
+            PlanningDate = new DateOnly(2026, 8, 12),
+            PalletSpacesUsed = 27,
+            TotalPalletSpaces = 26
+        };
+
+        Assert.Equal(103.8m, load.UtilisationPercent);
+    }
 }
