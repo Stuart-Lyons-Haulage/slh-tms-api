@@ -2,12 +2,11 @@ using Slh.Tms.Api.Models.Tracking;
 
 namespace Slh.Tms.Api.Services;
 
-public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactory, ILogger<DotTrackingIngestionService> logger) : BackgroundService
+public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactory, DotTrackingOptions options, ILogger<DotTrackingIngestionService> logger) : BackgroundService
 {
-    private static readonly TimeSpan PollInterval = TimeSpan.FromMinutes(5);
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        var pollInterval = TimeSpan.FromMinutes(Math.Max(1, options.PollIntervalMinutes));
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -24,9 +23,9 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
             }
             catch (Exception exception) when (!stoppingToken.IsCancellationRequested)
             {
-                logger.LogWarning(exception, "DOT tracking ingestion failed; retrying in five minutes.");
+                logger.LogWarning(exception, "DOT tracking ingestion failed; retrying in {Minutes} minutes.", pollInterval.TotalMinutes);
             }
-            await Task.Delay(PollInterval, stoppingToken);
+            await Task.Delay(pollInterval, stoppingToken);
         }
     }
 }
