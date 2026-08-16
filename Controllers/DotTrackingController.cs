@@ -140,6 +140,7 @@ public sealed class DotTrackingController(
         var driverIds = assignments.Where(load => load.DriverId != null).Select(load => load.DriverId!.Value).Distinct().ToList();
         var drivers = await LoadDriverIdentities(driverIds, cancellationToken);
         var matchedLiveIds = new HashSet<Guid>();
+        var matchedTachoKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var records = vehicles.Select(vehicle =>
         {
             var keys = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => NormaliseIdentifier(value!)).ToList();
@@ -153,6 +154,7 @@ public sealed class DotTrackingController(
             var assignment = assignments.Where(load => load.VehicleId == vehicle.Id).OrderByDescending(load => LoadPriority(load.Status)).FirstOrDefault();
             var allocatedDriver = assignment?.DriverId is Guid driverId ? drivers.GetValueOrDefault(driverId) : null;
             var tachoStatus = TachoDriverStatus(aliases, tachoDrivers);
+            if (tachoStatus is not null) matchedTachoKeys.Add(NormaliseIdentifier(tachoStatus.VehicleCode));
             var tachoName = tachoStatus?.DriverName;
             var condition = DetermineCondition(live, !string.IsNullOrWhiteSpace(tachoName), now);
             var tachoDriver = MatchTachoDriver(tachoName, drivers.Values);
@@ -167,10 +169,50 @@ public sealed class DotTrackingController(
             var observedAt = ObservedAt(status, now);
             var age = now - observedAt;
             var tachoStatus = TachoDriverStatus(IdentifierAliases(status.VehicleIdentifier), tachoDrivers);
+            if (tachoStatus is not null) matchedTachoKeys.Add(NormaliseIdentifier(tachoStatus.VehicleCode));
             var tachoName = tachoStatus?.DriverName;
             var tachoDriver = MatchTachoDriver(tachoName, drivers.Values);
             return new FleetVehicleStatus(status.Id, status.VehicleIdentifier, null, status.VehicleIdentifier, DetermineCondition(status, !string.IsNullOrWhiteSpace(tachoName), now), observedAt, status.IgnitionOn, status.IsMoving, status.SpeedKph, LiveLatitude(status), LiveLongitude(status), (int)Math.Max(0, age.TotalMinutes), null, null, null, tachoDriver?.Id, tachoDriver?.DisplayName ?? tachoName, tachoName, tachoName is null ? null : "TachoMaster", null, false, null, tachoStatus, null, null, null, null, null, null, null);
         }));
+        records.AddRange(tachoDrivers
+            .Where(item => !matchedTachoKeys.Contains(NormaliseIdentifier(item.Value.VehicleCode)))
+            .OrderBy(item => item.Value.VehicleCode)
+            .Select(item =>
+            {
+                var status = item.Value;
+                var tachoDriver = MatchTachoDriver(status.DriverName, drivers.Values);
+                return new FleetVehicleStatus(
+                    DeterministicGuid($"tachomaster:{status.VehicleCode}:{status.MemberCode}"),
+                    status.VehicleCode,
+                    null,
+                    status.VehicleCode,
+                    "SignedOn",
+                    status.DutyStartUtc,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    tachoDriver?.Id,
+                    tachoDriver?.DisplayName ?? status.DriverName,
+                    status.DriverName,
+                    "TachoMaster",
+                    null,
+                    false,
+                    null,
+                    status,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null);
+            }));
         return Ok(new FleetStatusResponse("RoadTech Falcon + TachoMaster", now, records.Count, records.Count(record => record.Condition == "Moving"), records.Count(record => record.Condition != "Moving"), records));
     }
 
@@ -262,15 +304,13 @@ public sealed class DotTrackingController(
         var normalised = NormaliseIdentifier(value);
         if (string.IsNullOrWhiteSpace(normalised)) return [];
         var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { normalised };
-        aliases.Add(IdentifierSuffix(normalised));
+        for (var length = 3; length <= Math.Min(6, normalised.Length); length++)
+            aliases.Add(normalised[^length..]);
         if (normalised.Length > 3 && char.IsLetter(normalised[^1]) && normalised[^3..].All(char.IsLetter)) aliases.Add(normalised[^3..]);
+        if (normalised.Length == 7 && char.IsLetter(normalised[0]) && char.IsLetter(normalised[1]) && char.IsDigit(normalised[2]) && char.IsDigit(normalised[3]))
+            aliases.Add(normalised[2..]);
         if (normalised.EndsWith("H", StringComparison.OrdinalIgnoreCase) && normalised.Length > 4) aliases.Add(normalised[..^1]);
         return aliases.Where(alias => !string.IsNullOrWhiteSpace(alias)).ToList();
-    }
-    private static string IdentifierSuffix(string value)
-    {
-        var normalised = NormaliseIdentifier(value);
-        return normalised.Length <= 3 ? normalised : normalised[^3..];
     }
     private static int LoadPriority(LoadStatus status) => status switch { LoadStatus.InProgress => 4, LoadStatus.Dispatched => 3, LoadStatus.Planned => 2, LoadStatus.Draft => 1, _ => 0 };
     private static DateTimeOffset ObservedAt(VehicleLiveStatus live, DateTimeOffset now) => live.LastEventTimeUtc;
@@ -290,8 +330,24 @@ public sealed class DotTrackingController(
 
     private static TachoVehicleDriverStatus? TachoDriverStatus(
         IEnumerable<string> identifiers,
-        IReadOnlyDictionary<string, TachoVehicleDriverStatus> drivers) =>
-        identifiers.Select(NormaliseIdentifier).Select(identifier => drivers.GetValueOrDefault(identifier)).FirstOrDefault(status => status is not null);
+        IReadOnlyDictionary<string, TachoVehicleDriverStatus> drivers)
+    {
+        var aliases = identifiers.SelectMany(IdentifierAliases).Where(alias => alias.Length >= 3).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        foreach (var alias in aliases)
+            if (drivers.TryGetValue(alias, out var exact)) return exact;
+        return drivers
+            .SelectMany(item => IdentifierAliases(item.Key).Select(alias => new { Alias = alias, Status = item.Value }))
+            .Where(item => aliases.Contains(item.Alias, StringComparer.OrdinalIgnoreCase))
+            .OrderByDescending(item => item.Alias.Length)
+            .Select(item => item.Status)
+            .FirstOrDefault();
+    }
+
+    private static Guid DeterministicGuid(string value)
+    {
+        var bytes = System.Security.Cryptography.MD5.HashData(System.Text.Encoding.UTF8.GetBytes(value));
+        return new Guid(bytes);
+    }
 
     public static string NormalisePersonName(string? value) => string.Join(' ', (value ?? string.Empty)
         .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)

@@ -96,6 +96,7 @@ public sealed class TachoMasterClient
                 .ToList();
             metrics.TryGetValue(latest.MemCode, out var metric);
             result[vehicle] = new TachoVehicleDriverStatus(
+                vehicle,
                 latest.MemCode,
                 name,
                 member.CardNoShort,
@@ -338,6 +339,7 @@ public sealed class TachoMasterClient
 }
 
 public sealed record TachoVehicleDriverStatus(
+    string VehicleCode,
     int MemberCode,
     string DriverName,
     string? CardNumber,
