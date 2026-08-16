@@ -19,6 +19,8 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<VehicleTrackingEvent> VehicleTrackingEvents => Set<VehicleTrackingEvent>();
     public DbSet<VehicleLiveStatus> VehicleLiveStatuses => Set<VehicleLiveStatus>();
     public DbSet<FuelPrice> FuelPrices => Set<FuelPrice>();
+    public DbSet<IntegrationMapping> IntegrationMappings => Set<IntegrationMapping>();
+    public DbSet<DriverStatusLog> DriverStatusLogs => Set<DriverStatusLog>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -31,6 +33,22 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<MarketContact>().HasIndex(x => new { x.Market, x.Name }).IsUnique();
         b.Entity<FuelPrice>().HasIndex(x => new { x.WeekCommencing, x.Provider }).IsUnique();
         b.Entity<FuelPrice>().Property(x => x.PricePencePerLitre).HasPrecision(10, 2);
+
+        b.Entity<IntegrationMapping>()
+            .HasIndex(x => new { x.Provider, x.ExternalKey, x.TmsEntityType })
+            .IsUnique()
+            .HasFilter("[Active] = 1")
+            .HasDatabaseName("IX_IntegrationMappings_Provider_ExternalKey_Type");
+        b.Entity<IntegrationMapping>()
+            .HasIndex(x => x.TmsEntityId)
+            .HasDatabaseName("IX_IntegrationMappings_TmsEntityId");
+
+        b.Entity<DriverStatusLog>()
+            .HasIndex(x => x.LoadId)
+            .HasDatabaseName("IX_DriverStatusLogs_LoadId");
+        b.Entity<DriverStatusLog>()
+            .HasIndex(x => x.CapturedAtUtc)
+            .HasDatabaseName("IX_DriverStatusLogs_CapturedAtUtc");
         b.Entity<StagedImport>().HasIndex(x => x.IdempotencyKey).IsUnique();
         b.Entity<StagedImport>().Property(x => x.RowVersion).IsRowVersion();
         b.Entity<TransportOrder>().HasIndex(x => x.Reference).IsUnique();

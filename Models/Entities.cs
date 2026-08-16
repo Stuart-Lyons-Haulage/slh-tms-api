@@ -190,3 +190,28 @@ public sealed class LoadStop
     public decimal? Longitude { get; set; }
     public DateTimeOffset? PlannedArrivalUtc { get; set; }
 }
+public sealed class IntegrationMapping
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    [MaxLength(40)] public required string Provider { get; set; }
+    [MaxLength(200)] public required string ExternalKey { get; set; }
+    [MaxLength(200)] public string? ExternalLabel { get; set; }
+    [MaxLength(20)] public required string TmsEntityType { get; set; }
+    public Guid TmsEntityId { get; set; }
+    public bool Active { get; set; } = true;
+    [MaxLength(1000)] public string? Notes { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    [MaxLength(200)] public string? UpdatedBy { get; set; }
+}
+public enum DriverDispatchStatus { Dispatched, Accepted, ArrivedCollection, Loaded, ArrivedDelivery, Delivered, IssueReported }
+public sealed class DriverStatusLog
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid LoadId { get; set; }
+    public Guid? DriverId { get; set; }
+    [MaxLength(40)] public required string Status { get; set; }
+    [MaxLength(1000)] public string? Notes { get; set; }
+    [MaxLength(200)] public string? CapturedBy { get; set; }
+    public DateTimeOffset CapturedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
