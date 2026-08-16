@@ -160,6 +160,15 @@ public sealed class Load
     [NotMapped] public decimal? EmptyMiles { get; set; }
     [NotMapped, MaxLength(40)] public string? InvoiceStatus { get; set; }
     [NotMapped, MaxLength(500)] public string? CommercialNotes { get; set; }
+    [NotMapped] public decimal? PalletSpacesUsed { get; set; }
+    [NotMapped] public decimal? TotalPalletSpaces { get; set; }
+    [NotMapped, MaxLength(40)] public string? CapacityType { get; set; }
+    [NotMapped, MaxLength(1000)] public string? DepotSplits { get; set; }
+    [NotMapped] public decimal? TemperatureC { get; set; }
+    [NotMapped, MaxLength(1000)] public string? PlannerNotes { get; set; }
+    [NotMapped] public decimal? UtilisationPercent => TotalPalletSpaces > 0 && PalletSpacesUsed is not null
+        ? Math.Round(PalletSpacesUsed.Value / TotalPalletSpaces.Value * 100, 1)
+        : null;
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public List<LoadStop> Stops { get; set; } = [];
 }

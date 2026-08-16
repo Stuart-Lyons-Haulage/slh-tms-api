@@ -48,12 +48,17 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
     public async Task<IActionResult> CreateLoad(CreateLoadRequest request, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.Reference) || request.Stops.Count == 0) return BadRequest("A reference and at least one stop are required.");
+        if (request.PalletSpacesUsed < 0 || request.TotalPalletSpaces < 0) return BadRequest("Capacity values cannot be negative.");
         var load = new Load { Reference = request.Reference.Trim(), PlanningDate = request.PlanningDate, VehicleId = request.VehicleId, DriverId = request.DriverId, TrailerId = request.TrailerId, Status = LoadStatus.Draft,
+            PalletSpacesUsed = request.PalletSpacesUsed, TotalPalletSpaces = request.TotalPalletSpaces, CapacityType = Clip(request.CapacityType, 40) ?? "Standard pallets",
+            DepotSplits = Clip(request.DepotSplits, 1000), TemperatureC = request.TemperatureC, PlannerNotes = Clip(request.PlannerNotes, 1000),
             Stops = request.Stops.Select((stop, index) => new LoadStop { OrderId = stop.OrderId, Sequence = index + 1, Name = stop.Name.Trim(), Address = stop.Address, Latitude = stop.Latitude, Longitude = stop.Longitude, PlannedArrivalUtc = stop.PlannedArrivalUtc }).ToList() };
         try
         {
             if (await db.Loads.AnyAsync(item => item.Reference == request.Reference, ct)) return Conflict("A load with this reference already exists.");
             db.Loads.Add(load); await db.SaveChangesAsync(ct);
+            if (load.PalletSpacesUsed is not null || load.TotalPalletSpaces is not null || load.DepotSplits is not null || load.TemperatureC is not null || load.PlannerNotes is not null)
+                await LoadCommercialStore.SaveAsync(db, load, Values(load), User.Identity?.Name, ct);
         }
         catch (Exception exception) when (IsSchemaUnavailable(exception))
         {
@@ -69,15 +74,26 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
     {
         Load? load;
         var register = false;
-        try { load = await db.Loads.SingleOrDefaultAsync(item => item.Id == id, ct); }
+        try
+        {
+            load = await db.Loads.SingleOrDefaultAsync(item => item.Id == id, ct);
+            if (load is not null) await LoadCommercialStore.EnrichAsync(db, [load], ct);
+        }
         catch (Exception exception) when (IsSchemaUnavailable(exception)) { db.ChangeTracker.Clear(); load = await PlanningRegisterStore.GetLoadAsync(db, id, ct); register = true; }
         if (load is null) return NotFound();
         if (request.VehicleId is not null && !await db.Vehicles.AnyAsync(vehicle => vehicle.Id == request.VehicleId && vehicle.Active, ct)) return BadRequest("Vehicle is not active.");
         if (request.DriverId is not null && !await db.Drivers.AnyAsync(driver => driver.Id == request.DriverId && driver.Active, ct)) return BadRequest("Driver is not active.");
         if (request.TrailerId is not null && !await db.Trailers.AnyAsync(trailer => trailer.Id == request.TrailerId && trailer.Active, ct)) return BadRequest("Trailer is not active.");
         load.VehicleId = request.VehicleId; load.DriverId = request.DriverId; load.TrailerId = request.TrailerId;
+        if (request.TrailerId is not null)
+        {
+            var trailer = await db.Trailers.AsNoTracking().SingleAsync(item => item.Id == request.TrailerId, ct);
+            load.TotalPalletSpaces = string.Equals(load.CapacityType, "Euro pallets", StringComparison.OrdinalIgnoreCase)
+                ? trailer.EuroCapacity ?? trailer.StandardCapacity
+                : trailer.StandardCapacity ?? trailer.EuroCapacity;
+        }
         load.Status = request.VehicleId is not null && request.DriverId is not null ? LoadStatus.Planned : LoadStatus.Draft;
-        if (register) await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct); else await db.SaveChangesAsync(ct);
+        if (register) await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct); else await LoadCommercialStore.SaveAsync(db, load, Values(load), User.Identity?.Name, ct);
         return Ok(load);
     }
 
@@ -86,13 +102,18 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
     {
         Load? load;
         var register = false;
-        try { load = await db.Loads.SingleOrDefaultAsync(item => item.Id == id, ct); }
+        try
+        {
+            load = await db.Loads.SingleOrDefaultAsync(item => item.Id == id, ct);
+            if (load is not null) await LoadCommercialStore.EnrichAsync(db, [load], ct);
+        }
         catch (Exception exception) when (IsSchemaUnavailable(exception)) { db.ChangeTracker.Clear(); load = await PlanningRegisterStore.GetLoadAsync(db, id, ct); register = true; }
         if (load is null) return NotFound();
         if (new decimal?[] { request.RevenueAmount, request.FuelSurchargeAmount, request.EstimatedCostAmount, request.ActualCostAmount, request.EstimatedDistanceMiles, request.EmptyMiles }.Any(value => value < 0))
             return BadRequest("Commercial values cannot be negative.");
         var values = new LoadCommercialValues(request.RevenueAmount, request.FuelSurchargeAmount, request.EstimatedCostAmount, request.ActualCostAmount,
-            request.EstimatedDistanceMiles, request.EmptyMiles, Clip(request.InvoiceStatus, 40), Clip(request.CommercialNotes, 500));
+            request.EstimatedDistanceMiles, request.EmptyMiles, Clip(request.InvoiceStatus, 40), Clip(request.CommercialNotes, 500), load.PalletSpacesUsed,
+            load.TotalPalletSpaces, load.CapacityType, load.DepotSplits, load.TemperatureC, load.PlannerNotes);
         if (register)
         {
             load.RevenueAmount = values.RevenueAmount; load.FuelSurchargeAmount = values.FuelSurchargeAmount; load.EstimatedCostAmount = values.EstimatedCostAmount;
@@ -101,6 +122,32 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
             await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
         }
         else await LoadCommercialStore.SaveAsync(db, load, values, User.Identity?.Name, ct);
+        return Ok(load);
+    }
+
+    [HttpPut("loads/{id:guid}/utilisation"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> UpdateUtilisation(Guid id, UpdateLoadUtilisationRequest request, CancellationToken ct)
+    {
+        if (request.PalletSpacesUsed < 0 || request.TotalPalletSpaces < 0) return BadRequest("Capacity values cannot be negative.");
+        if (request.TotalPalletSpaces > 0 && request.PalletSpacesUsed > request.TotalPalletSpaces)
+            return BadRequest("Pallet spaces used cannot exceed the available capacity. Split the work across another load or confirm a larger capacity.");
+        Load? load;
+        var register = false;
+        try
+        {
+            load = await db.Loads.SingleOrDefaultAsync(item => item.Id == id, ct);
+            if (load is not null) await LoadCommercialStore.EnrichAsync(db, [load], ct);
+        }
+        catch (Exception exception) when (IsSchemaUnavailable(exception)) { db.ChangeTracker.Clear(); load = await PlanningRegisterStore.GetLoadAsync(db, id, ct); register = true; }
+        if (load is null) return NotFound();
+        load.PalletSpacesUsed = request.PalletSpacesUsed;
+        load.TotalPalletSpaces = request.TotalPalletSpaces;
+        load.CapacityType = Clip(request.CapacityType, 40) ?? "Standard pallets";
+        load.DepotSplits = Clip(request.DepotSplits, 1000);
+        load.TemperatureC = request.TemperatureC;
+        load.PlannerNotes = Clip(request.PlannerNotes, 1000);
+        if (register) await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
+        else await LoadCommercialStore.SaveAsync(db, load, Values(load), User.Identity?.Name, ct);
         return Ok(load);
     }
 
@@ -266,11 +313,16 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
     };
 
     private static string? Clip(string? value, int length) => string.IsNullOrWhiteSpace(value) ? null : value.Trim()[..Math.Min(value.Trim().Length, length)];
+    private static LoadCommercialValues Values(Load load) => new(load.RevenueAmount, load.FuelSurchargeAmount, load.EstimatedCostAmount, load.ActualCostAmount,
+        load.EstimatedDistanceMiles, load.EmptyMiles, load.InvoiceStatus, load.CommercialNotes, load.PalletSpacesUsed, load.TotalPalletSpaces,
+        load.CapacityType, load.DepotSplits, load.TemperatureC, load.PlannerNotes);
 }
 
-public sealed record CreateLoadRequest(string Reference, DateOnly PlanningDate, Guid? VehicleId, Guid? DriverId, Guid? TrailerId, List<CreateLoadStopRequest> Stops);
+public sealed record CreateLoadRequest(string Reference, DateOnly PlanningDate, Guid? VehicleId, Guid? DriverId, Guid? TrailerId, List<CreateLoadStopRequest> Stops,
+    decimal? PalletSpacesUsed = null, decimal? TotalPalletSpaces = null, string? CapacityType = null, string? DepotSplits = null, decimal? TemperatureC = null, string? PlannerNotes = null);
 public sealed record CreateLoadStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc);
 public sealed record UpdateLoadAllocationRequest(Guid? VehicleId, Guid? DriverId, Guid? TrailerId);
 public sealed record UpdateLoadStatusRequest(string Status);
 public sealed record UpdateLoadStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc);
 public sealed record UpdateLoadCommercialRequest(decimal? RevenueAmount, decimal? FuelSurchargeAmount, decimal? EstimatedCostAmount, decimal? ActualCostAmount, decimal? EstimatedDistanceMiles, decimal? EmptyMiles, string? InvoiceStatus, string? CommercialNotes);
+public sealed record UpdateLoadUtilisationRequest(decimal? PalletSpacesUsed, decimal? TotalPalletSpaces, string? CapacityType, string? DepotSplits, decimal? TemperatureC, string? PlannerNotes);

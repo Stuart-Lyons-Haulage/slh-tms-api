@@ -57,10 +57,18 @@ public static class LoadCommercialStore
         load.EmptyMiles = values.EmptyMiles;
         load.InvoiceStatus = values.InvoiceStatus;
         load.CommercialNotes = values.CommercialNotes;
+        load.PalletSpacesUsed = values.PalletSpacesUsed;
+        load.TotalPalletSpaces = values.TotalPalletSpaces;
+        load.CapacityType = values.CapacityType;
+        load.DepotSplits = values.DepotSplits;
+        load.TemperatureC = values.TemperatureC;
+        load.PlannerNotes = values.PlannerNotes;
     }
 
     private static string Key(Guid loadId) => $"loadcommercial:{loadId:N}";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 }
 
-public sealed record LoadCommercialValues(decimal? RevenueAmount, decimal? FuelSurchargeAmount, decimal? EstimatedCostAmount, decimal? ActualCostAmount, decimal? EstimatedDistanceMiles, decimal? EmptyMiles, string? InvoiceStatus, string? CommercialNotes);
+public sealed record LoadCommercialValues(decimal? RevenueAmount, decimal? FuelSurchargeAmount, decimal? EstimatedCostAmount, decimal? ActualCostAmount,
+    decimal? EstimatedDistanceMiles, decimal? EmptyMiles, string? InvoiceStatus, string? CommercialNotes, decimal? PalletSpacesUsed = null,
+    decimal? TotalPalletSpaces = null, string? CapacityType = null, string? DepotSplits = null, decimal? TemperatureC = null, string? PlannerNotes = null);
