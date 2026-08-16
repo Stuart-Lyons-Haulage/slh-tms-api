@@ -26,7 +26,12 @@ public sealed class LookupsController(TmsDbContext db) : ControllerBase
         return Ok(rows);
     }
     [HttpGet("trailers")] public async Task<IActionResult> Trailers([FromQuery] string? q, CancellationToken ct) => Ok(await db.Trailers.AsNoTracking().Where(x => x.Active && (q == null || x.TrailerNumber.Contains(q) || (x.Type != null && x.Type.Contains(q)))).OrderBy(x => x.TrailerNumber).Take(5000).ToListAsync(ct));
-    [HttpGet("sites")] public async Task<IActionResult> Sites([FromQuery] string? q, CancellationToken ct) => Ok(await db.Sites.AsNoTracking().Where(x => x.Active && (q == null || x.Name.Contains(q) || (x.DriverTextName != null && x.DriverTextName.Contains(q)))).OrderBy(x => x.Name).Take(5000).ToListAsync(ct));
+    [HttpGet("sites")] public async Task<IActionResult> Sites([FromQuery] string? q, CancellationToken ct)
+    {
+        var rows = await db.Sites.AsNoTracking().Where(x => x.Active && (q == null || x.Name.Contains(q) || (x.DriverTextName != null && x.DriverTextName.Contains(q)))).OrderBy(x => x.Name).Take(5000).ToListAsync(ct);
+        await MasterDetailStore.EnrichSitesAsync(db, rows, ct);
+        return Ok(rows);
+    }
     [HttpGet("market-contacts")] public async Task<IActionResult> MarketContacts([FromQuery] string? q, CancellationToken ct)
     {
         var rows = await db.MarketContacts.AsNoTracking().Where(x => x.Active && (q == null || x.Name.Contains(q) || x.Market.Contains(q))).OrderBy(x => x.Market).ThenBy(x => x.Name).Take(5000).ToListAsync(ct);
@@ -68,13 +73,40 @@ public sealed class LookupsController(TmsDbContext db) : ControllerBase
     {
         var driver = await db.Drivers.SingleOrDefaultAsync(x => x.Id == id, ct);
         if (driver is null) return NotFound();
+        await MasterDetailStore.EnrichDriversAsync(db, new[] { driver }, ct);
         var employeeNumber = ClipRequired(request.EmployeeNumber ?? string.Empty, 40);
         if (string.IsNullOrWhiteSpace(employeeNumber) || string.IsNullOrWhiteSpace(request.DisplayName)) return BadRequest(new { message = "Employee number and display name are required." });
         if (await db.Drivers.AnyAsync(x => x.Id != id && x.EmployeeNumber == employeeNumber, ct)) return Conflict(new { message = $"Employee number {employeeNumber} already exists." });
         driver.EmployeeNumber = employeeNumber; driver.DisplayName = ClipRequired(request.DisplayName, 160); driver.TachoName = Clip(request.TachoName, 160); driver.MobileNumber = Clip(request.MobileNumber, 40); driver.DriverType = Clip(request.DriverType, 80); driver.DriverGroup = Clip(request.DriverGroup, 80); driver.Skills = Clip(request.Skills, 160); driver.Coding = Clip(request.Coding, 80); driver.AgencyName = Clip(request.AgencyName, 160); driver.NorthEligible = request.NorthEligible; driver.PreloadEligible = request.PreloadEligible; driver.Notes = Clip(request.Notes, 500); driver.TachoMasterDriverId = Clip(request.TachoMasterDriverId, 80); driver.DrivingLicenceNumber = Clip(request.DrivingLicenceNumber, 80); driver.LicenceExpiry = request.LicenceExpiry; driver.LicenceStatus = Clip(request.LicenceStatus, 40); driver.Active = request.Active;
         await db.SaveChangesAsync(ct);
-        await MasterDetailStore.SaveAsync(db, "driver", employeeNumber, JsonSerializer.Serialize(request), "SLH driver editor", User.Identity?.Name, ct);
+        await MasterDetailStore.SaveAsync(db, "driver", employeeNumber, JsonSerializer.Serialize(driver), "SLH driver editor", User.Identity?.Name, ct);
         return Ok(driver);
+    }
+
+    [HttpPut("customers/{id:guid}"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> UpdateCustomer(Guid id, [FromBody] CustomerUpdateRequest request, CancellationToken ct)
+    {
+        var customer = await db.Customers.SingleOrDefaultAsync(x => x.Id == id, ct);
+        if (customer is null) return NotFound();
+        var code = ClipRequired(request.Code ?? string.Empty, 40).ToUpperInvariant();
+        if (string.IsNullOrWhiteSpace(code) || string.IsNullOrWhiteSpace(request.Name)) return BadRequest(new { message = "Customer code and name are required." });
+        if (await db.Customers.AnyAsync(x => x.Id != id && x.Code == code, ct)) return Conflict(new { message = $"Customer code {code} already exists." });
+        customer.Code = code; customer.Name = ClipRequired(request.Name, 200); customer.Active = request.Active;
+        await db.SaveChangesAsync(ct);
+        return Ok(customer);
+    }
+
+    [HttpPut("customer-contacts/{id:guid}"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> UpdateCustomerContact(Guid id, [FromBody] CustomerContactUpdateRequest request, CancellationToken ct)
+    {
+        var contact = await db.CustomerContacts.SingleOrDefaultAsync(x => x.Id == id, ct);
+        if (contact is null) return NotFound();
+        var customerCode = ClipRequired(request.CustomerCode ?? string.Empty, 40).ToUpperInvariant();
+        if (string.IsNullOrWhiteSpace(customerCode) || string.IsNullOrWhiteSpace(request.Name)) return BadRequest(new { message = "Customer code and contact name are required." });
+        if (!await db.Customers.AnyAsync(x => x.Code == customerCode, ct)) return BadRequest(new { message = $"Customer {customerCode} does not exist." });
+        contact.CustomerCode = customerCode; contact.Name = ClipRequired(request.Name, 200); contact.Email = Clip(request.Email, 320)?.ToLowerInvariant(); contact.MobileNumber = Clip(request.MobileNumber, 40); contact.ReceivesEtaUpdates = request.ReceivesEtaUpdates; contact.Active = request.Active;
+        await db.SaveChangesAsync(ct);
+        return Ok(contact);
     }
 
     [HttpPut("trailers/{id:guid}"), Authorize(Policy = "TmsWrite")]
@@ -97,8 +129,11 @@ public sealed class LookupsController(TmsDbContext db) : ControllerBase
         var code = ClipRequired(request.ExternalCode ?? string.Empty, 40);
         if (string.IsNullOrWhiteSpace(code) || string.IsNullOrWhiteSpace(request.Name)) return BadRequest(new { message = "Site code and name are required." });
         if (await db.Sites.AnyAsync(x => x.Id != id && x.ExternalCode == code, ct)) return Conflict(new { message = $"Site code {code} already exists." });
-        site.ExternalCode = code; site.Name = ClipRequired(request.Name, 200); site.DriverTextName = Clip(request.DriverTextName, 200); site.Aliases = Clip(request.Aliases, 500); site.CollectionAddress = Clip(request.CollectionAddress, 500); site.CollectionInstructions = Clip(request.CollectionInstructions, 1000); site.MapLink = Clip(request.MapLink, 1000); site.CustomField1 = Clip(request.CustomField1, 200); site.CustomField2 = Clip(request.CustomField2, 200); site.CustomField3 = Clip(request.CustomField3, 200); site.Active = request.Active;
-        await db.SaveChangesAsync(ct); return Ok(site);
+        if (request.Latitude is < -90 or > 90 || request.Longitude is < -180 or > 180) return BadRequest(new { message = "Map point is outside the valid latitude/longitude range." });
+        site.ExternalCode = code; site.Name = ClipRequired(request.Name, 200); site.DriverTextName = Clip(request.DriverTextName, 200); site.Aliases = Clip(request.Aliases, 500); site.CollectionAddress = Clip(request.CollectionAddress, 500); site.CollectionInstructions = Clip(request.CollectionInstructions, 1000); site.MapLink = Clip(request.MapLink, 1000); site.Latitude = request.Latitude; site.Longitude = request.Longitude; site.CustomField1 = Clip(request.CustomField1, 200); site.CustomField2 = Clip(request.CustomField2, 200); site.CustomField3 = Clip(request.CustomField3, 200); site.Active = request.Active;
+        await db.SaveChangesAsync(ct);
+        await MasterDetailStore.SaveAsync(db, "site", code, JsonSerializer.Serialize(site), "SLH site editor", User.Identity?.Name, ct);
+        return Ok(site);
     }
 
     private static string? Clip(string? value, int maxLength) => string.IsNullOrWhiteSpace(value) ? null : value.Trim().Length <= maxLength ? value.Trim() : value.Trim()[..maxLength];
@@ -116,5 +151,7 @@ public sealed class LookupsController(TmsDbContext db) : ControllerBase
 
 public sealed record VehicleUpdateRequest(string Registration, string? FleetNumber, string? Abbreviation, string? Transmission, bool? DvsCompliant, string? FuelProvider, string? CabMobile, string? FuelPin, string? ShellCard, string? BpRedCard, string? BpPlainCard, string? Notes, string? FuelPinSecretName, string? FuelCardLastFour, bool Active);
 public sealed record DriverUpdateRequest(string? EmployeeNumber, string? DisplayName, string? TachoName, string? MobileNumber, string? DriverType, string? DriverGroup, string? Skills, string? Coding, string? AgencyName, bool? NorthEligible, bool? PreloadEligible, string? Notes, string? TachoMasterDriverId, string? DrivingLicenceNumber, DateOnly? LicenceExpiry, string? LicenceStatus, bool Active);
+public sealed record CustomerUpdateRequest(string? Code, string? Name, bool Active);
+public sealed record CustomerContactUpdateRequest(string? CustomerCode, string? Name, string? Email, string? MobileNumber, bool ReceivesEtaUpdates, bool Active);
 public sealed record TrailerUpdateRequest(string? TrailerNumber, string? Type, int? StandardCapacity, int? EuroCapacity, string? Notes, bool Active);
-public sealed record SiteUpdateRequest(string? ExternalCode, string? Name, string? DriverTextName, string? Aliases, string? CollectionAddress, string? CollectionInstructions, string? MapLink, string? CustomField1, string? CustomField2, string? CustomField3, bool Active);
+public sealed record SiteUpdateRequest(string? ExternalCode, string? Name, string? DriverTextName, string? Aliases, string? CollectionAddress, string? CollectionInstructions, string? MapLink, decimal? Latitude, decimal? Longitude, string? CustomField1, string? CustomField2, string? CustomField3, bool Active);

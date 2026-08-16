@@ -32,6 +32,17 @@ public sealed class AzureMapsRouteClient(HttpClient client, IConfiguration confi
         return document.RootElement.Clone();
     }
 
+    public async Task<(decimal Latitude, decimal Longitude)?> SearchCoordinate(string address, CancellationToken ct)
+    {
+        var result = await SearchAddress(address, ct);
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(result));
+        if (!document.RootElement.TryGetProperty("results", out var results) || results.GetArrayLength() == 0 ||
+            !results[0].TryGetProperty("position", out var position) ||
+            !position.TryGetProperty("lat", out var latitude) || !position.TryGetProperty("lon", out var longitude) ||
+            !latitude.TryGetDecimal(out var lat) || !longitude.TryGetDecimal(out var lon)) return null;
+        return (lat, lon);
+    }
+
     public async Task<TimeSpan> TravelTime((decimal Longitude, decimal Latitude) from, (decimal Longitude, decimal Latitude) to, CancellationToken ct)
     {
         var result = await Directions([from, to], ct);

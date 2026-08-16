@@ -9,6 +9,7 @@ namespace Slh.Tms.Api.Services;
 public static class MasterDetailStore
 {
     private const string DriverType = "masterdetail:driver";
+    private const string SiteType = "masterdetail:site";
 
     public static async Task SaveAsync(TmsDbContext db, string entityType, string key, string payloadJson, string? source, string? user, CancellationToken ct)
     {
@@ -64,6 +65,34 @@ public static class MasterDetailStore
         }
     }
 
+    public static async Task EnrichSitesAsync(TmsDbContext db, IReadOnlyCollection<Site> sites, CancellationToken ct)
+    {
+        if (sites.Count == 0) return;
+        var byCode = sites.ToDictionary(site => NormaliseKey(site.ExternalCode), StringComparer.OrdinalIgnoreCase);
+        var rows = await db.StagedImports.AsNoTracking().Where(item => item.EntityType == SiteType && item.Status == StagingStatus.Promoted)
+            .OrderByDescending(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc).Take(5000).ToListAsync(ct);
+        var applied = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in rows)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(row.PayloadJson);
+                var payload = document.RootElement;
+                var code = Text(payload, "externalCode") ?? Text(payload, "siteCode");
+                if (string.IsNullOrWhiteSpace(code)) continue;
+                var normalised = NormaliseKey(code);
+                if (!applied.Add(normalised) || !byCode.TryGetValue(normalised, out var site)) continue;
+                site.Aliases = Text(payload, "aliases");
+                site.CustomField1 = Text(payload, "customField1");
+                site.CustomField2 = Text(payload, "customField2");
+                site.CustomField3 = Text(payload, "customField3");
+                site.Latitude = Decimal(payload, "latitude");
+                site.Longitude = Decimal(payload, "longitude");
+            }
+            catch (JsonException) { }
+        }
+    }
+
     public static async Task<int> QuarantineFleetioPlaceholdersAsync(TmsDbContext db, CancellationToken ct)
     {
         var candidates = await db.Vehicles.Where(vehicle => vehicle.Active && vehicle.Registration.StartsWith("C")).ToListAsync(ct);
@@ -88,4 +117,5 @@ public static class MasterDetailStore
     }
     private static bool? Bool(JsonElement payload, string name) => bool.TryParse(Text(payload, name), out var value) ? value : null;
     private static int? Int(JsonElement payload, string name) => int.TryParse(Text(payload, name), out var value) ? value : null;
+    private static decimal? Decimal(JsonElement payload, string name) => decimal.TryParse(Text(payload, name), System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var value) ? value : null;
 }

@@ -52,6 +52,24 @@ public sealed class MasterDetailStoreTests
         Assert.True((await db.Vehicles.SingleAsync(vehicle => vehicle.Registration == "CU23ABC")).Active);
     }
 
+    [Fact]
+    public async Task SiteMapPointsAreRetainedAndEnriched()
+    {
+        await using var db = CreateDb();
+        db.Sites.Add(new Site { ExternalCode = "SITE-17", Name = "Test Depot" });
+        await db.SaveChangesAsync();
+        await MasterDetailStore.SaveAsync(db, "site", "SITE-17", """{"externalCode":"SITE-17","aliases":"Test Yard","latitude":51.507351,"longitude":-0.127758}""", "test", "tester", CancellationToken.None);
+
+        db.ChangeTracker.Clear();
+        var rows = await db.Sites.AsNoTracking().ToListAsync();
+        await MasterDetailStore.EnrichSitesAsync(db, rows, CancellationToken.None);
+
+        var enriched = Assert.Single(rows);
+        Assert.Equal("Test Yard", enriched.Aliases);
+        Assert.Equal(51.507351m, enriched.Latitude);
+        Assert.Equal(-0.127758m, enriched.Longitude);
+    }
+
     private static TmsDbContext CreateDb()
     {
         var options = new DbContextOptionsBuilder<TmsDbContext>().UseInMemoryDatabase($"master-detail-{Guid.NewGuid()}").Options;

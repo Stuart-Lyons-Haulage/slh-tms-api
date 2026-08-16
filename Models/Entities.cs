@@ -85,6 +85,8 @@ public sealed class Site
     [MaxLength(500)] public string? CollectionAddress { get; set; }
     [MaxLength(1000)] public string? CollectionInstructions { get; set; }
     [MaxLength(1000)] public string? MapLink { get; set; }
+    [NotMapped] public decimal? Latitude { get; set; }
+    [NotMapped] public decimal? Longitude { get; set; }
     [NotMapped, MaxLength(500)] public string? Aliases { get; set; }
     [NotMapped, MaxLength(200)] public string? CustomField1 { get; set; }
     [NotMapped, MaxLength(200)] public string? CustomField2 { get; set; }

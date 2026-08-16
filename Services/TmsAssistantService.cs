@@ -9,7 +9,7 @@ using Slh.Tms.Api.Models.Assistant;
 
 namespace Slh.Tms.Api.Services;
 
-public sealed class TmsAssistantService(HttpClient httpClient, TmsDbContext db, AssistantOptions options, ILogger<TmsAssistantService> logger)
+public sealed class TmsAssistantService(HttpClient httpClient, TmsDbContext db, AzureMapsRouteClient maps, AssistantOptions options, ILogger<TmsAssistantService> logger)
 {
     public async Task<AssistantSnapshot> GetSnapshot(DateOnly planningDate, CancellationToken ct)
     {
@@ -25,6 +25,7 @@ public sealed class TmsAssistantService(HttpClient httpClient, TmsDbContext db, 
         var drivers = await db.Drivers.AsNoTracking().Where(x => x.Active).Take(1000).ToListAsync(ct);
         var vehicles = await db.Vehicles.AsNoTracking().Where(x => x.Active).Take(1000).ToListAsync(ct);
         var sites = await db.Sites.AsNoTracking().Where(x => x.Active).Take(2000).ToListAsync(ct);
+        await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
 
         var plannedOrderIds = loads.SelectMany(x => x.Stops).Where(x => x.OrderId != null).Select(x => x.OrderId!.Value).ToHashSet();
         var unplanned = orders.Where(x => !plannedOrderIds.Contains(x.Id)).ToList();
@@ -61,9 +62,18 @@ public sealed class TmsAssistantService(HttpClient httpClient, TmsDbContext db, 
         var vehicleRisk = vehicles.Count(x => x.FleetioVor == true || x.FleetioMotDueUtc <= now.AddDays(30) || x.FleetioPmiDueUtc <= now.AddDays(30));
         if (vehicleRisk > 0)
             suggestions.Add(new("fleet-compliance", "high", "Protect fleet availability", $"{vehicleRisk} vehicle{(vehicleRisk == 1 ? " is" : "s are")} VOR or has MOT/PMI due within 30 days.", "Vehicles", false));
-        var missingMaps = sites.Count(x => !string.IsNullOrWhiteSpace(x.CollectionAddress) && string.IsNullOrWhiteSpace(x.MapLink));
-        if (missingMaps > 0)
-            suggestions.Add(new("sites-map-link", "low", "Create missing site map links", $"{missingMaps} site{(missingMaps == 1 ? " has" : "s have")} an address but no driver map link. This can be fixed safely.", "Sites", true));
+        var missingMapLinks = sites.Count(x => !string.IsNullOrWhiteSpace(x.CollectionAddress) && string.IsNullOrWhiteSpace(x.MapLink));
+        if (missingMapLinks > 0)
+            suggestions.Add(new("sites-map-link", "low", "Create missing site map links", $"{missingMapLinks} site{(missingMapLinks == 1 ? " has" : "s have")} an address but no driver map link. This can be fixed safely.", "Sites", true));
+        var missingMapPoints = sites.Count(x => !string.IsNullOrWhiteSpace(x.CollectionAddress) && (x.Latitude is null || x.Longitude is null));
+        if (missingMapPoints > 0)
+            suggestions.Add(new("sites-map-point", "medium", "Add missing map points", $"{missingMapPoints} site{(missingMapPoints == 1 ? " has" : "s have")} an address but no latitude/longitude. The Assistant can use Azure Maps to add these coordinates safely.", "Sites", true));
+        var duplicateSiteGroups = FindDuplicateSiteGroups(sites);
+        if (duplicateSiteGroups.Count > 0)
+        {
+            var examples = string.Join("; ", duplicateSiteGroups.Take(3).Select(group => string.Join(" / ", group.Select(site => $"{site.Name} ({site.ExternalCode})"))));
+            suggestions.Add(new("sites-duplicates", "high", "Review likely duplicate sites", $"{duplicateSiteGroups.Count} likely duplicate site group{(duplicateSiteGroups.Count == 1 ? " was" : "s were")} found by matching normalised names or addresses: {examples}. Nothing will be merged automatically.", "Sites", false));
+        }
         var untidyRegistrations = vehicles.Count(x => x.Registration != NormaliseRegistration(x.Registration));
         if (untidyRegistrations > 0)
             suggestions.Add(new("vehicles-registration", "low", "Normalise vehicle registrations", $"{untidyRegistrations} registration{(untidyRegistrations == 1 ? " needs" : "s need")} safe spacing/case normalisation.", "Vehicles", true));
@@ -72,7 +82,7 @@ public sealed class TmsAssistantService(HttpClient httpClient, TmsDbContext db, 
             suggestions.Add(new("ready", "info", "Plan looks ready", "No blocking planning or master-data validation issue was found by the current safety rules.", "Planner", false));
 
         return new AssistantSnapshot(planningDate, DateTimeOffset.UtcNow, options.IsConfigured ? "OpenAI + SLH safety rules" : "SLH safety rules", options.IsConfigured,
-            new AssistantMetrics(orders.Count, unplanned.Count, loads.Count, unallocated.Count, drivers.Count, vehicles.Count, vehicleRisk, unpriced, negativeMargin, emptyMiles), suggestions);
+            new AssistantMetrics(orders.Count, unplanned.Count, loads.Count, unallocated.Count, drivers.Count, vehicles.Count, vehicleRisk, unpriced, negativeMargin, emptyMiles, missingMapPoints, duplicateSiteGroups.Count), suggestions);
     }
 
     public async Task<AssistantAdvice> Advise(DateOnly planningDate, string message, string userKey, CancellationToken ct)
@@ -128,10 +138,32 @@ public sealed class TmsAssistantService(HttpClient httpClient, TmsDbContext db, 
         }
 
         var sites = await db.Sites.Where(x => x.Active).ToListAsync(ct);
+        await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
         foreach (var site in sites.Where(x => !string.IsNullOrWhiteSpace(x.CollectionAddress) && string.IsNullOrWhiteSpace(x.MapLink)))
         {
             site.MapLink = $"https://www.google.com/maps/search/?api=1&query={Uri.EscapeDataString(site.CollectionAddress!.Trim())}";
             changes.Add($"Created a driver map link for {site.Name}.");
+        }
+
+        var geocoded = 0;
+        foreach (var site in sites.Where(x => !string.IsNullOrWhiteSpace(x.CollectionAddress) && (x.Latitude is null || x.Longitude is null)))
+        {
+            if (geocoded >= 20) { skipped.Add($"{site.Name}: map point left for the next Assistant run (20-site safety limit)."); continue; }
+            try
+            {
+                var coordinate = await maps.SearchCoordinate(site.CollectionAddress!, ct);
+                if (coordinate is null) { skipped.Add($"{site.Name}: Azure Maps could not confidently locate this address."); continue; }
+                site.Latitude = coordinate.Value.Latitude;
+                site.Longitude = coordinate.Value.Longitude;
+                await MasterDetailStore.SaveAsync(db, "site", site.ExternalCode, JsonSerializer.Serialize(site), "SLH Assistant Azure Maps validation", null, ct);
+                changes.Add($"Added map point {site.Latitude:F6}, {site.Longitude:F6} for {site.Name}.");
+                geocoded++;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Assistant could not geocode site {SiteCode}.", site.ExternalCode);
+                skipped.Add($"{site.Name}: map point lookup failed and no coordinate was changed.");
+            }
         }
 
         var contacts = await db.CustomerContacts.Where(x => x.Active && x.Email != null).ToListAsync(ct);
@@ -161,6 +193,24 @@ public sealed class TmsAssistantService(HttpClient httpClient, TmsDbContext db, 
     }
 
     public static string NormaliseRegistration(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static List<List<Site>> FindDuplicateSiteGroups(IReadOnlyCollection<Site> sites)
+    {
+        var pairs = new Dictionary<string, HashSet<Site>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var site in sites)
+        {
+            var name = NormaliseSiteValue(site.Name);
+            var address = NormaliseSiteValue(site.CollectionAddress);
+            foreach (var key in new[] { name.Length >= 5 ? $"name:{name}" : "", address.Length >= 8 ? $"address:{address}" : "" }.Where(value => value.Length > 0))
+            {
+                if (!pairs.TryGetValue(key, out var group)) pairs[key] = group = [];
+                group.Add(site);
+            }
+        }
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        return pairs.Values.Where(group => group.Count > 1).Select(group => group.OrderBy(site => site.ExternalCode).ToList())
+            .Where(group => seen.Add(string.Join('|', group.Select(site => site.Id).OrderBy(id => id)))).ToList();
+    }
+    private static string NormaliseSiteValue(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
     private async Task<List<T>> SafeRead<T>(IQueryable<T> query, string area, CancellationToken ct)
     {
         try { return await query.ToListAsync(ct); }
@@ -183,7 +233,7 @@ public sealed class TmsAssistantService(HttpClient httpClient, TmsDbContext db, 
 }
 
 public sealed record AssistantSuggestion(string Id, string Severity, string Title, string Detail, string Area, bool AutoFixAvailable);
-public sealed record AssistantMetrics(int Orders, int UnplannedOrders, int Loads, int UnallocatedLoads, int ActiveDrivers, int ActiveVehicles, int VehicleComplianceRisks, int UnpricedLoads, int NegativeMarginLoads, decimal EmptyMiles);
+public sealed record AssistantMetrics(int Orders, int UnplannedOrders, int Loads, int UnallocatedLoads, int ActiveDrivers, int ActiveVehicles, int VehicleComplianceRisks, int UnpricedLoads, int NegativeMarginLoads, decimal EmptyMiles, int MissingSiteMapPoints, int DuplicateSiteGroups);
 public sealed record AssistantSnapshot(DateOnly PlanningDate, DateTimeOffset GeneratedAtUtc, string Source, bool AiConfigured, AssistantMetrics Metrics, IReadOnlyList<AssistantSuggestion> Suggestions);
 public sealed record AssistantAdvice(string Answer, string Source, IReadOnlyList<AssistantSuggestion> Suggestions);
 public sealed record SafeFixResult(int Applied, int Skipped, IReadOnlyList<string> Changes, IReadOnlyList<string> SkippedReasons);

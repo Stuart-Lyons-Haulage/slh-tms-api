@@ -19,14 +19,7 @@ public sealed class StagingService(TmsDbContext db)
     {
         var item = new StagedImport { EntityType = entityType.ToLowerInvariant(), IdempotencyKey = $"direct:{Guid.NewGuid():N}", PayloadJson = payload.GetRawText(), Source = "Direct master-data apply" };
         await Promote(item, ct);
-        var detailKey = entityType.ToLowerInvariant() switch
-        {
-            "driver" => Text(payload, "employeeNumber") ?? Text(payload, "driverId") ?? Text(payload, "payrollNumber"),
-            "vehicle" => Text(payload, "registration"),
-            "trailer" => Text(payload, "trailerNumber"),
-            "site" => Text(payload, "externalCode"),
-            _ => null
-        };
+        var detailKey = DetailKey(entityType, payload);
         if (!string.IsNullOrWhiteSpace(detailKey))
             await MasterDetailStore.SaveAsync(db, entityType, detailKey, payload.GetRawText(), "SLH master workbook", null, ct);
     }
@@ -97,6 +90,10 @@ public sealed class StagingService(TmsDbContext db)
             try
             {
                 await Promote(item, ct);
+                using var document = JsonDocument.Parse(item.PayloadJson);
+                var detailKey = DetailKey(item.EntityType, document.RootElement);
+                if (!string.IsNullOrWhiteSpace(detailKey))
+                    await MasterDetailStore.SaveAsync(db, item.EntityType, detailKey, item.PayloadJson, "Approved SLH master-data edit", user.Identity?.Name, ct);
                 item.Status = StagingStatus.Promoted;
             }
             catch (Exception ex) when (ex is JsonException or DbUpdateException or InvalidOperationException)
@@ -128,6 +125,15 @@ public sealed class StagingService(TmsDbContext db)
         }
         await db.SaveChangesAsync(ct);
     }
+
+    private static string? DetailKey(string entityType, JsonElement payload) => entityType.ToLowerInvariant() switch
+    {
+        "driver" => Text(payload, "employeeNumber") ?? Text(payload, "driverId") ?? Text(payload, "payrollNumber"),
+        "vehicle" => Text(payload, "registration"),
+        "trailer" => Text(payload, "trailerNumber"),
+        "site" => Text(payload, "externalCode"),
+        _ => null
+    };
 
     private async Task PromoteCustomer(JsonElement payload, CancellationToken ct)
     {
