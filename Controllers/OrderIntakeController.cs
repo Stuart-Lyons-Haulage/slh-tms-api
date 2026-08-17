@@ -14,9 +14,10 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class OrderIntakeController(
     TmsDbContext db,
     StagingService stagingService,
-    EmailOrderIntakeService emailParser,
     ILogger<OrderIntakeController> logger) : ControllerBase
 {
+    private readonly EmailOrderIntakeService emailParser = new();
+
     [HttpPost("email/preview"), Authorize(Policy = "TmsWrite")]
     public IActionResult Preview([FromBody] MailboxEmailIntakeRequest request)
     {
