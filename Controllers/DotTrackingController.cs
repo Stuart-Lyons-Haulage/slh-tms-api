@@ -163,12 +163,51 @@ public sealed class DotTrackingController(
             var allocatedDriver = assignment?.DriverId is Guid driverId ? drivers.GetValueOrDefault(driverId) : null;
             var tachoStatus = TachoDriverStatus(aliases, tachoDrivers);
             if (tachoStatus is not null) matchedTachoKeys.Add(NormaliseIdentifier(tachoStatus.VehicleCode));
-            var tachoName = tachoStatus?.DriverName;
-            var condition = DetermineCondition(live, !string.IsNullOrWhiteSpace(tachoName), now);
-            var (tachoDriver, matchReason) = MatchTachoDriverWithReason(tachoStatus, drivers.Values, tachoMappings);
-            var driverName = tachoDriver?.DisplayName ?? tachoName ?? allocatedDriver?.DisplayName;
-            var driverSource = !string.IsNullOrWhiteSpace(tachoName) ? "TachoMaster" : allocatedDriver is not null ? "Allocation" : null;
-            var driverMismatch = !string.IsNullOrWhiteSpace(tachoName) && allocatedDriver is not null && !SameDriver(tachoDriver, tachoName, allocatedDriver);
+          var tachoName = tachoStatus?.DriverName;
+var falconName = live?.CurrentDriverName;
+
+var currentDriverName =
+    !string.IsNullOrWhiteSpace(tachoName)
+        ? tachoName
+        : falconName;
+
+var condition = DetermineCondition(
+    live,
+    !string.IsNullOrWhiteSpace(currentDriverName),
+    now);
+
+var (tachoDriver, matchReason) =
+    MatchTachoDriverWithReason(tachoStatus, drivers.Values, tachoMappings);
+
+var driverName =
+    tachoDriver?.DisplayName
+    ?? tachoName
+    ?? falconName
+    ?? allocatedDriver?.DisplayName;
+
+var driverSource =
+    !string.IsNullOrWhiteSpace(tachoName)
+        ? "TachoMaster"
+        : !string.IsNullOrWhiteSpace(falconName)
+            ? "DOT/Falcon"
+            : allocatedDriver is not null
+                ? "Allocation"
+                : null;
+
+if (matchReason is null && !string.IsNullOrWhiteSpace(falconName))
+    matchReason = "DOTLive";
+
+var driverMismatch =
+    !string.IsNullOrWhiteSpace(currentDriverName)
+    && allocatedDriver is not null
+    && (
+        tachoDriver is not null
+            ? tachoDriver.Id != allocatedDriver.Id
+            : NormalisePersonName(currentDriverName)
+                != NormalisePersonName(allocatedDriver.TachoName)
+              && NormalisePersonName(currentDriverName)
+                != NormalisePersonName(allocatedDriver.DisplayName)
+    );
             var plannedDutyUtc = assignment?.Stops.Where(stop => stop.PlannedArrivalUtc != null).OrderBy(stop => stop.PlannedArrivalUtc).Select(stop => stop.PlannedArrivalUtc).FirstOrDefault();
             return new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, live?.VehicleIdentifier, condition, observedAt, live?.IgnitionOn, live?.IsMoving, live?.SpeedKph, LiveLatitude(live), LiveLongitude(live), age is null ? null : (int)Math.Max(0, age.Value.TotalMinutes), assignment?.Id, assignment?.Reference, assignment?.Status.ToString(), tachoDriver?.Id ?? allocatedDriver?.Id, driverName, tachoName, driverSource, allocatedDriver?.DisplayName, driverMismatch, plannedDutyUtc, tachoStatus, null, null, vehicle.FleetioStatus, vehicle.FleetioVor, vehicle.FleetioPmiDueUtc, vehicle.FleetioMotDueUtc, vehicle.FleetioServiceStatus, matchReason);
         }).ToList();
@@ -252,7 +291,8 @@ public sealed class DotTrackingController(
                 SpeedKph = record.SpeedKph,
                 IgnitionOn = record.IgnitionOn,
                 IsMoving = record.IsMoving,
-                LastKnownStatus = record.Status
+                LastKnownStatus = record.Status,
+                CurrentDriverName = record.DriverName
             }).ToList();
         }
         catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException or TaskCanceledException)
