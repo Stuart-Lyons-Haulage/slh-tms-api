@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -72,7 +73,10 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
         }
     }
 
-    [HttpGet("{id:guid}")] public async Task<IActionResult> Get(Guid id, CancellationToken ct) => (await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct)) is { } x ? Ok(x) : NotFound();
+    [HttpGet("{id:guid}")]
+    public async Task<IActionResult> Get(Guid id, CancellationToken ct) =>
+        (await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct)) is { } x ? Ok(x) : NotFound();
+
     [HttpDelete("pending"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> ClearPending([FromQuery] string confirm, CancellationToken ct)
     {
@@ -86,15 +90,60 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
     [HttpPost("{id:guid}/approve"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> Approve(Guid id, ReviewRequest request, CancellationToken ct)
     {
+        var staged = await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(item => item.Id == id, ct);
+        if (staged is null) return NotFound();
+        if (staged.EntityType == "order" && IsExplicitPreOrder(staged.PayloadJson))
+        {
+            return BadRequest(new ErrorResponse(
+                "preorder_not_ready",
+                "This NWF pre-order is awaiting customer instruction and cannot be accepted into live planning yet. A later NWF tracker snapshot will enrich/supersede it automatically.",
+                HttpContext.TraceIdentifier));
+        }
+
         try { return Ok(await service.ReviewAndPromote(id, true, request.Note, User, ct)); }
         catch (KeyNotFoundException) { return NotFound(); }
         catch (InvalidOperationException ex) { return BadRequest(new ErrorResponse("staging_promotion_failed", ex.Message, HttpContext.TraceIdentifier)); }
         catch (DbUpdateException ex) { return BadRequest(new ErrorResponse("staging_promotion_failed", $"The order could not be approved because the planning schema is incomplete: {ex.GetBaseException().Message}", HttpContext.TraceIdentifier)); }
     }
+
     [HttpPost("{id:guid}/reject"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> Reject(Guid id, ReviewRequest request, CancellationToken ct)
     {
         try { return Ok(await service.ReviewAndPromote(id, false, request.Note, User, ct)); }
         catch (KeyNotFoundException) { return NotFound(); }
+    }
+
+    private static bool IsExplicitPreOrder(string payloadJson)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(payloadJson);
+            var root = document.RootElement;
+            if (TryGetProperty(root, "plannerReady", out var plannerReady) && plannerReady.ValueKind == JsonValueKind.False)
+                return true;
+            if (TryGetProperty(root, "intakeStatus", out var status) && status.ValueKind == JsonValueKind.String &&
+                string.Equals(status.GetString(), "PreOrder", StringComparison.OrdinalIgnoreCase))
+                return true;
+            return false;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryGetProperty(JsonElement payload, string name, out JsonElement value)
+    {
+        if (payload.TryGetProperty(name, out value)) return true;
+        foreach (var property in payload.EnumerateObject())
+        {
+            if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                value = property.Value;
+                return true;
+            }
+        }
+        value = default;
+        return false;
     }
 }
