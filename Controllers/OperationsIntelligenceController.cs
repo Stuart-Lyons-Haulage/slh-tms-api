@@ -48,7 +48,7 @@ public sealed class OperationsIntelligenceController(TmsDbContext db) : Controll
                 }
             }
         }
-        catch { /* Optional live geofence intelligence must not break the attention centre. */ }
+        catch { }
         return Ok(new { planningDate = day, generatedAtUtc = DateTimeOffset.UtcNow, count = items.Count, items });
     }
 
@@ -59,18 +59,12 @@ public sealed class OperationsIntelligenceController(TmsDbContext db) : Controll
         if (q.Length < 2) return Ok(Array.Empty<object>());
         var term = $"%{q}%";
         var results = new List<object>();
-        results.AddRange((await db.TransportOrders.AsNoTracking().Where(x => EF.Functions.Like(x.Reference, term) || EF.Functions.Like(x.CustomerCode, term)).OrderByDescending(x => x.CreatedAtUtc).Take(8).ToListAsync(ct))
-            .Select(x => new { type = "Order", id = x.Id, label = x.Reference, detail = $"{x.CustomerCode} · {x.CollectionDate:dd MMM yyyy}", href = $"/timeline/order/{x.Id}" }));
-        results.AddRange((await db.Loads.AsNoTracking().Where(x => EF.Functions.Like(x.Reference, term)).OrderByDescending(x => x.PlanningDate).Take(8).ToListAsync(ct))
-            .Select(x => new { type = "Run", id = x.Id, label = x.Reference, detail = $"{x.PlanningDate:dd MMM yyyy} · {x.Status}", href = $"/timeline/run/{x.Id}" }));
-        results.AddRange((await db.Vehicles.AsNoTracking().Where(x => EF.Functions.Like(x.Registration, term) || (x.FleetNumber != null && EF.Functions.Like(x.FleetNumber, term))).Take(6).ToListAsync(ct))
-            .Select(x => new { type = "Vehicle", id = x.Id, label = x.Registration, detail = x.FleetNumber ?? "Vehicle", href = "/fleet-assets" }));
-        results.AddRange((await db.Drivers.AsNoTracking().Where(x => EF.Functions.Like(x.DisplayName, term) || EF.Functions.Like(x.EmployeeNumber, term)).Take(6).ToListAsync(ct))
-            .Select(x => new { type = "Driver", id = x.Id, label = x.DisplayName, detail = x.EmployeeNumber, href = "/drivers" }));
-        results.AddRange((await db.Customers.AsNoTracking().Where(x => EF.Functions.Like(x.Name, term) || EF.Functions.Like(x.Code, term)).Take(6).ToListAsync(ct))
-            .Select(x => new { type = "Customer", id = x.Id, label = x.Name, detail = x.Code, href = "/customers" }));
-        results.AddRange((await db.Sites.AsNoTracking().Where(x => EF.Functions.Like(x.Name, term) || EF.Functions.Like(x.ExternalCode, term)).Take(6).ToListAsync(ct))
-            .Select(x => new { type = "Site", id = x.Id, label = x.Name, detail = x.ExternalCode, href = "/sites" }));
+        results.AddRange((await db.TransportOrders.AsNoTracking().Where(x => EF.Functions.Like(x.Reference, term) || EF.Functions.Like(x.CustomerCode, term)).OrderByDescending(x => x.CreatedAtUtc).Take(8).ToListAsync(ct)).Select(x => new { type = "Order", id = x.Id, label = x.Reference, detail = $"{x.CustomerCode} · {x.CollectionDate:dd MMM yyyy}", href = $"/timeline/order/{x.Id}" }));
+        results.AddRange((await db.Loads.AsNoTracking().Where(x => EF.Functions.Like(x.Reference, term)).OrderByDescending(x => x.PlanningDate).Take(8).ToListAsync(ct)).Select(x => new { type = "Run", id = x.Id, label = x.Reference, detail = $"{x.PlanningDate:dd MMM yyyy} · {x.Status}", href = $"/timeline/run/{x.Id}" }));
+        results.AddRange((await db.Vehicles.AsNoTracking().Where(x => EF.Functions.Like(x.Registration, term) || (x.FleetNumber != null && EF.Functions.Like(x.FleetNumber, term))).Take(6).ToListAsync(ct)).Select(x => new { type = "Vehicle", id = x.Id, label = x.Registration, detail = x.FleetNumber ?? "Vehicle", href = "/fleet-assets" }));
+        results.AddRange((await db.Drivers.AsNoTracking().Where(x => EF.Functions.Like(x.DisplayName, term) || EF.Functions.Like(x.EmployeeNumber, term)).Take(6).ToListAsync(ct)).Select(x => new { type = "Driver", id = x.Id, label = x.DisplayName, detail = x.EmployeeNumber, href = "/drivers" }));
+        results.AddRange((await db.Customers.AsNoTracking().Where(x => EF.Functions.Like(x.Name, term) || EF.Functions.Like(x.Code, term)).Take(6).ToListAsync(ct)).Select(x => new { type = "Customer", id = x.Id, label = x.Name, detail = x.Code, href = "/customers" }));
+        results.AddRange((await db.Sites.AsNoTracking().Where(x => EF.Functions.Like(x.Name, term) || EF.Functions.Like(x.ExternalCode, term)).Take(6).ToListAsync(ct)).Select(x => new { type = "Site", id = x.Id, label = x.Name, detail = x.ExternalCode, href = "/sites" }));
         return Ok(results.Take(30));
     }
 
@@ -151,8 +145,7 @@ public sealed class OperationsIntelligenceController(TmsDbContext db) : Controll
         }
         var changedRuns = changes.Where(x => x.LoadId != null).Select(x => x.LoadId).Distinct().Count();
         var stability = baselineRuns == 0 ? (decimal?)null : Math.Round(Math.Max(0, baselineRuns - changedRuns) / (decimal)baselineRuns * 100m, 1);
-        return Ok(new { from, to, lockedDays, baselineRuns, changedRuns, stabilityPercent = stability,
-            driverSwaps = changes.Count(x => x.ChangeType == "Driver swap"), vehicleSwaps = changes.Count(x => x.ChangeType == "Vehicle swap"), routeAmendments = changes.Count(x => x.ChangeType == "Route amendment"), runChanges = changes.Count, changes });
+        return Ok(new { from, to, lockedDays, baselineRuns, changedRuns, stabilityPercent = stability, driverSwaps = changes.Count(x => x.ChangeType == "Driver swap"), vehicleSwaps = changes.Count(x => x.ChangeType == "Vehicle swap"), routeAmendments = changes.Count(x => x.ChangeType == "Route amendment"), runChanges = changes.Count, changes });
     }
 
     [HttpGet("readiness")]
@@ -170,18 +163,16 @@ public sealed class OperationsIntelligenceController(TmsDbContext db) : Controll
         var geofenceGaps = loads.Sum(x => x.Stops.Count(s => s.Latitude is null || s.Longitude is null));
         var missingAllocations = loads.Count(x => x.DriverId is null || x.VehicleId is null);
         var ready = missingAllocations == 0 && vorConflicts == 0 && tachoConcerns == 0 && geofenceGaps == 0 && pendingReview == 0;
-        return Ok(new { planningDate = day, generatedAtUtc = DateTimeOffset.UtcNow, ready, runs = loads.Count, assignedDrivers = assignedDriverIds.Count, activeDrivers = drivers.Count,
-            assignedVehicles = assignedVehicleIds.Count, activeVehicles = vehicles.Count, missingAllocations, vorConflicts, tachoConcerns, geofenceGaps, unreviewedOrders = pendingReview,
-            planLock = await PlanLockStore.GetAsync(db, day, ct) });
+        return Ok(new { planningDate = day, generatedAtUtc = DateTimeOffset.UtcNow, ready, runs = loads.Count, assignedDrivers = assignedDriverIds.Count, activeDrivers = drivers.Count, assignedVehicles = assignedVehicleIds.Count, activeVehicles = vehicles.Count, missingAllocations, vorConflicts, tachoConcerns, geofenceGaps, unreviewedOrders = pendingReview, planLock = await PlanLockStore.GetAsync(db, day, ct) });
     }
 
     private static object Item(Load load, string severity, string type, string title, string detail) => new { id = $"{type}-{load.Id}", severity, type, title, detail, entityId = load.Id, entityType = "run", href = $"/timeline/run/{load.Id}" };
     private static bool IsVor(Vehicle v) => v.FleetioVor == true || string.Equals(v.FleetioStatus, "VOR", StringComparison.OrdinalIgnoreCase) || string.Equals(v.FleetioStatus, "Out of Service", StringComparison.OrdinalIgnoreCase) || string.Equals(v.FleetioStatus, "Vehicle Off Road", StringComparison.OrdinalIgnoreCase);
     private static object Fresh(string name, DateTimeOffset? last, DateTimeOffset now, int amberAfter, int redAfter)
     {
-        var age = last is null ? (double?)null : Math.Max(0, (now - last.Value).TotalMinutes);
+        double? age = last is null ? null : Math.Max(0, (now - last.Value).TotalMinutes);
         var state = age is null ? "red" : age <= amberAfter ? "green" : age <= redAfter ? "amber" : "red";
-        return new { name, lastUpdatedUtc = last, ageMinutes = age is null ? null : Math.Round(age.Value, 1), state };
+        return new { name, lastUpdatedUtc = last, ageMinutes = age is null ? (double?)null : Math.Round(age.Value, 1), state };
     }
     private sealed record TimelineEvent(DateTimeOffset AtUtc, string Title, string Detail, string Source, string? By);
 }
