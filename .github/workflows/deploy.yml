@@ -9,6 +9,10 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: slh-tms-api-production
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -34,181 +38,163 @@ jobs:
 
       - name: Build and push container image in Azure Container Registry
         run: |
+          set -euo pipefail
           az acr build \
             --registry "$AZURE_CONTAINER_REGISTRY" \
             --image "slh-tms-api:${{ github.sha }}" \
             --image slh-tms-api:latest \
             .
 
-      - name: Configure the app to pull from the private registry
+      - name: Wait for any previous Container App operation
         run: |
-          az containerapp registry set \
-            --name "$AZURE_CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --server "$AZURE_CONTAINER_REGISTRY.azurecr.io" \
-            --identity system || {
-              echo "Registry pull identity is already configured or could not be changed by this workflow."
-              echo "Continuing because the image update step will verify whether the app can pull the new image."
-            }
-
-      - name: Reference runtime secrets from Azure Key Vault
-        run: |
-          key_vault_name="${AZURE_KEY_VAULT_URI##*/}"
-          key_vault_secrets="$(az keyvault secret list \
-            --vault-name "$key_vault_name" \
-            --query '[].name' --output tsv 2>/dev/null || true)"
-          find_key_vault_secret() {
-            for requested in "$@"; do
-              found="$(printf '%s\n' "$key_vault_secrets" | awk -v requested="$requested" 'tolower($0) == tolower(requested) { print; exit }')"
-              if test -n "$found"; then
-                printf '%s' "$found"
-                return 0
-              fi
-            done
-            return 1
-          }
-          fleetio_enabled_kv="$(find_key_vault_secret fleetio-enabled fleetio-enabled-flag Fleetio-Enabled || true)"
-          fleetio_api_key_kv="$(find_key_vault_secret fleetio-api-key fleetio-access-token Fleetio-ApiKey Fleetio--ApiKey || true)"
-          fleetio_account_token_kv="$(find_key_vault_secret fleetio-account-token Fleetio-AccountToken || true)"
-          fleetio_base_url_kv="$(find_key_vault_secret fleetio-base-url Fleetio-BaseUrl Fleetio--BaseUrl || true)"
-          openai_api_key_kv="$(find_key_vault_secret slh-openai-api-key openai-api-key OpenAI-ApiKey OpenAI--ApiKey || true)"
-          test -n "$fleetio_enabled_kv" || fleetio_enabled_kv="fleetio-enabled"
-          test -n "$fleetio_api_key_kv" || fleetio_api_key_kv="Fleetio--ApiKey"
-          test -n "$fleetio_account_token_kv" || fleetio_account_token_kv="fleetio-account-token"
-          test -n "$fleetio_base_url_kv" || fleetio_base_url_kv="Fleetio--BaseUrl"
-          fleetio_key_vault_args=()
-          test -n "$fleetio_enabled_kv" && fleetio_key_vault_args+=("fleetio-enabled=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/$fleetio_enabled_kv,identityref:system")
-          test -n "$fleetio_api_key_kv" && fleetio_key_vault_args+=("fleetio-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/$fleetio_api_key_kv,identityref:system")
-          test -n "$fleetio_account_token_kv" && fleetio_key_vault_args+=("fleetio-account-token=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/$fleetio_account_token_kv,identityref:system")
-          test -n "$fleetio_base_url_kv" && fleetio_key_vault_args+=("fleetio-base-url=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/$fleetio_base_url_kv,identityref:system")
-          openai_key_vault_args=()
-          test -n "$openai_api_key_kv" && openai_key_vault_args+=("openai-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/$openai_api_key_kv,identityref:system")
-          az containerapp secret set \
-            --name "$AZURE_CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --secrets \
-              "tms-db-connection=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-tms-db-connection,identityref:system" \
-              "dot-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-api-key,identityref:system" \
-              "dot-base-url=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-base-url,identityref:system" \
-              "dot-company-code=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-company-code,identityref:system" \
-              "dot-password=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-password,identityref:system" \
-              "dot-username=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-username,identityref:system" \
-              "sagehr-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-sagehr-api-key,identityref:system" \
-              "sagehr-base-url=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-sagehr-base-url,identityref:system" \
-              "${fleetio_key_vault_args[@]}" \
-              "${openai_key_vault_args[@]}" || {
-                echo "Key Vault secret references are already configured or this workflow cannot update them."
-                echo "Continuing so the image deployment can proceed with the existing runtime configuration."
-              }
-          if test -n "$fleetio_enabled_kv" || test -n "$fleetio_api_key_kv" || test -n "$fleetio_account_token_kv" || test -n "$fleetio_base_url_kv"; then
-            echo "Fleetio Key Vault aliases detected and promoted to Container App secret references."
-          else
-            echo "No Fleetio Key Vault aliases detected; existing Container App Fleetio secrets will be preserved."
-          fi
-          if test -n "$openai_api_key_kv"; then
-            echo "OpenAI Key Vault alias detected and promoted to a Container App secret reference."
-          else
-            echo "No OpenAI Key Vault alias detected; the assistant will use its built-in operational rules."
-          fi
-
-      - name: Deploy image and configure ingress
-        run: |
-          existing_secrets="$(az containerapp secret list \
-            --name "$AZURE_CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --query '[].name' --output tsv 2>/dev/null || true)"
-          find_secret() {
-            for requested in "$@"; do
-              found="$(printf '%s\n' "$existing_secrets" | awk -v requested="$requested" 'tolower($0) == tolower(requested) { print; exit }')"
-              if test -n "$found"; then
-                printf '%s' "$found"
-                return 0
-              fi
-            done
-            return 1
-          }
-          fleetio_enabled_secret="$(find_secret fleetio-enabled Fleetio--Enabled || true)"
-          fleetio_api_key_secret="$(find_secret Fleetio--ApiKey fleetio-api-key fleetio-access-token Integrations--Fleetio--ApiKey || true)"
-          fleetio_account_token_secret="$(find_secret fleetio-account-token Fleetio--AccountToken Integrations--Fleetio--AccountToken || true)"
-          fleetio_base_url_secret="$(find_secret Fleetio--BaseUrl fleetio-base-url Integrations--Fleetio--BaseUrl || true)"
-          fleetio_env_args=()
-          test -n "$fleetio_enabled_secret" && fleetio_env_args+=("Integrations__Fleetio__Enabled=secretref:$fleetio_enabled_secret")
-          test -n "$fleetio_api_key_secret" && fleetio_env_args+=("Integrations__Fleetio__ApiKey=secretref:$fleetio_api_key_secret")
-          test -n "$fleetio_account_token_secret" && fleetio_env_args+=("Integrations__Fleetio__AccountToken=secretref:$fleetio_account_token_secret")
-          test -n "$fleetio_base_url_secret" && fleetio_env_args+=("Integrations__Fleetio__BaseUrl=secretref:$fleetio_base_url_secret")
-          if test -n "$fleetio_enabled_secret" && test -n "$fleetio_api_key_secret" && test -n "$fleetio_account_token_secret"; then
-            echo "Fleetio credentials found; Fleetio integration will be enabled using the built-in production base URL unless a base URL secret is present."
-          else
-            echo "Fleetio credentials are incomplete on the API Container App; the status page will identify the missing values."
-          fi
-
-          tacho_enabled_secret="$(find_secret tachomaster-enabled tacho-enabled TachoMaster--Enabled Integrations--TachoMaster--Enabled || true)"
-          tacho_api_key_secret="$(find_secret tachomaster-api-key tacho-api-key TachoMaster--ApiKey Integrations--TachoMaster--ApiKey || true)"
-          tacho_username_secret="$(find_secret tachomaster-username tacho-username TachoMaster--Username Integrations--TachoMaster--Username || true)"
-          tacho_password_secret="$(find_secret tachomaster-password tacho-password TachoMaster--Password Integrations--TachoMaster--Password || true)"
-          tacho_base_url_secret="$(find_secret tachomaster-base-url tacho-base-url TachoMaster--BaseUrl Integrations--TachoMaster--BaseUrl || true)"
-          tacho_env_args=()
-          if test -n "$tacho_enabled_secret" && test -n "$tacho_api_key_secret" && test -n "$tacho_username_secret" && test -n "$tacho_password_secret"; then
-            tacho_env_args+=(
-              "Integrations__TachoMaster__Enabled=secretref:$tacho_enabled_secret"
-              "Integrations__TachoMaster__ApiKey=secretref:$tacho_api_key_secret"
-              "Integrations__TachoMaster__Username=secretref:$tacho_username_secret"
-              "Integrations__TachoMaster__Password=secretref:$tacho_password_secret"
-            )
-            if test -n "$tacho_base_url_secret"; then
-              tacho_env_args+=("Integrations__TachoMaster__BaseUrl=secretref:$tacho_base_url_secret")
-            else
-              tacho_env_args+=("Integrations__TachoMaster__BaseUrl=https://api-v1-alpha.roadtech.co.uk")
+          set -euo pipefail
+          for attempt in {1..90}; do
+            state="$(az containerapp show \
+              --name "$AZURE_CONTAINER_APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --query properties.provisioningState \
+              --output tsv 2>/dev/null || true)"
+            if test "$state" = "Succeeded"; then
+              echo "Container App is ready."
+              exit 0
             fi
-            echo "TachoMaster secrets found; driver-duty lookup will be enabled."
-          else
-            echo "TachoMaster secrets are not all present on the API Container App; preserving existing TachoMaster environment references."
-          fi
+            echo "Container App provisioning state is ${state:-unknown}; waiting before deployment mutation ($attempt/90)..."
+            sleep 10
+          done
+          echo "Container App did not return to Succeeded provisioning state."
+          exit 1
 
-          openai_api_key_secret="$(find_secret openai-api-key OpenAI--ApiKey Integrations--OpenAI--ApiKey || true)"
-          openai_env_args=()
-          if test -n "$openai_api_key_secret"; then
-            openai_env_args+=(
-              "Integrations__OpenAI__Enabled=true"
-              "Integrations__OpenAI__ApiKey=secretref:$openai_api_key_secret"
-              "Integrations__OpenAI__Model=gpt-5.6-luna"
-            )
-            echo "OpenAI secret found; conversational planning advice will be enabled."
-          else
-            echo "No OpenAI secret found; the assistant will continue with deterministic operational advice."
-          fi
+      - name: Configure private registry access
+        run: |
+          set -euo pipefail
+          for attempt in {1..18}; do
+            if az containerapp registry set \
+              --name "$AZURE_CONTAINER_APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --server "$AZURE_CONTAINER_REGISTRY.azurecr.io" \
+              --identity system; then
+              exit 0
+            fi
+            echo "Registry configuration is busy; retrying ($attempt/18)..."
+            sleep 10
+          done
+          exit 1
 
-          az containerapp revision set-mode \
-            --name "$AZURE_CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --mode multiple
+      - name: Wait after registry configuration
+        run: |
+          set -euo pipefail
+          for attempt in {1..90}; do
+            state="$(az containerapp show --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.provisioningState --output tsv 2>/dev/null || true)"
+            if test "$state" = "Succeeded"; then exit 0; fi
+            echo "Waiting for registry operation to complete: ${state:-unknown} ($attempt/90)..."
+            sleep 10
+          done
+          exit 1
 
-          az containerapp update \
-            --name "$AZURE_CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --image "$AZURE_CONTAINER_REGISTRY.azurecr.io/slh-tms-api:${{ github.sha }}" \
-            --set-env-vars \
-              "Tracking__Dot__Enabled=true" \
-              "Tracking__Dot__BaseUrl=secretref:dot-base-url" \
-              "Tracking__Dot__ApiKey=secretref:dot-api-key" \
-              "Tracking__Dot__CompanyCode=secretref:dot-company-code" \
-              "Tracking__Dot__Username=secretref:dot-username" \
-              "Tracking__Dot__Password=secretref:dot-password" \
-              "Integrations__SageHr__Enabled=true" \
-              "Integrations__SageHr__BaseUrl=secretref:sagehr-base-url" \
-              "Integrations__SageHr__ApiKey=secretref:sagehr-api-key" \
-              "Integrations__SageHr__DriverTeamName=Drivers" \
-              "Integrations__SageHr__DriverPositionKeyword=Driver" \
-              "${fleetio_env_args[@]}" \
-              "${tacho_env_args[@]}" \
-              "${openai_env_args[@]}" \
-              "Cors__AllowedOrigins__0=https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io" \
-              "Deployment__Revision=${{ github.sha }}"
+      - name: Bind production secrets from Azure Key Vault
+        run: |
+          set -euo pipefail
+          secrets=(
+            "tms-db-connection=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-tms-db-connection,identityref:system"
+            "dot-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-api-key,identityref:system"
+            "dot-base-url=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-base-url,identityref:system"
+            "dot-company-code=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-company-code,identityref:system"
+            "dot-password=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-password,identityref:system"
+            "dot-username=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-username,identityref:system"
+            "sagehr-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-sagehr-api-key,identityref:system"
+            "sagehr-base-url=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-sagehr-base-url,identityref:system"
+          )
+          for attempt in {1..18}; do
+            if az containerapp secret set \
+              --name "$AZURE_CONTAINER_APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --secrets "${secrets[@]}"; then
+              exit 0
+            fi
+            echo "Secret binding is busy; retrying ($attempt/18)..."
+            sleep 10
+          done
+          exit 1
 
-          az containerapp ingress update \
-            --name "$AZURE_CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --target-port 80
+      - name: Wait after secret binding
+        run: |
+          set -euo pipefail
+          for attempt in {1..90}; do
+            state="$(az containerapp show --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.provisioningState --output tsv 2>/dev/null || true)"
+            if test "$state" = "Succeeded"; then exit 0; fi
+            echo "Waiting for secret operation to complete: ${state:-unknown} ($attempt/90)..."
+            sleep 10
+          done
+          exit 1
+
+      - name: Deploy image with stable runtime configuration
+        run: |
+          set -euo pipefail
+          env_vars=(
+            "ConnectionStrings__TmsDb=secretref:tms-db-connection"
+            "Tracking__Dot__Enabled=true"
+            "Tracking__Dot__BaseUrl=secretref:dot-base-url"
+            "Tracking__Dot__ApiKey=secretref:dot-api-key"
+            "Tracking__Dot__CompanyCode=secretref:dot-company-code"
+            "Tracking__Dot__Username=secretref:dot-username"
+            "Tracking__Dot__Password=secretref:dot-password"
+            "Integrations__TachoMaster__Enabled=true"
+            "Integrations__TachoMaster__BaseUrl=secretref:dot-base-url"
+            "Integrations__TachoMaster__ApiKey=secretref:dot-api-key"
+            "Integrations__TachoMaster__Username=secretref:dot-username"
+            "Integrations__TachoMaster__Password=secretref:dot-password"
+            "Integrations__SageHr__Enabled=true"
+            "Integrations__SageHr__BaseUrl=secretref:sagehr-base-url"
+            "Integrations__SageHr__ApiKey=secretref:sagehr-api-key"
+            "Integrations__SageHr__DriverTeamName=Drivers"
+            "Integrations__SageHr__DriverPositionKeyword=Driver"
+            "Cors__AllowedOrigins__0=https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io"
+            "Deployment__Revision=${{ github.sha }}"
+          )
+          for attempt in {1..18}; do
+            if az containerapp update \
+              --name "$AZURE_CONTAINER_APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --image "$AZURE_CONTAINER_REGISTRY.azurecr.io/slh-tms-api:${{ github.sha }}" \
+              --set-env-vars "${env_vars[@]}"; then
+              exit 0
+            fi
+            echo "Container image update is busy; retrying ($attempt/18)..."
+            sleep 10
+          done
+          exit 1
+
+      - name: Wait for deployed revision
+        run: |
+          set -euo pipefail
+          for attempt in {1..90}; do
+            state="$(az containerapp show --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.provisioningState --output tsv 2>/dev/null || true)"
+            if test "$state" = "Succeeded"; then exit 0; fi
+            echo "Waiting for image deployment to complete: ${state:-unknown} ($attempt/90)..."
+            sleep 10
+          done
+          exit 1
+
+      - name: Configure ingress and route traffic to latest revision
+        run: |
+          set -euo pipefail
+          for attempt in {1..18}; do
+            if az containerapp ingress update \
+              --name "$AZURE_CONTAINER_APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --target-port 80; then
+              break
+            fi
+            echo "Ingress update is busy; retrying ($attempt/18)..."
+            sleep 10
+          done
+
+          for attempt in {1..90}; do
+            state="$(az containerapp show --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.provisioningState --output tsv 2>/dev/null || true)"
+            if test "$state" = "Succeeded"; then break; fi
+            echo "Waiting for ingress operation: ${state:-unknown} ($attempt/90)..."
+            sleep 10
+          done
 
           latest_revision="$(az containerapp revision list \
             --name "$AZURE_CONTAINER_APP_NAME" \
@@ -217,29 +203,28 @@ jobs:
             --output tsv)"
           test -n "$latest_revision"
 
-          active="$(az containerapp revision show \
+          az containerapp revision activate \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --revision "$latest_revision" \
-            --query properties.active \
-            --output tsv)"
-          if test "$active" != "true"; then
-            az containerapp revision activate \
+            --revision "$latest_revision" || true
+
+          for attempt in {1..18}; do
+            if az containerapp ingress traffic set \
               --name "$AZURE_CONTAINER_APP_NAME" \
               --resource-group "$AZURE_RESOURCE_GROUP" \
-              --revision "$latest_revision"
-          fi
-
-          az containerapp ingress traffic set \
-            --name "$AZURE_CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --revision-weight "$latest_revision=100"
+              --revision-weight "$latest_revision=100"; then
+              exit 0
+            fi
+            echo "Traffic update is busy; retrying ($attempt/18)..."
+            sleep 10
+          done
+          exit 1
 
       - name: Check versioned TMS health endpoint
         run: |
-          for attempt in {1..12}; do
-            health="$(curl --fail --silent --show-error \
-              "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health" || true)"
+          set -euo pipefail
+          for attempt in {1..24}; do
+            health="$(curl --fail --silent --show-error "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health" || true)"
             if echo "$health" | grep --quiet "${{ github.sha }}"; then
               echo "$health"
               exit 0
@@ -251,20 +236,34 @@ jobs:
 
       - name: Check Azure SQL readiness
         run: |
+          set -euo pipefail
           for attempt in {1..60}; do
-            status="$(curl --silent --output /dev/null --write-out "%{http_code}" \
-              "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/ready")"
-            if test "$status" = "200"; then
-              exit 0
-            fi
+            status="$(curl --silent --output /dev/null --write-out "%{http_code}" "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/ready")"
+            if test "$status" = "200"; then exit 0; fi
             echo "Azure SQL is not ready yet (HTTP $status), retrying..."
             sleep 10
           done
-          echo "Azure SQL readiness endpoint did not return HTTP 200 after 10 minutes."
+          exit 1
+
+      - name: Check TachoMaster live integration
+        run: |
+          set -euo pipefail
+          for attempt in {1..12}; do
+            body_file="$(mktemp)"
+            status="$(curl --silent --output "$body_file" --write-out "%{http_code}" "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/tachomaster")"
+            cat "$body_file"
+            if test "$status" = "200"; then
+              rm -f "$body_file"
+              exit 0
+            fi
+            rm -f "$body_file"
+            echo "TachoMaster live check returned HTTP $status; retrying..."
+            sleep 10
+          done
           exit 1
 
       - name: Verify operational API requires Microsoft Entra authentication
         run: |
-          status="$(curl --silent --output /dev/null --write-out "%{http_code}" \
-            "https://$AZURE_CONTAINER_APP_FQDN/api/v1/customers")"
+          set -euo pipefail
+          status="$(curl --silent --output /dev/null --write-out "%{http_code}" "https://$AZURE_CONTAINER_APP_FQDN/api/v1/customers")"
           test "$status" = "401"
