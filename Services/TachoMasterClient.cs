@@ -13,12 +13,14 @@ public sealed class TachoMasterClient
     private readonly HttpClient httpClient;
     private readonly TachoMasterOptions options;
     private readonly ILogger<TachoMasterClient> logger;
+    private readonly DotTrackingClient? dotTrackingClient;
 
-    public TachoMasterClient(HttpClient httpClient, TachoMasterOptions options, ILogger<TachoMasterClient> logger)
+    public TachoMasterClient(HttpClient httpClient, TachoMasterOptions options, ILogger<TachoMasterClient> logger, DotTrackingClient? dotTrackingClient = null)
     {
         this.httpClient = httpClient;
         this.options = options;
         this.logger = logger;
+        this.dotTrackingClient = dotTrackingClient;
         this.httpClient.Timeout = TimeSpan.FromSeconds(30);
         this.httpClient.BaseAddress = new Uri(NormaliseBaseUrl(options.BaseUrl));
     }
@@ -77,7 +79,17 @@ public sealed class TachoMasterClient
             .Where(duty => duty.DutyStart < dayEnd && (duty.DutyEnd is null || duty.DutyEnd >= dayStart))
             .GroupBy(duty => NormaliseIdentifier(duty.VehCode))
             .ToDictionary(group => group.Key, group => group.OrderByDescending(duty => duty.DutyStart).ToList());
-        if (currentDuties.Count == 0) return new Dictionary<string, TachoVehicleDriverStatus>();
+
+        if (currentDuties.Count == 0)
+        {
+            var falconDrivers = await TryGetFalconDriverStatusesAsync(cancellationToken);
+            if (falconDrivers.Count > 0)
+            {
+                logger.LogInformation("TachoMaster duty feed returned zero vehicles; using {Count} live Falcon driver identity record(s).", falconDrivers.Count);
+                return falconDrivers;
+            }
+            return new Dictionary<string, TachoVehicleDriverStatus>();
+        }
 
         var members = (await membersTask).GroupBy(member => member.MemCode).ToDictionary(group => group.Key, group => group.First());
         var metrics = (await metricsTask).GroupBy(metric => metric.MemCode).ToDictionary(group => group.Key, group => group.OrderByDescending(metric => metric.DateTimeWhenValid).First());
@@ -122,6 +134,51 @@ public sealed class TachoMasterClient
 
         logger.LogDebug("TachoMaster matched {Count} current vehicle duty records to drivers and duty metrics.", result.Count);
         return result;
+    }
+
+    private async Task<IReadOnlyDictionary<string, TachoVehicleDriverStatus>> TryGetFalconDriverStatusesAsync(CancellationToken cancellationToken)
+    {
+        if (dotTrackingClient is null) return new Dictionary<string, TachoVehicleDriverStatus>();
+        try
+        {
+            var telemetry = await dotTrackingClient.GetLatestVehicleEventsAsync(cancellationToken);
+            var records = telemetry.Select(DotTelemetryRecord.FromProvider)
+                .Where(record => !string.IsNullOrWhiteSpace(record.DriverName) && !string.IsNullOrWhiteSpace(record.VehicleIdentifier))
+                .GroupBy(record => NormaliseIdentifier(record.VehicleIdentifier))
+                .Select(group => group.OrderByDescending(record => record.EventTimeUtc).First())
+                .ToList();
+
+            return records.ToDictionary(
+                record => NormaliseIdentifier(record.VehicleIdentifier),
+                record => new TachoVehicleDriverStatus(
+                    NormaliseIdentifier(record.VehicleIdentifier),
+                    0,
+                    record.DriverName!,
+                    null,
+                    null,
+                    record.EventTimeUtc,
+                    null,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null));
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Falcon live driver fallback was unavailable.");
+            return new Dictionary<string, TachoVehicleDriverStatus>();
+        }
     }
 
     private async Task<string> LoginAsync(CancellationToken cancellationToken)
@@ -221,10 +278,6 @@ public sealed class TachoMasterClient
         for (var page = 0; page < options.MaxPages; page++)
         {
             using var request = CreateRequest(HttpMethod.Post, "Member/GetMembersLong", sid);
-            // The duty feed contains all drivers working today, while
-            // OnlyLiveMembers=true returns only the small subset currently
-            // marked live in TachoMaster. Fetch the full member directory so
-            // every card/duty record can be correlated to a driver.
             request.Content = JsonContent.Create(new { Offset = offset, OnlyLiveMembers = false });
             using var response = await httpClient.SendAsync(request, cancellationToken);
             response.EnsureSuccessStatusCode();
@@ -280,7 +333,8 @@ public sealed class TachoMasterClient
 
     private static string NormaliseIdentifier(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
-    private static readonly JsonSerializerOptions JsonOptions = new() {
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
         PropertyNameCaseInsensitive = true,
         Converters = { new NumberOrStringConverter() }
     };
@@ -362,5 +416,12 @@ public sealed record TachoVehicleDriverStatus(
     int? ShortDailyRestTakenThisWeek,
     int? WorkAvailableWeekMinutes);
 
-public sealed record TachoDriverProfile(int MemberCode, string DriverName, string? CardNumber, string? EmployeeNumber,
-    DateTimeOffset? MetricsValidAtUtc, int? DriveAvailableTodayMinutes, int? DriveAvailableWeekMinutes, int? WorkAvailableWeekMinutes);
+public sealed record TachoDriverProfile(
+    int MemberCode,
+    string DriverName,
+    string? CardNumber,
+    string? EmployeeNumber,
+    DateTimeOffset? MetricsValidAtUtc,
+    int? DriveAvailableTodayMinutes,
+    int? DriveAvailableWeekMinutes,
+    int? WorkAvailableWeekMinutes);
