@@ -14,6 +14,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     private readonly EmailOrderIntakeService emailParser = new();
     private readonly SpecialistMailboxOrderParser specialistParser = new();
     private readonly SainsburyHaulierPlanParser sainsburyParser = new();
+    private readonly NwfDailyTrackerParser nwfParser = new();
     [HttpPost("email/preview"), Authorize(Policy = "TmsWrite")]
     public IActionResult Preview([FromBody] MailboxEmailIntakeRequest request)
     {
@@ -46,7 +47,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         logger.LogInformation("Info mailbox intake {MessageId}: staged {Staged}, existing {Existing}, superseded {Superseded}, parser warnings {Warnings}.", request.MessageId, staged, existing, superseded, parsed.Warnings.Count);
         return Accepted(new { ignored = false, staged, existing, superseded, warnings = parsed.Warnings, records });
     }
-    private EmailIntakeParseResult ParseEmail(MailboxEmailIntakeRequest request) => sainsburyParser.TryParse(request) ?? specialistParser.TryParse(request) ?? emailParser.Parse(request);
+    private EmailIntakeParseResult ParseEmail(MailboxEmailIntakeRequest request) => nwfParser.TryParse(request) ?? sainsburyParser.TryParse(request) ?? specialistParser.TryParse(request) ?? emailParser.Parse(request);
     private async Task<int> SupersedeOlderPending(string naturalKey, string currentMessageId, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(naturalKey)) return 0;
