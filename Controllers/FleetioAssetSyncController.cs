@@ -16,6 +16,81 @@ public sealed class FleetioAssetSyncController(
     TmsDbContext db,
     ILogger<FleetioAssetSyncController> logger) : ControllerBase
 {
+    [HttpGet("asset-status")]
+    public async Task<IActionResult> AssetStatus(CancellationToken ct)
+    {
+        if (!fleetioClient.IsConfigured)
+            return BadRequest(new { configured = false, missingSettings = fleetioClient.MissingSettings });
+
+        try
+        {
+            var assets = await fleetioClient.GetVehiclesAsync(100, ct);
+            var vehicles = await db.Set<Vehicle>().AsNoTracking().Where(v => v.Active).ToListAsync(ct);
+            var trailers = await db.Set<Trailer>().AsNoTracking().Where(t => t.Active).ToListAsync(ct);
+
+            var powered = assets.Where(asset => !IsTrailer(asset)).Select(asset =>
+            {
+                var registration = BestVehicleRegistration(asset);
+                var match = string.IsNullOrWhiteSpace(registration) ? null : vehicles.FirstOrDefault(v => Normalise(v.Registration) == Normalise(registration));
+                match ??= vehicles.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v.FleetioId) && string.Equals(v.FleetioId, asset.Id, StringComparison.OrdinalIgnoreCase));
+                return new
+                {
+                    tmsVehicleId = match?.Id,
+                    registration = match?.Registration ?? registration ?? asset.Name ?? asset.Id,
+                    fleetNumber = match?.FleetNumber ?? asset.FleetNumber,
+                    fleetioId = asset.Id,
+                    fleetioName = asset.Name,
+                    fleetioStatus = asset.Status,
+                    pmiDueUtc = asset.PmiDueUtc,
+                    motDueUtc = asset.MotDueUtc,
+                    serviceStatus = asset.ServiceStatus,
+                    matched = match is not null
+                };
+            }).OrderBy(x => x.registration).ToList();
+
+            var trailerRows = assets.Where(IsTrailer).Select(asset =>
+            {
+                var slh = asset.Name?.Trim();
+                var cNumber = asset.Registration?.Trim();
+                var nameMatch = !string.IsNullOrWhiteSpace(slh)
+                    ? trailers.FirstOrDefault(t => Normalise(t.TrailerNumber) == Normalise(slh))
+                    : null;
+                var cMatch = !string.IsNullOrWhiteSpace(cNumber)
+                    ? trailers.FirstOrDefault(t => Normalise(t.TrailerNumber) == Normalise(cNumber))
+                    : null;
+                var match = nameMatch ?? cMatch;
+                return new
+                {
+                    tmsTrailerId = match?.Id,
+                    trailerNumber = match?.TrailerNumber ?? slh ?? cNumber ?? asset.Id,
+                    fleetioCNumber = cNumber,
+                    fleetioId = asset.Id,
+                    fleetioName = slh,
+                    fleetioStatus = asset.Status,
+                    type = asset.Type,
+                    pmiDueUtc = asset.PmiDueUtc,
+                    motDueUtc = asset.MotDueUtc,
+                    serviceStatus = asset.ServiceStatus,
+                    matched = match is not null
+                };
+            }).OrderBy(x => x.trailerNumber).ToList();
+
+            return Ok(new
+            {
+                configured = true,
+                connected = true,
+                retrievedAtUtc = DateTimeOffset.UtcNow,
+                vehicles = powered,
+                trailers = trailerRows
+            });
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogError(exception, "Fleetio asset status failed.");
+            return StatusCode(500, new { configured = true, connected = false, message = exception.GetBaseException().Message });
+        }
+    }
+
     [HttpPost("sync-assets")]
     [Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> SyncAssets(CancellationToken ct)
@@ -43,6 +118,7 @@ public sealed class FleetioAssetSyncController(
             var vehiclesCreated = 0;
             var trailersUpdated = 0;
             var trailersCreated = 0;
+            var trailerDuplicatesMerged = 0;
             var skipped = 0;
 
             foreach (var asset in vehicleAssets)
@@ -55,14 +131,7 @@ public sealed class FleetioAssetSyncController(
                 }
 
                 var registrationKey = Normalise(registration);
-
-                // Exact full registration is authoritative. Do not use three-character
-                // suffix matching here because that can bind the wrong Fleetio asset.
-                var vehicle = vehicles.FirstOrDefault(item =>
-                    Normalise(item.Registration) == registrationKey);
-
-                // If a record was already linked to Fleetio, that stable ID is the next
-                // safest fallback after an exact registration match.
+                var vehicle = vehicles.FirstOrDefault(item => Normalise(item.Registration) == registrationKey);
                 vehicle ??= vehicles.FirstOrDefault(item =>
                     !string.IsNullOrWhiteSpace(item.FleetioId) &&
                     string.Equals(item.FleetioId, asset.Id, StringComparison.OrdinalIgnoreCase));
@@ -84,41 +153,54 @@ public sealed class FleetioAssetSyncController(
                 }
                 else
                 {
-                    // Fleetio owns these integration fields. Keep TMS-only planning,
-                    // fuel and cab fields untouched.
                     vehicle.Registration = ClipRequired(registration, 20);
                     vehicle.FleetioId = Clip(asset.Id, 80);
                     vehicle.FleetioName = Clip(asset.Name, 160);
                     vehicle.FleetioStatus = Clip(asset.Status, 80);
-                    if (!string.IsNullOrWhiteSpace(asset.FleetNumber))
-                        vehicle.FleetNumber = Clip(asset.FleetNumber, 40);
+                    if (!string.IsNullOrWhiteSpace(asset.FleetNumber)) vehicle.FleetNumber = Clip(asset.FleetNumber, 40);
                     vehicle.Active = true;
                     vehiclesUpdated++;
                 }
+
+                // These are NotMapped legacy compatibility fields, but setting them
+                // ensures the current response/logic has the Fleetio values. The
+                // asset-status endpoint always refreshes them live from Fleetio.
+                vehicle.FleetioPmiDueUtc = asset.PmiDueUtc;
+                vehicle.FleetioMotDueUtc = asset.MotDueUtc;
+                vehicle.FleetioServiceStatus = asset.ServiceStatus;
+                vehicle.FleetioLastSyncedUtc = DateTimeOffset.UtcNow;
             }
 
             foreach (var asset in trailerAssets)
             {
                 var fleetioName = asset.Name?.Trim();
                 var cNumber = asset.Registration?.Trim();
-                var preferredTrailerNumber = !string.IsNullOrWhiteSpace(fleetioName)
-                    ? fleetioName
-                    : cNumber;
-
+                var preferredTrailerNumber = !string.IsNullOrWhiteSpace(fleetioName) ? fleetioName : cNumber;
                 if (string.IsNullOrWhiteSpace(preferredTrailerNumber))
                 {
                     skipped++;
                     continue;
                 }
 
-                var candidateKeys = new[] { fleetioName, cNumber }
-                    .Where(value => !string.IsNullOrWhiteSpace(value))
-                    .Select(value => Normalise(value!))
-                    .Where(value => value.Length > 0)
-                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                // The SLH number (eg SLH36) is the canonical TMS identity. The
+                // Fleetio C-number is the external asset identity. Prefer the SLH
+                // match and merge any historic C-number duplicate into it.
+                var nameMatch = !string.IsNullOrWhiteSpace(fleetioName)
+                    ? trailers.FirstOrDefault(item => Normalise(item.TrailerNumber) == Normalise(fleetioName))
+                    : null;
+                var cMatch = !string.IsNullOrWhiteSpace(cNumber)
+                    ? trailers.FirstOrDefault(item => Normalise(item.TrailerNumber) == Normalise(cNumber))
+                    : null;
+                var trailer = nameMatch ?? cMatch;
 
-                var trailer = trailers.FirstOrDefault(item =>
-                    candidateKeys.Contains(Normalise(item.TrailerNumber)));
+                if (nameMatch is not null && cMatch is not null && nameMatch.Id != cMatch.Id)
+                {
+                    var loadsUsingDuplicate = await db.Loads.Where(load => load.TrailerId == cMatch.Id).ToListAsync(ct);
+                    foreach (var load in loadsUsingDuplicate) load.TrailerId = nameMatch.Id;
+                    cMatch.Active = false;
+                    trailer = nameMatch;
+                    trailerDuplicatesMerged++;
+                }
 
                 if (trailer is null)
                 {
@@ -134,9 +216,8 @@ public sealed class FleetioAssetSyncController(
                 }
                 else
                 {
-                    // Fleetio is authoritative for the trailer identity/type while
-                    // pallet capacities remain TMS planning data.
-                    trailer.TrailerNumber = ClipRequired(preferredTrailerNumber, 40);
+                    if (!string.IsNullOrWhiteSpace(fleetioName))
+                        trailer.TrailerNumber = ClipRequired(fleetioName, 40);
                     trailer.Type = Clip(asset.Type, 80) ?? trailer.Type;
                     trailer.Active = true;
                     trailersUpdated++;
@@ -156,9 +237,10 @@ public sealed class FleetioAssetSyncController(
                 vehiclesCreated,
                 trailersUpdated,
                 trailersCreated,
+                trailerDuplicatesMerged,
                 skipped,
                 syncedAtUtc = DateTimeOffset.UtcNow,
-                message = $"Fleetio sync completed: {vehiclesUpdated} vehicle(s) updated, {vehiclesCreated} vehicle(s) created, {trailersUpdated} trailer(s) updated and {trailersCreated} trailer(s) created."
+                message = $"Fleetio sync completed: {vehiclesUpdated} vehicle(s) updated, {vehiclesCreated} vehicle(s) created, {trailersUpdated} trailer(s) updated, {trailersCreated} trailer(s) created and {trailerDuplicatesMerged} duplicate trailer identity record(s) merged."
             });
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
@@ -175,23 +257,15 @@ public sealed class FleetioAssetSyncController(
 
     private static bool IsTrailer(FleetioVehicle asset)
     {
-        if (asset.Type?.Contains("Trailer", StringComparison.OrdinalIgnoreCase) == true)
-            return true;
-
-        return !string.IsNullOrWhiteSpace(asset.Registration) &&
-               Regex.IsMatch(asset.Registration.Trim(), "^C\\d{5,}$", RegexOptions.IgnoreCase);
+        if (asset.Type?.Contains("Trailer", StringComparison.OrdinalIgnoreCase) == true) return true;
+        return !string.IsNullOrWhiteSpace(asset.Registration) && Regex.IsMatch(asset.Registration.Trim(), "^C\\d{5,}$", RegexOptions.IgnoreCase);
     }
 
     private static string? BestVehicleRegistration(FleetioVehicle asset)
     {
-        if (!string.IsNullOrWhiteSpace(asset.Registration) &&
-            !Regex.IsMatch(asset.Registration.Trim(), "^C\\d{5,}$", RegexOptions.IgnoreCase))
+        if (!string.IsNullOrWhiteSpace(asset.Registration) && !Regex.IsMatch(asset.Registration.Trim(), "^C\\d{5,}$", RegexOptions.IgnoreCase))
             return asset.Registration.Trim();
-
-        // Some Fleetio vehicle records use Name as the registration.
-        if (!string.IsNullOrWhiteSpace(asset.Name) && LooksLikeUkRegistration(asset.Name))
-            return asset.Name.Trim();
-
+        if (!string.IsNullOrWhiteSpace(asset.Name) && LooksLikeUkRegistration(asset.Name)) return asset.Name.Trim();
         return null;
     }
 
@@ -201,16 +275,13 @@ public sealed class FleetioAssetSyncController(
         return key.Length is >= 5 and <= 8 && key.Any(char.IsLetter) && key.Any(char.IsDigit);
     }
 
-    private static string Normalise(string value) =>
-        new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
-
+    private static string Normalise(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
     private static string? Clip(string? value, int maxLength)
     {
         if (string.IsNullOrWhiteSpace(value)) return null;
         var trimmed = value.Trim();
         return trimmed.Length <= maxLength ? trimmed : trimmed[..maxLength];
     }
-
     private static string ClipRequired(string value, int maxLength)
     {
         var trimmed = value.Trim();
