@@ -24,9 +24,6 @@ var deploymentRevision = builder.Configuration["Deployment:Revision"] ?? "local"
 
 builder.Services.AddControllers().AddJsonOptions(options =>
 {
-    // The web planner consumes enum fields such as OrderStatus and LoadStatus as
-    // semantic strings. Keep integer enum input compatibility for older clients,
-    // but always emit readable values such as "ReadyToPlan" and "Planned".
     options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
 });
 builder.Services.AddEndpointsApiExplorer();
@@ -47,8 +44,6 @@ assistantOptions.Model = ReadSetting(builder.Configuration, assistantOptions.Mod
 builder.Services.AddSingleton(assistantOptions);
 builder.Services.AddHttpClient<TmsAssistantService>();
 
-// Bind DOT tracking configuration from Tracking:Dot section
-// Sensitive values (BaseUrl, Username, Password) are loaded from environment variables or Azure Key Vault at runtime
 var dotTrackingOptions = new DotTrackingOptions();
 builder.Configuration.GetSection("Tracking:Dot").Bind(dotTrackingOptions);
 builder.Services.AddSingleton(dotTrackingOptions);
@@ -64,9 +59,6 @@ tachoMasterOptions.Username = ReadSetting(builder.Configuration, tachoMasterOpti
     "Integrations:TachoMaster:Username", "Integrations__TachoMaster__Username", "tachomaster-username", "tacho-username", "TachoMaster--Username");
 tachoMasterOptions.Password = ReadSetting(builder.Configuration, tachoMasterOptions.Password,
     "Integrations:TachoMaster:Password", "Integrations__TachoMaster__Password", "tachomaster-password", "tacho-password", "TachoMaster--Password");
-// TachoMaster and Falcon are exposed by the same authenticated RoadTech API.
-// When no dedicated TachoMaster login has been supplied, reuse the already
-// secured Falcon credentials rather than duplicating secrets in the app.
 var hasDedicatedTachoCredentials = !string.IsNullOrWhiteSpace(tachoMasterOptions.ApiKey) ||
     !string.IsNullOrWhiteSpace(tachoMasterOptions.Username) ||
     !string.IsNullOrWhiteSpace(tachoMasterOptions.Password);
@@ -112,21 +104,14 @@ builder.Services.AddHttpClient<AzureMapsRouteClient>();
 builder.Services.AddHttpClient<FleetioClient>();
 builder.Services.AddHostedService<DotTrackingIngestionService>();
 
-// Database readiness is checked separately from the public liveness check.
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
 
-// JWT Bearer authentication - validate tenant and audience
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(o =>
 {
     o.Authority = $"https://login.microsoftonline.com/{tenantId}/v2.0";
-    // audience must match the configured API audience (api://<client-id>)
     o.TokenValidationParameters = new TokenValidationParameters
     {
         ValidateIssuer = true,
-        // Power Automate may request delegated Entra tokens using either the
-        // v2 issuer or the tenant's established v1 issuer. Both are restricted
-        // to this configured tenant; audience, lifetime and Tms.Access scope
-        // remain mandatory below.
         ValidIssuers = new[]
         {
             $"https://login.microsoftonline.com/{tenantId}/v2.0",
@@ -136,8 +121,6 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJw
         ValidAudience = audience,
         ValidateLifetime = true
     };
-
-    // Ensure the middleware returns 401 for invalid/malformed tokens
     o.Events = new JwtBearerEvents
     {
         OnAuthenticationFailed = ctx =>
@@ -147,17 +130,12 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJw
         },
         OnChallenge = ctx =>
         {
-            // preserve default behavior but ensure 401
-            if (!ctx.Handled)
-            {
-                ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            }
+            if (!ctx.Handled) ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
             return Task.CompletedTask;
         }
     };
 });
 
-// Authorization: require authenticated users by default for all endpoints except explicitly allowed ones (health)
 builder.Services.AddAuthorization(options =>
 {
     var tmsAccessPolicy = new AuthorizationPolicyBuilder()
@@ -177,7 +155,6 @@ static bool IsLyonsUser(ClaimsPrincipal user)
         .Where(claim => claim.Type is "preferred_username" or "upn" or "email" || claim.Type == ClaimTypes.Email || claim.Type == ClaimTypes.Name)
         .Select(claim => claim.Value)
         .Where(value => !string.IsNullOrWhiteSpace(value));
-
     return values.Any(value => value.EndsWith("@lyonshaulage.com", StringComparison.OrdinalIgnoreCase));
 }
 
@@ -201,9 +178,6 @@ if (!app.Environment.IsEnvironment("Testing"))
         if (quarantinedFleetioPlaceholders > 0)
             logger.LogWarning("Quarantined {PlaceholderCount} Fleetio placeholder vehicle records from operational master data.", quarantinedFleetioPlaceholders);
         var register = scope.ServiceProvider.GetRequiredService<StagingService>();
-        // Link a small recovery batch without turning every cold start into a
-        // long-running import. Remaining rows stay safe in the register and can
-        // be linked from Master Data after the portal is serving traffic.
         await register.LinkRegistered(25, CancellationToken.None);
     }
     catch (Exception ex)
@@ -216,8 +190,8 @@ app.UseHttpsRedirection();
 app.UseCors("Portal");
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseMiddleware<Slh.Tms.Api.Middleware.PlanLockMiddleware>();
 
-// Anonymous liveness is intentionally lightweight; readiness verifies Azure SQL connectivity.
 app.MapGet("/api/v1/health", () => Results.Ok(new { status = "healthy", revision = deploymentRevision })).AllowAnonymous();
 app.MapHealthChecks("/api/v1/health/ready", new HealthCheckOptions
 {
@@ -225,25 +199,15 @@ app.MapHealthChecks("/api/v1/health/ready", new HealthCheckOptions
     {
         if (report.Status != Microsoft.Extensions.Diagnostics.HealthChecks.HealthStatus.Healthy)
         {
-            var logger = context.RequestServices
-                .GetRequiredService<ILoggerFactory>()
-                .CreateLogger("Tms.SqlReadiness");
-
+            var logger = context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("Tms.SqlReadiness");
             foreach (var entry in report.Entries)
-            {
-                logger.LogError(entry.Value.Exception,
-                    "Health check {HealthCheckName} returned {HealthStatus}.",
-                    entry.Key,
-                    entry.Value.Status);
-            }
+                logger.LogError(entry.Value.Exception, "Health check {HealthCheckName} returned {HealthStatus}.", entry.Key, entry.Value.Status);
         }
-
         context.Response.ContentType = "application/json";
         await context.Response.WriteAsJsonAsync(new { status = report.Status.ToString() });
     }
 }).AllowAnonymous();
 
-// Keep all operational endpoints under /api/v1 via controller routes
 app.MapControllers();
 
 if (app.Environment.IsDevelopment()) { app.UseSwagger(); app.UseSwaggerUI(); }
