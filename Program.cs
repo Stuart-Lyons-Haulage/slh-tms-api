@@ -1,4 +1,5 @@
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Authentication;
@@ -12,6 +13,8 @@ using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Models.Integrations;
 using Slh.Tms.Api.Models.Assistant;
 using Slh.Tms.Api.Services;
+
+[assembly: InternalsVisibleTo("Slh.Tms.Api.Tests")]
 
 var builder = WebApplication.CreateBuilder(args);
 var tenantId = builder.Configuration["Entra:TenantId"] ?? throw new InvalidOperationException("Entra:TenantId is required");
