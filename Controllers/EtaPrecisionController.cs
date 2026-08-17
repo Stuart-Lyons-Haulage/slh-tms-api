@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
@@ -30,7 +31,7 @@ public sealed class EtaPrecisionController(TmsDbContext db) : ControllerBase
         await ManagementReportingStore.EnsureSchemaAsync(db, ct);
 
         var loadIds = await db.Loads.AsNoTracking()
-            .Where(x => x.PlanningDate >= first && x.PlanningDate <= last && x.Status != Models.LoadStatus.Cancelled)
+            .Where(x => x.PlanningDate >= first && x.PlanningDate <= last && x.Status != LoadStatus.Cancelled)
             .Select(x => x.Id)
             .Take(5000)
             .ToListAsync(ct);
