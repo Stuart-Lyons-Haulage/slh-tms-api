@@ -139,12 +139,20 @@ public sealed class DotTrackingController(
         }
         var driverIds = assignments.Where(load => load.DriverId != null).Select(load => load.DriverId!.Value).Distinct().ToList();
         var drivers = await LoadDriverIdentities(driverIds, cancellationToken);
+        var tachoMappings = await LoadIntegrationMappingsAsync("TachoMaster", "Driver", cancellationToken);
+        var tachoVehicleMappings = await LoadIntegrationMappingsAsync("TachoMaster", "Vehicle", cancellationToken);
+        var dotVehicleMappings = await LoadIntegrationMappingsAsync("DotTracking", "Vehicle", cancellationToken);
         var matchedLiveIds = new HashSet<Guid>();
         var matchedTachoKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var records = vehicles.Select(vehicle =>
         {
             var keys = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => NormaliseIdentifier(value!)).ToList();
             var aliases = keys.SelectMany(IdentifierAliases).Distinct().ToList();
+            // Add explicit integration mapping aliases for this vehicle
+            var tachoVehicleCode = tachoVehicleMappings.FirstOrDefault(m => m.Value == vehicle.Id).Key;
+            if (tachoVehicleCode is not null) aliases.Add(tachoVehicleCode);
+            var dotVehicleCode = dotVehicleMappings.FirstOrDefault(m => m.Value == vehicle.Id).Key;
+            if (dotVehicleCode is not null) aliases.Add(dotVehicleCode);
             var exactLive = aliases.Select(key => latestByIdentifier.GetValueOrDefault(key)).Where(status => status is not null);
             var suffixLive = aliases.Select(key => latestBySuffix.GetValueOrDefault(key)).Where(status => status is not null);
             var live = exactLive.Concat(suffixLive).OrderByDescending(status => ObservedAt(status!, now)).FirstOrDefault();
@@ -157,12 +165,12 @@ public sealed class DotTrackingController(
             if (tachoStatus is not null) matchedTachoKeys.Add(NormaliseIdentifier(tachoStatus.VehicleCode));
             var tachoName = tachoStatus?.DriverName;
             var condition = DetermineCondition(live, !string.IsNullOrWhiteSpace(tachoName), now);
-            var tachoDriver = MatchTachoDriver(tachoName, drivers.Values);
+            var (tachoDriver, matchReason) = MatchTachoDriverWithReason(tachoStatus, drivers.Values, tachoMappings);
             var driverName = tachoDriver?.DisplayName ?? tachoName ?? allocatedDriver?.DisplayName;
             var driverSource = !string.IsNullOrWhiteSpace(tachoName) ? "TachoMaster" : allocatedDriver is not null ? "Allocation" : null;
             var driverMismatch = !string.IsNullOrWhiteSpace(tachoName) && allocatedDriver is not null && !SameDriver(tachoDriver, tachoName, allocatedDriver);
             var plannedDutyUtc = assignment?.Stops.Where(stop => stop.PlannedArrivalUtc != null).OrderBy(stop => stop.PlannedArrivalUtc).Select(stop => stop.PlannedArrivalUtc).FirstOrDefault();
-            return new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, live?.VehicleIdentifier, condition, observedAt, live?.IgnitionOn, live?.IsMoving, live?.SpeedKph, LiveLatitude(live), LiveLongitude(live), age is null ? null : (int)Math.Max(0, age.Value.TotalMinutes), assignment?.Id, assignment?.Reference, assignment?.Status.ToString(), tachoDriver?.Id ?? allocatedDriver?.Id, driverName, tachoName, driverSource, allocatedDriver?.DisplayName, driverMismatch, plannedDutyUtc, tachoStatus, null, null, vehicle.FleetioStatus, vehicle.FleetioVor, vehicle.FleetioPmiDueUtc, vehicle.FleetioMotDueUtc, vehicle.FleetioServiceStatus);
+            return new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, live?.VehicleIdentifier, condition, observedAt, live?.IgnitionOn, live?.IsMoving, live?.SpeedKph, LiveLatitude(live), LiveLongitude(live), age is null ? null : (int)Math.Max(0, age.Value.TotalMinutes), assignment?.Id, assignment?.Reference, assignment?.Status.ToString(), tachoDriver?.Id ?? allocatedDriver?.Id, driverName, tachoName, driverSource, allocatedDriver?.DisplayName, driverMismatch, plannedDutyUtc, tachoStatus, null, null, vehicle.FleetioStatus, vehicle.FleetioVor, vehicle.FleetioPmiDueUtc, vehicle.FleetioMotDueUtc, vehicle.FleetioServiceStatus, matchReason);
         }).ToList();
         records.AddRange(liveStatuses.Where(status => !matchedLiveIds.Contains(status.Id)).OrderBy(status => status.VehicleIdentifier).Select(status =>
         {
@@ -171,8 +179,8 @@ public sealed class DotTrackingController(
             var tachoStatus = TachoDriverStatus(IdentifierAliases(status.VehicleIdentifier), tachoDrivers);
             if (tachoStatus is not null) matchedTachoKeys.Add(NormaliseIdentifier(tachoStatus.VehicleCode));
             var tachoName = tachoStatus?.DriverName;
-            var tachoDriver = MatchTachoDriver(tachoName, drivers.Values);
-            return new FleetVehicleStatus(status.Id, status.VehicleIdentifier, null, status.VehicleIdentifier, DetermineCondition(status, !string.IsNullOrWhiteSpace(tachoName), now), observedAt, status.IgnitionOn, status.IsMoving, status.SpeedKph, LiveLatitude(status), LiveLongitude(status), (int)Math.Max(0, age.TotalMinutes), null, null, null, tachoDriver?.Id, tachoDriver?.DisplayName ?? tachoName, tachoName, tachoName is null ? null : "TachoMaster", null, false, null, tachoStatus, null, null, null, null, null, null, null);
+            var (tachoDriver, matchReason) = MatchTachoDriverWithReason(tachoStatus, drivers.Values, tachoMappings);
+            return new FleetVehicleStatus(status.Id, status.VehicleIdentifier, null, status.VehicleIdentifier, DetermineCondition(status, !string.IsNullOrWhiteSpace(tachoName), now), observedAt, status.IgnitionOn, status.IsMoving, status.SpeedKph, LiveLatitude(status), LiveLongitude(status), (int)Math.Max(0, age.TotalMinutes), null, null, null, tachoDriver?.Id, tachoDriver?.DisplayName ?? tachoName, tachoName, tachoName is null ? null : "TachoMaster", null, false, null, tachoStatus, null, null, null, null, null, null, null, matchReason);
         }));
         records.AddRange(tachoDrivers
             .Where(item => !matchedTachoKeys.Contains(NormaliseIdentifier(item.Value.VehicleCode)))
@@ -180,7 +188,7 @@ public sealed class DotTrackingController(
             .Select(item =>
             {
                 var status = item.Value;
-                var tachoDriver = MatchTachoDriver(status.DriverName, drivers.Values);
+                var (tachoDriver, matchReason) = MatchTachoDriverWithReason(status, drivers.Values, tachoMappings);
                 return new FleetVehicleStatus(
                     DeterministicGuid($"tachomaster:{status.VehicleCode}:{status.MemberCode}"),
                     status.VehicleCode,
@@ -211,7 +219,8 @@ public sealed class DotTrackingController(
                     null,
                     null,
                     null,
-                    null);
+                    null,
+                    matchReason);
             }));
         return Ok(new FleetStatusResponse("RoadTech Falcon + TachoMaster", now, records.Count, records.Count(record => record.Condition == "Moving"), records.Count(record => record.Condition != "Moving"), records));
     }
@@ -283,7 +292,7 @@ public sealed class DotTrackingController(
     private static FleetStatusResponse MasterFleetFallback(IReadOnlyList<FleetVehicleMaster> vehicles, string provider)
     {
         var now = DateTimeOffset.UtcNow;
-        var records = vehicles.Select(vehicle => new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, null, "NotSignedOn", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, false, null, null, null, null, vehicle.FleetioStatus, vehicle.FleetioVor, vehicle.FleetioPmiDueUtc, vehicle.FleetioMotDueUtc, vehicle.FleetioServiceStatus)).ToList();
+        var records = vehicles.Select(vehicle => new FleetVehicleStatus(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, null, "NotSignedOn", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, false, null, null, null, null, vehicle.FleetioStatus, vehicle.FleetioVor, vehicle.FleetioPmiDueUtc, vehicle.FleetioMotDueUtc, vehicle.FleetioServiceStatus, null)).ToList();
         return new FleetStatusResponse(provider, now, records.Count, 0, records.Count, records);
     }
 
@@ -355,12 +364,77 @@ public sealed class DotTrackingController(
         .Where(word => word.Length > 0)
         .OrderBy(word => word, StringComparer.Ordinal));
 
-    private static FleetDriverIdentity? MatchTachoDriver(string? tachoName, IEnumerable<FleetDriverIdentity> drivers)
+    private async Task<Dictionary<string, Guid>> LoadIntegrationMappingsAsync(string provider, string entityType, CancellationToken ct)
     {
-        var key = NormalisePersonName(tachoName);
-        if (key.Length == 0) return null;
-        return drivers.FirstOrDefault(driver => NormalisePersonName(driver.TachoName) == key)
-            ?? drivers.FirstOrDefault(driver => NormalisePersonName(driver.DisplayName) == key);
+        try
+        {
+            return await db.IntegrationMappings.AsNoTracking()
+                .Where(m => m.Provider == provider && m.TmsEntityType == entityType && m.Active)
+                .ToDictionaryAsync(m => m.ExternalKey.ToUpperInvariant(), m => m.TmsEntityId, ct);
+        }
+        catch (Exception exception) when (IsSchemaUnavailable(exception))
+        {
+            logger.LogWarning(exception, "IntegrationMappings table is unavailable; proceeding without explicit mappings.");
+            return new Dictionary<string, Guid>();
+        }
+    }
+
+    internal static (FleetDriverIdentity? Driver, string? Reason) MatchTachoDriverWithReason(
+        TachoVehicleDriverStatus? tacho,
+        IEnumerable<FleetDriverIdentity> drivers,
+        IReadOnlyDictionary<string, Guid> mappings)
+    {
+        if (tacho is null || string.IsNullOrWhiteSpace(tacho.DriverName)) return (null, null);
+
+        // 1. Explicit integration mapping by member code
+        if (tacho.MemberCode > 0 && mappings.TryGetValue(tacho.MemberCode.ToString(), out var mappedId))
+        {
+            var driver = drivers.FirstOrDefault(d => d.Id == mappedId);
+            if (driver is not null) return (driver, "Mapped");
+        }
+
+        // 2. Explicit mapping by employee number
+        if (!string.IsNullOrWhiteSpace(tacho.EmployeeNumber) && mappings.TryGetValue(tacho.EmployeeNumber!.ToUpperInvariant(), out var mappedEmpId))
+        {
+            var driver = drivers.FirstOrDefault(d => d.Id == mappedEmpId);
+            if (driver is not null) return (driver, "Mapped");
+        }
+
+        // 3. Explicit mapping by driver name
+        var nameKey = NormalisePersonName(tacho.DriverName);
+        if (nameKey.Length > 0 && mappings.TryGetValue(nameKey, out var mappedNameId))
+        {
+            var driver = drivers.FirstOrDefault(d => d.Id == mappedNameId);
+            if (driver is not null) return (driver, "Mapped");
+        }
+
+        // 4. Employee number match (TachoMaster employee number matches TMS employee number)
+        if (!string.IsNullOrWhiteSpace(tacho.EmployeeNumber))
+        {
+            var empMatch = drivers.FirstOrDefault(d =>
+                !string.IsNullOrWhiteSpace(d.EmployeeNumber) &&
+                string.Equals(d.EmployeeNumber, tacho.EmployeeNumber, StringComparison.OrdinalIgnoreCase));
+            if (empMatch is not null) return (empMatch, "EmployeeNumber");
+        }
+
+        // 5. TachoName match (existing behaviour - normalised sorted-word comparison)
+        if (nameKey.Length > 0)
+        {
+            var tachoNameMatch = drivers.FirstOrDefault(d => NormalisePersonName(d.TachoName) == nameKey);
+            if (tachoNameMatch is not null) return (tachoNameMatch, "TachoName");
+        }
+
+        // 6. DisplayName match (existing behaviour)
+        if (nameKey.Length > 0)
+        {
+            var displayMatch = drivers.FirstOrDefault(d => NormalisePersonName(d.DisplayName) == nameKey);
+            if (displayMatch is not null) return (displayMatch, "DisplayName");
+        }
+
+        // 7. Partial name match - surname match removed: NormalisePersonName sorts words alphabetically,
+        // so the last word is not reliably the surname. A wrong match is worse than unmatched.
+
+        return (null, "Unmatched");
     }
 
     private static bool SameDriver(FleetDriverIdentity? tachoDriver, string tachoName, FleetDriverIdentity allocatedDriver) =>
@@ -377,6 +451,6 @@ public sealed record DotTelemetryResponse(
     IReadOnlyList<DotTelemetryRecord> Records);
 
 public sealed record FleetStatusResponse(string Provider, DateTimeOffset RetrievedAtUtc, int VehicleCount, int ReadyCount, int AttentionCount, IReadOnlyList<FleetVehicleStatus> Vehicles);
-public sealed record FleetVehicleStatus(Guid VehicleId, string Registration, string? FleetNumber, string? TrackingIdentifier, string Condition, DateTimeOffset? LastEventTimeUtc, bool? IgnitionOn, bool? IsMoving, decimal? SpeedKph, decimal? Latitude, decimal? Longitude, int? AgeMinutes, Guid? LoadId, string? LoadReference, string? LoadStatus, Guid? DriverId, string? DriverName, string? TachoName, string? DriverSource, string? AllocatedDriverName, bool DriverMismatch, DateTimeOffset? PlannedDutyUtc, TachoVehicleDriverStatus? Tacho, string? FleetioId, string? FleetioName, string? FleetioStatus, bool? FleetioVor, DateTimeOffset? FleetioPmiDueUtc, DateTimeOffset? FleetioMotDueUtc, string? FleetioServiceStatus);
+public sealed record FleetVehicleStatus(Guid VehicleId, string Registration, string? FleetNumber, string? TrackingIdentifier, string Condition, DateTimeOffset? LastEventTimeUtc, bool? IgnitionOn, bool? IsMoving, decimal? SpeedKph, decimal? Latitude, decimal? Longitude, int? AgeMinutes, Guid? LoadId, string? LoadReference, string? LoadStatus, Guid? DriverId, string? DriverName, string? TachoName, string? DriverSource, string? AllocatedDriverName, bool DriverMismatch, DateTimeOffset? PlannedDutyUtc, TachoVehicleDriverStatus? Tacho, string? FleetioId, string? FleetioName, string? FleetioStatus, bool? FleetioVor, DateTimeOffset? FleetioPmiDueUtc, DateTimeOffset? FleetioMotDueUtc, string? FleetioServiceStatus, string? DriverMatchReason);
 public sealed record FleetVehicleMaster(Guid Id, string Registration, string? FleetNumber, string? Abbreviation, string? FleetioStatus, bool? FleetioVor, DateTimeOffset? FleetioPmiDueUtc, DateTimeOffset? FleetioMotDueUtc, string? FleetioServiceStatus);
 public sealed record FleetDriverIdentity(Guid Id, string EmployeeNumber, string DisplayName, string? TachoName);
