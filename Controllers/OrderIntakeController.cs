@@ -57,8 +57,9 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
         // NWF tracker workbooks are versioned snapshots. Supersede older pending
         // versions by any stable alias (Product PO, Transport PO, Load Ref or
-        // route identity) before inserting the new snapshot rows. This allows a
-        // blank pre-order to become enriched without creating a duplicate.
+        // route identity) before inserting the new snapshot rows. Strong NWF
+        // references are canonicalised without the planning date because NWF
+        // can correct a movement from one day to another in a later tracker.
         var matchKeys = parsed.Orders
             .SelectMany(order => ReadMatchKeys(order.Payload))
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -198,8 +199,28 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             return [];
         return value.EnumerateArray()
             .Where(item => item.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(item.GetString()))
-            .Select(item => item.GetString()!.Trim())
+            .Select(item => CanonicalMatchKey(item.GetString()!.Trim()))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    private static string CanonicalMatchKey(string key)
+    {
+        var parts = key.Split('|', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length >= 3 &&
+            string.Equals(parts[0], "NWF", StringComparison.OrdinalIgnoreCase) &&
+            DateOnly.TryParse(parts[1], out _) &&
+            (parts[2].StartsWith("PRODUCT:", StringComparison.OrdinalIgnoreCase) ||
+             parts[2].StartsWith("TRANSPORT:", StringComparison.OrdinalIgnoreCase) ||
+             parts[2].StartsWith("LOAD:", StringComparison.OrdinalIgnoreCase) ||
+             parts[2].StartsWith("CRATEREF:", StringComparison.OrdinalIgnoreCase)))
+        {
+            return $"NWF|{parts[2].ToUpperInvariant()}";
+        }
+
+        // Route/loading fallback identities remain date-scoped because they are
+        // not unique enough to link across planning dates safely.
+        return key.ToUpperInvariant();
     }
 
     private static string? ReadText(JsonElement payload, string name)
