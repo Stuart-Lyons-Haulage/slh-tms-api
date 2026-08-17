@@ -28,6 +28,39 @@ public sealed class GeofencesController(TmsDbContext db) : ControllerBase
         }
     }
 
+    [HttpPost("import-slh-seed")]
+    [Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> ImportSlhSeed(CancellationToken ct)
+    {
+        using var document = JsonDocument.Parse(GeofenceSeedPayload.Json);
+        var inserted = 0; var updated = 0; var matched = 0;
+        foreach (var record in document.RootElement.EnumerateArray())
+        {
+            var payload = JsonSerializer.SerializeToElement(new
+            {
+                format = "falcon.geofence",
+                version = 1,
+                category = NullableText(record, "category"),
+                category_max_wait_time = NullableInt(record, "category_max_wait_time"),
+                geofences = new[]
+                {
+                    new
+                    {
+                        name = NullableText(record, "name"),
+                        max_wait_time = NullableInt(record, "max_wait_time"),
+                        pending_entry_minutes = NullableInt(record, "pending_entry_minutes") ?? 0,
+                        pending_exit_minutes = NullableInt(record, "pending_exit_minutes") ?? 0,
+                        site_no = NullableText(record, "site_no"),
+                        points = record.GetProperty("points")
+                    }
+                }
+            });
+            var result = await GeofenceRunProgression.ImportFalconAsync(db, payload, ct);
+            inserted += result.Inserted; updated += result.Updated; matched += result.SiteMatched;
+        }
+        return Ok(new { supplied = document.RootElement.GetArrayLength(), inserted, updated, siteMatched = matched, importedAtUtc = DateTimeOffset.UtcNow });
+    }
+
     [HttpGet]
     public async Task<IActionResult> List(CancellationToken ct)
     {
@@ -52,4 +85,10 @@ public sealed class GeofencesController(TmsDbContext db) : ControllerBase
             .ToListAsync(ct);
         return Ok(new { date = day, count = rows.Count, records = rows });
     }
+
+    private static string? NullableText(JsonElement element, string property) =>
+        element.TryGetProperty(property, out var value) && value.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined ? value.ToString() : null;
+
+    private static int? NullableInt(JsonElement element, string property) =>
+        element.TryGetProperty(property, out var value) && value.TryGetInt32(out var number) ? number : null;
 }
