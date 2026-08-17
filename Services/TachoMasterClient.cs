@@ -72,6 +72,7 @@ public sealed class TachoMasterClient
         await Task.WhenAll(dutiesTask, membersTask, metricsTask);
 
         var duties = await dutiesTask;
+        var memberList = await membersTask;
         var dayStart = new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc));
         var dayEnd = dayStart.AddDays(1);
         var currentDuties = duties
@@ -82,16 +83,16 @@ public sealed class TachoMasterClient
 
         if (currentDuties.Count == 0)
         {
-            var falconDrivers = await TryGetFalconDriverStatusesAsync(cancellationToken);
+            var falconDrivers = await TryGetFalconDriverStatusesAsync(memberList, cancellationToken);
             if (falconDrivers.Count > 0)
             {
-                logger.LogInformation("TachoMaster duty feed returned zero vehicles; using {Count} live Falcon driver identity record(s).", falconDrivers.Count);
+                logger.LogInformation("TachoMaster duty feed returned zero vehicles; using {Count} live Falcon driver identity record(s), including card-to-member matches where available.", falconDrivers.Count);
                 return falconDrivers;
             }
             return new Dictionary<string, TachoVehicleDriverStatus>();
         }
 
-        var members = (await membersTask).GroupBy(member => member.MemCode).ToDictionary(group => group.Key, group => group.First());
+        var members = memberList.GroupBy(member => member.MemCode).ToDictionary(group => group.Key, group => group.First());
         var metrics = (await metricsTask).GroupBy(metric => metric.MemCode).ToDictionary(group => group.Key, group => group.OrderByDescending(metric => metric.DateTimeWhenValid).First());
         var result = new Dictionary<string, TachoVehicleDriverStatus>();
         foreach (var (vehicle, vehicleDuties) in currentDuties)
@@ -136,26 +137,37 @@ public sealed class TachoMasterClient
         return result;
     }
 
-    private async Task<IReadOnlyDictionary<string, TachoVehicleDriverStatus>> TryGetFalconDriverStatusesAsync(CancellationToken cancellationToken)
+    private async Task<IReadOnlyDictionary<string, TachoVehicleDriverStatus>> TryGetFalconDriverStatusesAsync(
+        IReadOnlyList<TachoMember> members,
+        CancellationToken cancellationToken)
     {
         if (dotTrackingClient is null) return new Dictionary<string, TachoVehicleDriverStatus>();
         try
         {
             var telemetry = await dotTrackingClient.GetLatestVehicleEventsAsync(cancellationToken);
             var records = telemetry.Select(DotTelemetryRecord.FromProvider)
-                .Where(record => !string.IsNullOrWhiteSpace(record.DriverName) && !string.IsNullOrWhiteSpace(record.VehicleIdentifier))
+                .Where(record => !string.IsNullOrWhiteSpace(record.VehicleIdentifier))
+                .Where(record => !string.IsNullOrWhiteSpace(record.DriverName) || !string.IsNullOrWhiteSpace(record.DriverCardNumber))
                 .GroupBy(record => NormaliseIdentifier(record.VehicleIdentifier))
                 .Select(group => group.OrderByDescending(record => record.EventTimeUtc).First())
                 .ToList();
 
-            return records.ToDictionary(
-                record => NormaliseIdentifier(record.VehicleIdentifier),
-                record => new TachoVehicleDriverStatus(
-                    NormaliseIdentifier(record.VehicleIdentifier),
-                    0,
-                    record.DriverName!,
-                    null,
-                    null,
+            var result = new Dictionary<string, TachoVehicleDriverStatus>();
+            foreach (var record in records)
+            {
+                var member = FindMemberByCard(members, record.DriverCardNumber);
+                var resolvedName = !string.IsNullOrWhiteSpace(record.DriverName)
+                    ? record.DriverName!.Trim()
+                    : member is null ? null : DriverName(member);
+                if (string.IsNullOrWhiteSpace(resolvedName)) continue;
+
+                var vehicle = NormaliseIdentifier(record.VehicleIdentifier);
+                result[vehicle] = new TachoVehicleDriverStatus(
+                    vehicle,
+                    member?.MemCode ?? 0,
+                    resolvedName,
+                    member?.CardNoShort ?? record.DriverCardNumber,
+                    member?.EmployeeNumber,
                     record.EventTimeUtc,
                     null,
                     0,
@@ -172,13 +184,30 @@ public sealed class TachoMasterClient
                     null,
                     null,
                     null,
-                    null));
+                    null);
+            }
+
+            return result;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             logger.LogWarning(exception, "Falcon live driver fallback was unavailable.");
             return new Dictionary<string, TachoVehicleDriverStatus>();
         }
+    }
+
+    private static TachoMember? FindMemberByCard(IEnumerable<TachoMember> members, string? cardNumber)
+    {
+        var liveCard = NormaliseCard(cardNumber);
+        if (liveCard.Length < 8) return null;
+        return members.FirstOrDefault(member =>
+        {
+            var memberCard = NormaliseCard(member.CardNoShort);
+            if (memberCard.Length < 8) return false;
+            return string.Equals(memberCard, liveCard, StringComparison.OrdinalIgnoreCase)
+                || (memberCard.Length >= 8 && liveCard.EndsWith(memberCard, StringComparison.OrdinalIgnoreCase))
+                || (liveCard.Length >= 8 && memberCard.EndsWith(liveCard, StringComparison.OrdinalIgnoreCase));
+        });
     }
 
     private async Task<string> LoginAsync(CancellationToken cancellationToken)
@@ -306,6 +335,8 @@ public sealed class TachoMasterClient
         var surname = string.IsNullOrWhiteSpace(member.Surname) ? member.SName : member.Surname;
         return string.Join(' ', new[] { given, surname }.Where(value => !string.IsNullOrWhiteSpace(value))).Trim();
     }
+
+    private static string NormaliseCard(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     private static IReadOnlyList<string> PasswordAttempts(string password)
     {
