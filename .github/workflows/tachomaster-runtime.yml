@@ -1,0 +1,83 @@
+name: Repair TachoMaster runtime configuration
+
+on:
+  workflow_run:
+    workflows: ["CD - Deploy TMS to Azure Container Apps"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  configure:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    env:
+      AZURE_CONTAINER_APP_NAME: slh-tms-api-prod
+      AZURE_RESOURCE_GROUP: slh-tms-prod-rg
+      AZURE_CONTAINER_APP_FQDN: slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+    steps:
+      - name: Sign in to Azure with OpenID Connect
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Bind TachoMaster to authenticated RoadTech credentials
+        run: |
+          set -euo pipefail
+          existing_secrets="$(az containerapp secret list \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query '[].name' --output tsv)"
+
+          for required in dot-api-key dot-username dot-password dot-base-url; do
+            if ! printf '%s\n' "$existing_secrets" | grep -Fxiq "$required"; then
+              echo "Required RoadTech runtime secret is missing: $required"
+              exit 1
+            fi
+          done
+
+          az containerapp update \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --set-env-vars \
+              "Integrations__TachoMaster__Enabled=true" \
+              "Integrations__TachoMaster__BaseUrl=secretref:dot-base-url" \
+              "Integrations__TachoMaster__ApiKey=secretref:dot-api-key" \
+              "Integrations__TachoMaster__Username=secretref:dot-username" \
+              "Integrations__TachoMaster__Password=secretref:dot-password"
+
+      - name: Route traffic to latest ready revision
+        run: |
+          set -euo pipefail
+          latest_ready="$(az containerapp show \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query properties.latestReadyRevisionName \
+            --output tsv)"
+          test -n "$latest_ready"
+          az containerapp ingress traffic set \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision-weight "$latest_ready=100"
+
+      - name: Verify TachoMaster upstream connection
+        run: |
+          set -euo pipefail
+          for attempt in {1..12}; do
+            body="$(curl --silent --show-error \
+              "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/tachomaster" || true)"
+            echo "$body"
+            if echo "$body" | grep -q '"status":"healthy"'; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "TachoMaster did not become healthy after runtime configuration was applied."
+          exit 1
