@@ -54,8 +54,6 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
                     .ToList();
                 all.AddRange(parsed);
 
-                // Current Fleetio API uses cursor pagination and returns next_cursor in the body.
-                // Older array responses do not expose a cursor; in that case this is the only page.
                 var nextCursor = root.ValueKind == JsonValueKind.Object
                     ? FirstText(root, "next_cursor", "nextCursor")
                     : null;
@@ -71,13 +69,112 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
             }
         }
 
-        return all
+        var vehiclesById = all
             .GroupBy(item => string.IsNullOrWhiteSpace(item.Id)
                 ? $"{Normalise(item.Registration)}|{Normalise(item.Name)}"
                 : item.Id,
                 StringComparer.OrdinalIgnoreCase)
             .Select(group => group.First())
             .ToList();
+
+        // Fleetio keeps preventative-maintenance and statutory renewal dates in
+        // reminder resources rather than guaranteeing them on the Vehicle object.
+        // Enrich the basic asset list from those feeds where available.
+        try
+        {
+            var due = await GetDueDatesAsync(ct);
+            vehiclesById = vehiclesById.Select(vehicle =>
+            {
+                if (!due.TryGetValue(vehicle.Id, out var dates)) return vehicle;
+                return vehicle with
+                {
+                    PmiDueUtc = dates.PmiDueUtc ?? vehicle.PmiDueUtc,
+                    MotDueUtc = dates.MotDueUtc ?? vehicle.MotDueUtc,
+                    ServiceStatus = dates.ServiceStatus ?? vehicle.ServiceStatus
+                };
+            }).ToList();
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Fleetio reminder dates were unavailable; returning asset data without due-date enrichment.");
+        }
+
+        return vehiclesById;
+    }
+
+    public async Task<IReadOnlyDictionary<string, FleetioDueDates>> GetDueDatesAsync(CancellationToken ct)
+    {
+        var byVehicle = new Dictionary<string, FleetioDueDates>(StringComparer.OrdinalIgnoreCase);
+        var service = await ReadPagedRecordsAsync("service_reminders", ct);
+        foreach (var item in service)
+        {
+            var vehicleId = FirstText(item, "vehicle_id") ?? NestedText(item, "vehicle", "id");
+            if (string.IsNullOrWhiteSpace(vehicleId)) continue;
+            var task = FirstText(item, "service_task_name") ?? NestedText(item, "service_task", "name") ?? string.Empty;
+            var due = FirstDate(item, "next_due_at", "forecasted_next_due_at", "forecasted_primary_next_due_at");
+            var status = FirstText(item, "service_reminder_status", "service_reminder_status_name");
+            var current = byVehicle.GetValueOrDefault(vehicleId) ?? new FleetioDueDates(null, null, null);
+            var isMot = task.Contains("MOT", StringComparison.OrdinalIgnoreCase);
+            var isPmi = task.Contains("PMI", StringComparison.OrdinalIgnoreCase)
+                || task.Contains("prevent", StringComparison.OrdinalIgnoreCase)
+                || task.Contains("inspection", StringComparison.OrdinalIgnoreCase)
+                || task.Contains("service", StringComparison.OrdinalIgnoreCase);
+            byVehicle[vehicleId] = current with
+            {
+                MotDueUtc = isMot ? Earliest(current.MotDueUtc, due) : current.MotDueUtc,
+                PmiDueUtc = !isMot && isPmi ? Earliest(current.PmiDueUtc, due) : current.PmiDueUtc,
+                ServiceStatus = WorstStatus(current.ServiceStatus, status)
+            };
+        }
+
+        var renewals = await ReadPagedRecordsAsync("vehicle_renewal_reminders", ct);
+        foreach (var item in renewals)
+        {
+            var vehicleId = FirstText(item, "vehicle_id") ?? NestedText(item, "vehicle", "id");
+            if (string.IsNullOrWhiteSpace(vehicleId)) continue;
+            var type = FirstText(item, "vehicle_renewal_type_name", "renewal_type_name")
+                ?? NestedText(item, "vehicle_renewal_type", "name")
+                ?? NestedText(item, "renewal_type", "name")
+                ?? string.Empty;
+            if (!type.Contains("MOT", StringComparison.OrdinalIgnoreCase)) continue;
+            var due = FirstDate(item, "next_due_at");
+            var current = byVehicle.GetValueOrDefault(vehicleId) ?? new FleetioDueDates(null, null, null);
+            byVehicle[vehicleId] = current with { MotDueUtc = Earliest(current.MotDueUtc, due) };
+        }
+
+        return byVehicle;
+    }
+
+    private async Task<List<JsonElement>> ReadPagedRecordsAsync(string resource, CancellationToken ct)
+    {
+        var result = new List<JsonElement>();
+        string? cursor = null;
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        for (var page = 0; page < 100; page++)
+        {
+            var path = $"{resource}?per_page=100";
+            if (!string.IsNullOrWhiteSpace(cursor)) path += $"&start_cursor={Uri.EscapeDataString(cursor)}";
+            using var request = CreateRequest(path);
+            using var response = await httpClient.SendAsync(request, ct);
+            var body = await response.Content.ReadAsStringAsync(ct);
+            if (!response.IsSuccessStatusCode)
+                throw new HttpRequestException($"Fleetio {resource} returned {(int)response.StatusCode} ({response.ReasonPhrase}). {body}", null, response.StatusCode);
+            using var document = JsonDocument.Parse(body);
+            var root = document.RootElement;
+            IEnumerable<JsonElement> records = root.ValueKind switch
+            {
+                JsonValueKind.Array => root.EnumerateArray(),
+                JsonValueKind.Object when TryFindProperty(root, "records", out var a) && a.ValueKind == JsonValueKind.Array => a.EnumerateArray(),
+                JsonValueKind.Object when TryFindProperty(root, "data", out var b) && b.ValueKind == JsonValueKind.Array => b.EnumerateArray(),
+                JsonValueKind.Object when TryFindProperty(root, "results", out var c) && c.ValueKind == JsonValueKind.Array => c.EnumerateArray(),
+                _ => []
+            };
+            result.AddRange(records.Select(record => record.Clone()));
+            var next = root.ValueKind == JsonValueKind.Object ? FirstText(root, "next_cursor", "nextCursor") : null;
+            if (string.IsNullOrWhiteSpace(next) || !seen.Add(next)) break;
+            cursor = next;
+        }
+        return result;
     }
 
     private HttpRequestMessage CreateRequest(string path)
@@ -105,6 +202,13 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
         return new FleetioVehicle(FirstText(element, "id") ?? string.Empty, registration, name, fleetNumber, vin, status, type, vor, pmi, mot, serviceStatus);
     }
 
+    private static string? NestedText(JsonElement element, string objectName, string propertyName)
+    {
+        if (TryFindProperty(element, objectName, out var nested) && nested.ValueKind == JsonValueKind.Object)
+            return FirstText(nested, propertyName);
+        return null;
+    }
+
     private static string? FirstText(JsonElement element, params string[] names)
     {
         if (element.ValueKind != JsonValueKind.Object) return null;
@@ -126,6 +230,22 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
         return DateTimeOffset.TryParse(value, out var parsed) ? parsed : null;
     }
 
+    private static DateTimeOffset? Earliest(DateTimeOffset? left, DateTimeOffset? right) =>
+        left is null ? right : right is null ? left : left <= right ? left : right;
+
+    private static string? WorstStatus(string? left, string? right)
+    {
+        static int Rank(string? value) => (value ?? string.Empty).ToLowerInvariant() switch
+        {
+            "overdue" => 4,
+            "due_soon" => 3,
+            "snoozed" => 2,
+            "ok" => 1,
+            _ => 0
+        };
+        return Rank(right) > Rank(left) ? right : left;
+    }
+
     private static bool TryFindProperty(JsonElement element, string name, out JsonElement value)
     {
         foreach (var property in element.EnumerateObject())
@@ -144,6 +264,7 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
 }
 
 public sealed record FleetioVehicleSummary(bool Connected, int SampleVehicleCount);
+public sealed record FleetioDueDates(DateTimeOffset? PmiDueUtc, DateTimeOffset? MotDueUtc, string? ServiceStatus);
 public sealed record FleetioVehicle(
     string Id,
     string? Registration,
