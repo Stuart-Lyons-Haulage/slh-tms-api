@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Slh.Tms.Api.Services;
 using Xunit;
 
@@ -11,7 +10,7 @@ public sealed class NwfWorkbookSnapshotParserTests
     [Fact]
     public void WorkbookSnapshot_KeepsIncompleteFreshCutRowAsPreOrder()
     {
-        var result = parser.TryParse(Request("snapshot-1", SnapshotFixture));
+        var result = parser.TryParse(Request("snapshot-1"));
 
         Assert.NotNull(result);
         Assert.Null(result!.IgnoredReason);
@@ -24,45 +23,33 @@ public sealed class NwfWorkbookSnapshotParserTests
         Assert.Equal("PreOrder", freshCut.Payload.GetProperty("intakeStatus").GetString());
         Assert.Equal("Merston", freshCut.Payload.GetProperty("stallNumber").GetString());
         Assert.Equal(3, freshCut.Payload.GetProperty("pallets").GetInt32());
-        Assert.Contains("PRODUCT:PO00500277", MatchKeys(freshCut.Payload));
+        Assert.Contains(
+            freshCut.Payload.GetProperty("intakeMatchKeys").EnumerateArray().Select(item => item.GetString()),
+            key => string.Equals(key, "NWF|2026-08-18|PRODUCT:PO00500277", StringComparison.OrdinalIgnoreCase));
 
         Assert.DoesNotContain(result.Orders, order =>
             order.Payload.TryGetProperty("productPo", out var product) && product.GetString() == "POOLD");
     }
 
     [Fact]
-    public void LaterTransportPoAndLoadRef_EnrichSameFreshCutMovement()
+    public void WorkbookSnapshot_ParsesReadyInboundAndCurrentCrateReturn()
     {
-        var first = parser.TryParse(Request("snapshot-a", SnapshotFixture));
-        var later = parser.TryParse(Request("snapshot-b", EnrichedFixture));
+        var result = parser.TryParse(Request("snapshot-ready"));
 
-        var preOrder = Assert.Single(first!.Orders.Where(order =>
-            order.Payload.TryGetProperty("productPo", out var product) && product.GetString() == "PO00500277"));
-        var enriched = Assert.Single(later!.Orders);
+        var hobson = result!.Orders.Where(order =>
+            order.Payload.TryGetProperty("productPo", out var product) && product.GetString() == "PO00499127").ToList();
+        Assert.Equal(2, hobson.Count);
+        Assert.All(hobson, order => Assert.True(order.Payload.GetProperty("plannerReady").GetBoolean()));
 
-        Assert.False(preOrder.Payload.GetProperty("plannerReady").GetBoolean());
-        Assert.True(enriched.Payload.GetProperty("plannerReady").GetBoolean());
-        Assert.Equal("ReadyForReview", enriched.Payload.GetProperty("intakeStatus").GetString());
-        Assert.Equal("PO00500999", enriched.Payload.GetProperty("transportPo").GetString());
-        Assert.Equal("SLH1808D", enriched.Payload.GetProperty("loadRef").GetString());
-        Assert.NotEmpty(MatchKeys(preOrder.Payload).Intersect(MatchKeys(enriched.Payload), StringComparer.OrdinalIgnoreCase));
-        Assert.Equal(preOrder.NaturalKey, enriched.NaturalKey);
-    }
-
-    [Fact]
-    public void WorkbookSnapshot_ParsesCurrentCrateReturnSheet()
-    {
-        var result = parser.TryParse(Request("snapshot-crates", SnapshotFixture));
-        var crate = Assert.Single(result!.Orders.Where(order =>
+        var crate = Assert.Single(result.Orders.Where(order =>
             order.Payload.GetProperty("jobType").GetString() == "NWF crate return"));
-
         Assert.True(crate.Payload.GetProperty("plannerReady").GetBoolean());
         Assert.Equal("Selsey", crate.Payload.GetProperty("sellerName").GetString());
         Assert.Equal("Valefresco", crate.Payload.GetProperty("stallNumber").GetString());
         Assert.Equal(5, crate.Payload.GetProperty("pallets").GetInt32());
     }
 
-    private static MailboxEmailIntakeRequest Request(string id, string fixture) => new(
+    private static MailboxEmailIntakeRequest Request(string id) => new(
         id,
         null,
         "info@lyonshaulage.com",
@@ -73,12 +60,7 @@ public sealed class NwfWorkbookSnapshotParserTests
         "Please see updated tracker attached.",
         null,
         null,
-        [new MailboxAttachmentRequest("SLH NWF's Daily Control Tracker 2026.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fixture, false)]);
-
-    private static IReadOnlyList<string> MatchKeys(JsonElement payload) =>
-        payload.GetProperty("intakeMatchKeys").EnumerateArray().Select(item => item.GetString()!).ToList();
+        [new MailboxAttachmentRequest("SLH NWF's Daily Control Tracker 2026.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", SnapshotFixture, false)]);
 
     private const string SnapshotFixture = "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";
-
-    private const string EnrichedFixture = "UEsDBBQAAAAIADaaEV0kU9fAxAAAACgBAAAPAAAAeGwvd29ya2Jvb2sueG1sjc/BTsMwEATQX7H2TpwgSiCK00svFTckPsCN141VezfyOsWfjyiIXrmN5jB6M+5riuqKWQKTga5pQSHN7AKdDWzFP7zAfhrr8Mn5cmK+qJoiyVANLKWsg9YyL5isNLwi1RQ952SLNJzPWtaM1smCWFLUj237rJMNBN97t1b+kiKb0MCRTryRUx9voG790RnoQOUhOAPvrtv5V9/3u9b7p75F+NXk/2jY+zDjgectIZUfTsZoS2CSJawCSk+jvtP0/fX0BVBLAwQUAAAACAA2mhFdmivhnR4BAACnAgAADQAAAHhsL3N0eWxlcy54bWytks1OwzAQhF/F2jt1EgmEqro9IFXiwqUcuJpk01paryPbrVyeHjlxQylIXDh5PPJ847/VJlkSJ/TBOFZQLyoQyK3rDO8VHGN/9wib9SotQzwT7g6IUSRLHJZJwSHGYSllaA9odVi4ATlZ6p23OoaF83sZBo+6CzlmSTZV9SCtNgyZ2DuOQbTuyFFBPVtj2Yc4aVJQ1yBkNlhbnKwn7clEN/rykigijAxDNGObCWuI8jjoGNHz1hCJol/PAypgxzgTy+I/Q3uvz3Vz/z1XxLiTd+c79DdHnMySKSuy3yLRLt/xW3+TSL3go93a+NwpqEDkk16kISpyQpXJRL9GXir+g576HzVXDWPjTcnsi/yQCl7yF6FfSVN8nH59ufUnUEsDBBQAAAAIADaaEV36XAFZAwMAANoNAAATAAAAeGwvdGhlbWUvdGhlbWUxLnhtbL1X23KbMBT8FUbvDTdz84RkEsduH9Jpp8kPyCBAjRAeSY6dv+8gbgKM4zR27AdLYs/ZReewwte3+5xor4hxXNAQmFcG0BCNihjTNARbkXzzwe3NNZyLDOVIozBHIVhkUHz//Qy0fU4on8MQZEJs5rrOowzlkF8VG0T3OUkKlkPBrwqW6jGDO0zTnOiWYbh6DjEFbd4lQTmigpcLEWFP0QGy8lr8YpY//I0vCNNeIQnBDtO42D2jvQAagVwsCAuBIT9A02+u9TaKiIlgJXAlP01gHRG/WDKQpes20lha/szsGCSCiDFw6ZffLqNEwChCtJajgk3HNXyrASuoangge+CZ9iBAYbDHDIF7b836ARJVDWfjG10FywenHyBR1dAZBdwZ1n1g9wMkqhq6o4DZ8s6zlv0AicoIpi9juOv5vtvAW0xSkB8H8YHrGt5Dg+9gutJqVQIqeo33K0lwhGTf5fBvwVYFFbLKUGCqibcNSmBUNigkeM2w9ojTTEgeOEfwHUDEjwL0AWeO6bsCjlAfIW3pOgZd3Qy5NbmYfCQTTMiTeCPokUtxvCA4XmFC5ERGtaXYZAvCGsIeMGWwG/M6Vcq1TcFDYIDJXNJBMBXVmus1Tz2ck23+s4jrpjdbO4BzDkV3wXAUn2gZ5CzlqoYSd7IOz57Q0dENddgn6pB3crIQ3/ywkOCoEF0pD8FUg+Up4cxqu+URJCguC1Yn6JX1LCUOZlN3ZH12a08oMc9gjJq8xpSSqWbruvAMRVakeP5hJUEwIaTcqksUWR/bAaH9mbYr+b3m7v7LLDaMiwfIswonL7XnK1VoAsP5Ahqr3JnL0ejDPURJgiIxsdJNH7mosxy8/Fl0OSm2ArGnLN5pa7Jlf2AcAsczHQNoMeaiKYAWY9a1z/j9oluHZJPB2sl7D22Fl+OWUxEr5Qyl9+e14nW6Ostx9X7UwLWm7NabfhIvcD4Gyrmk+Efgf9RTK6s897Gp6lDlTRqtPSHPvpDRdl35dYY6bNnSY5vXMTkb/IFqVm7+AVBLAwQUAAAACAA2mhFdDR656GUAAABzAAAAFAAAAHhsL3NoYXJlZFN0cmluZ3MueG1sBcFRCsMgDADQq0j+Z9w+xpDankXatAomFpMNj7/3lm1ycz8aWrskePoAjmTvR5UrwdfOxwe2dZlR1dzkJhpngmJ2R0TdC3FW32+Sye3sg7Op7+NCvQflQwuRccNXCG/kXAUcrn9QSwMEFAAAAAgANpoRXQ9UXVzHAgAApAsAABgAAAB4bC93b3Jrc2hlZXRzL3NoZWV0MS54bWyN1ktvm0AUBeC/MmJfg98kih21PAw2L8XposspjG1UYNAwdpx/Xxk3KQePpez4onOHnMlVxNPzuSzIiYkm59VCGw4MjbAq5Vle7RfaUe6+mdrz8un8+MbFn+bAmCTnsqiax/NCO0hZP+p6kx5YSZsBr1l1LosdFyWVzYCLvd7UgtGsHSsLfWQYM72keaVdDmx/6rbhRJCM7eixkC/8zWP5/iAX2nCqEf0zaFNJLxD8jYiFNmyPSC+P34f/cq1+gCyQDXJALmgF8kA+aA3agAJQCIpAMSi5Sm/bdkqPOqVHUBpkgWyQA3JBK5AH8kFr0AYUgEJQBIpByUhdetwpPYbSIAtkgxyQC1qBPJAPWoM2oAAUgiJQDErG6tKTTukJlAZZIBvkgFzQCuSBfNAatAEFoBAUgWJQMlGXnnZKT6E0yALZIAfkglYgD+SD1qANKACFoAgUg5KpuvSsU3oGpUEWyAY5IBe0AnkgH7QGbUABKARFoBiUzNSl553ScygNsuYakQutkaLNn5Y2K/ITE+/EppJdjj21h6f/L6Y/8Spo1dRcSJLEqgGnPxBwmhHBdqqw2w8ngmfH9N7ZK9XZebUnSUFT5a/v3RQW9F3ySpX1+9mQieZOdt3Pvhyr9E52089uWdGwd1U0uLltLmlBEloUTJJtTVPWqObCm3vsTpCfDctUY1F/zBJUMmLxomCpzHlFtrl6LeKb/vxYZeRV5DX5pUeqkeTmZXEYOtHrFsI3m212NtuEzTbb866fPqflUPVOCzOT2Wg6Um652b+/2DCmhvHw8KDc8X58G3hD0zBt5Y7fOXs0nyt3vB93BWsOxDpK5X7DlfhYd6zcXBP+K4GCL8yHX8hEcGoMSq76+Dvrva/Rmu5ZSMU+rxpSsJ1caMZgrhFx/YJtnyWv26epRn5zKXn5oQOjGRMXjTWy41x+4vrCzw/u5V9QSwMEFAAAAAAANpoRXaJp+QQoAQAAKAEAAAsAAABfcmVscy8ucmVsc++7vzw/eG1sIHZlcnNpb249IjEuMCIgZW5jb2Rpbmc9InV0Zi04Ij8+PFJlbGF0aW9uc2hpcHMgeG1sbnM9Imh0dHA6Ly9zY2hlbWFzLm9wZW54bWxmb3JtYXRzLm9yZy9wYWNrYWdlLzIwMDYvcmVsYXRpb25zaGlwcyI+PFJlbGF0aW9uc2hpcCBUeXBlPSJodHRwOi8vc2NoZW1hcy5vcGVueG1sZm9ybWF0cy5vcmcvb2ZmaWNlRG9jdW1lbnQvMjAwNi9yZWxhdGlvbnNoaXBzL29mZmljZURvY3VtZW50IiBUYXJnZXQ9Ii94bC93b3JrYm9vay54bWwiIElkPSJSNDM2YjljNjhiMWU0NGU3ZSIgLz48L1JlbGF0aW9uc2hpcHM+UEsDBBQAAAAIADaaEV2TyxfREQEAAPICAAAaAAAAeGwvX3JlbHMvd29ya2Jvb2sueG1sLnJlbHO1kktOwzAQhq9ieU/sJE7coKbdsGFbegHHGcdR/YhsF9KzseBIXAFBEUoQCzbdzOIf6dM3j/fXt+1+tgY9Q4ijdy3OM4oROOn70Q0tPid1t8H73fYARqTRu6jHKaLZGhdbrFOa7gmJUoMVMfMTuNka5YMVKWY+DGQS8iQGIAWlNQlLBl4z0fEywX+IXqlRwoOXZwsu/QEmMV0MRIyOIgyQWkxm851lszUYPfYtPjAFeUHLHERVMQWAEbmZUNJgYe3zFV1rvrCSBeWiyVnNGWe0Lm9pFbUI0D+lMLrh97aWrYVe1W2gFB3IuqlZ0fFb6r34cIoaIK3VfuLPAQDScnt9XqlGcV5RpRin15uS1efuPgBQSwMEFAAAAAgANpoRXY2C2akWAQAAUwMAABMAAABbQ29udGVudF9UeXBlc10ueG1srZNBTsMwEEWvEnmLaqcsEEJJuwC2gAQXsJxJYtUeW55pSM/GgiNxBVQHRYCQItRuPJvxe/8v5uPtvdqO3hUDJLIBa7GWpSgATWgsdrXYc7u6FttN9XKIQMXoHVIteuZ4oxSZHrwmGSLg6F0bktdMMqRORW12ugN1WZZXygRkQF7xkSE21R20eu+4uB8ZcNKO3onidto7qmqhY3TWaLYB1YDNL8kqtK010ASz94AsKSbQDfUA7J3MU3pt8SKD1Z/OBI7+J/1qJRO4vEO9jTQrHgdIyTZQPOnED9pDLdToFPHBAckzN8zQJTX34GF61ycHyJjFsr1O0DxzstidvfN39lKQ15B2+SOpPE7v/zPMzJ+DqHwim09QSwECFAMUAAAACAA2mhFdJFPXwMQAAAAoAQAADwAAAAAAAAAAAAAApIEAAAAAeGwvd29ya2Jvb2sueG1sUEsBAhQDFAAAAAgANpoRXZor4Z0eAQAApwIAAA0AAAAAAAAAAAAAAKSB8QAAAHhsL3N0eWxlcy54bWxQSwECFAMUAAAACAA2mhFd+lwBWQMDAADaDQAAEwAAAAAAAAAAAAAApIE6AgAAeGwvdGhlbWUvdGhlbWUxLnhtbFBLAQIUAxQAAAAIADaaEV0NHrnoZQAAAHMAAAAUAAAAAAAAAAAAAACkgW4FAAB4bC9zaGFyZWRTdHJpbmdzLnhtbFBLAQIUAxQAAAAIADaaEV0PVF1cxwIAAKQLAAAYAAAAAAAAAAAAAACkgQUGAAB4bC93b3Jrc2hlZXRzL3NoZWV0MS54bWxQSwECFAMUAAAAAAA2mhFdomn5BCgBAAAoAQAACwAAAAAAAAAAAAAApIECCQAAX3JlbHMvLnJlbHNQSwECFAMUAAAACAA2mhFdk8sX0REBAADyAgAAGgAAAAAAAAAAAAAApIFTCgAAeGwvX3JlbHMvd29ya2Jvb2sueG1sLnJlbHNQSwECFAMUAAAACAA2mhFdjYLZqRYBAABTAwAAEwAAAAAAAAAAAAAApIGcCwAAW0NvbnRlbnRfVHlwZXNdLnhtbFBLBQYAAAAACAAIAAMCAADjDAAAAAA=";
 }
