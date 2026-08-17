@@ -8,7 +8,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/orders")]
 [Authorize]
-public sealed class OrdersMaintenanceController(TmsDbContext db) : ControllerBase
+public sealed class OrdersMaintenanceController(TmsDbContext db, ILogger<OrdersMaintenanceController> logger) : ControllerBase
 {
     [HttpPut("{id:guid}"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> Update(Guid id, [FromBody] OrderUpdateRequest request, CancellationToken ct)
@@ -48,16 +48,23 @@ public sealed class OrdersMaintenanceController(TmsDbContext db) : ControllerBas
             ? Clip(request.MapLink, 1000)
             : $"https://www.google.com/maps/search/?api=1&query={Uri.EscapeDataString(deliveryAddress)}";
 
-        var linkedStops = await db.LoadStops.Where(stop => stop.OrderId == id).ToListAsync(ct);
-        foreach (var stop in linkedStops)
+        try
         {
-            stop.Name = Clip($"{order.CustomerCode} · {destination ?? depotId ?? order.Reference}", 200)!;
-            if (!string.Equals(previousAddress, deliveryAddress, StringComparison.OrdinalIgnoreCase))
+            var linkedStops = await db.LoadStops.Where(stop => stop.OrderId == id).ToListAsync(ct);
+            foreach (var stop in linkedStops)
             {
-                stop.Address = deliveryAddress;
-                stop.Latitude = null;
-                stop.Longitude = null;
+                stop.Name = Clip($"{order.CustomerCode} · {destination ?? depotId ?? order.Reference}", 200)!;
+                if (!string.Equals(previousAddress, deliveryAddress, StringComparison.OrdinalIgnoreCase))
+                {
+                    stop.Address = deliveryAddress;
+                    stop.Latitude = null;
+                    stop.Longitude = null;
+                }
             }
+        }
+        catch (Exception ex) when (IsPlanningSchemaUnavailable(ex))
+        {
+            logger.LogWarning(ex, "Linked planning stops could not be updated for order {OrderId}; saving the order amendment without stop maintenance.", id);
         }
 
         await db.SaveChangesAsync(ct);
@@ -71,11 +78,30 @@ public sealed class OrdersMaintenanceController(TmsDbContext db) : ControllerBas
         if (order is null) return NotFound(new { message = "Order was not found." });
         if (order.Status == OrderStatus.Delivered) return BadRequest(new { message = "A delivered order cannot be deleted." });
 
-        var linkedStops = await db.LoadStops.Where(stop => stop.OrderId == id).ToListAsync(ct);
-        if (linkedStops.Count > 0) db.LoadStops.RemoveRange(linkedStops);
+        var removedStops = 0;
+        try
+        {
+            // ExecuteDelete avoids materialising every mapped LoadStop column. This keeps
+            // cancellation working even while optional planning columns are being repaired.
+            removedStops = await db.LoadStops.Where(stop => stop.OrderId == id).ExecuteDeleteAsync(ct);
+        }
+        catch (Exception ex) when (IsPlanningSchemaUnavailable(ex))
+        {
+            logger.LogWarning(ex, "Linked planning stops could not be removed for order {OrderId}; cancelling the order so it is excluded from planning.", id);
+        }
+
         order.Status = OrderStatus.Cancelled;
         await db.SaveChangesAsync(ct);
-        return Ok(new { order.Id, order.Reference, status = order.Status.ToString(), removedStops = linkedStops.Count });
+        return Ok(new { order.Id, order.Reference, status = order.Status.ToString(), removedStops });
+    }
+
+    private static bool IsPlanningSchemaUnavailable(Exception exception)
+    {
+        var message = exception.GetBaseException().Message;
+        return exception is InvalidOperationException or DbUpdateException
+            || message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string BuildNotes(string? collectionSite, string? depotId, string? destination, string? deliveryAddress, string? customerRef, string? poRef, string? palletName, string? notes)
