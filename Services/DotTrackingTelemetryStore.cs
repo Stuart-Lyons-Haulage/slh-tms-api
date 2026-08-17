@@ -8,7 +8,8 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db)
 {
     public async Task PersistAsync(IEnumerable<DotTelemetryRecord> records, CancellationToken ct)
     {
-        foreach (var record in records)
+        var batch = records.ToList();
+        foreach (var record in batch)
         {
             if (record.Latitude is not null && record.Longitude is not null)
             {
@@ -37,5 +38,16 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db)
             }
         }
         if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync(ct);
+
+        // Geofence progression is deliberately downstream of telemetry persistence.
+        // A geofence/Fleetio failure must never prevent core RoadTech tracking from being stored.
+        try
+        {
+            await GeofenceRunProgression.ProcessTelemetryAsync(db, batch, ct);
+        }
+        catch (Exception) when (!ct.IsCancellationRequested)
+        {
+            db.ChangeTracker.Clear();
+        }
     }
 }
