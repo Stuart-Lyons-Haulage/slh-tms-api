@@ -18,6 +18,7 @@ public sealed class OrderIntakeController(
 {
     private readonly EmailOrderIntakeService emailParser = new();
     private readonly SpecialistMailboxOrderParser specialistParser = new();
+    private readonly SainsburyHaulierPlanParser sainsburyParser = new();
 
     [HttpPost("email/preview"), Authorize(Policy = "TmsWrite")]
     public IActionResult Preview([FromBody] MailboxEmailIntakeRequest request)
@@ -40,29 +41,14 @@ public sealed class OrderIntakeController(
     }
 
     [HttpPost("email"), Authorize(Policy = "TmsWrite")]
-    public async Task<IActionResult> Intake(
-        [FromBody] MailboxEmailIntakeRequest request,
-        CancellationToken ct)
+    public async Task<IActionResult> Intake([FromBody] MailboxEmailIntakeRequest request, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.MessageId))
-            return BadRequest(new ErrorResponse(
-                "missing_message_id",
-                "Mailbox message ID is required so repeated flow runs remain idempotent.",
-                HttpContext.TraceIdentifier));
+            return BadRequest(new ErrorResponse("missing_message_id", "Mailbox message ID is required so repeated flow runs remain idempotent.", HttpContext.TraceIdentifier));
 
         var parsed = ParseEmail(request);
         if (parsed.IgnoredReason is not null)
-        {
-            return Ok(new
-            {
-                ignored = true,
-                reason = parsed.IgnoredReason,
-                staged = 0,
-                existing = 0,
-                superseded = 0,
-                warnings = parsed.Warnings
-            });
-        }
+            return Ok(new { ignored = true, reason = parsed.IgnoredReason, staged = 0, existing = 0, superseded = 0, warnings = parsed.Warnings });
 
         var staged = 0;
         var existing = 0;
@@ -72,86 +58,39 @@ public sealed class OrderIntakeController(
         foreach (var order in parsed.Orders)
         {
             var idempotencyKey = $"email:{CompactKey(request.MessageId)}:{order.SourceKey}";
-            if (idempotencyKey.Length > 200)
-                idempotencyKey = idempotencyKey[..200];
+            if (idempotencyKey.Length > 200) idempotencyKey = idempotencyKey[..200];
 
-            var already = await db.StagedImports
-                .AsNoTracking()
-                .SingleOrDefaultAsync(item => item.IdempotencyKey == idempotencyKey, ct);
-
+            var already = await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(item => item.IdempotencyKey == idempotencyKey, ct);
             if (already is not null)
             {
                 existing++;
-                records.Add(new
-                {
-                    stagingId = already.Id,
-                    status = already.Status.ToString(),
-                    existing = true,
-                    reviewUrl = $"{Request.Scheme}://{Request.Host}/api/v1/staging/{already.Id}"
-                });
+                records.Add(new { stagingId = already.Id, status = already.Status.ToString(), existing = true, reviewUrl = $"{Request.Scheme}://{Request.Host}/api/v1/staging/{already.Id}" });
                 continue;
             }
 
             superseded += await SupersedeOlderPending(order.NaturalKey, request.MessageId, ct);
-
-            var stagedRequest = new StageImportRequest(
-                "order",
-                idempotencyKey,
-                order.Payload,
-                $"Info mailbox / {(request.SenderAddress ?? "unknown sender").Trim()}");
-
+            var stagedRequest = new StageImportRequest("order", idempotencyKey, order.Payload, $"Info mailbox / {(request.SenderAddress ?? "unknown sender").Trim()}");
             var item = stagingService.Create(stagedRequest);
             db.StagedImports.Add(item);
             await db.SaveChangesAsync(ct);
             staged++;
-
-            records.Add(new
-            {
-                stagingId = item.Id,
-                status = item.Status.ToString(),
-                existing = false,
-                warnings = order.Warnings,
-                reviewUrl = $"{Request.Scheme}://{Request.Host}/api/v1/staging/{item.Id}"
-            });
+            records.Add(new { stagingId = item.Id, status = item.Status.ToString(), existing = false, warnings = order.Warnings, reviewUrl = $"{Request.Scheme}://{Request.Host}/api/v1/staging/{item.Id}" });
         }
 
-        logger.LogInformation(
-            "Info mailbox intake {MessageId}: staged {Staged}, existing {Existing}, superseded {Superseded}, parser warnings {Warnings}.",
-            request.MessageId,
-            staged,
-            existing,
-            superseded,
-            parsed.Warnings.Count);
-
-        return Accepted(new
-        {
-            ignored = false,
-            staged,
-            existing,
-            superseded,
-            warnings = parsed.Warnings,
-            records
-        });
+        logger.LogInformation("Info mailbox intake {MessageId}: staged {Staged}, existing {Existing}, superseded {Superseded}, parser warnings {Warnings}.", request.MessageId, staged, existing, superseded, parsed.Warnings.Count);
+        return Accepted(new { ignored = false, staged, existing, superseded, warnings = parsed.Warnings, records });
     }
 
     private EmailIntakeParseResult ParseEmail(MailboxEmailIntakeRequest request) =>
-        specialistParser.TryParse(request) ?? emailParser.Parse(request);
+        sainsburyParser.TryParse(request)
+        ?? specialistParser.TryParse(request)
+        ?? emailParser.Parse(request);
 
-    private async Task<int> SupersedeOlderPending(
-        string naturalKey,
-        string currentMessageId,
-        CancellationToken ct)
+    private async Task<int> SupersedeOlderPending(string naturalKey, string currentMessageId, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(naturalKey)) return 0;
-
         var marker = $"\"intakeNaturalKey\":\"{EscapeForContains(naturalKey)}\"";
-        var candidates = await db.StagedImports
-            .Where(item =>
-                item.EntityType == "order" &&
-                item.Status == StagingStatus.PendingReview &&
-                item.PayloadJson.Contains(marker))
-            .ToListAsync(ct);
-
+        var candidates = await db.StagedImports.Where(item => item.EntityType == "order" && item.Status == StagingStatus.PendingReview && item.PayloadJson.Contains(marker)).ToListAsync(ct);
         if (candidates.Count == 0) return 0;
 
         var now = DateTimeOffset.UtcNow;
@@ -169,11 +108,9 @@ public sealed class OrderIntakeController(
     private static string CompactKey(string value)
     {
         var compact = new string(value.Where(char.IsLetterOrDigit).ToArray());
-        if (compact.Length <= 96) return compact;
-        return compact[^96..];
+        return compact.Length <= 96 ? compact : compact[^96..];
     }
 
     private static string EscapeForContains(string value) =>
-        value.Replace("\\", "\\\\", StringComparison.Ordinal)
-             .Replace("\"", "\\\"", StringComparison.Ordinal);
+        value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal);
 }
