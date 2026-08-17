@@ -1,6 +1,7 @@
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Security.Claims;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -21,7 +22,13 @@ var tenantId = builder.Configuration["Entra:TenantId"] ?? throw new InvalidOpera
 var audience = builder.Configuration["Entra:Audience"] ?? throw new InvalidOperationException("Entra:Audience is required");
 var deploymentRevision = builder.Configuration["Deployment:Revision"] ?? "local";
 
-builder.Services.AddControllers();
+builder.Services.AddControllers().AddJsonOptions(options =>
+{
+    // The web planner consumes enum fields such as OrderStatus and LoadStatus as
+    // semantic strings. Keep integer enum input compatibility for older clients,
+    // but always emit readable values such as "ReadyToPlan" and "Planned".
+    options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
+});
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
