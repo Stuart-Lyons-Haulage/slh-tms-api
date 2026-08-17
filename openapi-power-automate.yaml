@@ -1,7 +1,7 @@
 swagger: '2.0'
 info:
   title: SLH TMS API
-  version: '1.0'
+  version: '1.1'
 host: REPLACE_WITH_APP.azurewebsites.net
 basePath: /api/v1
 schemes: [https]
@@ -60,7 +60,7 @@ paths:
       parameters:
         - { name: status, in: query, type: string, required: false, enum: [PendingReview, Approved, Rejected, Promoted, Failed] }
         - { name: entityType, in: query, type: string, required: false }
-        - { name: take, in: query, type: integer, required: false, default: 100, maximum: 500 }
+        - { name: take, in: query, type: integer, required: false, default: 100, maximum: 2000 }
       responses: { '200': { description: Staged records } }
     post:
       operationId: SubmitStagedImport
@@ -95,6 +95,54 @@ paths:
         - { name: id, in: path, required: true, type: string, format: uuid }
         - { name: body, in: body, required: true, schema: { $ref: '#/definitions/ReviewRequest' } }
       responses: { '200': { description: Rejected record } }
+  /staging/{id}/payload:
+    put:
+      operationId: AmendPendingOrder
+      summary: Correct a pending mailbox order before approval
+      parameters:
+        - { name: id, in: path, required: true, type: string, format: uuid }
+        - name: body
+          in: body
+          required: true
+          schema: { $ref: '#/definitions/StagedPayloadAmendment' }
+      responses: { '200': { description: Updated pending staged order } }
+  /order-intake/email/preview:
+    post:
+      operationId: PreviewInfoMailboxEmail
+      summary: Parse an Info mailbox email without creating staged orders
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema: { $ref: '#/definitions/MailboxEmailIntakeRequest' }
+      responses: { '200': { description: Parsed order preview } }
+  /order-intake/email:
+    post:
+      operationId: IntakeInfoMailboxEmail
+      summary: Parse an Info mailbox email and stage identified orders for approval
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema: { $ref: '#/definitions/MailboxEmailIntakeRequest' }
+      responses:
+        '202': { description: Email parsed and orders staged }
+        '200': { description: Email ignored or previously processed }
+  /planning-day/{date}/reset-preview:
+    get:
+      operationId: PreviewPlanningDayReset
+      summary: Count records that would be reset for one planning date
+      parameters:
+        - { name: date, in: path, required: true, type: string, format: date }
+      responses: { '200': { description: Reset preview } }
+  /planning-day/{date}:
+    delete:
+      operationId: ResetPlanningDay
+      summary: Clear only one planning date while retaining delivered/completed history
+      parameters:
+        - { name: date, in: path, required: true, type: string, format: date }
+        - { name: confirm, in: query, required: true, type: string, description: 'Must equal RESET-YYYY-MM-DD' }
+      responses: { '200': { description: Planning date reset summary } }
 definitions:
   StageImportRequest:
     type: object
@@ -114,6 +162,36 @@ definitions:
   ReviewRequest:
     type: object
     properties: { note: { type: string } }
+  StagedPayloadAmendment:
+    type: object
+    required: [payload]
+    properties:
+      note: { type: string }
+      payload: { type: object, additionalProperties: true }
+  MailboxAttachmentRequest:
+    type: object
+    properties:
+      name: { type: string }
+      contentType: { type: string }
+      contentBase64: { type: string, description: Base64 content returned by Get attachment content }
+      isInline: { type: boolean, default: false }
+  MailboxEmailIntakeRequest:
+    type: object
+    required: [messageId]
+    properties:
+      messageId: { type: string }
+      internetMessageId: { type: string }
+      mailbox: { type: string, example: info@lyonshaulage.com }
+      senderAddress: { type: string }
+      senderName: { type: string }
+      subject: { type: string }
+      receivedAtUtc: { type: string, format: date-time }
+      bodyText: { type: string }
+      bodyHtml: { type: string }
+      webLink: { type: string }
+      attachments:
+        type: array
+        items: { $ref: '#/definitions/MailboxAttachmentRequest' }
   Customer:
     type: object
     properties: { id: { type: string, format: uuid }, code: { type: string }, name: { type: string }, active: { type: boolean } }
