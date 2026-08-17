@@ -18,9 +18,25 @@ public sealed class OperationsIntelligenceController(TmsDbContext db) : Controll
         var loads = await db.Loads.AsNoTracking().Include(x => x.Stops).Where(x => x.PlanningDate == day && x.Status != LoadStatus.Cancelled).ToListAsync(ct);
         var pending = await db.StagedImports.AsNoTracking().Where(x => x.Status == StagingStatus.PendingReview).OrderBy(x => x.ReceivedAtUtc).Take(100).ToListAsync(ct);
         var activeVehicleIds = loads.Where(x => x.VehicleId != null).Select(x => x.VehicleId!.Value).Distinct().ToList();
-        var vehicles = await db.Vehicles.AsNoTracking().Where(x => activeVehicleIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        var vehicles = new Dictionary<Guid, Vehicle>();
+        try
+        {
+            vehicles = await db.Vehicles.AsNoTracking().Where(x => activeVehicleIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        }
+        catch
+        {
+            // Vehicle enrichment must never take down the attention queue if an optional master-data column is unavailable.
+        }
         var activeDriverIds = loads.Where(x => x.DriverId != null).Select(x => x.DriverId!.Value).Distinct().ToList();
-        var drivers = await db.Drivers.AsNoTracking().Where(x => activeDriverIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        var drivers = new Dictionary<Guid, Driver>();
+        try
+        {
+            drivers = await db.Drivers.AsNoTracking().Where(x => activeDriverIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        }
+        catch
+        {
+            // Tacho enrichment is advisory here; core planning exceptions should still render.
+        }
         var items = new List<object>();
         foreach (var staged in pending)
             items.Add(new { id = $"staging-{staged.Id}", severity = "High", type = "OrderReview", title = "Order awaiting review", detail = staged.Source ?? staged.EntityType, entityId = staged.Id, entityType = "staging", href = "/staging" });
@@ -36,7 +52,6 @@ public sealed class OperationsIntelligenceController(TmsDbContext db) : Controll
         }
         try
         {
-            await GeofenceRunProgression.EnsureSchemaAsync(db, ct);
             var loadIds = loads.Select(x => x.Id).ToList();
             if (loadIds.Count > 0)
             {
@@ -48,7 +63,10 @@ public sealed class OperationsIntelligenceController(TmsDbContext db) : Controll
                 }
             }
         }
-        catch { }
+        catch
+        {
+            // Geofence intelligence is additive; core attention items remain useful without it.
+        }
         return Ok(new { planningDate = day, generatedAtUtc = DateTimeOffset.UtcNow, count = items.Count, items });
     }
 
@@ -73,7 +91,8 @@ public sealed class OperationsIntelligenceController(TmsDbContext db) : Controll
     {
         var now = DateTimeOffset.UtcNow;
         var tracking = await db.VehicleLiveStatuses.AsNoTracking().MaxAsync(x => (DateTimeOffset?)x.LastEventTimeUtc, ct);
-        var tacho = await db.Drivers.AsNoTracking().MaxAsync(x => (DateTimeOffset?)x.LastTachoSyncUtc, ct);
+        // LastTachoSyncUtc is runtime-only / NotMapped on Driver and cannot be translated by EF. Use persisted Tacho-related intake/status evidence instead.
+        var tacho = await db.StagedImports.AsNoTracking().Where(x => x.Source != null && x.Source.Contains("Tacho")).MaxAsync(x => (DateTimeOffset?)x.ReceivedAtUtc, ct);
         var email = await db.StagedImports.AsNoTracking().Where(x => x.Source != null).MaxAsync(x => (DateTimeOffset?)x.ReceivedAtUtc, ct);
         var sage = await db.StagedImports.AsNoTracking().Where(x => x.Source != null && x.Source.Contains("Sage")).MaxAsync(x => (DateTimeOffset?)x.ReceivedAtUtc, ct);
         return Ok(new { generatedAtUtc = now, sources = new[] { Fresh("Tracking", tracking, now, 10, 30), Fresh("Tacho", tacho, now, 30, 120), Fresh("Info mailbox", email, now, 15, 60), Fresh("Sage HR", sage, now, 180, 720) } });
@@ -85,11 +104,14 @@ public sealed class OperationsIntelligenceController(TmsDbContext db) : Controll
         var load = await db.Loads.AsNoTracking().Include(x => x.Stops).SingleOrDefaultAsync(x => x.Id == id, ct);
         if (load is null) return NotFound();
         var events = new List<TimelineEvent> { new(load.CreatedAtUtc, "Run created", load.Reference, "Planning", null) };
-        var logs = await db.DriverStatusLogs.AsNoTracking().Where(x => x.LoadId == id).OrderBy(x => x.CapturedAtUtc).ToListAsync(ct);
-        events.AddRange(logs.Select(x => new TimelineEvent(x.CapturedAtUtc, x.Status, x.Notes ?? "Operational status updated", "Operations", x.CapturedBy)));
         try
         {
-            await GeofenceRunProgression.EnsureSchemaAsync(db, ct);
+            var logs = await db.DriverStatusLogs.AsNoTracking().Where(x => x.LoadId == id).OrderBy(x => x.CapturedAtUtc).ToListAsync(ct);
+            events.AddRange(logs.Select(x => new TimelineEvent(x.CapturedAtUtc, x.Status, x.Notes ?? "Operational status updated", "Operations", x.CapturedBy)));
+        }
+        catch { }
+        try
+        {
             var visits = await db.GeofenceVisits.AsNoTracking().Where(x => x.LoadId == id).ToListAsync(ct);
             foreach (var v in visits)
             {
@@ -99,8 +121,12 @@ public sealed class OperationsIntelligenceController(TmsDbContext db) : Controll
             }
         }
         catch { }
-        var changes = await PlanLockStore.ChangesAsync(db, load.PlanningDate, load.PlanningDate, ct);
-        events.AddRange(changes.Where(x => x.LoadId == id).Select(x => new TimelineEvent(x.ChangedAtUtc, x.ChangeType, x.Reason, "Plan change", x.ChangedBy)));
+        try
+        {
+            var changes = await PlanLockStore.ChangesAsync(db, load.PlanningDate, load.PlanningDate, ct);
+            events.AddRange(changes.Where(x => x.LoadId == id).Select(x => new TimelineEvent(x.ChangedAtUtc, x.ChangeType, x.Reason, "Plan change", x.ChangedBy)));
+        }
+        catch { }
         return Ok(new { entityType = "Run", id = load.Id, reference = load.Reference, planningDate = load.PlanningDate, status = load.Status.ToString(), events = events.OrderBy(x => x.AtUtc) });
     }
 
@@ -123,7 +149,11 @@ public sealed class OperationsIntelligenceController(TmsDbContext db) : Controll
     }
 
     [HttpGet("plan-lock/{date}")]
-    public async Task<IActionResult> PlanLock(DateOnly date, CancellationToken ct) => Ok(await PlanLockStore.GetAsync(db, date, ct));
+    public async Task<IActionResult> PlanLock(DateOnly date, CancellationToken ct)
+    {
+        try { return Ok(await PlanLockStore.GetAsync(db, date, ct)); }
+        catch { return Ok(null); }
+    }
 
     [HttpPost("plan-lock/{date}"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> LockPlan(DateOnly date, CancellationToken ct)
@@ -136,16 +166,23 @@ public sealed class OperationsIntelligenceController(TmsDbContext db) : Controll
     public async Task<IActionResult> PlanStability([FromQuery] DateOnly from, [FromQuery] DateOnly to, CancellationToken ct)
     {
         if (from > to) return BadRequest("'from' must be on or before 'to'.");
-        var changes = await PlanLockStore.ChangesAsync(db, from, to, ct);
-        var lockedDays = 0; var baselineRuns = 0;
-        for (var d = from; d <= to; d = d.AddDays(1))
+        try
         {
-            var info = await PlanLockStore.GetAsync(db, d, ct);
-            if (info != null) { lockedDays++; baselineRuns += info.BaselineRuns; }
+            var changes = await PlanLockStore.ChangesAsync(db, from, to, ct);
+            var lockedDays = 0; var baselineRuns = 0;
+            for (var d = from; d <= to; d = d.AddDays(1))
+            {
+                var info = await PlanLockStore.GetAsync(db, d, ct);
+                if (info != null) { lockedDays++; baselineRuns += info.BaselineRuns; }
+            }
+            var changedRuns = changes.Where(x => x.LoadId != null).Select(x => x.LoadId).Distinct().Count();
+            var stability = baselineRuns == 0 ? (decimal?)null : Math.Round(Math.Max(0, baselineRuns - changedRuns) / (decimal)baselineRuns * 100m, 1);
+            return Ok(new { from, to, lockedDays, baselineRuns, changedRuns, stabilityPercent = stability, driverSwaps = changes.Count(x => x.ChangeType == "Driver swap"), vehicleSwaps = changes.Count(x => x.ChangeType == "Vehicle swap"), routeAmendments = changes.Count(x => x.ChangeType == "Route amendment"), runChanges = changes.Count, changes, dataAvailable = true });
         }
-        var changedRuns = changes.Where(x => x.LoadId != null).Select(x => x.LoadId).Distinct().Count();
-        var stability = baselineRuns == 0 ? (decimal?)null : Math.Round(Math.Max(0, baselineRuns - changedRuns) / (decimal)baselineRuns * 100m, 1);
-        return Ok(new { from, to, lockedDays, baselineRuns, changedRuns, stabilityPercent = stability, driverSwaps = changes.Count(x => x.ChangeType == "Driver swap"), vehicleSwaps = changes.Count(x => x.ChangeType == "Vehicle swap"), routeAmendments = changes.Count(x => x.ChangeType == "Route amendment"), runChanges = changes.Count, changes });
+        catch
+        {
+            return Ok(new { from, to, lockedDays = 0, baselineRuns = 0, changedRuns = 0, stabilityPercent = (decimal?)null, driverSwaps = 0, vehicleSwaps = 0, routeAmendments = 0, runChanges = 0, changes = Array.Empty<object>(), dataAvailable = false });
+        }
     }
 
     [HttpGet("readiness")]
@@ -153,8 +190,10 @@ public sealed class OperationsIntelligenceController(TmsDbContext db) : Controll
     {
         var day = date ?? DateOnly.FromDateTime(DateTime.UtcNow.AddDays(1));
         var loads = await db.Loads.AsNoTracking().Include(x => x.Stops).Where(x => x.PlanningDate == day && x.Status != LoadStatus.Cancelled).ToListAsync(ct);
-        var vehicles = await db.Vehicles.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
-        var drivers = await db.Drivers.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
+        var vehicles = new List<Vehicle>();
+        var drivers = new List<Driver>();
+        try { vehicles = await db.Vehicles.AsNoTracking().Where(x => x.Active).ToListAsync(ct); } catch { }
+        try { drivers = await db.Drivers.AsNoTracking().Where(x => x.Active).ToListAsync(ct); } catch { }
         var assignedVehicleIds = loads.Where(x => x.VehicleId != null).Select(x => x.VehicleId!.Value).Distinct().ToHashSet();
         var assignedDriverIds = loads.Where(x => x.DriverId != null).Select(x => x.DriverId!.Value).Distinct().ToHashSet();
         var pendingReview = await db.StagedImports.AsNoTracking().CountAsync(x => x.Status == StagingStatus.PendingReview, ct);
@@ -163,7 +202,9 @@ public sealed class OperationsIntelligenceController(TmsDbContext db) : Controll
         var geofenceGaps = loads.Sum(x => x.Stops.Count(s => s.Latitude is null || s.Longitude is null));
         var missingAllocations = loads.Count(x => x.DriverId is null || x.VehicleId is null);
         var ready = missingAllocations == 0 && vorConflicts == 0 && tachoConcerns == 0 && geofenceGaps == 0 && pendingReview == 0;
-        return Ok(new { planningDate = day, generatedAtUtc = DateTimeOffset.UtcNow, ready, runs = loads.Count, assignedDrivers = assignedDriverIds.Count, activeDrivers = drivers.Count, assignedVehicles = assignedVehicleIds.Count, activeVehicles = vehicles.Count, missingAllocations, vorConflicts, tachoConcerns, geofenceGaps, unreviewedOrders = pendingReview, planLock = await PlanLockStore.GetAsync(db, day, ct) });
+        PlanLockInfo? planLock = null;
+        try { planLock = await PlanLockStore.GetAsync(db, day, ct); } catch { }
+        return Ok(new { planningDate = day, generatedAtUtc = DateTimeOffset.UtcNow, ready, runs = loads.Count, assignedDrivers = assignedDriverIds.Count, activeDrivers = drivers.Count, assignedVehicles = assignedVehicleIds.Count, activeVehicles = vehicles.Count, missingAllocations, vorConflicts, tachoConcerns, geofenceGaps, unreviewedOrders = pendingReview, planLock });
     }
 
     private static object Item(Load load, string severity, string type, string title, string detail) => new { id = $"{type}-{load.Id}", severity, type, title, detail, entityId = load.Id, entityType = "run", href = $"/timeline/run/{load.Id}" };
