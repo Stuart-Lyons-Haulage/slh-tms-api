@@ -121,3 +121,31 @@ AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_GeofenceVisits_Load_
 IF COL_LENGTH('dbo.GeofenceVisits', 'EnteredAtUtc') IS NOT NULL
 AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_GeofenceVisits_Entered' AND object_id = OBJECT_ID(N'dbo.GeofenceVisits'))
     CREATE INDEX IX_GeofenceVisits_Entered ON dbo.GeofenceVisits(EnteredAtUtc);
+
+IF OBJECT_ID(N'dbo.DriverStatusLogs', N'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.DriverStatusLogs (
+        Id uniqueidentifier NOT NULL CONSTRAINT PK_DriverStatusLogs PRIMARY KEY,
+        LoadId uniqueidentifier NOT NULL,
+        DriverId uniqueidentifier NULL,
+        Status nvarchar(40) NOT NULL,
+        Notes nvarchar(1000) NULL,
+        CapturedBy nvarchar(200) NULL,
+        CapturedAtUtc datetimeoffset NOT NULL CONSTRAINT DF_DriverStatusLogs_CapturedAtUtc_026 DEFAULT(SYSUTCDATETIME())
+    );
+END
+ELSE
+BEGIN
+    IF COL_LENGTH('dbo.DriverStatusLogs', 'LoadId') IS NULL ALTER TABLE dbo.DriverStatusLogs ADD LoadId uniqueidentifier NULL;
+    IF COL_LENGTH('dbo.DriverStatusLogs', 'DriverId') IS NULL ALTER TABLE dbo.DriverStatusLogs ADD DriverId uniqueidentifier NULL;
+    IF COL_LENGTH('dbo.DriverStatusLogs', 'Status') IS NULL ALTER TABLE dbo.DriverStatusLogs ADD Status nvarchar(40) NULL;
+    IF COL_LENGTH('dbo.DriverStatusLogs', 'Notes') IS NULL ALTER TABLE dbo.DriverStatusLogs ADD Notes nvarchar(1000) NULL;
+    IF COL_LENGTH('dbo.DriverStatusLogs', 'CapturedBy') IS NULL ALTER TABLE dbo.DriverStatusLogs ADD CapturedBy nvarchar(200) NULL;
+    IF COL_LENGTH('dbo.DriverStatusLogs', 'CapturedAtUtc') IS NULL ALTER TABLE dbo.DriverStatusLogs ADD CapturedAtUtc datetimeoffset NOT NULL CONSTRAINT DF_DriverStatusLogs_CapturedAtUtc_Repair DEFAULT(SYSUTCDATETIME());
+END;
+IF COL_LENGTH('dbo.DriverStatusLogs', 'LoadId') IS NOT NULL
+AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_DriverStatusLogs_LoadId' AND object_id = OBJECT_ID(N'dbo.DriverStatusLogs'))
+    CREATE INDEX IX_DriverStatusLogs_LoadId ON dbo.DriverStatusLogs(LoadId);
+IF COL_LENGTH('dbo.DriverStatusLogs', 'CapturedAtUtc') IS NOT NULL
+AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_DriverStatusLogs_CapturedAtUtc' AND object_id = OBJECT_ID(N'dbo.DriverStatusLogs'))
+    CREATE INDEX IX_DriverStatusLogs_CapturedAtUtc ON dbo.DriverStatusLogs(CapturedAtUtc);
