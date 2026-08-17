@@ -17,11 +17,12 @@ public sealed class OrderIntakeController(
     ILogger<OrderIntakeController> logger) : ControllerBase
 {
     private readonly EmailOrderIntakeService emailParser = new();
+    private readonly SpecialistMailboxOrderParser specialistParser = new();
 
     [HttpPost("email/preview"), Authorize(Policy = "TmsWrite")]
     public IActionResult Preview([FromBody] MailboxEmailIntakeRequest request)
     {
-        var parsed = emailParser.Parse(request);
+        var parsed = ParseEmail(request);
         return Ok(new
         {
             ignored = parsed.IgnoredReason is not null,
@@ -49,7 +50,7 @@ public sealed class OrderIntakeController(
                 "Mailbox message ID is required so repeated flow runs remain idempotent.",
                 HttpContext.TraceIdentifier));
 
-        var parsed = emailParser.Parse(request);
+        var parsed = ParseEmail(request);
         if (parsed.IgnoredReason is not null)
         {
             return Ok(new
@@ -132,6 +133,9 @@ public sealed class OrderIntakeController(
             records
         });
     }
+
+    private EmailIntakeParseResult ParseEmail(MailboxEmailIntakeRequest request) =>
+        specialistParser.TryParse(request) ?? emailParser.Parse(request);
 
     private async Task<int> SupersedeOlderPending(
         string naturalKey,
