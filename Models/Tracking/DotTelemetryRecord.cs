@@ -15,9 +15,6 @@ public sealed class RoadTechTelemetryItem
     public JsonElement? DataCan { get; init; }
     public JsonElement? DataGaz { get; init; }
 
-    // Falcon adds product/version-specific fields to current telemetry. Keep them
-    // rather than silently discarding them so live driver identity can be read
-    // when RoadTech supplies it alongside the vehicle position.
     [JsonExtensionData]
     public Dictionary<string, JsonElement> Extra { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 }
@@ -67,29 +64,89 @@ public sealed record DotTelemetryRecord(
 
     private static string? ReadProviderDriverName(RoadTechTelemetryItem item)
     {
-        // RoadTech/Falcon response names have varied between API versions.
-        // Prefer explicit driver/card-holder labels and then inspect nested live
-        // data objects. Do not infer a driver from unrelated text fields.
         var direct = ReadExtraString(item.Extra,
             "DriverName", "driverName", "CurrentDriver", "currentDriver",
-            "CardHolder", "cardHolder", "Driver", "driver");
+            "CurrentDriverName", "currentDriverName", "TachoDriver", "tachoDriver",
+            "TachoDriverName", "tachoDriverName", "CardHolder", "cardHolder",
+            "CardHolderName", "cardHolderName", "MemberName", "memberName",
+            "Driver1Name", "driver1Name", "Driver", "driver");
         if (!string.IsNullOrWhiteSpace(direct)) return CleanDriverName(direct);
 
         foreach (var source in new[] { item.DataGps, item.DataCan, item.DataGaz })
         {
             var nested = ReadString(source,
-                "driverName", "currentDriver", "cardHolder", "driver");
+                "driverName", "currentDriver", "currentDriverName", "tachoDriver",
+                "tachoDriverName", "cardHolder", "cardHolderName", "memberName",
+                "driver1Name", "driver");
             if (!string.IsNullOrWhiteSpace(nested)) return CleanDriverName(nested);
+
+            var recursive = FindDriverNameRecursive(source, 0);
+            if (!string.IsNullOrWhiteSpace(recursive)) return CleanDriverName(recursive);
         }
 
-        // Some Falcon payloads wrap driver identity in a top-level object.
-        foreach (var key in new[] { "DriverInfo", "driverInfo", "DriverData", "driverData", "Tacho", "tacho" })
+        foreach (var value in item.Extra.Values)
         {
-            if (!item.Extra.TryGetValue(key, out var value) || value.ValueKind != JsonValueKind.Object) continue;
-            var nested = ReadString(value, "name", "driverName", "currentDriver", "cardHolder", "driver");
-            if (!string.IsNullOrWhiteSpace(nested)) return CleanDriverName(nested);
+            var recursive = FindDriverNameRecursive(value, 0);
+            if (!string.IsNullOrWhiteSpace(recursive)) return CleanDriverName(recursive);
+        }
+
+        return null;
+    }
+
+    private static string? FindDriverNameRecursive(JsonElement? source, int depth)
+    {
+        if (source is null || depth > 5) return null;
+        var value = source.Value;
+        if (value.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in value.EnumerateObject())
+            {
+                var key = property.Name.Replace("_", string.Empty).Replace("-", string.Empty);
+                var looksLikeDriverIdentity = key.Contains("driver", StringComparison.OrdinalIgnoreCase)
+                    || key.Contains("cardholder", StringComparison.OrdinalIgnoreCase)
+                    || key.Contains("membername", StringComparison.OrdinalIgnoreCase)
+                    || key.Contains("tachoname", StringComparison.OrdinalIgnoreCase);
+
+                if (looksLikeDriverIdentity)
+                {
+                    if (property.Value.ValueKind is JsonValueKind.String or JsonValueKind.Number)
+                    {
+                        var candidate = CleanDriverName(property.Value.ToString());
+                        if (!string.IsNullOrWhiteSpace(candidate) && !LooksLikeIdentifierOnly(candidate)) return candidate;
+                    }
+                    if (property.Value.ValueKind == JsonValueKind.Object)
+                    {
+                        var candidate = ReadString(property.Value, "name", "displayName", "fullName", "driverName", "memberName", "cardHolderName");
+                        candidate = CleanDriverName(candidate);
+                        if (!string.IsNullOrWhiteSpace(candidate) && !LooksLikeIdentifierOnly(candidate)) return candidate;
+                    }
+                }
+
+                if (property.Value.ValueKind is JsonValueKind.Object or JsonValueKind.Array)
+                {
+                    var nested = FindDriverNameRecursive(property.Value, depth + 1);
+                    if (!string.IsNullOrWhiteSpace(nested)) return nested;
+                }
+            }
+        }
+        else if (value.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in value.EnumerateArray())
+            {
+                var nested = FindDriverNameRecursive(child, depth + 1);
+                if (!string.IsNullOrWhiteSpace(nested)) return nested;
+            }
         }
         return null;
+    }
+
+    private static bool LooksLikeIdentifierOnly(string value)
+    {
+        var compact = new string(value.Where(char.IsLetterOrDigit).ToArray());
+        if (compact.Length == 0) return true;
+        if (compact.All(char.IsDigit)) return true;
+        if (compact.Length > 12 && compact.Count(char.IsDigit) > compact.Length / 2) return true;
+        return false;
     }
 
     private static string? ReadExtraString(IReadOnlyDictionary<string, JsonElement> values, params string[] names)
@@ -103,7 +160,7 @@ public sealed record DotTelemetryRecord(
                 return value.ToString();
             if (value.ValueKind == JsonValueKind.Object)
             {
-                var nested = ReadString(value, "name", "displayName", "driverName", "fullName");
+                var nested = ReadString(value, "name", "displayName", "driverName", "fullName", "memberName", "cardHolderName");
                 if (!string.IsNullOrWhiteSpace(nested)) return nested;
             }
         }
@@ -113,7 +170,7 @@ public sealed record DotTelemetryRecord(
     private static string? CleanDriverName(string? value)
     {
         var cleaned = (value ?? string.Empty).Trim();
-        if (cleaned.Length == 0 || cleaned == "0" || cleaned.Equals("unknown", StringComparison.OrdinalIgnoreCase)) return null;
+        if (cleaned.Length == 0 || cleaned == "0" || cleaned.Equals("unknown", StringComparison.OrdinalIgnoreCase) || cleaned.Equals("none", StringComparison.OrdinalIgnoreCase)) return null;
         return cleaned;
     }
 
