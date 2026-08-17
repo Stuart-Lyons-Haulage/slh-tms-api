@@ -23,6 +23,7 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<DriverStatusLog> DriverStatusLogs => Set<DriverStatusLog>();
     public DbSet<SiteGeofence> SiteGeofences => Set<SiteGeofence>();
     public DbSet<GeofenceVisit> GeofenceVisits => Set<GeofenceVisit>();
+    public DbSet<EtaSnapshot> EtaSnapshots => Set<EtaSnapshot>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -67,6 +68,8 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<GeofenceVisit>().HasIndex(x => new { x.VehicleIdentifier, x.ExitedAtUtc });
         b.Entity<GeofenceVisit>().HasIndex(x => new { x.LoadId, x.LoadStopId });
         b.Entity<GeofenceVisit>().HasIndex(x => x.EnteredAtUtc);
+        b.Entity<EtaSnapshot>().HasIndex(x => new { x.StopId, x.CapturedAtUtc });
+        b.Entity<EtaSnapshot>().HasIndex(x => x.LoadId);
 
         b.Entity<VehicleTrackingEvent>()
             .HasIndex(x => new { x.ProviderName, x.ProviderEventId })
