@@ -21,6 +21,8 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<FuelPrice> FuelPrices => Set<FuelPrice>();
     public DbSet<IntegrationMapping> IntegrationMappings => Set<IntegrationMapping>();
     public DbSet<DriverStatusLog> DriverStatusLogs => Set<DriverStatusLog>();
+    public DbSet<SiteGeofence> SiteGeofences => Set<SiteGeofence>();
+    public DbSet<GeofenceVisit> GeofenceVisits => Set<GeofenceVisit>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -60,20 +62,22 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<LoadStop>().Property(x => x.Latitude).HasPrecision(9, 6);
         b.Entity<LoadStop>().Property(x => x.Longitude).HasPrecision(9, 6);
 
-        // Tracking entities configuration
+        b.Entity<SiteGeofence>().HasIndex(x => x.NormalizedName).IsUnique();
+        b.Entity<SiteGeofence>().HasIndex(x => x.SiteId);
+        b.Entity<GeofenceVisit>().HasIndex(x => new { x.VehicleIdentifier, x.ExitedAtUtc });
+        b.Entity<GeofenceVisit>().HasIndex(x => new { x.LoadId, x.LoadStopId });
+        b.Entity<GeofenceVisit>().HasIndex(x => x.EnteredAtUtc);
+
         b.Entity<VehicleTrackingEvent>()
             .HasIndex(x => new { x.ProviderName, x.ProviderEventId })
             .IsUnique()
             .HasDatabaseName("IX_VehicleTrackingEvent_ProviderName_ProviderEventId");
-
         b.Entity<VehicleTrackingEvent>()
             .HasIndex(x => x.VehicleIdentifier)
             .HasDatabaseName("IX_VehicleTrackingEvent_VehicleIdentifier");
-
         b.Entity<VehicleTrackingEvent>()
             .HasIndex(x => x.EventTimeUtc)
             .HasDatabaseName("IX_VehicleTrackingEvent_EventTimeUtc");
-
         b.Entity<VehicleTrackingEvent>().Property(x => x.Latitude).HasPrecision(9, 6);
         b.Entity<VehicleTrackingEvent>().Property(x => x.Longitude).HasPrecision(9, 6);
         b.Entity<VehicleTrackingEvent>().Property(x => x.SpeedKph).HasPrecision(10, 2);
@@ -82,11 +86,9 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
             .HasIndex(x => x.VehicleIdentifier)
             .IsUnique()
             .HasDatabaseName("IX_VehicleLiveStatus_VehicleIdentifier");
-
         b.Entity<VehicleLiveStatus>()
             .HasIndex(x => x.LastEventTimeUtc)
             .HasDatabaseName("IX_VehicleLiveStatus_LastEventTimeUtc");
-
         b.Entity<VehicleLiveStatus>().Property(x => x.Latitude).HasPrecision(9, 6);
         b.Entity<VehicleLiveStatus>().Property(x => x.Longitude).HasPrecision(9, 6);
         b.Entity<VehicleLiveStatus>().Property(x => x.SpeedKph).HasPrecision(10, 2);
