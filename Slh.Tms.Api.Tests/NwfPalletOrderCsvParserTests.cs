@@ -9,7 +9,7 @@ public sealed class NwfPalletOrderCsvParserTests
     private readonly NwfPalletOrderCsvParser parser = new();
 
     [Fact]
-    public void NwfCsv_StagesOnlyPositivePalletRows_AndRetainsSourceFields()
+    public void NwfCsv_StagesOnlyPositivePalletRows_AndUsesPoAsTmsReference()
     {
         const string csv = """
 Haulier Name,Requested Ship Date,04. Collection Site,Customer Name,DepotID,Depot Description,Delivery Address,Sales Order ID,CustomerRef,Pallet Name,PalletQty,PO REF
@@ -36,8 +36,14 @@ Stuart Lyons,19/08/2026,Selsey,Morrisons,MOR06,Morrisons FRUITBRIDGWATER 718,TA6
         Assert.Equal("6511786146", first.GetProperty("customerRef").GetString());
         Assert.Equal("IPP Euro", first.GetProperty("palletName").GetString());
         Assert.Equal("PO00499461", first.GetProperty("poRef").GetString());
+        Assert.Equal("PO00499461", first.GetProperty("customerPo").GetString());
+        Assert.StartsWith("PO00499461/SO000367762/Drayton/ALD20", first.GetProperty("poNumber").GetString(), StringComparison.OrdinalIgnoreCase);
         Assert.Equal(2, first.GetProperty("pallets").GetInt32());
         Assert.Equal("NWF Pallet Order CSV", first.GetProperty("intakeParser").GetString());
+        Assert.Contains(first.GetProperty("intakeMatchKeys").EnumerateArray().Select(item => item.GetString()),
+            key => key is not null && key.Contains("PO:PO00499461", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(first.GetProperty("intakeMatchKeys").EnumerateArray().Select(item => item.GetString()),
+            key => key is not null && key.Contains("SALES:SO000367762", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -58,6 +64,21 @@ Stuart Lyons,19/08/2026,Drayton,Aldi,ALD20,Aldi SAWLEY Distribution Centre,DE72 
         Assert.Equal(first.NaturalKey, updated.NaturalKey);
         Assert.Equal(2, first.Payload.GetProperty("pallets").GetInt32());
         Assert.Equal(4, updated.Payload.GetProperty("pallets").GetInt32());
+    }
+
+    [Fact]
+    public void MissingPo_UsesSalesOrderOnlyAsFallbackAndFlagsReview()
+    {
+        const string csv = """
+Haulier Name,Requested Ship Date,04. Collection Site,Customer Name,DepotID,Depot Description,Delivery Address,Sales Order ID,CustomerRef,Pallet Name,PalletQty,PO REF
+Stuart Lyons,19/08/2026,Drayton,Aldi,ALD20,Aldi SAWLEY Distribution Centre,DE72 2HP,SO000367762,6511786146,IPP Euro,2,
+""";
+
+        var row = Assert.Single(parser.TryParse(Request(csv, "message-no-po"))!.Orders);
+        Assert.StartsWith("SO000367762/Drayton/ALD20", row.Payload.GetProperty("poNumber").GetString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("Medium", row.Payload.GetProperty("intakeConfidence").GetString());
+        Assert.Contains(row.Payload.GetProperty("intakeWarnings").EnumerateArray().Select(item => item.GetString()),
+            warning => warning is not null && warning.Contains("PO REF is missing", StringComparison.OrdinalIgnoreCase));
     }
 
     private static MailboxEmailIntakeRequest Request(string csv, string messageId) =>

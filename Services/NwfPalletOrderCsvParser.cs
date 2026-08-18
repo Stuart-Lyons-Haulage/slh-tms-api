@@ -75,6 +75,8 @@ public sealed class NwfPalletOrderCsvParser
                     if (string.IsNullOrWhiteSpace(collection)) rowWarnings.Add("Collection Site is missing.");
                     if (string.IsNullOrWhiteSpace(depotDescription)) rowWarnings.Add("Depot Description is missing.");
                     if (string.IsNullOrWhiteSpace(salesOrderId)) rowWarnings.Add("Sales Order ID is missing.");
+                    if (string.IsNullOrWhiteSpace(poRef))
+                        rowWarnings.Add("PO REF is missing; Sales Order ID is being used only as a fallback TMS reference and must be checked before approval.");
                     if (date is null || string.IsNullOrWhiteSpace(collection)
                         || string.IsNullOrWhiteSpace(depotDescription) || string.IsNullOrWhiteSpace(salesOrderId))
                     {
@@ -85,17 +87,28 @@ public sealed class NwfPalletOrderCsvParser
                     var collectionToken = Normalise(collection);
                     var depotToken = Normalise(depotId ?? depotDescription);
                     var palletToken = Normalise(palletName);
-                    var naturalKey = $"NWFCSV|{date:yyyy-MM-dd}|{Normalise(salesOrderId)}|{collectionToken}|{depotToken}|{palletToken}";
-                    var matchKeys = new[]
+                    var poToken = Normalise(poRef);
+                    var salesToken = Normalise(salesOrderId);
+                    var naturalKey = $"NWFCSV|{date:yyyy-MM-dd}|PO:{poToken}|SO:{salesToken}|{collectionToken}|{depotToken}|{palletToken}";
+                    var matchKeys = new List<string>
                     {
-                        $"NWF|{date:yyyy-MM-dd}|LOAD:{Normalise(salesOrderId)}:{collectionToken}:{depotToken}"
+                        $"NWF|{date:yyyy-MM-dd}|SALES:{salesToken}:{collectionToken}:{depotToken}"
                     };
-                    var reference = Clip($"{salesOrderId}/{collection}/{depotId ?? depotDescription}", 80);
+                    if (!string.IsNullOrWhiteSpace(poToken))
+                        matchKeys.Insert(0, $"NWF|{date:yyyy-MM-dd}|PO:{poToken}:{collectionToken}:{depotToken}");
+
+                    // PO REF is the primary TMS identity. Sales Order ID is retained in
+                    // the reference as a subordinate discriminator because one NWF PO can
+                    // contain multiple sales orders for the same collection/depot route.
+                    var referenceRoot = !string.IsNullOrWhiteSpace(poRef)
+                        ? $"{poRef}/{salesOrderId}"
+                        : salesOrderId;
+                    var reference = Clip($"{referenceRoot}/{collection}/{depotId ?? depotDescription}", 80);
                     var instructions = string.Join(" · ", new[]
                     {
                         "Order type: NWF pallet order",
-                        $"Sales order: {salesOrderId}",
                         string.IsNullOrWhiteSpace(poRef) ? null : $"PO ref: {poRef}",
+                        $"Sales order: {salesOrderId}",
                         string.IsNullOrWhiteSpace(customerRef) ? null : $"Customer ref: {customerRef}",
                         string.IsNullOrWhiteSpace(palletName) ? null : $"Pallet type: {palletName}",
                         string.IsNullOrWhiteSpace(depotId) ? null : $"Depot ID: {depotId}",
@@ -148,7 +161,7 @@ public sealed class NwfPalletOrderCsvParser
                     };
 
                     orders.Add(new ParsedEmailOrder(
-                        $"nwf-csv-{Normalise(salesOrderId)}-{collectionToken}-{depotToken}-{palletToken}",
+                        $"nwf-csv-{salesToken}-{collectionToken}-{depotToken}-{palletToken}",
                         naturalKey,
                         JsonSerializer.SerializeToElement(payload),
                         rowWarnings));
