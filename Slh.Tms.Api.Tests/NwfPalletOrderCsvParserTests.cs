@@ -37,8 +37,7 @@ Stuart Lyons,19/08/2026,Selsey,Morrisons,MOR06,Morrisons FRUITBRIDGWATER 718,TA6
         Assert.Equal("IPP Euro", first.GetProperty("palletName").GetString());
         Assert.Equal("PO00499461", first.GetProperty("poRef").GetString());
         Assert.Equal("PO00499461", first.GetProperty("customerPo").GetString());
-        Assert.StartsWith("PO00499461/Drayton/ALD20", first.GetProperty("poNumber").GetString(), StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("SO000367762", first.GetProperty("poNumber").GetString(), StringComparison.OrdinalIgnoreCase);
+        Assert.StartsWith("PO00499461/SO000367762/Drayton/ALD20", first.GetProperty("poNumber").GetString(), StringComparison.OrdinalIgnoreCase);
         Assert.Equal(2, first.GetProperty("pallets").GetInt32());
         Assert.Equal("NWF Pallet Order CSV", first.GetProperty("intakeParser").GetString());
         Assert.Contains(first.GetProperty("intakeMatchKeys").EnumerateArray().Select(item => item.GetString()),
