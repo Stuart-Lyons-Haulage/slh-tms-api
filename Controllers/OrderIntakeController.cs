@@ -19,6 +19,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     private readonly SainsburyHaulierPlanParser sainsburyParser = new();
     private readonly NwfDailyTrackerParser nwfParser = new();
     private readonly NwfWorkbookSnapshotParser nwfWorkbookParser = new();
+    private readonly NwfPalletOrderCsvParser nwfCsvParser = new();
 
     [HttpPost("email/preview"), Authorize(Policy = "TmsWrite")]
     public IActionResult Preview([FromBody] MailboxEmailIntakeRequest request)
@@ -55,11 +56,10 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var superseded = 0;
         var records = new List<object>();
 
-        // NWF tracker workbooks are versioned snapshots. Supersede older pending
-        // versions by any stable alias (Product PO, Transport PO, Load Ref or
-        // route identity) before inserting the new snapshot rows. Strong NWF
-        // references are canonicalised without the planning date because NWF
-        // can correct a movement from one day to another in a later tracker.
+        // NWF tracker workbooks and pallet-order CSVs are versioned snapshots.
+        // Supersede older pending versions by any stable alias before inserting
+        // the new snapshot rows. Strong NWF references are canonicalised without
+        // the planning date so corrected customer snapshots replace earlier rows.
         var matchKeys = parsed.Orders
             .SelectMany(order => ReadMatchKeys(order.Payload))
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -116,7 +116,8 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     }
 
     private EmailIntakeParseResult ParseEmail(MailboxEmailIntakeRequest request) =>
-        nwfWorkbookParser.TryParse(request)
+        nwfCsvParser.TryParse(request)
+        ?? nwfWorkbookParser.TryParse(request)
         ?? nwfParser.TryParse(request)
         ?? sainsburyParser.TryParse(request)
         ?? specialistParser.TryParse(request)
