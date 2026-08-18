@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
+using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
 using Xunit;
 
