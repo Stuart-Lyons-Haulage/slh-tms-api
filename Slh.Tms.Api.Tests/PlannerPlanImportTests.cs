@@ -52,21 +52,30 @@ public sealed class PlannerPlanImportTests : IClassFixture<CustomWebFactory>
         Assert.Equal(1, firstSummary!.Created);
         Assert.Equal(1, firstSummary.Held);
 
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            Assert.True(db.Loads.Count() == 1, $"Expected one load after first import, found {db.Loads.Count()}.");
+            Assert.True(db.StagedImports.Count(x => x.IdempotencyKey == "planimport:20260818:COL-01") == 1,
+                $"Expected one audit marker after first import, found {db.StagedImports.Count(x => x.IdempotencyKey == "planimport:20260818:COL-01")}.");
+        }
+
         var second = await client.PostAsJsonAsync("/api/v1/planning/import-plan", request);
         Assert.Equal(HttpStatusCode.OK, second.StatusCode);
         var secondSummary = await second.Content.ReadFromJsonAsync<PlannerPlanImportSummary>();
         Assert.NotNull(secondSummary);
-        Assert.Equal(1, secondSummary!.Updated + secondSummary.Unchanged);
+        Assert.True(secondSummary!.Updated + secondSummary.Unchanged == 1,
+            $"Second import counts: Created={secondSummary.Created}, Updated={secondSummary.Updated}, Unchanged={secondSummary.Unchanged}, Held={secondSummary.Held}; outcomes={string.Join(",", secondSummary.Runs.Select(x => x.Outcome))}");
         Assert.Equal(1, secondSummary.Held);
 
-        using var scope = _factory.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-        Assert.Single(db.Loads);
-        var load = db.Loads.Single();
+        using var finalScope = _factory.Services.CreateScope();
+        var finalDb = finalScope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        Assert.Single(finalDb.Loads);
+        var load = finalDb.Loads.Single();
         Assert.Equal("PLAN-20260818-COL-01", load.Reference);
         Assert.Equal(LoadStatus.Planned, load.Status);
-        Assert.Equal(2, db.LoadStops.Count());
-        Assert.DoesNotContain(db.Loads, x => x.Reference.Contains("S3"));
+        Assert.Equal(2, finalDb.LoadStops.Count());
+        Assert.DoesNotContain(finalDb.Loads, x => x.Reference.Contains("S3"));
     }
 
     [Fact]
