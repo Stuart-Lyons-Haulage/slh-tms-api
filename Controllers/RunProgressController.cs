@@ -17,13 +17,42 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
         var planningDate = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
         var now = DateTimeOffset.UtcNow;
 
+        try
+        {
+            return Ok(await BuildProgressAsync(planningDate, now, ct));
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogError(exception, "Live run progress failed safely for {PlanningDate}.", planningDate);
+            db.ChangeTracker.Clear();
+
+            var warning = $"Live run progress failed safely: {exception.GetBaseException().Message}";
+            var fallback = await TryLoadRegisterRunsAsync(planningDate, warning, ct);
+            if (fallback is not null) return Ok(fallback);
+
+            return Ok(new
+            {
+                planningDate,
+                calculatedAtUtc = now,
+                count = 0,
+                source = "Unavailable",
+                geofenceAvailable = false,
+                warning,
+                records = Array.Empty<object>()
+            });
+        }
+    }
+
+    private async Task<object> BuildProgressAsync(DateOnly planningDate, DateTimeOffset now, CancellationToken ct)
+    {
         var geofenceAvailable = true;
         string? geofenceWarning = null;
+
         try
         {
             await GeofenceRunProgression.EnsureSchemaAsync(db, ct);
         }
-        catch (Exception exception) when (IsSchemaUnavailable(exception))
+        catch (Exception exception) when (exception is not OperationCanceledException)
         {
             db.ChangeTracker.Clear();
             geofenceAvailable = false;
@@ -52,7 +81,7 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
                         .Where(x => geofenceIds.Contains(x.Id))
                         .ToDictionaryAsync(x => x.Id, ct);
             }
-            catch (Exception exception) when (IsSchemaUnavailable(exception))
+            catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 db.ChangeTracker.Clear();
                 geofenceAvailable = false;
@@ -65,7 +94,7 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
 
         var records = loads.Select(load =>
         {
-            var orderedStops = load.Stops.OrderBy(x => x.Sequence).ToList();
+            var orderedStops = (load.Stops ?? []).OrderBy(x => x.Sequence).ToList();
             var loadVisits = geofenceAvailable
                 ? visits.Where(x => x.LoadId == load.Id).ToList()
                 : [];
@@ -91,6 +120,7 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
             var runState = totalStops > 0 && completedStops >= totalStops
                 ? "Completed"
                 : activeVisit?.Status ?? (completedStops > 0 ? "BetweenStops" : load.Status.ToString());
+            var delayed = activeVisit is not null && (activeVisit.Status == "SiteDelay" || waitLimit is int limit && currentDwellMinutes.GetValueOrDefault() > limit);
 
             return new
             {
@@ -113,7 +143,7 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
                     activeVisit.ConfirmedAtUtc,
                     dwellMinutes = currentDwellMinutes,
                     waitLimitMinutes = waitLimit,
-                    isDelayed = activeVisit.Status == "SiteDelay" || waitLimit is int limit && currentDwellMinutes > limit,
+                    isDelayed = delayed,
                     activeVisit.Status,
                     activeVisit.StatusReason
                 },
@@ -122,7 +152,7 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
             };
         }).ToList();
 
-        return Ok(new
+        return new
         {
             planningDate,
             calculatedAtUtc = now,
@@ -131,7 +161,7 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
             geofenceAvailable,
             warning = loadWarning ?? geofenceWarning,
             records
-        });
+        };
     }
 
     private async Task<(List<Load> Loads, string Source, string? Warning)> LoadRunsAsync(DateOnly planningDate, CancellationToken ct)
@@ -146,18 +176,70 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
 
             if (loads.Count > 0) return (loads, "Loads", null);
 
-            var registerLoads = await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct);
+            var registerLoads = await SafeReadRegisterLoadsAsync(planningDate, ct);
             if (registerLoads.Count > 0)
                 return (registerLoads, "PlanningRegister", "No dedicated planning loads were returned, so the live progress panel is using the audited planning register fallback.");
 
             return (loads, "Loads", null);
         }
-        catch (Exception exception) when (IsSchemaUnavailable(exception))
+        catch (Exception exception) when (exception is not OperationCanceledException)
         {
             db.ChangeTracker.Clear();
-            var registerLoads = await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct);
+            var registerLoads = await SafeReadRegisterLoadsAsync(planningDate, ct);
             return (registerLoads, "PlanningRegister", $"Dedicated planning load tables are not available yet: {exception.GetBaseException().Message}");
         }
+    }
+
+    private async Task<List<Load>> SafeReadRegisterLoadsAsync(DateOnly planningDate, CancellationToken ct)
+    {
+        try
+        {
+            return await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            logger.LogWarning(exception, "Planning register fallback could not be read for {PlanningDate}.", planningDate);
+            return [];
+        }
+    }
+
+    private async Task<object?> TryLoadRegisterRunsAsync(DateOnly planningDate, string warning, CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var loads = await SafeReadRegisterLoadsAsync(planningDate, ct);
+        if (loads.Count == 0) return null;
+
+        var records = loads.OrderBy(load => load.Reference).Select(load =>
+        {
+            var stops = (load.Stops ?? []).OrderBy(stop => stop.Sequence).ToList();
+            var nextStop = stops.FirstOrDefault();
+            return new
+            {
+                loadId = load.Id,
+                loadReference = load.Reference,
+                loadStatus = load.Status.ToString(),
+                runState = load.Status.ToString(),
+                totalStops = stops.Count,
+                completedStops = 0,
+                progressPercent = 0m,
+                nextStop = nextStop is null ? null : new { nextStop.Id, nextStop.Sequence, nextStop.Name, nextStop.Address, nextStop.PlannedArrivalUtc },
+                currentVisit = (object?)null,
+                lastDeparture = (object?)null,
+                calculatedAtUtc = now
+            };
+        }).ToList();
+
+        return new
+        {
+            planningDate,
+            calculatedAtUtc = now,
+            count = records.Count,
+            source = "PlanningRegisterSafeFallback",
+            geofenceAvailable = false,
+            warning,
+            records
+        };
     }
 
     private static DateOnly UkOperatingDate(DateTimeOffset value)
@@ -170,16 +252,5 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
         {
             return DateOnly.FromDateTime(value.UtcDateTime);
         }
-    }
-
-    private static bool IsSchemaUnavailable(Exception exception)
-    {
-        var message = exception.GetBaseException().Message;
-        return exception is InvalidOperationException or DbUpdateException ||
-            message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) ||
-            message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase) ||
-            message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase) ||
-            message.Contains("already an object named", StringComparison.OrdinalIgnoreCase) ||
-            message.Contains("There is already an object named", StringComparison.OrdinalIgnoreCase);
     }
 }
