@@ -103,7 +103,7 @@ public sealed class AssistantController(
                     "Clean market master data",
                     $"Market validation found {string.Join(", ", parts)}. Safe fixes will standardise market names, infer obvious stand numbers and consolidate exact duplicate market records; incomplete identities remain review-only.",
                     "Markets",
-                    nonCanonical + duplicates > 0 || rows.Any(x => string.IsNullOrWhiteSpace(x.StandOrLocation) && !string.IsNullOrWhiteSpace(InferStand(x.Name))))));
+                    nonCanonical + duplicates > 0 || rows.Any(x => string.IsNullOrWhiteSpace(x.StandOrLocation) && !string.IsNullOrWhiteSpace(InferStand(x.Name)))));
             }
             return result;
         }
