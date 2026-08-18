@@ -155,21 +155,99 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
             results));
     }
 
-    private static List<LoadStop> BuildStops(Guid loadId, PlannerPlanRunRequest run, IReadOnlyCollection<TransportOrder> orders) =>
-        run.Stops.OrderBy(stop => stop.Sequence).Select((stop, index) =>
+    private static List<LoadStop> BuildStops(Guid loadId, PlannerPlanRunRequest run, IReadOnlyCollection<TransportOrder> orders)
+    {
+        var sourceRows = run.Stops.OrderBy(stop => stop.Sequence).ToList();
+        var stops = new List<LoadStop>();
+
+        foreach (var group in GroupBySite(sourceRows, stop => stop.CollectionSite))
         {
-            var order = string.IsNullOrWhiteSpace(stop.Reference) ? null : orders.FirstOrDefault(x => string.Equals(x.Reference, stop.Reference, StringComparison.OrdinalIgnoreCase));
-            return new LoadStop
+            stops.Add(new LoadStop
+            {
+                Id = Guid.NewGuid(),
+                LoadId = loadId,
+                Sequence = stops.Count + 1,
+                Name = Clip($"Collect · {group.Site}", 200)!,
+                Address = Clip(BuildGroupedStopDetail(group.Rows, includeDelivery: true), 500),
+                PlannedArrivalUtc = EarliestPlannerTime(run.PlanningDate, group.Rows.Select(stop => stop.CollectFrom ?? stop.CollectTo))
+            });
+        }
+
+        foreach (var group in GroupBySite(sourceRows, stop => stop.DeliverySite))
+        {
+            var order = FirstMatchingOrder(group.Rows, orders);
+            stops.Add(new LoadStop
             {
                 Id = Guid.NewGuid(),
                 LoadId = loadId,
                 OrderId = order?.Id,
+                Sequence = stops.Count + 1,
+                Name = Clip($"Deliver · {group.Site}", 200)!,
+                Address = Clip(BuildGroupedStopDetail(group.Rows, includeDelivery: false), 500),
+                PlannedArrivalUtc = EarliestPlannerTime(run.PlanningDate, group.Rows.Select(stop => stop.Deadline))
+            });
+        }
+
+        return stops.Count > 0
+            ? stops
+            : sourceRows.Select((stop, index) => new LoadStop
+            {
+                Id = Guid.NewGuid(),
+                LoadId = loadId,
                 Sequence = index + 1,
                 Name = Clip(PlannerPlanImportRules.StopName(stop), 200)!,
                 Address = Clip(BuildStopDetail(stop), 500),
                 PlannedArrivalUtc = ParsePlannerTime(run.PlanningDate, stop.CollectFrom ?? stop.Deadline)
-            };
-        }).ToList();
+            }).ToList();
+    }
+
+    private static IEnumerable<(string Site, List<PlannerPlanStopRequest> Rows)> GroupBySite(
+        IReadOnlyCollection<PlannerPlanStopRequest> rows,
+        Func<PlannerPlanStopRequest, string?> siteSelector)
+    {
+        var groups = new List<(string Site, List<PlannerPlanStopRequest> Rows)>();
+        foreach (var row in rows)
+        {
+            var site = siteSelector(row)?.Trim();
+            if (string.IsNullOrWhiteSpace(site)) continue;
+            var existingIndex = groups.FindIndex(group => string.Equals(Normalize(group.Site), Normalize(site), StringComparison.Ordinal));
+            if (existingIndex >= 0) groups[existingIndex].Rows.Add(row);
+            else groups.Add((site, [row]));
+        }
+        return groups;
+    }
+
+    private static TransportOrder? FirstMatchingOrder(IEnumerable<PlannerPlanStopRequest> rows, IReadOnlyCollection<TransportOrder> orders)
+    {
+        foreach (var row in rows)
+        {
+            if (string.IsNullOrWhiteSpace(row.Reference)) continue;
+            var order = orders.FirstOrDefault(item => string.Equals(item.Reference, row.Reference, StringComparison.OrdinalIgnoreCase));
+            if (order is not null) return order;
+        }
+        return null;
+    }
+
+    private static string BuildGroupedStopDetail(IEnumerable<PlannerPlanStopRequest> rows, bool includeDelivery)
+    {
+        var details = rows.OrderBy(row => row.Sequence).Select(row =>
+        {
+            var routePart = includeDelivery && !string.IsNullOrWhiteSpace(row.DeliverySite) ? $"to {row.DeliverySite}" :
+                !includeDelivery && !string.IsNullOrWhiteSpace(row.CollectionSite) ? $"from {row.CollectionSite}" : null;
+            var parts = new[]
+            {
+                routePart,
+                row.Pallets is null ? null : $"{row.Pallets:0.##} pallets",
+                string.IsNullOrWhiteSpace(row.Reference) ? null : $"Ref {row.Reference}",
+                string.IsNullOrWhiteSpace(row.CollectFrom) ? null : $"collect {row.CollectFrom}",
+                string.IsNullOrWhiteSpace(row.CollectTo) ? null : $"to {row.CollectTo}",
+                string.IsNullOrWhiteSpace(row.Deadline) ? null : $"deadline {row.Deadline}"
+            }.Where(part => !string.IsNullOrWhiteSpace(part));
+            return string.Join(" · ", parts);
+        }).Where(detail => !string.IsNullOrWhiteSpace(detail));
+
+        return string.Join(" | ", details);
+    }
 
     private static Driver? ResolveDriver(IEnumerable<Driver> drivers, string? value) => string.IsNullOrWhiteSpace(value) || IsPlaceholder(value)
         ? null
@@ -201,6 +279,15 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
         string.IsNullOrWhiteSpace(stop.CollectTo) ? null : $"Collect to {stop.CollectTo}",
         string.IsNullOrWhiteSpace(stop.Deadline) ? null : $"Deadline {stop.Deadline}"
     }.Where(x => x is not null));
+
+    private static DateTimeOffset? EarliestPlannerTime(DateOnly date, IEnumerable<string?> values)
+    {
+        return values
+            .Select(value => ParsePlannerTime(date, value))
+            .Where(value => value is not null)
+            .OrderBy(value => value)
+            .FirstOrDefault();
+    }
 
     private static DateTimeOffset? ParsePlannerTime(DateOnly date, string? value)
     {
