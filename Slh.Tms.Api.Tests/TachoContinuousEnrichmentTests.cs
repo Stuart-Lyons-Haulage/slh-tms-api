@@ -1,7 +1,7 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
-using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
 using Xunit;
 
@@ -58,22 +58,43 @@ public sealed class TachoContinuousEnrichmentTests
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            var start = today.ToDateTime(new TimeOnly(6, 0), DateTimeKind.Utc).ToString("O");
+            var start = today.ToDateTime(new TimeOnly(6, 0), DateTimeKind.Utc);
             var payload = request.RequestUri!.AbsolutePath switch
             {
                 "/api/auth/login" => "{\"token\":\"sid-tacho\"}",
-                "/api/Duty/GetDutyTransactions" => $$"""
-                    {"dutyNew":{"moreData":false,"recordCount":1,"data":[{
-                      "memCode":1,"vehCode":"AB12 CDE","dutyStart":"{{start}}","dutyEnd":null,
-                      "timeWork":30,"timeRest":0,"timeAvailable":0,"timeDrive":90,"wtd":[]
-                    }]}}
-                    """,
-                "/api/Member/GetMembersLong" => """
-                    {"moreData":false,"recordCount":2,"data":[
-                      {"memCode":1,"cName":"Jane","sName":"Duty","cardNoShort":"CARD10000001","employeeNumber":"SLH-1"},
-                      {"memCode":2,"cName":"Sam","sName":"Falcon","cardNoShort":"CARD20000002","employeeNumber":"SLH-2"}
-                    ]}
-                    """,
+                "/api/Duty/GetDutyTransactions" => JsonSerializer.Serialize(new
+                {
+                    dutyNew = new
+                    {
+                        moreData = false,
+                        recordCount = 1,
+                        data = new[]
+                        {
+                            new
+                            {
+                                memCode = 1,
+                                vehCode = "AB12 CDE",
+                                dutyStart = start,
+                                dutyEnd = (DateTimeOffset?)null,
+                                timeWork = 30,
+                                timeRest = 0,
+                                timeAvailable = 0,
+                                timeDrive = 90,
+                                wtd = Array.Empty<object>()
+                            }
+                        }
+                    }
+                }),
+                "/api/Member/GetMembersLong" => JsonSerializer.Serialize(new
+                {
+                    moreData = false,
+                    recordCount = 2,
+                    data = new[]
+                    {
+                        new { memCode = 1, cName = "Jane", sName = "Duty", cardNoShort = "CARD10000001", employeeNumber = "SLH-1" },
+                        new { memCode = 2, cName = "Sam", sName = "Falcon", cardNoShort = "CARD20000002", employeeNumber = "SLH-2" }
+                    }
+                }),
                 "/api/Member/GetMemberMetrics" => "{\"moreData\":false,\"recordCount\":0,\"data\":[]}",
                 _ => throw new InvalidOperationException($"Unexpected TachoMaster request {request.RequestUri}")
             };
@@ -92,16 +113,35 @@ public sealed class TachoContinuousEnrichmentTests
         {
             var path = request.RequestUri!.AbsolutePath;
             Paths.Add(path);
-            var stamp = now.ToString("O");
             var payload = path switch
             {
                 "/api/auth/login" => "{\"token\":\"sid-falcon\"}",
-                "/api/Falcon/GetCurrentTelemetry" => $$"""
-                    {"moreData":false,"recordCount":2,"data":[
-                      {"vehCode":"AB12 CDE","Ign":true,"Moving":true,"driverName":"Jane Duty","driverCardNumber":"CARD10000001","dataGps":{"Time":"{{stamp}}","Lat":50.8,"Long":-0.8,"KmH":45}},
-                      {"vehCode":"XY34 ZTT","Ign":true,"Moving":true,"driverName":"Sam Falcon","driverCardNumber":"CARD20000002","dataGps":{"Time":"{{stamp}}","Lat":51.0,"Long":-1.0,"KmH":50}}
-                    ]}
-                    """,
+                "/api/Falcon/GetCurrentTelemetry" => JsonSerializer.Serialize(new
+                {
+                    moreData = false,
+                    recordCount = 2,
+                    data = new object[]
+                    {
+                        new
+                        {
+                            vehCode = "AB12 CDE",
+                            Ign = true,
+                            Moving = true,
+                            driverName = "Jane Duty",
+                            driverCardNumber = "CARD10000001",
+                            dataGps = new { Time = now, Lat = 50.8, Long = -0.8, KmH = 45 }
+                        },
+                        new
+                        {
+                            vehCode = "XY34 ZTT",
+                            Ign = true,
+                            Moving = true,
+                            driverName = "Sam Falcon",
+                            driverCardNumber = "CARD20000002",
+                            dataGps = new { Time = now, Lat = 51.0, Long = -1.0, KmH = 50 }
+                        }
+                    }
+                }),
                 _ => throw new InvalidOperationException($"Unexpected Falcon request {request.RequestUri}")
             };
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
