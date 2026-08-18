@@ -50,7 +50,7 @@ public sealed class WeeklyDriverTimesheetsController(
         }
         else sageError = "Sage HR is not configured.";
 
-        var tachoByDate = new Dictionary<DateOnly, IReadOnlyCollection<Models.Tracking.TachoVehicleDriverStatus>>();
+        var tachoByDate = new Dictionary<DateOnly, IReadOnlyCollection<TachoVehicleDriverStatus>>();
         string? tachoError = null;
         for (var date = weekStart; date <= weekEnd; date = date.AddDays(1))
         {
@@ -100,7 +100,7 @@ public sealed class WeeklyDriverTimesheetsController(
                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
                 var dayStartUtc = new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc));
                 var dayEndUtc = dayStartUtc.AddDays(1);
-                var dot = trackingEvents.Where(x => x.EventTimeUtc >= dayStartUtc && x.EventTimeUtc < dayEndUtc && assignedVehicleKeys.Contains(Normalise(x.VehicleIdentifier)) && (x.IsMoving || x.IgnitionOn == true || (x.SpeedKph ?? 0) > 0)).ToList();
+                var dot = trackingEvents.Where(x => x.EventTimeUtc >= dayStartUtc && x.EventTimeUtc < dayEndUtc && assignedVehicleKeys.Contains(Normalise(x.VehicleIdentifier)) && (x.IsMoving || x.IgnitionOn == true || x.SpeedKph > 0)).ToList();
                 var dotStart = dot.Count > 0 ? dot.Min(x => x.EventTimeUtc) : (DateTimeOffset?)null;
                 var dotEnd = dot.Count > 0 ? dot.Max(x => x.EventTimeUtc) : (DateTimeOffset?)null;
                 var dotMinutes = dotStart != null && dotEnd != null ? (int)Math.Round((dotEnd.Value - dotStart.Value).TotalMinutes) : (int?)null;
@@ -186,7 +186,7 @@ public sealed class WeeklyDriverTimesheetsController(
 
     private static IEnumerable<string> VehicleKeys(params string?[] values) => values.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => Normalise(x!)).Where(x => x.Length > 0);
     private static string Normalise(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
-    private static bool DriverMatches(Driver driver, Models.Tracking.TachoVehicleDriverStatus status)
+    private static bool DriverMatches(Driver driver, TachoVehicleDriverStatus status)
     {
         var identifiers = new[] { driver.DisplayName, driver.TachoName, driver.EmployeeNumber }.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => Normalise(x!)).ToHashSet();
         return identifiers.Contains(Normalise(status.DriverName)) || (!string.IsNullOrWhiteSpace(status.EmployeeNumber) && identifiers.Contains(Normalise(status.EmployeeNumber)));
