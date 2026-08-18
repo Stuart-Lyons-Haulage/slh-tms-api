@@ -81,17 +81,6 @@ public sealed class TachoMasterClient
             .GroupBy(duty => NormaliseIdentifier(duty.VehCode))
             .ToDictionary(group => group.Key, group => group.OrderByDescending(duty => duty.DutyStart).ToList());
 
-        if (currentDuties.Count == 0)
-        {
-            var falconDrivers = await TryGetFalconDriverStatusesAsync(memberList, cancellationToken);
-            if (falconDrivers.Count > 0)
-            {
-                logger.LogInformation("TachoMaster duty feed returned zero vehicles; using {Count} live Falcon driver identity record(s), including card-to-member matches where available.", falconDrivers.Count);
-                return falconDrivers;
-            }
-            return new Dictionary<string, TachoVehicleDriverStatus>();
-        }
-
         var members = memberList.GroupBy(member => member.MemCode).ToDictionary(group => group.Key, group => group.First());
         var metrics = (await metricsTask).GroupBy(metric => metric.MemCode).ToDictionary(group => group.Key, group => group.OrderByDescending(metric => metric.DateTimeWhenValid).First());
         var result = new Dictionary<string, TachoVehicleDriverStatus>();
@@ -133,7 +122,40 @@ public sealed class TachoMasterClient
                 metric?.WorkAvaiableWeek);
         }
 
-        logger.LogDebug("TachoMaster matched {Count} current vehicle duty records to drivers and duty metrics.", result.Count);
+        var falconDrivers = await TryGetFalconDriverStatusesAsync(memberList, cancellationToken);
+        var falconOnly = 0;
+        var overlaps = 0;
+        var mismatches = 0;
+        foreach (var (vehicle, falcon) in falconDrivers)
+        {
+            if (!result.TryGetValue(vehicle, out var duty))
+            {
+                result[vehicle] = falcon;
+                falconOnly++;
+                continue;
+            }
+
+            overlaps++;
+            if (!SameIdentity(duty, falcon))
+            {
+                mismatches++;
+                logger.LogWarning(
+                    "Live driver identity mismatch for vehicle {Vehicle}: TachoMaster duty={DutyDriver} card={DutyCard}; Falcon={FalconDriver} card={FalconCard}. TachoMaster duty retained for compliance metrics.",
+                    vehicle,
+                    duty.DriverName,
+                    duty.CardNumber,
+                    falcon.DriverName,
+                    falcon.CardNumber);
+            }
+        }
+
+        logger.LogInformation(
+            "Tacho continuous enrichment produced {Total} vehicle identities: {DutyCount} TachoMaster duty record(s), {FalconOnly} Falcon-only identity record(s), {OverlapCount} overlap(s), {MismatchCount} live mismatch(es).",
+            result.Count,
+            currentDuties.Count,
+            falconOnly,
+            overlaps,
+            mismatches);
         return result;
     }
 
@@ -144,9 +166,11 @@ public sealed class TachoMasterClient
         if (dotTrackingClient is null) return new Dictionary<string, TachoVehicleDriverStatus>();
         try
         {
+            var freshAfter = DateTimeOffset.UtcNow.AddMinutes(-30);
             var telemetry = await dotTrackingClient.GetLatestVehicleEventsAsync(cancellationToken);
             var records = telemetry.Select(DotTelemetryRecord.FromProvider)
                 .Where(record => !string.IsNullOrWhiteSpace(record.VehicleIdentifier))
+                .Where(record => record.EventTimeUtc >= freshAfter)
                 .Where(record => !string.IsNullOrWhiteSpace(record.DriverName) || !string.IsNullOrWhiteSpace(record.DriverCardNumber))
                 .GroupBy(record => NormaliseIdentifier(record.VehicleIdentifier))
                 .Select(group => group.OrderByDescending(record => record.EventTimeUtc).First())
@@ -191,10 +215,24 @@ public sealed class TachoMasterClient
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            logger.LogWarning(exception, "Falcon live driver fallback was unavailable.");
+            logger.LogWarning(exception, "Falcon live driver enrichment was unavailable.");
             return new Dictionary<string, TachoVehicleDriverStatus>();
         }
     }
+
+    private static bool SameIdentity(TachoVehicleDriverStatus duty, TachoVehicleDriverStatus falcon)
+    {
+        var dutyCard = NormaliseCard(duty.CardNumber);
+        var falconCard = NormaliseCard(falcon.CardNumber);
+        if (dutyCard.Length >= 8 && falconCard.Length >= 8)
+            return string.Equals(dutyCard, falconCard, StringComparison.OrdinalIgnoreCase)
+                || dutyCard.EndsWith(falconCard, StringComparison.OrdinalIgnoreCase)
+                || falconCard.EndsWith(dutyCard, StringComparison.OrdinalIgnoreCase);
+
+        return string.Equals(NormaliseName(duty.DriverName), NormaliseName(falcon.DriverName), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormaliseName(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     private static TachoMember? FindMemberByCard(IEnumerable<TachoMember> members, string? cardNumber)
     {
