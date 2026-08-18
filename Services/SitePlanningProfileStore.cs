@@ -42,6 +42,66 @@ public static class SitePlanningProfileStore
         }
     }
 
+    public static async Task<TemperatureSyncResult> ApplyDailyRunTemperaturesAsync(TmsDbContext db, DateOnly date, CancellationToken ct)
+    {
+        var conflicts = new List<TemperatureConflict>();
+        var updatedLoads = 0;
+        var updatedOrders = 0;
+        List<Load> loads;
+        try
+        {
+            loads = await db.Loads.Include(x => x.Stops).Where(x => x.PlanningDate == date && x.Status != LoadStatus.Cancelled).ToListAsync(ct);
+        }
+        catch (Exception ex) when (SchemaUnavailable(ex))
+        {
+            db.ChangeTracker.Clear();
+            return new TemperatureSyncResult(0, 0, conflicts);
+        }
+
+        var orderIds = loads.SelectMany(x => x.Stops).Where(x => x.OrderId is not null).Select(x => x.OrderId!.Value).Distinct().ToList();
+        var orders = orderIds.Count == 0 ? [] : await db.TransportOrders.Where(x => orderIds.Contains(x.Id) && x.Status != OrderStatus.Cancelled).ToListAsync(ct);
+        var orderById = orders.ToDictionary(x => x.Id);
+
+        foreach (var load in loads)
+        {
+            var loadOrders = load.Stops.Where(x => x.OrderId is not null && orderById.ContainsKey(x.OrderId.Value)).Select(x => orderById[x.OrderId!.Value]).DistinctBy(x => x.Id).ToList();
+            if (loadOrders.Count == 0) continue;
+            var context = await ResolveRunTemperaturesAsync(db, loadOrders, ct);
+            if (context.HasConflict)
+            {
+                load.TemperatureC = null;
+                conflicts.Add(new TemperatureConflict(load.Id, load.Reference, context.DistinctTemperatures.Select(FormatTemperature).ToList()));
+                foreach (var order in loadOrders)
+                {
+                    if (!context.OrderTemperatures.TryGetValue(order.Id, out var temperature) || temperature is null) continue;
+                    var next = WithTemperatureInstruction(order.DriverInstructions, temperature.Value, false);
+                    if (next == order.DriverInstructions) continue;
+                    order.DriverInstructions = next;
+                    updatedOrders++;
+                }
+                continue;
+            }
+
+            if (context.LoadTemperatureC is null) continue;
+            var loadTemperature = context.LoadTemperatureC.Value;
+            if (load.TemperatureC != loadTemperature)
+            {
+                load.TemperatureC = loadTemperature;
+                updatedLoads++;
+            }
+            foreach (var order in loadOrders)
+            {
+                var next = WithTemperatureInstruction(order.DriverInstructions, loadTemperature, true);
+                if (next == order.DriverInstructions) continue;
+                order.DriverInstructions = next;
+                updatedOrders++;
+            }
+        }
+
+        if (updatedLoads > 0 || updatedOrders > 0 || conflicts.Count > 0) await db.SaveChangesAsync(ct);
+        return new TemperatureSyncResult(updatedLoads, updatedOrders, conflicts);
+    }
+
     public static async Task<RunTemperatureContext> ResolveRunTemperaturesAsync(TmsDbContext db, IEnumerable<TransportOrder> orders, CancellationToken ct)
     {
         var orderList = orders.ToList();
@@ -72,7 +132,7 @@ public static class SitePlanningProfileStore
         var result = new Dictionary<Guid, decimal?>();
         foreach (var order in orderList)
         {
-            var explicitTemperature = ParseTemperature(Tagged(order.DriverInstructions, "Temperature") ?? Tagged(order.DriverInstructions, "Load temperature"));
+            var explicitTemperature = ParseTemperature(Tagged(order.DriverInstructions, "Temperature") ?? Tagged(order.DriverInstructions, "Load temperature") ?? Tagged(order.DriverInstructions, "Order temperature"));
             staged.TryGetValue(Normalise(order.Reference), out var detail);
             var temperature = explicitTemperature ?? detail.Temperature;
             if (temperature is null)
@@ -103,6 +163,20 @@ public static class SitePlanningProfileStore
     }
 
     public static string FormatTemperature(decimal value) => $"{(value > 0 ? "+" : string.Empty)}{value:0.#}°C";
+
+    private static string WithTemperatureInstruction(string? existing, decimal temperature, bool singleLoadTemperature)
+    {
+        var kept = (existing ?? string.Empty).Split(new[] { '·', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(x => x.Trim())
+            .Where(x => !x.StartsWith("Load temperature:", StringComparison.OrdinalIgnoreCase)
+                && !x.StartsWith("Order temperature:", StringComparison.OrdinalIgnoreCase)
+                && !x.StartsWith("Set trailer to ", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        var formatted = FormatTemperature(temperature);
+        kept.Insert(0, singleLoadTemperature ? $"Load temperature: {formatted}" : $"Order temperature: {formatted}");
+        if (singleLoadTemperature) kept.Insert(1, $"Set trailer to {formatted} before collection");
+        return string.Join(" · ", kept);
+    }
 
     private static async Task<Dictionary<Guid, SitePlanningProfile>> ReadProfilesAsync(TmsDbContext db, IReadOnlyCollection<Site> sites, CancellationToken ct)
     {
@@ -194,7 +268,14 @@ public static class SitePlanningProfileStore
     }
 
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static bool SchemaUnavailable(Exception ex)
+    {
+        var message = ex.GetBaseException().Message;
+        return message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
+    }
 }
 
 public sealed record SitePlanningProfile(Guid SiteId, string ExternalCode, string Name, decimal? DefaultTemperatureC, string Region, string? Address);
 public sealed record RunTemperatureContext(IReadOnlyDictionary<Guid, decimal?> OrderTemperatures, decimal? LoadTemperatureC, bool HasConflict, IReadOnlyList<decimal> DistinctTemperatures);
+public sealed record TemperatureConflict(Guid LoadId, string LoadReference, IReadOnlyList<string> Temperatures);
+public sealed record TemperatureSyncResult(int UpdatedLoads, int UpdatedOrders, IReadOnlyList<TemperatureConflict> Conflicts);
