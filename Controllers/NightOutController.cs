@@ -20,7 +20,6 @@ public sealed class NightOutController(TmsDbContext db, TachoMasterClient tachoM
         var loads = await db.Loads.AsNoTracking().Include(x => x.Stops)
             .Where(x => x.PlanningDate >= from && x.PlanningDate <= to && x.DriverId != null && x.Status != LoadStatus.Cancelled)
             .OrderBy(x => x.PlanningDate).ThenBy(x => x.Reference).ToListAsync(ct);
-        await LoadCommercialStore.EnrichAsync(db, loads, ct);
         loads = loads.Where(x => ReadNightOut(x.PlannerNotes) is not null).ToList();
 
         var driverIds = loads.Select(x => x.DriverId!.Value).Distinct().ToList();
