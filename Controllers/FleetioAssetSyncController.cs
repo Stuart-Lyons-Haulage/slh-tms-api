@@ -41,6 +41,15 @@ public sealed class FleetioAssetSyncController(
                     fleetioId = asset.Id,
                     fleetioName = asset.Name,
                     fleetioStatus = asset.Status,
+                    vin = asset.Vin,
+                    year = asset.Year,
+                    make = asset.Make,
+                    model = asset.Model,
+                    trim = asset.Trim,
+                    issuesCount = asset.IssuesCount,
+                    workOrdersCount = asset.WorkOrdersCount,
+                    primaryMeterValue = asset.PrimaryMeterValue,
+                    primaryMeterUnit = asset.PrimaryMeterUnit,
                     pmiDueUtc = asset.PmiDueUtc,
                     motDueUtc = asset.MotDueUtc,
                     serviceStatus = asset.ServiceStatus,
@@ -68,6 +77,13 @@ public sealed class FleetioAssetSyncController(
                     fleetioName = slh,
                     fleetioStatus = asset.Status,
                     type = asset.Type,
+                    vin = asset.Vin,
+                    year = asset.Year,
+                    make = asset.Make,
+                    model = asset.Model,
+                    trim = asset.Trim,
+                    issuesCount = asset.IssuesCount,
+                    workOrdersCount = asset.WorkOrdersCount,
                     pmiDueUtc = asset.PmiDueUtc,
                     motDueUtc = asset.MotDueUtc,
                     serviceStatus = asset.ServiceStatus,
@@ -87,6 +103,24 @@ public sealed class FleetioAssetSyncController(
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             logger.LogError(exception, "Fleetio asset status failed.");
+            return StatusCode(500, new { configured = true, connected = false, message = exception.GetBaseException().Message });
+        }
+    }
+
+    [HttpGet("asset-maintenance/{fleetioId}")]
+    public async Task<IActionResult> AssetMaintenance(string fleetioId, CancellationToken ct)
+    {
+        if (!fleetioClient.IsConfigured)
+            return BadRequest(new { configured = false, missingSettings = fleetioClient.MissingSettings });
+
+        try
+        {
+            var snapshot = await fleetioClient.GetMaintenanceSnapshotAsync(fleetioId, ct);
+            return Ok(snapshot);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogError(exception, "Fleetio maintenance detail failed for asset {FleetioId}.", fleetioId);
             return StatusCode(500, new { configured = true, connected = false, message = exception.GetBaseException().Message });
         }
     }
@@ -162,9 +196,6 @@ public sealed class FleetioAssetSyncController(
                     vehiclesUpdated++;
                 }
 
-                // These are NotMapped legacy compatibility fields, but setting them
-                // ensures the current response/logic has the Fleetio values. The
-                // asset-status endpoint always refreshes them live from Fleetio.
                 vehicle.FleetioPmiDueUtc = asset.PmiDueUtc;
                 vehicle.FleetioMotDueUtc = asset.MotDueUtc;
                 vehicle.FleetioServiceStatus = asset.ServiceStatus;
@@ -182,9 +213,6 @@ public sealed class FleetioAssetSyncController(
                     continue;
                 }
 
-                // The SLH number (eg SLH36) is the canonical TMS identity. The
-                // Fleetio C-number is the external asset identity. Prefer the SLH
-                // match and merge any historic C-number duplicate into it.
                 var nameMatch = !string.IsNullOrWhiteSpace(fleetioName)
                     ? trailers.FirstOrDefault(item => Normalise(item.TrailerNumber) == Normalise(fleetioName))
                     : null;
