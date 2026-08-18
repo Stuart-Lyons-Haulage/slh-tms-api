@@ -235,6 +235,7 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         var (load, register) = await FindLoadAsync(id, includeStops: true, asTracking: false, ct);
         if (load is null) return NotFound("The imported run could not be found in live loads or the planning register.");
         var orders = await LoadOrdersAsync(load, register, ct);
+        var temperature = await SitePlanningProfileStore.ResolveRunTemperaturesAsync(db, orders.Values, ct);
         var driver = load.DriverId is null ? null : await db.Drivers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.DriverId, ct);
         var vehicle = load.VehicleId is null ? null : await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.VehicleId, ct);
         var trailer = load.TrailerId is null ? null : await db.Trailers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.TrailerId, ct);
@@ -244,6 +245,9 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
             load.Reference,
             load.PlanningDate,
             load.Status,
+            loadTemperatureC = temperature.LoadTemperatureC,
+            temperatureConflict = temperature.HasConflict,
+            temperatures = temperature.DistinctTemperatures.Select(SitePlanningProfileStore.FormatTemperature).ToList(),
             driver = driver is null ? null : new { driver.DisplayName, driver.EmployeeNumber, driver.MobileNumber },
             vehicle = vehicle is null ? null : new { vehicle.Registration, vehicle.FleetNumber },
             trailer = trailer is null ? null : new { trailer.TrailerNumber, trailer.Type },
@@ -264,7 +268,8 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
                     order.MarketName,
                     order.StallNumber,
                     order.DriverInstructions,
-                    order.MapLink
+                    order.MapLink,
+                    temperatureC = temperature.OrderTemperatures.GetValueOrDefault(order.Id)
                 } : null
             })
         });
@@ -282,12 +287,23 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         if (string.IsNullOrWhiteSpace(driver.MobileNumber)) return BadRequest("The assigned driver has no approved mobile number.");
 
         var orders = await LoadOrdersAsync(load, register, ct);
+        var temperature = await SitePlanningProfileStore.ResolveRunTemperaturesAsync(db, orders.Values, ct);
+        if (temperature.HasConflict)
+        {
+            var values = temperature.DistinctTemperatures.Select(SitePlanningProfileStore.FormatTemperature).ToList();
+            return BadRequest(new { message = $"Temperature conflict on run {load.Reference}: {string.Join(" / ", values)}. Resolve the load temperature before sending the driver text.", temperatures = values });
+        }
+        var formattedTemperature = temperature.LoadTemperatureC is null ? null : SitePlanningProfileStore.FormatTemperature(temperature.LoadTemperatureC.Value);
         var stops = load.Stops.OrderBy(stop => stop.Sequence).Select(stop =>
         {
             orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
+            var orderTemperature = order is not null && temperature.OrderTemperatures.TryGetValue(order.Id, out var value) && value is not null
+                ? SitePlanningProfileStore.FormatTemperature(value.Value)
+                : null;
             return string.Join("\n", new[]
             {
                 $"{stop.Sequence}. {stop.Name}",
+                orderTemperature is null ? null : $"Temperature: {orderTemperature}",
                 order?.MarketName is null ? null : $"Market: {order.MarketName}{(string.IsNullOrWhiteSpace(order.StallNumber) ? string.Empty : $" · Stall {order.StallNumber}")}",
                 order?.SellerName is null ? null : $"Seller: {order.SellerName}",
                 string.IsNullOrWhiteSpace(stop.Address) ? null : $"Address: {stop.Address}",
@@ -295,11 +311,19 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
                 string.IsNullOrWhiteSpace(order?.MapLink) ? null : $"Map: {order!.MapLink}"
             }.Where(line => line is not null));
         });
-        var message = string.Join("\n\n", new[] { $"SLH run {load.Reference}", $"Driver: {driver.DisplayName}", $"Vehicle: {vehicle.Registration}", string.Empty, string.Join("\n\n", stops) });
+        var message = string.Join("\n\n", new[]
+        {
+            $"SLH run {load.Reference}",
+            $"Driver: {driver.DisplayName}",
+            $"Vehicle: {vehicle.Registration}",
+            formattedTemperature is null ? null : $"LOAD TEMPERATURE: {formattedTemperature}\nSet trailer to {formattedTemperature} before collection",
+            string.Empty,
+            string.Join("\n\n", stops)
+        }.Where(line => line is not null));
         var receipt = await sms.SendAsync(driver.MobileNumber, message, ct);
         if (load.Status == LoadStatus.Planned) load.Status = LoadStatus.Dispatched;
         await SaveLoadAsync(load, register, ct);
-        return Accepted(new { receipt.MessageId, receipt.MobileSuffix, receipt.Provider, load.Status });
+        return Accepted(new { receipt.MessageId, receipt.MobileSuffix, receipt.Provider, load.Status, loadTemperatureC = temperature.LoadTemperatureC });
     }
 
     [HttpGet("maps/geocode")]
