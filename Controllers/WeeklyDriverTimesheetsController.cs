@@ -50,14 +50,14 @@ public sealed class WeeklyDriverTimesheetsController(
         }
         else sageError = "Sage HR is not configured.";
 
-        var tachoByDate = new Dictionary<DateOnly, IReadOnlyCollection<TachoVehicleDriverStatus>>();
+        var tachoByDate = new Dictionary<DateOnly, IReadOnlyCollection<TachoDriverDutyStatus>>();
         string? tachoError = null;
         for (var date = weekStart; date <= weekEnd; date = date.AddDays(1))
         {
             try
             {
-                var statuses = await tachoMaster.GetCurrentDriverStatusesByVehicleAsync(date, ct);
-                tachoByDate[date] = statuses.Values.ToList();
+                var duties = await tachoMaster.GetDriverDutyStatusesAsync(date, ct);
+                tachoByDate[date] = duties;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -86,8 +86,8 @@ public sealed class WeeklyDriverTimesheetsController(
                 var plannedMinutes = plannedStart != null && plannedEnd != null && plannedEnd >= plannedStart ? (int)Math.Round((plannedEnd.Value - plannedStart.Value).TotalMinutes) : (int?)null;
                 if (plannedMinutes is int pm) plannedMinutesWeek += pm;
 
-                var tachoMatches = tachoByDate.TryGetValue(date, out var statuses)
-                    ? statuses.Where(x => DriverMatches(driver, x)).OrderBy(x => x.DutyStartUtc).ToList()
+                var tachoMatches = tachoByDate.TryGetValue(date, out var duties)
+                    ? duties.Where(x => DriverMatches(driver, x)).OrderBy(x => x.DutyStartUtc).ToList()
                     : [];
                 var tachoStart = tachoMatches.Count > 0 ? tachoMatches.Min(x => x.DutyStartUtc) : (DateTimeOffset?)null;
                 var tachoEnds = tachoMatches.Where(x => x.DutyEndUtc != null).Select(x => x.DutyEndUtc!.Value).ToList();
@@ -133,7 +133,21 @@ public sealed class WeeklyDriverTimesheetsController(
                     sageMatched = sage is not null,
                     sageEmployeeId = sage?.Id,
                     tms = new { runCount = dayLoads.Count, runs = dayLoads.Select(x => x.Reference).ToList(), plannedStartUtc = plannedStart, plannedEndUtc = plannedEnd, plannedMinutes },
-                    tacho = new { matched = tachoMatches.Count > 0, dutyStartUtc = tachoStart, dutyEndUtc = tachoEnd, totalMinutes = tachoMinutes, vehicles = tachoMatches.Select(x => x.VehicleCode).Distinct().ToList(), driveMinutes = tachoMatches.Sum(x => x.DriveMinutes), restMinutes = tachoMatches.Sum(x => x.RestMinutes) },
+                    tacho = new
+                    {
+                        matched = tachoMatches.Count > 0,
+                        dutyCount = tachoMatches.Count,
+                        dutyStartUtc = tachoStart,
+                        dutyEndUtc = tachoEnd,
+                        totalMinutes = tachoMinutes,
+                        vehicles = tachoMatches.Select(x => x.VehicleCode).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().ToList(),
+                        driveMinutes = tachoMatches.Sum(x => x.DriveMinutes),
+                        workMinutes = tachoMatches.Sum(x => x.WorkMinutes),
+                        availableMinutes = tachoMatches.Sum(x => x.AvailableMinutes),
+                        restMinutes = tachoMatches.Sum(x => x.RestMinutes),
+                        breakCount = tachoMatches.Sum(x => x.BreakCount),
+                        breakMinutes = tachoMatches.Where(x => x.BreakMinutes is not null).Sum(x => x.BreakMinutes ?? 0)
+                    },
                     dot = new { movementEvents = dot.Count, firstMovementUtc = dotStart, lastMovementUtc = dotEnd, movementSpanMinutes = dotMinutes, vehicles = assignedVehicleKeys.ToList() },
                     nightOut,
                     discrepancies,
@@ -169,7 +183,7 @@ public sealed class WeeklyDriverTimesheetsController(
             {
                 tms = "Available",
                 dot = "Available from stored RoadTech Falcon tracking events",
-                tachoMaster = tachoError is null ? "Available" : $"Partial: {tachoError}",
+                tachoMaster = tachoError is null ? "Available - complete duty history" : $"Partial: {tachoError}",
                 sageHr = sageError is null ? "Available - active employee roster" : $"Unavailable: {sageError}"
             },
             summary = new
@@ -186,11 +200,35 @@ public sealed class WeeklyDriverTimesheetsController(
 
     private static IEnumerable<string> VehicleKeys(params string?[] values) => values.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => Normalise(x!)).Where(x => x.Length > 0);
     private static string Normalise(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
-    private static bool DriverMatches(Driver driver, TachoVehicleDriverStatus status)
+    private static bool DriverMatches(Driver driver, TachoDriverDutyStatus status)
     {
-        var identifiers = new[] { driver.DisplayName, driver.TachoName, driver.EmployeeNumber }.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => Normalise(x!)).ToHashSet();
-        return identifiers.Contains(Normalise(status.DriverName)) || (!string.IsNullOrWhiteSpace(status.EmployeeNumber) && identifiers.Contains(Normalise(status.EmployeeNumber)));
+        if (int.TryParse(driver.TachoMasterDriverId, out var linkedMember) && linkedMember > 0 && linkedMember == status.MemberCode)
+            return true;
+
+        if (SameCard(driver.TachoCardNumber, status.CardNumber))
+            return true;
+
+        if (!string.IsNullOrWhiteSpace(driver.EmployeeNumber) && !string.IsNullOrWhiteSpace(status.EmployeeNumber) &&
+            string.Equals(Normalise(driver.EmployeeNumber), Normalise(status.EmployeeNumber), StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var names = new[] { driver.TachoName, driver.DisplayName }
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => Normalise(x!))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return names.Contains(Normalise(status.DriverName));
     }
+
+    private static bool SameCard(string? left, string? right)
+    {
+        var a = Normalise(left ?? string.Empty);
+        var b = Normalise(right ?? string.Empty);
+        if (a.Length < 8 || b.Length < 8) return false;
+        return string.Equals(a, b, StringComparison.OrdinalIgnoreCase) ||
+               a.EndsWith(b, StringComparison.OrdinalIgnoreCase) ||
+               b.EndsWith(a, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool SageMatches(Driver driver, SageHrEmployee employee)
     {
         if (!string.IsNullOrWhiteSpace(employee.EmployeeNumber) && string.Equals(Normalise(employee.EmployeeNumber), Normalise(driver.EmployeeNumber), StringComparison.OrdinalIgnoreCase)) return true;

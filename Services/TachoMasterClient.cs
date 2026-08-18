@@ -54,9 +54,90 @@ public sealed class TachoMasterClient
         return (await membersTask).GroupBy(item => item.MemCode).Select(group => group.First()).Select(member =>
         {
             metrics.TryGetValue(member.MemCode, out var metric);
-            return new TachoDriverProfile(member.MemCode, DriverName(member), member.CardNoShort, member.EmployeeNumber,
-                metric?.DateTimeWhenValid, metric?.DriveAvailableToday, metric?.DriveAvailableWeek, metric?.WorkAvaiableWeek);
+            return new TachoDriverProfile(
+                member.MemCode,
+                DriverName(member),
+                member.CardNoShort,
+                member.EmployeeNumber,
+                metric?.DateTimeWhenValid,
+                metric?.DailyDriverPeriodsAvaiable,
+                metric?.DriveAvailableToday,
+                metric?.DriveAvailableTomorrow,
+                metric?.DriveAvailableWeek,
+                metric?.DriveAvailableFortnight,
+                metric?.LongDaysWorkedThisWeek,
+                metric?.ShortDailyRestTakenThisWeek,
+                metric?.WorkAvaiableWeek);
         }).Where(profile => !string.IsNullOrWhiteSpace(profile.DriverName)).OrderBy(profile => profile.DriverName).ToList();
+    }
+
+    /// <summary>
+    /// Returns every TachoMaster duty transaction for the requested date. This is intentionally
+    /// different from GetCurrentDriverStatusesByVehicleAsync, which collapses to the latest driver
+    /// identity for each vehicle and is appropriate only for live operational identity.
+    /// </summary>
+    public async Task<IReadOnlyList<TachoDriverDutyStatus>> GetDriverDutyStatusesAsync(
+        DateOnly date,
+        CancellationToken cancellationToken = default)
+    {
+        if (!options.IsConfigured) return [];
+
+        var sid = await LoginAsync(cancellationToken);
+        var dutiesTask = GetDutiesAsync(sid, date, cancellationToken);
+        var membersTask = GetMembersAsync(sid, cancellationToken);
+        var metricsTask = TryGetMemberMetricsAsync(sid, cancellationToken);
+        await Task.WhenAll(dutiesTask, membersTask, metricsTask);
+
+        var members = (await membersTask).GroupBy(member => member.MemCode)
+            .ToDictionary(group => group.Key, group => group.First());
+        var metrics = (await metricsTask).GroupBy(metric => metric.MemCode)
+            .ToDictionary(group => group.Key, group => group.OrderByDescending(metric => metric.DateTimeWhenValid).First());
+        var dayStart = new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc));
+        var dayEnd = dayStart.AddDays(1);
+        var result = new List<TachoDriverDutyStatus>();
+
+        foreach (var duty in (await dutiesTask)
+            .Where(item => item.MemCode > 0)
+            .Where(item => item.DutyStart < dayEnd && (item.DutyEnd is null || item.DutyEnd >= dayStart))
+            .OrderBy(item => item.DutyStart))
+        {
+            if (!members.TryGetValue(duty.MemCode, out var member)) continue;
+            var name = DriverName(member);
+            if (string.IsNullOrWhiteSpace(name)) continue;
+
+            var breaks = (duty.Wtd ?? [])
+                .Where(item => string.Equals(item.WtdEvent, "wtdBreak", StringComparison.OrdinalIgnoreCase))
+                .Where(item => item.TimeEnd >= item.TimeStart)
+                .ToList();
+            metrics.TryGetValue(duty.MemCode, out var metric);
+
+            result.Add(new TachoDriverDutyStatus(
+                string.IsNullOrWhiteSpace(duty.VehCode) ? string.Empty : NormaliseIdentifier(duty.VehCode),
+                duty.MemCode,
+                name,
+                member.CardNoShort,
+                member.EmployeeNumber,
+                duty.DutyStart,
+                duty.DutyEnd,
+                duty.TimeWork,
+                duty.TimeRest,
+                duty.TimeAvailable,
+                duty.TimeDrive,
+                breaks.Count,
+                breaks.Count == 0 ? null : (int)breaks.Sum(item => (item.TimeEnd - item.TimeStart).TotalMinutes),
+                metric?.DateTimeWhenValid,
+                metric?.DailyDriverPeriodsAvaiable,
+                metric?.DriveAvailableToday,
+                metric?.DriveAvailableTomorrow,
+                metric?.DriveAvailableWeek,
+                metric?.DriveAvailableFortnight,
+                metric?.LongDaysWorkedThisWeek,
+                metric?.ShortDailyRestTakenThisWeek,
+                metric?.WorkAvaiableWeek));
+        }
+
+        logger.LogInformation("TachoMaster returned {DutyCount} complete duty transaction(s) for {Date}.", result.Count, date);
+        return result;
     }
 
     public async Task<IReadOnlyDictionary<string, TachoVehicleDriverStatus>> GetCurrentDriverStatusesByVehicleAsync(
@@ -485,12 +566,41 @@ public sealed record TachoVehicleDriverStatus(
     int? ShortDailyRestTakenThisWeek,
     int? WorkAvailableWeekMinutes);
 
+public sealed record TachoDriverDutyStatus(
+    string VehicleCode,
+    int MemberCode,
+    string DriverName,
+    string? CardNumber,
+    string? EmployeeNumber,
+    DateTimeOffset DutyStartUtc,
+    DateTimeOffset? DutyEndUtc,
+    int WorkMinutes,
+    int RestMinutes,
+    int AvailableMinutes,
+    int DriveMinutes,
+    int BreakCount,
+    int? BreakMinutes,
+    DateTimeOffset? MetricsValidAtUtc,
+    int? DailyDriverPeriodsAvailable,
+    int? DriveAvailableTodayMinutes,
+    int? DriveAvailableTomorrowMinutes,
+    int? DriveAvailableWeekMinutes,
+    int? DriveAvailableFortnightMinutes,
+    int? LongDaysWorkedThisWeek,
+    int? ShortDailyRestTakenThisWeek,
+    int? WorkAvailableWeekMinutes);
+
 public sealed record TachoDriverProfile(
     int MemberCode,
     string DriverName,
     string? CardNumber,
     string? EmployeeNumber,
     DateTimeOffset? MetricsValidAtUtc,
+    int? DailyDriverPeriodsAvailable,
     int? DriveAvailableTodayMinutes,
+    int? DriveAvailableTomorrowMinutes,
     int? DriveAvailableWeekMinutes,
+    int? DriveAvailableFortnightMinutes,
+    int? LongDaysWorkedThisWeek,
+    int? ShortDailyRestTakenThisWeek,
     int? WorkAvailableWeekMinutes);
