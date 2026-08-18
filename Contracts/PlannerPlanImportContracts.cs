@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Slh.Tms.Api.Contracts;
 
 public sealed record PlannerPlanImportRequest(
@@ -13,7 +15,7 @@ public sealed record PlannerPlanRunRequest(
     DateOnly PlanningDate,
     string? Driver,
     string? Vehicle,
-    string? Trailer,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? Trailer,
     string? PlannerNote,
     bool IncludeInImport,
     string? ReconciliationStatus,
