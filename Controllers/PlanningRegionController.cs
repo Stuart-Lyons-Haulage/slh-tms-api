@@ -17,6 +17,7 @@ public sealed class PlanningRegionController(TmsDbContext db) : ControllerBase
     public async Task<IActionResult> Regions([FromQuery] DateOnly date, CancellationToken ct)
     {
         await SitePlanningProfileStore.SyncOrderProfilesAsync(db, date, ct);
+        var temperatureSync = await SitePlanningProfileStore.ApplyDailyRunTemperaturesAsync(db, date, ct);
         var destinations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var rows = await db.StagedImports.AsNoTracking()
             .Where(x => (x.EntityType == "order" || x.EntityType == "register:order") && x.Status != StagingStatus.Rejected)
@@ -51,7 +52,15 @@ public sealed class PlanningRegionController(TmsDbContext db) : ControllerBase
         };
         var ordered = destinations.OrderBy(x => rank.TryGetValue(map.GetValueOrDefault(x, "Other"), out var value) ? value : 99)
             .ThenBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
-        return Ok(new { date, destinations = ordered, destinationRegions = map });
+        return Ok(new
+        {
+            date,
+            destinations = ordered,
+            destinationRegions = map,
+            temperatureConflicts = temperatureSync.Conflicts,
+            temperatureUpdatedLoads = temperatureSync.UpdatedLoads,
+            temperatureUpdatedOrders = temperatureSync.UpdatedOrders
+        });
     }
 
     private static string? Text(JsonElement root, params string[] names)
