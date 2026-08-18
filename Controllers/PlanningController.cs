@@ -23,6 +23,7 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         }
         catch (Exception exception) when (IsSchemaUnavailable(exception))
         {
+            db.ChangeTracker.Clear();
             return Ok(await PlanningRegisterStore.ReadOrdersAsync(db, from, to, ct));
         }
     }
@@ -36,10 +37,14 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
             if (date is not null) query = query.Where(load => load.PlanningDate == date);
             var loads = await query.OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).Take(500).ToListAsync(ct);
             await LoadCommercialStore.EnrichAsync(db, loads, ct);
-            return Ok(loads);
+            if (loads.Count > 0) return Ok(loads);
+
+            var registerLoads = await PlanningRegisterStore.ReadLoadsAsync(db, date, ct);
+            return Ok(registerLoads.Count > 0 ? registerLoads : loads);
         }
         catch (Exception exception) when (IsSchemaUnavailable(exception))
         {
+            db.ChangeTracker.Clear();
             return Ok(await PlanningRegisterStore.ReadLoadsAsync(db, date, ct));
         }
     }
@@ -49,14 +54,38 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
     {
         if (string.IsNullOrWhiteSpace(request.Reference) || request.Stops.Count == 0) return BadRequest("A reference and at least one stop are required.");
         if (request.PalletSpacesUsed < 0 || request.TotalPalletSpaces < 0) return BadRequest("Capacity values cannot be negative.");
-        var load = new Load { Reference = request.Reference.Trim(), PlanningDate = request.PlanningDate, VehicleId = request.VehicleId, DriverId = request.DriverId, TrailerId = request.TrailerId, Status = LoadStatus.Draft,
-            PalletSpacesUsed = request.PalletSpacesUsed, TotalPalletSpaces = request.TotalPalletSpaces, CapacityType = Clip(request.CapacityType, 40) ?? "Standard pallets",
-            DepotSplits = Clip(request.DepotSplits, 1000), TemperatureC = request.TemperatureC, PlannerNotes = Clip(request.PlannerNotes, 1000),
-            Stops = request.Stops.Select((stop, index) => new LoadStop { OrderId = stop.OrderId, Sequence = index + 1, Name = stop.Name.Trim(), Address = stop.Address, Latitude = stop.Latitude, Longitude = stop.Longitude, PlannedArrivalUtc = stop.PlannedArrivalUtc }).ToList() };
+        var load = new Load
+        {
+            Reference = request.Reference.Trim(),
+            PlanningDate = request.PlanningDate,
+            VehicleId = request.VehicleId,
+            DriverId = request.DriverId,
+            TrailerId = request.TrailerId,
+            Status = LoadStatus.Draft,
+            PalletSpacesUsed = request.PalletSpacesUsed,
+            TotalPalletSpaces = request.TotalPalletSpaces,
+            CapacityType = Clip(request.CapacityType, 40) ?? "Standard pallets",
+            DepotSplits = Clip(request.DepotSplits, 1000),
+            TemperatureC = request.TemperatureC,
+            PlannerNotes = Clip(request.PlannerNotes, 1000),
+            Stops = request.Stops.Select((stop, index) => new LoadStop
+            {
+                OrderId = stop.OrderId,
+                Sequence = index + 1,
+                Name = stop.Name.Trim(),
+                Address = stop.Address,
+                Latitude = stop.Latitude,
+                Longitude = stop.Longitude,
+                PlannedArrivalUtc = stop.PlannedArrivalUtc
+            }).ToList()
+        };
+
         try
         {
             if (await db.Loads.AnyAsync(item => item.Reference == request.Reference, ct)) return Conflict("A load with this reference already exists.");
-            db.Loads.Add(load); await db.SaveChangesAsync(ct);
+            if ((await PlanningRegisterStore.ReadLoadsAsync(db, null, ct)).Any(item => string.Equals(item.Reference, request.Reference, StringComparison.OrdinalIgnoreCase))) return Conflict("A load with this reference already exists.");
+            db.Loads.Add(load);
+            await db.SaveChangesAsync(ct);
             if (load.PalletSpacesUsed is not null || load.TotalPalletSpaces is not null || load.DepotSplits is not null || load.TemperatureC is not null || load.PlannerNotes is not null)
                 await LoadCommercialStore.SaveAsync(db, load, Values(load), User.Identity?.Name, ct);
         }
@@ -72,19 +101,15 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
     [HttpPut("loads/{id:guid}/allocation"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> Allocate(Guid id, UpdateLoadAllocationRequest request, CancellationToken ct)
     {
-        Load? load;
-        var register = false;
-        try
-        {
-            load = await db.Loads.SingleOrDefaultAsync(item => item.Id == id, ct);
-            if (load is not null) await LoadCommercialStore.EnrichAsync(db, [load], ct);
-        }
-        catch (Exception exception) when (IsSchemaUnavailable(exception)) { db.ChangeTracker.Clear(); load = await PlanningRegisterStore.GetLoadAsync(db, id, ct); register = true; }
-        if (load is null) return NotFound();
+        var (load, register) = await FindLoadAsync(id, includeStops: false, asTracking: true, ct);
+        if (load is null) return NotFound("The imported run could not be found in live loads or the planning register.");
         if (request.VehicleId is not null && !await db.Vehicles.AnyAsync(vehicle => vehicle.Id == request.VehicleId && vehicle.Active, ct)) return BadRequest("Vehicle is not active.");
         if (request.DriverId is not null && !await db.Drivers.AnyAsync(driver => driver.Id == request.DriverId && driver.Active, ct)) return BadRequest("Driver is not active.");
         if (request.TrailerId is not null && !await db.Trailers.AnyAsync(trailer => trailer.Id == request.TrailerId && trailer.Active, ct)) return BadRequest("Trailer is not active.");
-        load.VehicleId = request.VehicleId; load.DriverId = request.DriverId; load.TrailerId = request.TrailerId;
+
+        load.VehicleId = request.VehicleId;
+        load.DriverId = request.DriverId;
+        load.TrailerId = request.TrailerId;
         if (request.TrailerId is not null)
         {
             var trailer = await db.Trailers.AsNoTracking().SingleAsync(item => item.Id == request.TrailerId, ct);
@@ -93,34 +118,29 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
                 : trailer.StandardCapacity ?? trailer.EuroCapacity;
         }
         load.Status = request.VehicleId is not null && request.DriverId is not null ? LoadStatus.Planned : LoadStatus.Draft;
-        if (register) await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct); else await LoadCommercialStore.SaveAsync(db, load, Values(load), User.Identity?.Name, ct);
+        await SaveLoadAsync(load, register, ct);
         return Ok(load);
     }
 
     [HttpPut("loads/{id:guid}/commercial"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> UpdateCommercial(Guid id, UpdateLoadCommercialRequest request, CancellationToken ct)
     {
-        Load? load;
-        var register = false;
-        try
-        {
-            load = await db.Loads.SingleOrDefaultAsync(item => item.Id == id, ct);
-            if (load is not null) await LoadCommercialStore.EnrichAsync(db, [load], ct);
-        }
-        catch (Exception exception) when (IsSchemaUnavailable(exception)) { db.ChangeTracker.Clear(); load = await PlanningRegisterStore.GetLoadAsync(db, id, ct); register = true; }
-        if (load is null) return NotFound();
+        var (load, register) = await FindLoadAsync(id, includeStops: false, asTracking: true, ct);
+        if (load is null) return NotFound("The imported run could not be found in live loads or the planning register.");
         if (new decimal?[] { request.RevenueAmount, request.FuelSurchargeAmount, request.EstimatedCostAmount, request.ActualCostAmount, request.EstimatedDistanceMiles, request.EmptyMiles }.Any(value => value < 0))
             return BadRequest("Commercial values cannot be negative.");
         var values = new LoadCommercialValues(request.RevenueAmount, request.FuelSurchargeAmount, request.EstimatedCostAmount, request.ActualCostAmount,
             request.EstimatedDistanceMiles, request.EmptyMiles, Clip(request.InvoiceStatus, 40), Clip(request.CommercialNotes, 500), load.PalletSpacesUsed,
             load.TotalPalletSpaces, load.CapacityType, load.DepotSplits, load.TemperatureC, load.PlannerNotes);
-        if (register)
-        {
-            load.RevenueAmount = values.RevenueAmount; load.FuelSurchargeAmount = values.FuelSurchargeAmount; load.EstimatedCostAmount = values.EstimatedCostAmount;
-            load.ActualCostAmount = values.ActualCostAmount; load.EstimatedDistanceMiles = values.EstimatedDistanceMiles; load.EmptyMiles = values.EmptyMiles;
-            load.InvoiceStatus = values.InvoiceStatus; load.CommercialNotes = values.CommercialNotes;
-            await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
-        }
+        load.RevenueAmount = values.RevenueAmount;
+        load.FuelSurchargeAmount = values.FuelSurchargeAmount;
+        load.EstimatedCostAmount = values.EstimatedCostAmount;
+        load.ActualCostAmount = values.ActualCostAmount;
+        load.EstimatedDistanceMiles = values.EstimatedDistanceMiles;
+        load.EmptyMiles = values.EmptyMiles;
+        load.InvoiceStatus = values.InvoiceStatus;
+        load.CommercialNotes = values.CommercialNotes;
+        if (register) await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
         else await LoadCommercialStore.SaveAsync(db, load, values, User.Identity?.Name, ct);
         return Ok(load);
     }
@@ -129,118 +149,122 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
     public async Task<IActionResult> UpdateUtilisation(Guid id, UpdateLoadUtilisationRequest request, CancellationToken ct)
     {
         if (request.PalletSpacesUsed < 0 || request.TotalPalletSpaces < 0) return BadRequest("Capacity values cannot be negative.");
-        Load? load;
-        var register = false;
-        try
-        {
-            load = await db.Loads.SingleOrDefaultAsync(item => item.Id == id, ct);
-            if (load is not null) await LoadCommercialStore.EnrichAsync(db, [load], ct);
-        }
-        catch (Exception exception) when (IsSchemaUnavailable(exception)) { db.ChangeTracker.Clear(); load = await PlanningRegisterStore.GetLoadAsync(db, id, ct); register = true; }
-        if (load is null) return NotFound();
+        var (load, register) = await FindLoadAsync(id, includeStops: false, asTracking: true, ct);
+        if (load is null) return NotFound("The imported run could not be found in live loads or the planning register.");
         load.PalletSpacesUsed = request.PalletSpacesUsed;
         load.TotalPalletSpaces = request.TotalPalletSpaces;
         load.CapacityType = Clip(request.CapacityType, 40) ?? "Standard pallets";
         load.DepotSplits = Clip(request.DepotSplits, 1000);
         load.TemperatureC = request.TemperatureC;
         load.PlannerNotes = Clip(request.PlannerNotes, 1000);
-        if (register) await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
-        else await LoadCommercialStore.SaveAsync(db, load, Values(load), User.Identity?.Name, ct);
+        await SaveLoadAsync(load, register, ct);
         return Ok(load);
     }
 
     [HttpPut("loads/{id:guid}/status"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> UpdateStatus(Guid id, UpdateLoadStatusRequest request, CancellationToken ct)
     {
-        Load? load;
-        var register = false;
-        try { load = await db.Loads.Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == id, ct); }
-        catch (Exception exception) when (IsSchemaUnavailable(exception)) { db.ChangeTracker.Clear(); load = await PlanningRegisterStore.GetLoadAsync(db, id, ct); register = true; }
-        if (load is null) return NotFound();
+        var (load, register) = await FindLoadAsync(id, includeStops: true, asTracking: true, ct);
+        if (load is null) return NotFound("The imported run could not be found in live loads or the planning register.");
         if (!Enum.TryParse<LoadStatus>(request.Status, true, out var next)) return BadRequest("The requested load status is not valid.");
         if (!CanTransition(load.Status, next)) return BadRequest($"A load cannot move from {load.Status} to {next}.");
         if ((next is LoadStatus.Dispatched or LoadStatus.InProgress) && (load.DriverId is null || load.VehicleId is null)) return BadRequest("Allocate both a driver and vehicle before dispatching a load.");
 
         load.Status = next;
-        var orderIds = load.Stops.Where(stop => stop.OrderId is not null).Select(stop => stop.OrderId!.Value).ToList();
-        if (!register && orderIds.Count > 0)
+        if (!register)
         {
-            var orders = await db.TransportOrders.Where(order => orderIds.Contains(order.Id)).ToListAsync(ct);
-            foreach (var order in orders)
+            var orderIds = load.Stops.Where(stop => stop.OrderId is not null).Select(stop => stop.OrderId!.Value).ToList();
+            if (orderIds.Count > 0)
             {
-                if (next is LoadStatus.Planned or LoadStatus.Dispatched) order.Status = OrderStatus.Planned;
-                else if (next == LoadStatus.InProgress) order.Status = OrderStatus.InTransit;
-                else if (next == LoadStatus.Completed) order.Status = OrderStatus.Delivered;
-                else if (next == LoadStatus.Cancelled) order.Status = OrderStatus.Cancelled;
+                try
+                {
+                    var orders = await db.TransportOrders.Where(order => orderIds.Contains(order.Id)).ToListAsync(ct);
+                    foreach (var order in orders)
+                    {
+                        if (next is LoadStatus.Planned or LoadStatus.Dispatched) order.Status = OrderStatus.Planned;
+                        else if (next == LoadStatus.InProgress) order.Status = OrderStatus.InTransit;
+                        else if (next == LoadStatus.Completed) order.Status = OrderStatus.Delivered;
+                        else if (next == LoadStatus.Cancelled) order.Status = OrderStatus.Cancelled;
+                    }
+                }
+                catch (Exception exception) when (IsSchemaUnavailable(exception))
+                {
+                    db.ChangeTracker.Clear();
+                    register = true;
+                }
             }
         }
-        if (register) await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct); else await db.SaveChangesAsync(ct);
+        await SaveLoadAsync(load, register, ct);
         return Ok(load);
     }
 
     [HttpPut("loads/{id:guid}/stops"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> UpdateStops(Guid id, List<UpdateLoadStopRequest> request, CancellationToken ct)
     {
-        Load? load;
-        var register = false;
-        try { load = await db.Loads.Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == id, ct); }
-        catch (Exception exception) when (IsSchemaUnavailable(exception)) { db.ChangeTracker.Clear(); load = await PlanningRegisterStore.GetLoadAsync(db, id, ct); register = true; }
-        if (load is null) return NotFound();
+        var (load, register) = await FindLoadAsync(id, includeStops: true, asTracking: true, ct);
+        if (load is null) return NotFound("The imported run could not be found in live loads or the planning register.");
         if (request.Count == 0 || request.Any(stop => string.IsNullOrWhiteSpace(stop.Name))) return BadRequest("At least one named stop is required.");
         if (!register) db.LoadStops.RemoveRange(load.Stops);
-        load.Stops = request.Select((stop, index) => new LoadStop { OrderId = stop.OrderId, Sequence = index + 1, Name = stop.Name.Trim(), Address = stop.Address, Latitude = stop.Latitude, Longitude = stop.Longitude, PlannedArrivalUtc = stop.PlannedArrivalUtc }).ToList();
-        if (register) await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct); else await db.SaveChangesAsync(ct);
+        load.Stops = request.Select((stop, index) => new LoadStop
+        {
+            OrderId = stop.OrderId,
+            Sequence = index + 1,
+            Name = stop.Name.Trim(),
+            Address = stop.Address,
+            Latitude = stop.Latitude,
+            Longitude = stop.Longitude,
+            PlannedArrivalUtc = stop.PlannedArrivalUtc
+        }).ToList();
+        await SaveLoadAsync(load, register, ct);
         return Ok(load);
     }
 
     [HttpGet("loads/{id:guid}/route")]
     public async Task<IActionResult> Route(Guid id, CancellationToken ct)
     {
-        List<(decimal Longitude, decimal Latitude)> points;
-        try
-        {
-            var storedPoints = await db.LoadStops.AsNoTracking().Where(stop => stop.LoadId == id && stop.Longitude != null && stop.Latitude != null)
-                .OrderBy(stop => stop.Sequence).Select(stop => new { stop.Longitude, stop.Latitude }).ToListAsync(ct);
-            points = storedPoints.Select(point => (point.Longitude!.Value, point.Latitude!.Value)).ToList();
-        }
-        catch (Exception exception) when (IsSchemaUnavailable(exception))
-        {
-            db.ChangeTracker.Clear();
-            var load = await PlanningRegisterStore.GetLoadAsync(db, id, ct);
-            if (load is null) return NotFound();
-            points = load.Stops.Where(stop => stop.Longitude is not null && stop.Latitude is not null).OrderBy(stop => stop.Sequence)
-                .Select(stop => (stop.Longitude!.Value, stop.Latitude!.Value)).ToList();
-        }
+        var (load, _) = await FindLoadAsync(id, includeStops: true, asTracking: false, ct);
+        if (load is null) return NotFound("The imported run could not be found in live loads or the planning register.");
+        var points = load.Stops.Where(stop => stop.Longitude is not null && stop.Latitude is not null).OrderBy(stop => stop.Sequence)
+            .Select(stop => (stop.Longitude!.Value, stop.Latitude!.Value)).ToList();
         return Ok(await maps.Directions(points, ct));
     }
 
     [HttpGet("loads/{id:guid}/dispatch")]
     public async Task<IActionResult> Dispatch(Guid id, CancellationToken ct)
     {
-        Load? load;
-        var register = false;
-        try { load = await db.Loads.AsNoTracking().Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == id, ct); }
-        catch (Exception exception) when (IsSchemaUnavailable(exception)) { db.ChangeTracker.Clear(); load = await PlanningRegisterStore.GetLoadAsync(db, id, ct); register = true; }
-        if (load is null) return NotFound();
-        var orderIds = load.Stops.Where(stop => stop.OrderId is not null).Select(stop => stop.OrderId!.Value).Distinct().ToList();
-        var orders = register
-            ? (await PlanningRegisterStore.ReadOrdersAsync(db, null, null, ct)).Where(order => orderIds.Contains(order.Id)).ToDictionary(order => order.Id)
-            : await db.TransportOrders.AsNoTracking().Where(order => orderIds.Contains(order.Id)).ToDictionaryAsync(order => order.Id, ct);
+        var (load, register) = await FindLoadAsync(id, includeStops: true, asTracking: false, ct);
+        if (load is null) return NotFound("The imported run could not be found in live loads or the planning register.");
+        var orders = await LoadOrdersAsync(load, register, ct);
         var driver = load.DriverId is null ? null : await db.Drivers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.DriverId, ct);
         var vehicle = load.VehicleId is null ? null : await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.VehicleId, ct);
         var trailer = load.TrailerId is null ? null : await db.Trailers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.TrailerId, ct);
         return Ok(new
         {
-            load.Id, load.Reference, load.PlanningDate, load.Status,
+            load.Id,
+            load.Reference,
+            load.PlanningDate,
+            load.Status,
             driver = driver is null ? null : new { driver.DisplayName, driver.EmployeeNumber, driver.MobileNumber },
             vehicle = vehicle is null ? null : new { vehicle.Registration, vehicle.FleetNumber },
             trailer = trailer is null ? null : new { trailer.TrailerNumber, trailer.Type },
             stops = load.Stops.OrderBy(stop => stop.Sequence).Select(stop => new
             {
-                stop.Id, stop.Sequence, stop.Name, stop.Address, stop.Latitude, stop.Longitude, stop.PlannedArrivalUtc,
+                stop.Id,
+                stop.Sequence,
+                stop.Name,
+                stop.Address,
+                stop.Latitude,
+                stop.Longitude,
+                stop.PlannedArrivalUtc,
                 order = stop.OrderId is not null && orders.TryGetValue(stop.OrderId.Value, out var order) ? new
                 {
-                    order.Reference, order.CustomerCode, order.SellerName, order.MarketName, order.StallNumber, order.DriverInstructions, order.MapLink
+                    order.Reference,
+                    order.CustomerCode,
+                    order.SellerName,
+                    order.MarketName,
+                    order.StallNumber,
+                    order.DriverInstructions,
+                    order.MapLink
                 } : null
             })
         });
@@ -249,21 +273,15 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
     [HttpPost("loads/{id:guid}/dispatch/sms"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> SendDispatchSms(Guid id, CancellationToken ct)
     {
-        Load? load;
-        var register = false;
-        try { load = await db.Loads.Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == id, ct); }
-        catch (Exception exception) when (IsSchemaUnavailable(exception)) { db.ChangeTracker.Clear(); load = await PlanningRegisterStore.GetLoadAsync(db, id, ct); register = true; }
-        if (load is null) return NotFound();
+        var (load, register) = await FindLoadAsync(id, includeStops: true, asTracking: true, ct);
+        if (load is null) return NotFound("The imported run could not be found in live loads or the planning register.");
         if (load.DriverId is null || load.VehicleId is null) return BadRequest("Allocate both a driver and vehicle before sending a dispatch.");
         var driver = await db.Drivers.SingleOrDefaultAsync(item => item.Id == load.DriverId, ct);
         var vehicle = await db.Vehicles.SingleOrDefaultAsync(item => item.Id == load.VehicleId, ct);
         if (driver is null || vehicle is null) return BadRequest("The allocated driver or vehicle could not be found.");
         if (string.IsNullOrWhiteSpace(driver.MobileNumber)) return BadRequest("The assigned driver has no approved mobile number.");
 
-        var orderIds = load.Stops.Where(stop => stop.OrderId is not null).Select(stop => stop.OrderId!.Value).Distinct().ToList();
-        var orders = register
-            ? (await PlanningRegisterStore.ReadOrdersAsync(db, null, null, ct)).Where(order => orderIds.Contains(order.Id)).ToDictionary(order => order.Id)
-            : await db.TransportOrders.AsNoTracking().Where(order => orderIds.Contains(order.Id)).ToDictionaryAsync(order => order.Id, ct);
+        var orders = await LoadOrdersAsync(load, register, ct);
         var stops = load.Stops.OrderBy(stop => stop.Sequence).Select(stop =>
         {
             orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
@@ -280,7 +298,7 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         var message = string.Join("\n\n", new[] { $"SLH run {load.Reference}", $"Driver: {driver.DisplayName}", $"Vehicle: {vehicle.Registration}", string.Empty, string.Join("\n\n", stops) });
         var receipt = await sms.SendAsync(driver.MobileNumber, message, ct);
         if (load.Status == LoadStatus.Planned) load.Status = LoadStatus.Dispatched;
-        if (register) await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct); else await db.SaveChangesAsync(ct);
+        await SaveLoadAsync(load, register, ct);
         return Accepted(new { receipt.MessageId, receipt.MobileSuffix, receipt.Provider, load.Status });
     }
 
@@ -291,10 +309,73 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         return Ok(await maps.SearchAddress(address, ct));
     }
 
+    private async Task<(Load? Load, bool Register)> FindLoadAsync(Guid id, bool includeStops, bool asTracking, CancellationToken ct)
+    {
+        try
+        {
+            IQueryable<Load> query = asTracking ? db.Loads : db.Loads.AsNoTracking();
+            if (includeStops) query = query.Include(load => load.Stops);
+            var load = await query.SingleOrDefaultAsync(item => item.Id == id, ct);
+            if (load is not null)
+            {
+                await LoadCommercialStore.EnrichAsync(db, [load], ct);
+                return (load, false);
+            }
+        }
+        catch (Exception exception) when (IsSchemaUnavailable(exception))
+        {
+            db.ChangeTracker.Clear();
+        }
+
+        var registered = await PlanningRegisterStore.GetLoadAsync(db, id, ct);
+        if (registered is not null) await LoadCommercialStore.EnrichAsync(db, [registered], ct);
+        return (registered, registered is not null);
+    }
+
+    private async Task<Dictionary<Guid, TransportOrder>> LoadOrdersAsync(Load load, bool register, CancellationToken ct)
+    {
+        var orderIds = load.Stops.Where(stop => stop.OrderId is not null).Select(stop => stop.OrderId!.Value).Distinct().ToList();
+        if (orderIds.Count == 0) return [];
+        if (!register)
+        {
+            try
+            {
+                return await db.TransportOrders.AsNoTracking().Where(order => orderIds.Contains(order.Id)).ToDictionaryAsync(order => order.Id, ct);
+            }
+            catch (Exception exception) when (IsSchemaUnavailable(exception))
+            {
+                db.ChangeTracker.Clear();
+            }
+        }
+        return (await PlanningRegisterStore.ReadOrdersAsync(db, null, null, ct)).Where(order => orderIds.Contains(order.Id)).ToDictionary(order => order.Id);
+    }
+
+    private async Task SaveLoadAsync(Load load, bool register, CancellationToken ct)
+    {
+        if (register)
+        {
+            await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
+            return;
+        }
+
+        try
+        {
+            await LoadCommercialStore.SaveAsync(db, load, Values(load), User.Identity?.Name, ct);
+        }
+        catch (Exception exception) when (IsSchemaUnavailable(exception))
+        {
+            db.ChangeTracker.Clear();
+            await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
+        }
+    }
+
     private static bool IsSchemaUnavailable(Exception exception)
     {
         var message = exception.GetBaseException().Message;
-        return exception is InvalidOperationException or DbUpdateException || message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase) || message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
+        return exception is InvalidOperationException or DbUpdateException ||
+            message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool CanTransition(LoadStatus current, LoadStatus next) => current == next || (current, next) switch
