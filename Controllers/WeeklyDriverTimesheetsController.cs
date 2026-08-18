@@ -100,7 +100,7 @@ public sealed class WeeklyDriverTimesheetsController(
                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
                 var dayStartUtc = new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc));
                 var dayEndUtc = dayStartUtc.AddDays(1);
-                var dot = trackingEvents.Where(x => x.EventTimeUtc >= dayStartUtc && x.EventTimeUtc < dayEndUtc && assignedVehicleKeys.Contains(Normalise(x.VehicleIdentifier)) && (x.IsMoving || x.IgnitionOn == true || x.SpeedKph > 0)).ToList();
+                var dot = trackingEvents.Where(x => x.EventTimeUtc >= dayStartUtc && x.EventTimeUtc < dayEndUtc && assignedVehicleKeys.Contains(Normalise(x.VehicleIdentifier)) && (x.IsMoving == true || x.IgnitionOn == true || x.SpeedKph > 0)).ToList();
                 var dotStart = dot.Count > 0 ? dot.Min(x => x.EventTimeUtc) : (DateTimeOffset?)null;
                 var dotEnd = dot.Count > 0 ? dot.Max(x => x.EventTimeUtc) : (DateTimeOffset?)null;
                 var dotMinutes = dotStart != null && dotEnd != null ? (int)Math.Round((dotEnd.Value - dotStart.Value).TotalMinutes) : (int?)null;
