@@ -11,7 +11,7 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/v1/planning-control")]
 [Authorize]
-public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<PalletPlanningControlController> logger) : ControllerBase
+public sealed class PalletPlanningControlController(TmsDbContext db) : ControllerBase
 {
     private const string AllocationType = "planningpalletallocation";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
@@ -37,14 +37,13 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         {
             details.TryGetValue(Normalise(order.Reference), out var detail);
             var ordered = Math.Max(order.Pallets ?? detail?.Pallets ?? 0, 0);
+            var hasExplicitAllocations = explicitAllocations.Keys.Any(key => key.OrderId == order.Id);
             var allocations = explicitAllocations.Values
                 .Where(x => x.OrderId == order.Id && x.Pallets > 0)
                 .OrderBy(x => loadById.TryGetValue(x.LoadId, out var load) ? load.Reference : x.LoadId.ToString())
                 .ToList();
 
-            // Existing runs created before this quantity model remain valid: if an order is linked to a live run
-            // and has no explicit allocation record, treat the original order quantity as planned once.
-            if (allocations.Count == 0)
+            if (!hasExplicitAllocations && allocations.Count == 0)
             {
                 var linkedLoad = loads.FirstOrDefault(load => load.Status != LoadStatus.Cancelled && load.Stops.Any(stop => stop.OrderId == order.Id));
                 if (linkedLoad is not null && ordered > 0)
@@ -184,18 +183,13 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
 
         var allLatest = await ReadLatestAllocations(request.Date, ct);
         var totalPlanned = allLatest.Values.Where(x => x.OrderId == order.Id).Sum(x => Math.Max(x.Pallets, 0));
-        if (totalPlanned == 0 && loads.Any(x => x.Stops.Any(stop => stop.OrderId == order.Id)))
-        {
-            // Explicit zero means intentionally removed from quantity planning, so do not fall back to the legacy full-order rule.
-            totalPlanned = 0;
-        }
         var ordered = Math.Max(order.Pallets ?? detail?.Pallets ?? 0, 0);
         return Ok(new
         {
-            order.Id,
-            order.Reference,
-            load.Id,
-            load.Reference,
+            orderId = order.Id,
+            orderReference = order.Reference,
+            loadId = load.Id,
+            loadReference = load.Reference,
             allocatedToRun = request.Pallets,
             plannedPallets = totalPlanned,
             orderedPallets = ordered,
@@ -264,7 +258,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
     {
         var rows = await db.StagedImports.AsNoTracking().Where(x => x.EntityType == AllocationType && x.Status == StagingStatus.Promoted)
             .OrderByDescending(x => x.ReceivedAtUtc).Take(20000).ToListAsync(ct);
-        var result = new Dictionary<(Guid, Guid), AllocationState>();
+        var result = new Dictionary<(Guid OrderId, Guid LoadId), AllocationState>();
         foreach (var row in rows)
         {
             try
