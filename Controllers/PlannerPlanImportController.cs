@@ -108,7 +108,7 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
             load.PalletSpacesUsed = capacity.StandardEquivalentUsed;
             load.TotalPalletSpaces = capacity.StandardEquivalentCapacity;
             load.CapacityType = "Mixed Standard/Euro";
-            load.PlannerNotes = PlannerPlanImportRules.BuildPlannerNotes(run, capacity);
+            load.PlannerNotes = AddFirstCollectionWalkroundNote(PlannerPlanImportRules.BuildPlannerNotes(run, capacity), run);
 
             if (registerFallback)
             {
@@ -162,13 +162,21 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
 
         foreach (var group in GroupByCollectionWindow(sourceRows))
         {
+            var detail = BuildGroupedStopDetail(group.Rows, includeDelivery: true);
+            if (stops.Count == 0)
+            {
+                var window = FirstCollectionWindow(group.Rows);
+                var instruction = FirstCollectionWalkroundInstruction(window);
+                if (!string.IsNullOrWhiteSpace(instruction)) detail = string.IsNullOrWhiteSpace(detail) ? instruction : $"{instruction} | {detail}";
+            }
+
             stops.Add(new LoadStop
             {
                 Id = Guid.NewGuid(),
                 LoadId = loadId,
                 Sequence = stops.Count + 1,
                 Name = Clip($"Collect · {group.Site}", 200)!,
-                Address = Clip(BuildGroupedStopDetail(group.Rows, includeDelivery: true), 500),
+                Address = Clip(detail, 500),
                 PlannedArrivalUtc = EarliestPlannerTime(run.PlanningDate, group.Rows.Select(stop => stop.CollectFrom ?? stop.CollectTo))
             });
         }
@@ -259,6 +267,30 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
 
         return string.Join(" | ", details);
     }
+
+    private static string AddFirstCollectionWalkroundNote(string notes, PlannerPlanRunRequest run)
+    {
+        var instruction = FirstCollectionWalkroundInstruction(FirstCollectionWindow(run.Stops ?? []));
+        if (string.IsNullOrWhiteSpace(instruction)) return notes;
+        return string.IsNullOrWhiteSpace(notes) ? instruction : $"{instruction} | {notes}";
+    }
+
+    private static string? FirstCollectionWindow(IEnumerable<PlannerPlanStopRequest> rows)
+    {
+        var first = rows
+            .Where(row => !string.IsNullOrWhiteSpace(row.CollectFrom))
+            .OrderBy(row => row.Sequence)
+            .ThenBy(row => Clean(row.CollectFrom), StringComparer.Ordinal)
+            .FirstOrDefault();
+        if (first is null) return null;
+        var from = Clean(first.CollectFrom);
+        var to = Clean(first.CollectTo);
+        return string.IsNullOrWhiteSpace(to) ? from : $"{from}-{to}";
+    }
+
+    private static string? FirstCollectionWalkroundInstruction(string? window) => string.IsNullOrWhiteSpace(window)
+        ? null
+        : $"First collection window is {window}. Please allow for your 15-minute walkround and plan your start accordingly.";
 
     private static Driver? ResolveDriver(IEnumerable<Driver> drivers, string? value) => string.IsNullOrWhiteSpace(value) || IsPlaceholder(value)
         ? null
