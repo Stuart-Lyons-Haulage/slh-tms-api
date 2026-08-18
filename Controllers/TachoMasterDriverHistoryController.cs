@@ -33,7 +33,8 @@ public sealed class TachoMasterDriverHistoryController(
         var driver = await db.Drivers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == driverId, ct);
         if (driver is null) return NotFound(new { message = "Driver was not found." });
 
-        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        var now = DateTimeOffset.UtcNow;
+        var today = DateOnly.FromDateTime(now.UtcDateTime);
         var end = to ?? today;
         var start = from ?? end.AddDays(-13);
         if (end > today) end = today;
@@ -42,8 +43,17 @@ public sealed class TachoMasterDriverHistoryController(
 
         try
         {
-            var profiles = await tachoMaster.GetDriverProfilesAsync(ct);
+            var profilesTask = tachoMaster.GetDriverProfilesAsync(ct);
+            var currentTask = tachoMaster.GetCurrentDriverStatusesByVehicleAsync(today, ct);
+            await Task.WhenAll(profilesTask, currentTask);
+
+            var profiles = await profilesTask;
             var profile = profiles.FirstOrDefault(item => DriverMatches(driver, item));
+            var current = (await currentTask).Values
+                .Where(item => DriverMatches(driver, item))
+                .OrderByDescending(item => item.MetricsValidAtUtc ?? item.DutyEndUtc ?? item.DutyStartUtc)
+                .FirstOrDefault();
+
             var duties = new List<TachoDriverDutyStatus>();
             for (var date = start; date <= end; date = date.AddDays(1))
             {
@@ -52,9 +62,36 @@ public sealed class TachoMasterDriverHistoryController(
             }
 
             var ordered = duties.OrderByDescending(item => item.DutyStartUtc).ToList();
+            var sourceTimestamp = new[]
+                {
+                    profile?.MetricsValidAtUtc,
+                    current?.MetricsValidAtUtc,
+                    current?.DutyEndUtc,
+                    current?.DutyStartUtc,
+                    ordered.FirstOrDefault()?.DutyEndUtc,
+                    ordered.FirstOrDefault()?.DutyStartUtc
+                }
+                .Where(value => value is not null)
+                .Select(value => value!.Value)
+                .DefaultIfEmpty()
+                .Max();
+
+            var sourceAgeMinutes = sourceTimestamp == default
+                ? (double?)null
+                : Math.Max(0, Math.Round((now - sourceTimestamp).TotalMinutes, 1));
+            var freshness = sourceAgeMinutes switch
+            {
+                null => "Unknown",
+                <= 15 => "Live",
+                <= 60 => "Delayed",
+                _ => "Stale"
+            };
+
             return Ok(new
             {
                 configured = true,
+                connected = true,
+                checkedAtUtc = now,
                 driverId = driver.Id,
                 driverName = driver.DisplayName,
                 driver.EmployeeNumber,
@@ -63,6 +100,21 @@ public sealed class TachoMasterDriverHistoryController(
                 from = start,
                 to = end,
                 profile,
+                live = new
+                {
+                    status = freshness,
+                    sourceTimestampUtc = sourceTimestamp == default ? (DateTimeOffset?)null : sourceTimestamp,
+                    sourceAgeMinutes,
+                    stale = sourceAgeMinutes is null || sourceAgeMinutes > 60,
+                    delayed = sourceAgeMinutes is > 15 and <= 60,
+                    hasCurrentDuty = current is not null,
+                    currentDuty = current,
+                    explanation = current is null
+                        ? "No current TachoMaster duty is open for this driver. Completed duty history is shown below."
+                        : freshness == "Live"
+                            ? "Current duty is being read from the live TachoMaster vehicle-duty feed."
+                            : $"A current TachoMaster duty was found, but its freshest source timestamp is {sourceAgeMinutes:0.#} minutes old."
+                },
                 summary = new
                 {
                     dutyCount = ordered.Count,
@@ -83,7 +135,9 @@ public sealed class TachoMasterDriverHistoryController(
             return StatusCode(StatusCodes.Status502BadGateway, new
             {
                 configured = true,
+                connected = false,
                 driverId,
+                checkedAtUtc = now,
                 message = $"TachoMaster history could not be returned: {ex.GetBaseException().Message}"
             });
         }
@@ -109,6 +163,17 @@ public sealed class TachoMasterDriverHistoryController(
             string.Equals(Normalise(driver.EmployeeNumber), Normalise(duty.EmployeeNumber), StringComparison.OrdinalIgnoreCase))
             return true;
         return SameName(driver, duty.DriverName);
+    }
+
+    private static bool DriverMatches(Driver driver, TachoVehicleDriverStatus status)
+    {
+        if (int.TryParse(driver.TachoMasterDriverId, out var linkedMember) && linkedMember > 0 && linkedMember == status.MemberCode)
+            return true;
+        if (SameCard(driver.TachoCardNumber, status.CardNumber)) return true;
+        if (!string.IsNullOrWhiteSpace(driver.EmployeeNumber) && !string.IsNullOrWhiteSpace(status.EmployeeNumber) &&
+            string.Equals(Normalise(driver.EmployeeNumber), Normalise(status.EmployeeNumber), StringComparison.OrdinalIgnoreCase))
+            return true;
+        return SameName(driver, status.DriverName);
     }
 
     private static bool SameName(Driver driver, string name)
