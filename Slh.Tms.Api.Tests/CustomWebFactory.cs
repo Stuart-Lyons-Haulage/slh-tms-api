@@ -11,6 +11,8 @@ namespace Slh.Tms.Api.Tests;
 
 public class CustomWebFactory : WebApplicationFactory<Program>
 {
+    private readonly string _databaseName = $"slh-tms-tests-{Guid.NewGuid():N}";
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
@@ -18,7 +20,7 @@ public class CustomWebFactory : WebApplicationFactory<Program>
         {
             var dbRegistrations = services.Where(descriptor => descriptor.ServiceType == typeof(DbContextOptions<TmsDbContext>) || descriptor.ServiceType == typeof(TmsDbContext)).ToList();
             foreach (var registration in dbRegistrations) services.Remove(registration);
-            services.AddDbContext<TmsDbContext>(options => options.UseInMemoryDatabase($"slh-tms-tests-{Guid.NewGuid()}"));
+            services.AddDbContext<TmsDbContext>(options => options.UseInMemoryDatabase(_databaseName));
             // Replace authentication with test scheme
             services.AddAuthentication(options =>
             {
