@@ -10,6 +10,23 @@ public sealed class PlanLockMiddleware(RequestDelegate next)
 {
     public async Task InvokeAsync(HttpContext context)
     {
+        if (ControlPageFallback.IsProtectedGet(context.Request))
+        {
+            try
+            {
+                await next(context);
+            }
+            catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                await ControlPageFallback.WriteAsync(context, ex);
+            }
+            return;
+        }
+
         if (!IsOperationalPlanWrite(context.Request))
         {
             await next(context);
