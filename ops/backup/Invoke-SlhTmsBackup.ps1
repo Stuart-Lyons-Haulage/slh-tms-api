@@ -93,16 +93,18 @@ try {
     Write-Host "Target: $bacpac"
 
     $servicePrincipalCredential = Import-Clixml -Path $CredentialPath
-    if ($servicePrincipalCredential -isnot [Management.Automation.PSCredential]) {
+    if ($servicePrincipalCredential -isnot [System.Management.Automation.PSCredential]) {
         throw "CredentialPath must contain a PSCredential exported with Export-Clixml."
     }
 
     Import-Module Az.Accounts -ErrorAction Stop
-    Connect-AzAccount \
-        -ServicePrincipal \
-        -Tenant $TenantId \
-        -Credential $servicePrincipalCredential \
-        -Scope Process | Out-Null
+    $connectParameters = @{
+        ServicePrincipal = $true
+        Tenant = $TenantId
+        Credential = $servicePrincipalCredential
+        Scope = "Process"
+    }
+    Connect-AzAccount @connectParameters | Out-Null
 
     $accessTokenResult = Get-AzAccessToken -ResourceUrl "https://database.windows.net/"
     $accessToken = if ($accessTokenResult.Token -is [Security.SecureString]) {
@@ -117,12 +119,13 @@ try {
     }
 
     $sourceConnectionString = "Server=tcp:$SqlServer,1433;Initial Catalog=$Database;Encrypt=True;TrustServerCertificate=False;MultipleActiveResultSets=False;Connection Timeout=30;"
-
-    & $SqlPackagePath \
-        /Action:Export \
-        /TargetFile:$bacpac \
-        /SourceConnectionString:$sourceConnectionString \
-        /AccessToken:$accessToken
+    $sqlPackageArguments = @(
+        "/Action:Export",
+        "/TargetFile:$bacpac",
+        "/SourceConnectionString:$sourceConnectionString",
+        "/AccessToken:$accessToken"
+    )
+    & $SqlPackagePath @sqlPackageArguments
 
     if ($LASTEXITCODE -ne 0) {
         throw "SqlPackage export failed with exit code $LASTEXITCODE."
