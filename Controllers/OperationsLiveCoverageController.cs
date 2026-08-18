@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
 
@@ -11,6 +12,9 @@ namespace Slh.Tms.Api.Controllers;
 /// Live operational coverage for Ops Control.
 /// DOT/RoadTech is the source of vehicle location and movement.
 /// TachoMaster is the source of driver/card identity and legal-hours data.
+/// When TachoMaster only confirms a few live vehicle/card pairings, the endpoint
+/// also shows allocation-backed driver profile coverage so the dashboard can
+/// distinguish confirmed live cards from planned-driver Tachomaster enrichment.
 /// </summary>
 [ApiController]
 [Route("api/v1/operations")]
@@ -34,7 +38,14 @@ public sealed class OperationsLiveCoverageController(
             ? (DateTimeOffset?)null
             : dotRecords.Records.Max(record => record.EventTimeUtc);
 
+        var movingRecords = dotRecords.Records
+            .Where(record => IsMoving(record))
+            .GroupBy(record => NormaliseIdentifier(record.VehicleIdentifier))
+            .Select(group => group.OrderByDescending(record => record.EventTimeUtc).First())
+            .ToList();
+
         IReadOnlyDictionary<string, TachoVehicleDriverStatus> tachoStatuses = new Dictionary<string, TachoVehicleDriverStatus>();
+        IReadOnlyList<TachoDriverProfile> tachoProfiles = [];
         string? tachoError = null;
         if (tachoMaster.IsConfigured)
         {
@@ -45,19 +56,31 @@ public sealed class OperationsLiveCoverageController(
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
                 tachoError = exception.GetBaseException().Message;
-                logger.LogWarning(exception, "Live operations coverage could not read TachoMaster driver/card identities.");
+                logger.LogWarning(exception, "Live operations coverage could not read TachoMaster vehicle/card identities.");
+            }
+
+            try
+            {
+                tachoProfiles = await tachoMaster.GetDriverProfilesAsync(ct);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogWarning(exception, "Live operations coverage could not read the TachoMaster driver profile directory.");
             }
         }
 
-        var movingRecords = dotRecords.Records
-            .Where(record => IsMoving(record))
-            .GroupBy(record => NormaliseIdentifier(record.VehicleIdentifier))
-            .Select(group => group.OrderByDescending(record => record.EventTimeUtc).First())
-            .ToList();
+        var vehicles = await LoadVehicles(ct);
+        var vehicleAliases = BuildVehicleAliasLookup(vehicles);
+        var allocations = await LoadAllocations(operatingDate, ct);
+        var allocationsByVehicle = allocations
+            .GroupBy(allocation => allocation.VehicleId)
+            .ToDictionary(group => group.Key, group => group.OrderByDescending(allocation => LoadPriority(allocation.LoadStatus)).First());
 
         var tachoAliases = BuildTachoAliasLookup(tachoStatuses);
-        var movingWithTacho = 0;
-        var movingWithTachoMember = 0;
+        var movingWithLiveTacho = 0;
+        var movingWithLiveTachoMember = 0;
+        var movingWithTachoProfile = 0;
+        var movingWithPlannedAllocation = 0;
         var movingWithLiveCardOrName = 0;
         var movingWithoutTacho = new List<UnmatchedMovingVehicle>();
         var movingVehicleRows = new List<LiveVehicleCoverageRow>();
@@ -65,16 +88,36 @@ public sealed class OperationsLiveCoverageController(
         foreach (var record in movingRecords.OrderBy(record => record.VehicleIdentifier))
         {
             var aliases = IdentifierAliases(record.VehicleIdentifier);
-            var status = aliases
+            var liveTachoStatus = aliases
                 .Select(alias => tachoAliases.GetValueOrDefault(alias))
                 .Where(value => value is not null)
                 .OrderByDescending(value => value!.VehicleCode.Length)
                 .FirstOrDefault();
 
-            if (status is not null)
+            var vehicle = aliases
+                .Select(alias => vehicleAliases.GetValueOrDefault(alias))
+                .Where(value => value is not null)
+                .OrderByDescending(value => value!.Registration.Length)
+                .FirstOrDefault();
+
+            AllocationLite? allocation = null;
+            if (vehicle is not null)
+                allocationsByVehicle.TryGetValue(vehicle.Id, out allocation);
+
+            if (allocation is not null) movingWithPlannedAllocation++;
+
+            var profile = liveTachoStatus is null
+                ? MatchDriverProfile(allocation?.Driver, tachoProfiles)
+                : null;
+
+            if (liveTachoStatus is not null)
             {
-                movingWithTacho++;
-                if (status.MemberCode > 0) movingWithTachoMember++;
+                movingWithLiveTacho++;
+                if (liveTachoStatus.MemberCode > 0) movingWithLiveTachoMember++;
+            }
+            else if (profile is not null)
+            {
+                movingWithTachoProfile++;
             }
             else
             {
@@ -83,14 +126,24 @@ public sealed class OperationsLiveCoverageController(
                     record.EventTimeUtc,
                     record.SpeedKph,
                     record.DriverName,
-                    string.IsNullOrWhiteSpace(record.DriverCardNumber) ? false : true,
+                    !string.IsNullOrWhiteSpace(record.DriverCardNumber),
+                    allocation?.Driver.DisplayName,
+                    allocation?.LoadReference,
                     string.IsNullOrWhiteSpace(record.DriverCardNumber)
-                        ? "No TachoMaster duty/card identity matched this moving DOT vehicle."
-                        : "DOT reports a driver card, but it did not match a TachoMaster member/vehicle identity."));
+                        ? allocation is null
+                            ? "No live Tachomaster card and no planned TMS allocation matched this moving DOT vehicle."
+                            : "No live Tachomaster card and the planned TMS driver did not match the Tachomaster driver directory."
+                        : "DOT reports a driver card, but it did not match a Tachomaster member/vehicle identity."));
             }
 
             if (!string.IsNullOrWhiteSpace(record.DriverName) || !string.IsNullOrWhiteSpace(record.DriverCardNumber))
                 movingWithLiveCardOrName++;
+
+            var status = liveTachoStatus is not null
+                ? liveTachoStatus.MemberCode > 0 ? "LiveTachoCardConfirmed" : "LiveIdentityOnly"
+                : profile is not null
+                    ? "AllocationTachoProfile"
+                    : "Attention";
 
             movingVehicleRows.Add(new LiveVehicleCoverageRow(
                 record.VehicleIdentifier,
@@ -98,19 +151,19 @@ public sealed class OperationsLiveCoverageController(
                 record.SpeedKph,
                 record.Latitude,
                 record.Longitude,
-                status?.DriverName,
-                status?.CardNumber,
-                status?.MemberCode > 0,
-                status is null
-                    ? "Attention"
-                    : status.MemberCode > 0
-                        ? "Matched"
-                        : "LiveIdentityOnly"));
+                liveTachoStatus?.DriverName ?? profile?.DriverName,
+                liveTachoStatus?.CardNumber ?? profile?.CardNumber,
+                liveTachoStatus?.MemberCode > 0 || profile is not null,
+                allocation?.Driver.DisplayName,
+                allocation?.LoadReference,
+                liveTachoStatus is not null ? "LiveTachoCard" : profile is not null ? "PlannedAllocationTachoProfile" : null,
+                status));
         }
 
         var tachoDutyLike = tachoStatuses.Values.Count(status => status.DriveMinutes > 0 || status.WorkMinutes > 0 || status.AvailableMinutes > 0 || status.RestMinutes > 0);
         var tachoMemberIdentities = tachoStatuses.Values.Count(status => status.MemberCode > 0);
         var liveOnlyIdentities = Math.Max(0, tachoStatuses.Count - tachoMemberIdentities);
+        var anyTachoCoverage = movingWithLiveTacho + movingWithTachoProfile;
 
         return Ok(new LiveCoverageResponse(
             now,
@@ -128,14 +181,19 @@ public sealed class OperationsLiveCoverageController(
                 tachoDutyLike,
                 tachoMemberIdentities,
                 liveOnlyIdentities,
+                tachoProfiles.Count,
                 tachoError),
             new LiveCoverageSummary(
                 movingRecords.Count,
-                movingWithTacho,
-                movingWithTachoMember,
+                anyTachoCoverage,
+                movingWithLiveTachoMember + movingWithTachoProfile,
                 movingWithLiveCardOrName,
-                Math.Max(0, movingRecords.Count - movingWithTacho),
-                movingWithoutTacho.Count),
+                Math.Max(0, movingRecords.Count - anyTachoCoverage),
+                movingWithoutTacho.Count,
+                movingWithLiveTacho,
+                movingWithLiveTachoMember,
+                movingWithTachoProfile,
+                movingWithPlannedAllocation),
             movingVehicleRows,
             movingWithoutTacho));
     }
@@ -171,11 +229,75 @@ public sealed class OperationsLiveCoverageController(
                 null)).ToList();
             return new DotCoverageRecords("RoadTech Falcon stored fallback", records);
         }
-        catch (Exception exception) when (exception is InvalidOperationException or DbUpdateException)
+        catch (Exception exception) when (IsSchemaUnavailable(exception))
         {
             logger.LogWarning(exception, "Stored DOT/RoadTech live status is unavailable.");
             return new DotCoverageRecords("RoadTech Falcon unavailable", []);
         }
+    }
+
+    private async Task<List<VehicleLite>> LoadVehicles(CancellationToken ct)
+    {
+        try
+        {
+            return await db.Vehicles.AsNoTracking()
+                .Where(vehicle => vehicle.Active)
+                .Select(vehicle => new VehicleLite(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation))
+                .ToListAsync(ct);
+        }
+        catch (Exception exception) when (IsSchemaUnavailable(exception))
+        {
+            logger.LogWarning(exception, "Vehicle master data is unavailable for live Tachomaster coverage.");
+            return [];
+        }
+    }
+
+    private async Task<List<AllocationLite>> LoadAllocations(DateOnly operatingDate, CancellationToken ct)
+    {
+        try
+        {
+            var loads = await db.Loads.AsNoTracking()
+                .Where(load => load.PlanningDate == operatingDate && load.VehicleId != null && load.DriverId != null && load.Status != LoadStatus.Cancelled && load.Status != LoadStatus.Completed)
+                .Select(load => new { load.VehicleId, load.DriverId, load.Reference, load.Status })
+                .ToListAsync(ct);
+
+            var driverIds = loads.Select(load => load.DriverId!.Value).Distinct().ToList();
+            var drivers = await db.Drivers.AsNoTracking()
+                .Where(driver => driverIds.Contains(driver.Id))
+                .Select(driver => new DriverLite(driver.Id, driver.EmployeeNumber, driver.DisplayName, driver.TachoName))
+                .ToDictionaryAsync(driver => driver.Id, ct);
+
+            return loads
+                .Where(load => load.VehicleId != null && load.DriverId != null && drivers.ContainsKey(load.DriverId.Value))
+                .Select(load => new AllocationLite(
+                    load.VehicleId!.Value,
+                    load.Reference,
+                    load.Status.ToString(),
+                    drivers[load.DriverId!.Value]))
+                .ToList();
+        }
+        catch (Exception exception) when (IsSchemaUnavailable(exception))
+        {
+            logger.LogWarning(exception, "Planning allocations are unavailable for allocation-backed Tachomaster coverage.");
+            return [];
+        }
+    }
+
+    private static Dictionary<string, VehicleLite> BuildVehicleAliasLookup(IEnumerable<VehicleLite> vehicles)
+    {
+        var lookup = new Dictionary<string, VehicleLite>(StringComparer.OrdinalIgnoreCase);
+        foreach (var vehicle in vehicles)
+        {
+            foreach (var identifier in new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation })
+            {
+                if (string.IsNullOrWhiteSpace(identifier)) continue;
+                foreach (var alias in IdentifierAliases(identifier))
+                {
+                    if (!lookup.ContainsKey(alias)) lookup[alias] = vehicle;
+                }
+            }
+        }
+        return lookup;
     }
 
     private static Dictionary<string, TachoVehicleDriverStatus> BuildTachoAliasLookup(IReadOnlyDictionary<string, TachoVehicleDriverStatus> statuses)
@@ -191,11 +313,44 @@ public sealed class OperationsLiveCoverageController(
         return lookup;
     }
 
+    private static TachoDriverProfile? MatchDriverProfile(DriverLite? driver, IReadOnlyList<TachoDriverProfile> profiles)
+    {
+        if (driver is null || profiles.Count == 0) return null;
+
+        if (!string.IsNullOrWhiteSpace(driver.EmployeeNumber))
+        {
+            var employee = profiles.FirstOrDefault(profile =>
+                !string.IsNullOrWhiteSpace(profile.EmployeeNumber) &&
+                string.Equals(profile.EmployeeNumber.Trim(), driver.EmployeeNumber.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (employee is not null) return employee;
+        }
+
+        var tachoName = NormalisePersonName(driver.TachoName);
+        if (tachoName.Length > 0)
+        {
+            var byTachoName = profiles.FirstOrDefault(profile => NormalisePersonName(profile.DriverName) == tachoName);
+            if (byTachoName is not null) return byTachoName;
+        }
+
+        var displayName = NormalisePersonName(driver.DisplayName);
+        if (displayName.Length > 0)
+            return profiles.FirstOrDefault(profile => NormalisePersonName(profile.DriverName) == displayName);
+
+        return null;
+    }
+
     private static bool IsMoving(DotTelemetryRecord record) =>
         record.IsMoving == true || record.SpeedKph.GetValueOrDefault() > 3;
 
     private static string NormaliseIdentifier(string value) =>
         new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
+    private static string NormalisePersonName(string? value) =>
+        string.Join(' ', (value ?? string.Empty)
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+            .Select(word => new string(word.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray()))
+            .Where(word => word.Length > 0)
+            .OrderBy(word => word, StringComparer.Ordinal));
 
     private static IReadOnlyList<string> IdentifierAliases(string value)
     {
@@ -215,6 +370,24 @@ public sealed class OperationsLiveCoverageController(
         return aliases.Where(alias => alias.Length >= 3).ToList();
     }
 
+    private static int LoadPriority(string status) => status switch
+    {
+        nameof(LoadStatus.InProgress) => 4,
+        nameof(LoadStatus.Dispatched) => 3,
+        nameof(LoadStatus.Planned) => 2,
+        nameof(LoadStatus.Draft) => 1,
+        _ => 0
+    };
+
+    private static bool IsSchemaUnavailable(Exception exception)
+    {
+        var message = exception.GetBaseException().Message;
+        return exception is InvalidOperationException or DbUpdateException ||
+            message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static DateOnly UkOperatingDate(DateTimeOffset value)
     {
         try
@@ -228,6 +401,9 @@ public sealed class OperationsLiveCoverageController(
     }
 
     private sealed record DotCoverageRecords(string Provider, IReadOnlyList<DotTelemetryRecord> Records);
+    private sealed record VehicleLite(Guid Id, string Registration, string? FleetNumber, string? Abbreviation);
+    private sealed record DriverLite(Guid Id, string EmployeeNumber, string DisplayName, string? TachoName);
+    private sealed record AllocationLite(Guid VehicleId, string LoadReference, string LoadStatus, DriverLite Driver);
 }
 
 public sealed record LiveCoverageResponse(
@@ -253,6 +429,7 @@ public sealed record TachoCoverage(
     int DutyRecordCount,
     int TachoMemberIdentityCount,
     int LiveOnlyIdentityCount,
+    int DriverProfileCount,
     string? Error);
 
 public sealed record LiveCoverageSummary(
@@ -261,7 +438,11 @@ public sealed record LiveCoverageSummary(
     int MovingWithTachoMemberMatch,
     int MovingWithLiveCardOrNameFromDot,
     int MovingWithoutTachoIdentity,
-    int AttentionCount);
+    int AttentionCount,
+    int MovingWithLiveTachoIdentity,
+    int MovingWithLiveTachoMemberMatch,
+    int MovingWithTachoDirectoryProfile,
+    int MovingWithPlannedAllocation);
 
 public sealed record LiveVehicleCoverageRow(
     string VehicleIdentifier,
@@ -272,6 +453,9 @@ public sealed record LiveVehicleCoverageRow(
     string? TachoDriverName,
     string? TachoCardNumber,
     bool TachoMemberMatched,
+    string? PlannedDriverName,
+    string? PlannedLoadReference,
+    string? DriverSource,
     string Status);
 
 public sealed record UnmatchedMovingVehicle(
@@ -280,4 +464,6 @@ public sealed record UnmatchedMovingVehicle(
     decimal? SpeedKph,
     string? DotDriverName,
     bool DotDriverCardDetected,
+    string? PlannedDriverName,
+    string? PlannedLoadReference,
     string Reason);
