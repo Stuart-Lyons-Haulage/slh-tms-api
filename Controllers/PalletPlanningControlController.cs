@@ -31,6 +31,8 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
         var destinations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var totalOrdered = 0;
         var totalPlanned = 0;
+        var totalOutstanding = 0;
+        var totalOverplanned = 0;
         var lateCount = 0;
 
         foreach (var order in orders.Where(x => x.Status != OrderStatus.Cancelled))
@@ -43,6 +45,8 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
                 .OrderBy(x => loadById.TryGetValue(x.LoadId, out var load) ? load.Reference : x.LoadId.ToString())
                 .ToList();
 
+            // Runs created before quantity allocation existed remain valid. Once any explicit allocation
+            // exists for the order, including a zero, the explicit quantities become authoritative.
             if (!hasExplicitAllocations && allocations.Count == 0)
             {
                 var linkedLoad = loads.FirstOrDefault(load => load.Status != LoadStatus.Cancelled && load.Stops.Any(stop => stop.OrderId == order.Id));
@@ -71,6 +75,8 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
 
             totalOrdered += ordered;
             totalPlanned += planned;
+            totalOutstanding += outstanding;
+            totalOverplanned += overplanned;
             orderRows.Add(new
             {
                 order.Id,
@@ -122,8 +128,8 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
             {
                 ordered = totalOrdered,
                 planned = totalPlanned,
-                outstanding = Math.Max(totalOrdered - totalPlanned, 0),
-                overplanned = Math.Max(totalPlanned - totalOrdered, 0),
+                outstanding = totalOutstanding,
+                overplanned = totalOverplanned,
                 lateAdditions = lateCount,
                 orders = orderRows.Count,
                 runs = loads.Count(x => x.Status != LoadStatus.Cancelled)
@@ -201,13 +207,18 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
 
     private async Task<List<TransportOrder>> ReadOrders(DateOnly date, CancellationToken ct)
     {
+        var result = new Dictionary<string, TransportOrder>(StringComparer.OrdinalIgnoreCase);
         try
         {
             var primary = await db.TransportOrders.AsNoTracking().Where(x => x.CollectionDate == date).OrderBy(x => x.Reference).Take(2000).ToListAsync(ct);
-            if (primary.Count > 0) return primary;
+            foreach (var order in primary) result[order.Reference] = order;
         }
         catch (Exception ex) when (SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); }
-        return await PlanningRegisterStore.ReadOrdersAsync(db, date, date, ct);
+
+        var registered = await PlanningRegisterStore.ReadOrdersAsync(db, date, date, ct);
+        foreach (var order in registered)
+            if (!result.ContainsKey(order.Reference)) result[order.Reference] = order;
+        return result.Values.OrderBy(x => x.Reference, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     private async Task<List<Load>> ReadLoads(DateOnly date, CancellationToken ct)
@@ -303,8 +314,27 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
 
     private async Task UpdateRunPalletTotal(Guid loadId, DateOnly date, CancellationToken ct)
     {
+        var loads = await ReadLoads(date, ct);
+        var target = loads.SingleOrDefault(x => x.Id == loadId);
+        if (target is null) return;
         var latest = await ReadLatestAllocations(date, ct);
-        var pallets = latest.Values.Where(x => x.LoadId == loadId).Sum(x => Math.Max(x.Pallets, 0));
+        var orders = await ReadOrders(date, ct);
+        var details = await ReadOrderDetails(date, ct);
+        var pallets = 0;
+
+        foreach (var order in orders.Where(x => x.Status != OrderStatus.Cancelled))
+        {
+            var hasExplicit = latest.Keys.Any(key => key.OrderId == order.Id);
+            if (hasExplicit)
+            {
+                if (latest.TryGetValue((order.Id, loadId), out var allocation)) pallets += Math.Max(allocation.Pallets, 0);
+                continue;
+            }
+            if (!target.Stops.Any(stop => stop.OrderId == order.Id)) continue;
+            details.TryGetValue(Normalise(order.Reference), out var detail);
+            pallets += Math.Max(order.Pallets ?? detail?.Pallets ?? 0, 0);
+        }
+
         try
         {
             var load = await db.Loads.SingleOrDefaultAsync(x => x.Id == loadId, ct);
