@@ -1,0 +1,417 @@
+using System.Text.Json;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Services;
+
+namespace Slh.Tms.Api.Controllers;
+
+[ApiController]
+[Route("api/v1/planning-control")]
+[Authorize]
+public sealed class PalletPlanningControlController(TmsDbContext db) : ControllerBase
+{
+    private const string AllocationType = "planningpalletallocation";
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
+
+    [HttpGet("pallets")]
+    public async Task<IActionResult> Get([FromQuery] DateOnly date, CancellationToken ct)
+    {
+        var orders = await ReadOrders(date, ct);
+        var loads = await ReadLoads(date, ct);
+        var details = await ReadOrderDetails(date, ct);
+        var explicitAllocations = await ReadLatestAllocations(date, ct);
+        var loadById = loads.ToDictionary(x => x.Id);
+        var firstRunCreated = loads.Count == 0 ? (DateTimeOffset?)null : loads.Min(x => x.CreatedAtUtc);
+
+        var orderRows = new List<object>();
+        var matrixRows = new Dictionary<string, Dictionary<string, CellAccumulator>>(StringComparer.OrdinalIgnoreCase);
+        var destinations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var totalOrdered = 0;
+        var totalPlanned = 0;
+        var totalOutstanding = 0;
+        var totalOverplanned = 0;
+        var lateCount = 0;
+
+        foreach (var order in orders.Where(x => x.Status != OrderStatus.Cancelled))
+        {
+            details.TryGetValue(Normalise(order.Reference), out var detail);
+            var ordered = Math.Max(order.Pallets ?? detail?.Pallets ?? 0, 0);
+            var hasExplicitAllocations = explicitAllocations.Keys.Any(key => key.OrderId == order.Id);
+            var allocations = explicitAllocations.Values
+                .Where(x => x.OrderId == order.Id && x.Pallets > 0)
+                .OrderBy(x => loadById.TryGetValue(x.LoadId, out var load) ? load.Reference : x.LoadId.ToString())
+                .ToList();
+
+            // Runs created before quantity allocation existed remain valid. Once any explicit allocation
+            // exists for the order, including a zero, the explicit quantities become authoritative.
+            if (!hasExplicitAllocations && allocations.Count == 0)
+            {
+                var linkedLoad = loads.FirstOrDefault(load => load.Status != LoadStatus.Cancelled && load.Stops.Any(stop => stop.OrderId == order.Id));
+                if (linkedLoad is not null && ordered > 0)
+                    allocations.Add(new AllocationState(order.Id, linkedLoad.Id, ordered, date, linkedLoad.CreatedAtUtc, "Existing run allocation"));
+            }
+
+            var planned = allocations.Sum(x => x.Pallets);
+            var outstanding = Math.Max(ordered - planned, 0);
+            var overplanned = Math.Max(planned - ordered, 0);
+            var group = PlanningGroup(detail, order);
+            var destination = Destination(detail, order);
+            var collection = Collection(detail, order);
+            var temperature = detail?.Temperature;
+            var late = firstRunCreated is not null && order.CreatedAtUtc > firstRunCreated.Value.AddMinutes(15);
+            if (late) lateCount++;
+
+            destinations.Add(destination);
+            if (!matrixRows.TryGetValue(group, out var byDestination))
+                matrixRows[group] = byDestination = new Dictionary<string, CellAccumulator>(StringComparer.OrdinalIgnoreCase);
+            if (!byDestination.TryGetValue(destination, out var cell))
+                byDestination[destination] = cell = new CellAccumulator(group, destination);
+            cell.Ordered += ordered;
+            cell.Planned += planned;
+            cell.OrderIds.Add(order.Id);
+
+            totalOrdered += ordered;
+            totalPlanned += planned;
+            totalOutstanding += outstanding;
+            totalOverplanned += overplanned;
+            orderRows.Add(new
+            {
+                order.Id,
+                order.Reference,
+                order.CustomerCode,
+                order.CollectionDate,
+                order.DeliveryDate,
+                order.DeliveryWindowStartUtc,
+                order.DeliveryWindowEndUtc,
+                orderedPallets = ordered,
+                plannedPallets = planned,
+                outstandingPallets = outstanding,
+                overplannedPallets = overplanned,
+                collection,
+                destination,
+                planningGroup = group,
+                temperature,
+                source = detail?.Source,
+                receivedAtUtc = detail?.ReceivedAtUtc ?? order.CreatedAtUtc,
+                lateAddition = late,
+                allocations = allocations.Select(x => new
+                {
+                    x.LoadId,
+                    loadReference = loadById.TryGetValue(x.LoadId, out var linked) ? linked.Reference : null,
+                    pallets = x.Pallets,
+                    x.UpdatedAtUtc,
+                    x.UpdatedBy
+                }).ToList()
+            });
+        }
+
+        var orderedDestinations = destinations.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+        var cells = matrixRows.Values.SelectMany(x => x.Values).Select(cell => new
+        {
+            planningGroup = cell.Group,
+            destination = cell.Destination,
+            ordered = cell.Ordered,
+            planned = cell.Planned,
+            outstanding = Math.Max(cell.Ordered - cell.Planned, 0),
+            overplanned = Math.Max(cell.Planned - cell.Ordered, 0),
+            orderIds = cell.OrderIds
+        }).ToList();
+
+        return Ok(new
+        {
+            date,
+            generatedAtUtc = DateTimeOffset.UtcNow,
+            summary = new
+            {
+                ordered = totalOrdered,
+                planned = totalPlanned,
+                outstanding = totalOutstanding,
+                overplanned = totalOverplanned,
+                lateAdditions = lateCount,
+                orders = orderRows.Count,
+                runs = loads.Count(x => x.Status != LoadStatus.Cancelled)
+            },
+            planningGroups = matrixRows.Keys.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList(),
+            destinations = orderedDestinations,
+            cells,
+            orders = orderRows,
+            runs = loads.Where(x => x.Status != LoadStatus.Cancelled).OrderBy(x => x.Reference).Select(x => new
+            {
+                x.Id,
+                x.Reference,
+                x.Status,
+                x.PalletSpacesUsed,
+                x.TotalPalletSpaces,
+                stopCount = x.Stops.Count
+            }).ToList()
+        });
+    }
+
+    [HttpPost("allocations")]
+    [Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> Allocate([FromBody] PalletAllocationRequest request, CancellationToken ct)
+    {
+        if (request.Pallets < 0) return BadRequest(new { message = "Allocated pallets cannot be negative." });
+        var orders = await ReadOrders(request.Date, ct);
+        var order = orders.SingleOrDefault(x => x.Id == request.OrderId);
+        if (order is null) return NotFound(new { message = "The order could not be found for this planning date." });
+
+        var loads = await ReadLoads(request.Date, ct);
+        var load = loads.SingleOrDefault(x => x.Id == request.LoadId);
+        if (load is null) return NotFound(new { message = "The selected run could not be found for this planning date." });
+        if (load.Status == LoadStatus.Cancelled) return BadRequest(new { message = "Pallets cannot be allocated to a cancelled run." });
+
+        var latest = await ReadLatestAllocations(request.Date, ct);
+        latest.TryGetValue((request.OrderId, request.LoadId), out var previous);
+        var previousPallets = previous?.Pallets ?? 0;
+        var now = DateTimeOffset.UtcNow;
+        var payload = new AllocationState(request.OrderId, request.LoadId, request.Pallets, request.Date, now, User.Identity?.Name);
+        db.StagedImports.Add(new StagedImport
+        {
+            EntityType = AllocationType,
+            IdempotencyKey = $"palletallocation:{request.OrderId:N}:{request.LoadId:N}:{now:yyyyMMddHHmmssfff}:{Guid.NewGuid():N}",
+            PayloadJson = JsonSerializer.Serialize(payload, JsonOptions),
+            Source = "Pallet planning control",
+            Status = StagingStatus.Promoted,
+            ReviewedAtUtc = now,
+            ReviewedBy = User.Identity?.Name,
+            ReviewNote = $"Run pallet allocation changed from {previousPallets} to {request.Pallets}. {request.Note}".Trim()
+        });
+        await db.SaveChangesAsync(ct);
+
+        var detailMap = await ReadOrderDetails(request.Date, ct);
+        detailMap.TryGetValue(Normalise(order.Reference), out var detail);
+        await EnsureOrderOnRun(load, order, detail, ct);
+        await UpdateRunPalletTotal(load.Id, request.Date, ct);
+
+        var allLatest = await ReadLatestAllocations(request.Date, ct);
+        var totalPlanned = allLatest.Values.Where(x => x.OrderId == order.Id).Sum(x => Math.Max(x.Pallets, 0));
+        var ordered = Math.Max(order.Pallets ?? detail?.Pallets ?? 0, 0);
+        return Ok(new
+        {
+            orderId = order.Id,
+            orderReference = order.Reference,
+            loadId = load.Id,
+            loadReference = load.Reference,
+            allocatedToRun = request.Pallets,
+            plannedPallets = totalPlanned,
+            orderedPallets = ordered,
+            outstandingPallets = Math.Max(ordered - totalPlanned, 0),
+            overplannedPallets = Math.Max(totalPlanned - ordered, 0),
+            updatedAtUtc = now
+        });
+    }
+
+    private async Task<List<TransportOrder>> ReadOrders(DateOnly date, CancellationToken ct)
+    {
+        var result = new Dictionary<string, TransportOrder>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var primary = await db.TransportOrders.AsNoTracking().Where(x => x.CollectionDate == date).OrderBy(x => x.Reference).Take(2000).ToListAsync(ct);
+            foreach (var order in primary) result[order.Reference] = order;
+        }
+        catch (Exception ex) when (SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); }
+
+        var registered = await PlanningRegisterStore.ReadOrdersAsync(db, date, date, ct);
+        foreach (var order in registered)
+            if (!result.ContainsKey(order.Reference)) result[order.Reference] = order;
+        return result.Values.OrderBy(x => x.Reference, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private async Task<List<Load>> ReadLoads(DateOnly date, CancellationToken ct)
+    {
+        try
+        {
+            var primary = await db.Loads.AsNoTracking().Include(x => x.Stops).Where(x => x.PlanningDate == date).OrderBy(x => x.Reference).Take(1000).ToListAsync(ct);
+            await LoadCommercialStore.EnrichAsync(db, primary, ct);
+            var registered = await PlanningRegisterStore.ReadLoadsAsync(db, date, ct);
+            foreach (var row in registered.Where(x => primary.All(p => p.Id != x.Id))) primary.Add(row);
+            return primary;
+        }
+        catch (Exception ex) when (SchemaUnavailable(ex))
+        {
+            db.ChangeTracker.Clear();
+            return await PlanningRegisterStore.ReadLoadsAsync(db, date, ct);
+        }
+    }
+
+    private async Task<Dictionary<string, OrderDetail>> ReadOrderDetails(DateOnly date, CancellationToken ct)
+    {
+        var result = new Dictionary<string, OrderDetail>(StringComparer.OrdinalIgnoreCase);
+        var rows = await db.StagedImports.AsNoTracking()
+            .Where(x => (x.EntityType == "order" || x.EntityType == "register:order") && x.Status != StagingStatus.Rejected)
+            .OrderByDescending(x => x.ReceivedAtUtc).Take(8000).ToListAsync(ct);
+        foreach (var row in rows)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(row.PayloadJson);
+                var root = document.RootElement;
+                var reference = Text(root, "poNumber", "reference", "orderReference", "orderRef");
+                if (string.IsNullOrWhiteSpace(reference) || result.ContainsKey(Normalise(reference))) continue;
+                if (DateOnly.TryParse(Text(root, "collectionDate"), out var collectionDate) && collectionDate != date) continue;
+                var collection = Text(root, "collectionLocation", "collectionSite", "collection", "sellerName", "pickupLocation", "pickupSite");
+                var destination = Text(root, "deliveryLocation", "deliverySite", "delivery", "destination", "depot", "stallNumber");
+                var group = Text(root, "planningGroup", "palletOrderGroup", "collectionGroup");
+                var temperature = Text(root, "temperature", "temperatureC", "temp", "temperatureRequirement") ?? Tagged(Text(root, "driverInstructions", "notes"), "Temperature");
+                var pallets = Int(root, "pallets", "palletQty", "palletQuantity", "quantity");
+                result[Normalise(reference)] = new OrderDetail(reference, collection, destination, group, temperature, pallets, row.Source, row.ReceivedAtUtc);
+            }
+            catch (JsonException) { }
+        }
+        return result;
+    }
+
+    private async Task<Dictionary<(Guid OrderId, Guid LoadId), AllocationState>> ReadLatestAllocations(DateOnly date, CancellationToken ct)
+    {
+        var rows = await db.StagedImports.AsNoTracking().Where(x => x.EntityType == AllocationType && x.Status == StagingStatus.Promoted)
+            .OrderByDescending(x => x.ReceivedAtUtc).Take(20000).ToListAsync(ct);
+        var result = new Dictionary<(Guid OrderId, Guid LoadId), AllocationState>();
+        foreach (var row in rows)
+        {
+            try
+            {
+                var state = JsonSerializer.Deserialize<AllocationState>(row.PayloadJson, JsonOptions);
+                if (state is null || state.Date != date) continue;
+                var key = (state.OrderId, state.LoadId);
+                if (!result.ContainsKey(key)) result[key] = state;
+            }
+            catch (JsonException) { }
+        }
+        return result;
+    }
+
+    private async Task EnsureOrderOnRun(Load load, TransportOrder order, OrderDetail? detail, CancellationToken ct)
+    {
+        if (load.Stops.Any(x => x.OrderId == order.Id)) return;
+        var collection = Collection(detail, order);
+        var destination = Destination(detail, order);
+
+        try
+        {
+            var tracked = await db.Loads.Include(x => x.Stops).SingleOrDefaultAsync(x => x.Id == load.Id, ct);
+            if (tracked is not null)
+            {
+                if (!string.IsNullOrWhiteSpace(collection) && collection != "Collection not mapped" && !tracked.Stops.Any(x => x.Name.Contains(collection, StringComparison.OrdinalIgnoreCase)))
+                    tracked.Stops.Add(new LoadStop { LoadId = tracked.Id, Sequence = tracked.Stops.Count + 1, Name = $"Collect · {collection}" });
+                tracked.Stops.Add(new LoadStop { LoadId = tracked.Id, OrderId = order.Id, Sequence = tracked.Stops.Count + 1, Name = $"Deliver · {order.CustomerCode} · {destination}" });
+                await db.SaveChangesAsync(ct);
+                return;
+            }
+        }
+        catch (Exception ex) when (SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); }
+
+        var registered = await PlanningRegisterStore.GetLoadAsync(db, load.Id, ct);
+        if (registered is null) return;
+        if (!string.IsNullOrWhiteSpace(collection) && collection != "Collection not mapped" && !registered.Stops.Any(x => x.Name.Contains(collection, StringComparison.OrdinalIgnoreCase)))
+            registered.Stops.Add(new LoadStop { LoadId = registered.Id, Sequence = registered.Stops.Count + 1, Name = $"Collect · {collection}" });
+        registered.Stops.Add(new LoadStop { LoadId = registered.Id, OrderId = order.Id, Sequence = registered.Stops.Count + 1, Name = $"Deliver · {order.CustomerCode} · {destination}" });
+        await PlanningRegisterStore.SaveLoadAsync(db, registered, User.Identity?.Name, ct);
+    }
+
+    private async Task UpdateRunPalletTotal(Guid loadId, DateOnly date, CancellationToken ct)
+    {
+        var loads = await ReadLoads(date, ct);
+        var target = loads.SingleOrDefault(x => x.Id == loadId);
+        if (target is null) return;
+        var latest = await ReadLatestAllocations(date, ct);
+        var orders = await ReadOrders(date, ct);
+        var details = await ReadOrderDetails(date, ct);
+        var pallets = 0;
+
+        foreach (var order in orders.Where(x => x.Status != OrderStatus.Cancelled))
+        {
+            var hasExplicit = latest.Keys.Any(key => key.OrderId == order.Id);
+            if (hasExplicit)
+            {
+                if (latest.TryGetValue((order.Id, loadId), out var allocation)) pallets += Math.Max(allocation.Pallets, 0);
+                continue;
+            }
+            if (!target.Stops.Any(stop => stop.OrderId == order.Id)) continue;
+            details.TryGetValue(Normalise(order.Reference), out var detail);
+            pallets += Math.Max(order.Pallets ?? detail?.Pallets ?? 0, 0);
+        }
+
+        try
+        {
+            var load = await db.Loads.SingleOrDefaultAsync(x => x.Id == loadId, ct);
+            if (load is not null)
+            {
+                await LoadCommercialStore.EnrichAsync(db, new[] { load }, ct);
+                await LoadCommercialStore.SaveAsync(db, load, new LoadCommercialValues(load.RevenueAmount, load.FuelSurchargeAmount, load.EstimatedCostAmount,
+                    load.ActualCostAmount, load.EstimatedDistanceMiles, load.EmptyMiles, load.InvoiceStatus, load.CommercialNotes,
+                    pallets, load.TotalPalletSpaces ?? 26, load.CapacityType ?? "Standard pallets", load.DepotSplits, load.TemperatureC, load.PlannerNotes), User.Identity?.Name, ct);
+                return;
+            }
+        }
+        catch (Exception ex) when (SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); }
+        var registered = await PlanningRegisterStore.GetLoadAsync(db, loadId, ct);
+        if (registered is null) return;
+        registered.PalletSpacesUsed = pallets;
+        if (registered.TotalPalletSpaces is null) registered.TotalPalletSpaces = 26;
+        await PlanningRegisterStore.SaveLoadAsync(db, registered, User.Identity?.Name, ct);
+    }
+
+    private static string PlanningGroup(OrderDetail? detail, TransportOrder order)
+    {
+        if (!string.IsNullOrWhiteSpace(detail?.Group)) return detail.Group!;
+        var collection = Collection(detail, order);
+        var temperature = detail?.Temperature;
+        if (string.IsNullOrWhiteSpace(temperature) || collection.Contains("°", StringComparison.OrdinalIgnoreCase) || collection.Contains("temp", StringComparison.OrdinalIgnoreCase)) return collection;
+        var clean = temperature.Trim().Replace("degrees", "°", StringComparison.OrdinalIgnoreCase);
+        if (!clean.Contains("°") && decimal.TryParse(new string(clean.Where(c => char.IsDigit(c) || c is '-' or '.').ToArray()), out var number)) clean = $"{number:0.#}°C";
+        return $"{collection} ({clean})";
+    }
+
+    private static string Collection(OrderDetail? detail, TransportOrder order) =>
+        !string.IsNullOrWhiteSpace(detail?.Collection) ? detail.Collection! : !string.IsNullOrWhiteSpace(order.SellerName) ? order.SellerName! : "Collection not mapped";
+
+    private static string Destination(OrderDetail? detail, TransportOrder order)
+    {
+        if (!string.IsNullOrWhiteSpace(detail?.Destination)) return detail.Destination!;
+        if (!string.IsNullOrWhiteSpace(order.StallNumber)) return order.StallNumber!;
+        var tagged = Tagged(order.DriverInstructions, "Depot") ?? Tagged(order.DriverInstructions, "Delivery site") ?? Tagged(order.DriverInstructions, "Destination");
+        return string.IsNullOrWhiteSpace(tagged) ? "Destination not mapped" : tagged;
+    }
+
+    private static string? Tagged(string? notes, string label)
+    {
+        if (string.IsNullOrWhiteSpace(notes)) return null;
+        var prefix = $"{label}:";
+        return notes.Split('·', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim())
+            .FirstOrDefault(x => x.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))?[prefix.Length..].Trim();
+    }
+
+    private static string? Text(JsonElement root, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            foreach (var property in root.EnumerateObject())
+            {
+                if (Normalise(property.Name) != Normalise(name)) continue;
+                return property.Value.ValueKind == JsonValueKind.String ? property.Value.GetString()?.Trim() : property.Value.ValueKind is JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False ? property.Value.ToString() : null;
+            }
+        }
+        return null;
+    }
+
+    private static int? Int(JsonElement root, params string[] names) => int.TryParse(Text(root, names), out var value) ? value : null;
+    private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static bool SchemaUnavailable(Exception ex) => ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || ex.GetBaseException().Message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
+
+    private sealed record OrderDetail(string Reference, string? Collection, string? Destination, string? Group, string? Temperature, int? Pallets, string? Source, DateTimeOffset ReceivedAtUtc);
+    private sealed record AllocationState(Guid OrderId, Guid LoadId, int Pallets, DateOnly Date, DateTimeOffset UpdatedAtUtc, string? UpdatedBy);
+    public sealed record PalletAllocationRequest(Guid OrderId, Guid LoadId, DateOnly Date, int Pallets, string? Note);
+
+    private sealed class CellAccumulator(string group, string destination)
+    {
+        public string Group { get; } = group;
+        public string Destination { get; } = destination;
+        public int Ordered { get; set; }
+        public int Planned { get; set; }
+        public List<Guid> OrderIds { get; } = [];
+    }
+}
