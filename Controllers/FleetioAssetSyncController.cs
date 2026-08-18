@@ -27,11 +27,14 @@ public sealed class FleetioAssetSyncController(
             var assets = await fleetioClient.GetVehiclesAsync(100, ct);
             var vehicles = await db.Set<Vehicle>().AsNoTracking().Where(v => v.Active).ToListAsync(ct);
             var trailers = await db.Set<Trailer>().AsNoTracking().Where(t => t.Active).ToListAsync(ct);
+            var mappings = await SafeFleetioMappings(ct);
 
             var powered = assets.Where(asset => !IsTrailer(asset)).Select(asset =>
             {
+                var mappedId = MappingTarget(mappings, asset.Id, "Vehicle");
                 var registration = BestVehicleRegistration(asset);
-                var match = string.IsNullOrWhiteSpace(registration) ? null : vehicles.FirstOrDefault(v => Normalise(v.Registration) == Normalise(registration));
+                var match = mappedId is not null ? vehicles.FirstOrDefault(v => v.Id == mappedId.Value) : null;
+                match ??= string.IsNullOrWhiteSpace(registration) ? null : vehicles.FirstOrDefault(v => Normalise(v.Registration) == Normalise(registration));
                 match ??= vehicles.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v.FleetioId) && string.Equals(v.FleetioId, asset.Id, StringComparison.OrdinalIgnoreCase));
                 return new
                 {
@@ -59,15 +62,17 @@ public sealed class FleetioAssetSyncController(
 
             var trailerRows = assets.Where(IsTrailer).Select(asset =>
             {
+                var mappedId = MappingTarget(mappings, asset.Id, "Trailer");
                 var slh = asset.Name?.Trim();
                 var cNumber = asset.Registration?.Trim();
+                var mappedMatch = mappedId is not null ? trailers.FirstOrDefault(t => t.Id == mappedId.Value) : null;
                 var nameMatch = !string.IsNullOrWhiteSpace(slh)
                     ? trailers.FirstOrDefault(t => Normalise(t.TrailerNumber) == Normalise(slh))
                     : null;
                 var cMatch = !string.IsNullOrWhiteSpace(cNumber)
                     ? trailers.FirstOrDefault(t => Normalise(t.TrailerNumber) == Normalise(cNumber))
                     : null;
-                var match = nameMatch ?? cMatch;
+                var match = mappedMatch ?? nameMatch ?? cMatch;
                 return new
                 {
                     tmsTrailerId = match?.Id,
@@ -147,6 +152,7 @@ public sealed class FleetioAssetSyncController(
 
             var vehicles = await db.Set<Vehicle>().ToListAsync(ct);
             var trailers = await db.Set<Trailer>().ToListAsync(ct);
+            var mappings = await SafeFleetioMappings(ct, tracked: true);
 
             var vehiclesUpdated = 0;
             var vehiclesCreated = 0;
@@ -164,8 +170,10 @@ public sealed class FleetioAssetSyncController(
                     continue;
                 }
 
+                var mappedId = MappingTarget(mappings, asset.Id, "Vehicle");
                 var registrationKey = Normalise(registration);
-                var vehicle = vehicles.FirstOrDefault(item => Normalise(item.Registration) == registrationKey);
+                var vehicle = mappedId is not null ? vehicles.FirstOrDefault(item => item.Id == mappedId.Value) : null;
+                vehicle ??= vehicles.FirstOrDefault(item => Normalise(item.Registration) == registrationKey);
                 vehicle ??= vehicles.FirstOrDefault(item =>
                     !string.IsNullOrWhiteSpace(item.FleetioId) &&
                     string.Equals(item.FleetioId, asset.Id, StringComparison.OrdinalIgnoreCase));
@@ -200,6 +208,7 @@ public sealed class FleetioAssetSyncController(
                 vehicle.FleetioMotDueUtc = asset.MotDueUtc;
                 vehicle.FleetioServiceStatus = asset.ServiceStatus;
                 vehicle.FleetioLastSyncedUtc = DateTimeOffset.UtcNow;
+                UpsertMapping(mappings, asset.Id, asset.Name ?? registration, "Vehicle", vehicle.Id);
             }
 
             foreach (var asset in trailerAssets)
@@ -213,18 +222,25 @@ public sealed class FleetioAssetSyncController(
                     continue;
                 }
 
+                var mappedId = MappingTarget(mappings, asset.Id, "Trailer");
+                var mappedMatch = mappedId is not null ? trailers.FirstOrDefault(item => item.Id == mappedId.Value) : null;
                 var nameMatch = !string.IsNullOrWhiteSpace(fleetioName)
                     ? trailers.FirstOrDefault(item => Normalise(item.TrailerNumber) == Normalise(fleetioName))
                     : null;
                 var cMatch = !string.IsNullOrWhiteSpace(cNumber)
                     ? trailers.FirstOrDefault(item => Normalise(item.TrailerNumber) == Normalise(cNumber))
                     : null;
-                var trailer = nameMatch ?? cMatch;
+                var trailer = mappedMatch ?? nameMatch ?? cMatch;
 
                 if (nameMatch is not null && cMatch is not null && nameMatch.Id != cMatch.Id)
                 {
-                    var loadsUsingDuplicate = await db.Loads.Where(load => load.TrailerId == cMatch.Id).ToListAsync(ct);
-                    foreach (var load in loadsUsingDuplicate) load.TrailerId = nameMatch.Id;
+                    await ReassignTrailerLoads(cMatch.Id, nameMatch.Id, ct);
+                    foreach (var mapping in mappings.Where(x => x.TmsEntityType == "Trailer" && x.TmsEntityId == cMatch.Id))
+                    {
+                        mapping.TmsEntityId = nameMatch.Id;
+                        mapping.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                        mapping.UpdatedBy = User.Identity?.Name ?? "Fleetio sync";
+                    }
                     cMatch.Active = false;
                     trailer = nameMatch;
                     trailerDuplicatesMerged++;
@@ -250,6 +266,8 @@ public sealed class FleetioAssetSyncController(
                     trailer.Active = true;
                     trailersUpdated++;
                 }
+
+                UpsertMapping(mappings, asset.Id, fleetioName ?? cNumber ?? preferredTrailerNumber, "Trailer", trailer.Id);
             }
 
             await db.SaveChangesAsync(ct);
@@ -268,7 +286,7 @@ public sealed class FleetioAssetSyncController(
                 trailerDuplicatesMerged,
                 skipped,
                 syncedAtUtc = DateTimeOffset.UtcNow,
-                message = $"Fleetio sync completed: {vehiclesUpdated} vehicle(s) updated, {vehiclesCreated} vehicle(s) created, {trailersUpdated} trailer(s) updated, {trailersCreated} trailer(s) created and {trailerDuplicatesMerged} duplicate trailer identity record(s) merged."
+                message = $"Fleetio sync completed into the canonical TMS master: {vehiclesUpdated} vehicle(s) updated, {vehiclesCreated} vehicle(s) created, {trailersUpdated} trailer(s) updated, {trailersCreated} trailer(s) created and {trailerDuplicatesMerged} duplicate trailer identity record(s) consolidated."
             });
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
@@ -280,6 +298,84 @@ public sealed class FleetioAssetSyncController(
                 connected = false,
                 message = $"Fleetio asset sync failed: {exception.GetBaseException().Message}"
             });
+        }
+    }
+
+    private async Task<List<IntegrationMapping>> SafeFleetioMappings(CancellationToken ct, bool tracked = false)
+    {
+        try
+        {
+            var query = db.IntegrationMappings.Where(x => x.Active && x.Provider == "Fleetio");
+            return tracked ? await query.ToListAsync(ct) : await query.AsNoTracking().ToListAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Fleetio integration mappings are unavailable; identity matching will use registration/name fallbacks.");
+            return [];
+        }
+    }
+
+    private static Guid? MappingTarget(IEnumerable<IntegrationMapping> mappings, string fleetioId, string entityType) =>
+        mappings.FirstOrDefault(x =>
+            string.Equals(x.ExternalKey, fleetioId, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(x.TmsEntityType, entityType, StringComparison.OrdinalIgnoreCase))?.TmsEntityId;
+
+    private void UpsertMapping(List<IntegrationMapping> mappings, string fleetioId, string label, string entityType, Guid entityId)
+    {
+        var mapping = mappings.FirstOrDefault(x =>
+            string.Equals(x.ExternalKey, fleetioId, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(x.TmsEntityType, entityType, StringComparison.OrdinalIgnoreCase));
+        if (mapping is null)
+        {
+            mapping = new IntegrationMapping
+            {
+                Provider = "Fleetio",
+                ExternalKey = ClipRequired(fleetioId, 200),
+                ExternalLabel = Clip(label, 200),
+                TmsEntityType = entityType,
+                TmsEntityId = entityId,
+                Active = true,
+                UpdatedBy = User.Identity?.Name ?? "Fleetio sync"
+            };
+            db.IntegrationMappings.Add(mapping);
+            mappings.Add(mapping);
+        }
+        else
+        {
+            mapping.ExternalLabel = Clip(label, 200);
+            mapping.TmsEntityId = entityId;
+            mapping.Active = true;
+            mapping.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            mapping.UpdatedBy = User.Identity?.Name ?? "Fleetio sync";
+        }
+    }
+
+    private async Task ReassignTrailerLoads(Guid fromTrailerId, Guid toTrailerId, CancellationToken ct)
+    {
+        try
+        {
+            var loadsUsingDuplicate = await db.Loads.Where(load => load.TrailerId == fromTrailerId).ToListAsync(ct);
+            foreach (var load in loadsUsingDuplicate) load.TrailerId = toTrailerId;
+            return;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Dedicated Loads table unavailable while consolidating trailer {FromTrailer}; using planning register fallback.", fromTrailerId);
+        }
+
+        try
+        {
+            var registerLoads = await PlanningRegisterStore.ReadLoadsAsync(db, null, ct);
+            foreach (var load in registerLoads.Where(load => load.TrailerId == fromTrailerId))
+            {
+                load.TrailerId = toTrailerId;
+                await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name ?? "Fleetio trailer consolidation", ct);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Planning register could not reassign loads from duplicate trailer {FromTrailer} to {ToTrailer}; the duplicate trailer will remain active for safety.", fromTrailerId, toTrailerId);
+            throw;
         }
     }
 

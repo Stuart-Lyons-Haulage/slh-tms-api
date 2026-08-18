@@ -8,7 +8,7 @@ using Slh.Tms.Api.Services;
 namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/assistant"), Authorize]
-public sealed class PlannerEfficiencyController(TmsDbContext db) : ControllerBase
+public sealed class PlannerEfficiencyController(TmsDbContext db, ILogger<PlannerEfficiencyController> logger) : ControllerBase
 {
     [HttpGet("efficiency")]
     public async Task<IActionResult> Efficiency([FromQuery] DateOnly? date, CancellationToken ct)
@@ -16,9 +16,16 @@ public sealed class PlannerEfficiencyController(TmsDbContext db) : ControllerBas
         var planningDate = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
         var previousDate = planningDate.AddDays(-1);
 
-        var drivers = await db.Drivers.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
-        var sites = await db.Sites.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
-        await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
+        var drivers = await SafeRead(db.Drivers.AsNoTracking().Where(x => x.Active), "drivers", ct);
+        var sites = await SafeRead(db.Sites.AsNoTracking().Where(x => x.Active), "sites", ct);
+        if (sites.Count > 0)
+        {
+            try { await MasterDetailStore.EnrichSitesAsync(db, sites, ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Assistant efficiency site enrichment was unavailable; base site records will be used.");
+            }
+        }
 
         var previousLoads = await SafeLoads(previousDate, ct);
         var todayLoads = await SafeLoads(planningDate, ct);
@@ -114,6 +121,17 @@ public sealed class PlannerEfficiencyController(TmsDbContext db) : ControllerBas
         });
     }
 
+    private async Task<List<T>> SafeRead<T>(IQueryable<T> query, string area, CancellationToken ct)
+    {
+        try { return await query.ToListAsync(ct); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Assistant efficiency skipped unavailable {Area} data.", area);
+            db.ChangeTracker.Clear();
+            return [];
+        }
+    }
+
     private async Task<List<Load>> SafeLoads(DateOnly date, CancellationToken ct)
     {
         try
@@ -123,8 +141,17 @@ public sealed class PlannerEfficiencyController(TmsDbContext db) : ControllerBas
                 .OrderBy(x => x.Reference).ToListAsync(ct);
             if (loads.Count > 0) return loads;
         }
-        catch { }
-        return await PlanningRegisterStore.ReadLoadsAsync(db, date, ct);
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Assistant efficiency primary load table unavailable; using planning register.");
+            db.ChangeTracker.Clear();
+        }
+        try { return await PlanningRegisterStore.ReadLoadsAsync(db, date, ct); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Assistant efficiency planning-register load fallback unavailable.");
+            return [];
+        }
     }
 
     private async Task<List<TransportOrder>> SafeOrders(DateOnly date, CancellationToken ct)
@@ -136,8 +163,17 @@ public sealed class PlannerEfficiencyController(TmsDbContext db) : ControllerBas
                 .OrderBy(x => x.Reference).ToListAsync(ct);
             if (orders.Count > 0) return orders;
         }
-        catch { }
-        return await PlanningRegisterStore.ReadOrdersAsync(db, date, date, ct);
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Assistant efficiency primary order table unavailable; using planning register.");
+            db.ChangeTracker.Clear();
+        }
+        try { return await PlanningRegisterStore.ReadOrdersAsync(db, date, date, ct); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Assistant efficiency planning-register order fallback unavailable.");
+            return [];
+        }
     }
 
     private static Site? FindSite(IEnumerable<Site> sites, string? value)
