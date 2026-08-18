@@ -77,9 +77,6 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
             .Select(group => group.First())
             .ToList();
 
-        // Fleetio keeps preventative-maintenance and statutory renewal dates in
-        // reminder resources rather than guaranteeing them on the Vehicle object.
-        // Enrich the basic asset list from those feeds where available.
         try
         {
             var due = await GetDueDatesAsync(ct);
@@ -100,6 +97,71 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
         }
 
         return vehiclesById;
+    }
+
+    public async Task<FleetioMaintenanceSnapshot> GetMaintenanceSnapshotAsync(string vehicleId, CancellationToken ct)
+    {
+        if (!IsConfigured) throw new InvalidOperationException("Fleetio runtime settings are incomplete.");
+        if (string.IsNullOrWhiteSpace(vehicleId)) throw new ArgumentException("Fleetio vehicle ID is required.", nameof(vehicleId));
+
+        var escaped = Uri.EscapeDataString(vehicleId.Trim());
+        var issuesTask = SafeReadAsync($"vehicles/{escaped}/issues", "issues", ct);
+        var inspectionsTask = SafeReadAsync($"submitted_inspection_forms?filter[vehicle_id][eq]={escaped}&sort[submitted_at]=desc", "submitted inspections", ct);
+        var workOrdersTask = SafeReadAsync($"work_orders?filter[vehicle_id][eq]={escaped}", "work orders", ct);
+        await Task.WhenAll(issuesTask, inspectionsTask, workOrdersTask);
+
+        var openIssues = issuesTask.Result
+            .Where(item => !IsClosedState(FirstText(item, "state")))
+            .OrderByDescending(item => FirstDate(item, "reported_at", "created_at"))
+            .Take(10)
+            .Select(item => new FleetioIssue(
+                FirstText(item, "id") ?? string.Empty,
+                FirstText(item, "number"),
+                FirstText(item, "name", "summary") ?? "Fleetio issue",
+                FirstText(item, "state"),
+                FirstDate(item, "reported_at", "created_at"),
+                FirstDate(item, "due_date")))
+            .ToList();
+
+        var activeWorkOrders = workOrdersTask.Result
+            .Where(item => !IsCompletedWorkOrder(item))
+            .OrderByDescending(item => FirstDate(item, "issued_at", "created_at"))
+            .Take(10)
+            .Select(item => new FleetioWorkOrder(
+                FirstText(item, "id") ?? string.Empty,
+                FirstText(item, "number"),
+                FirstText(item, "work_order_status_name", "status_name", "state"),
+                FirstText(item, "description"),
+                FirstDate(item, "issued_at", "created_at"),
+                FirstDate(item, "expected_completed_at", "scheduled_at")))
+            .ToList();
+
+        var latestInspectionElement = inspectionsTask.Result
+            .OrderByDescending(item => FirstDate(item, "submitted_at", "created_at"))
+            .FirstOrDefault();
+        FleetioInspection? latestInspection = latestInspectionElement.ValueKind == JsonValueKind.Undefined
+            ? null
+            : new FleetioInspection(
+                FirstText(latestInspectionElement, "id") ?? string.Empty,
+                NestedText(latestInspectionElement, "inspection_form", "title") ?? FirstText(latestInspectionElement, "inspection_form_title") ?? "Inspection",
+                FirstDate(latestInspectionElement, "submitted_at", "created_at"),
+                FirstInt(latestInspectionElement, "failed_items"),
+                NestedText(latestInspectionElement, "user", "name") ?? FirstText(latestInspectionElement, "user"));
+
+        return new FleetioMaintenanceSnapshot(vehicleId, openIssues, activeWorkOrders, latestInspection, DateTimeOffset.UtcNow);
+    }
+
+    private async Task<List<JsonElement>> SafeReadAsync(string resource, string label, CancellationToken ct)
+    {
+        try
+        {
+            return await ReadPagedRecordsAsync(resource, ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Fleetio {Label} could not be loaded for maintenance detail.", label);
+            return [];
+        }
     }
 
     public async Task<IReadOnlyDictionary<string, FleetioDueDates>> GetDueDatesAsync(CancellationToken ct)
@@ -152,7 +214,8 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
         var seen = new HashSet<string>(StringComparer.Ordinal);
         for (var page = 0; page < 100; page++)
         {
-            var path = $"{resource}?per_page=100";
+            var separator = resource.Contains('?') ? "&" : "?";
+            var path = $"{resource}{separator}per_page=100";
             if (!string.IsNullOrWhiteSpace(cursor)) path += $"&start_cursor={Uri.EscapeDataString(cursor)}";
             using var request = CreateRequest(path);
             using var response = await httpClient.SendAsync(request, ct);
@@ -199,7 +262,36 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
         var pmi = FirstDate(element, "pmi_due", "pmiDue", "next_pmi", "nextPmi", "service_due", "serviceDue", "next_service_due");
         var mot = FirstDate(element, "mot_due", "motDue", "next_mot", "nextMot", "inspection_due", "inspectionDue", "annual_inspection_due");
         var serviceStatus = FirstText(element, "service_status", "serviceStatus", "maintenance_status", "maintenanceStatus");
-        return new FleetioVehicle(FirstText(element, "id") ?? string.Empty, registration, name, fleetNumber, vin, status, type, vor, pmi, mot, serviceStatus);
+        return new FleetioVehicle(
+            FirstText(element, "id") ?? string.Empty,
+            registration,
+            name,
+            fleetNumber,
+            vin,
+            status,
+            type,
+            vor,
+            pmi,
+            mot,
+            serviceStatus,
+            FirstInt(element, "year"),
+            FirstText(element, "make"),
+            FirstText(element, "model"),
+            FirstText(element, "trim"),
+            FirstInt(element, "issues_count", "issuesCount"),
+            FirstInt(element, "work_orders_count", "workOrdersCount"),
+            FirstText(element, "primary_meter_value", "primaryMeterValue"),
+            FirstText(element, "primary_meter_unit", "primaryMeterUnit"));
+    }
+
+    private static bool IsClosedState(string? value) => value?.Trim().ToLowerInvariant() is "closed" or "resolved" or "completed";
+
+    private static bool IsCompletedWorkOrder(JsonElement item)
+    {
+        var state = FirstText(item, "state");
+        if (state?.Equals("completed", StringComparison.OrdinalIgnoreCase) == true) return true;
+        var completedAt = FirstDate(item, "completed_at");
+        return completedAt is not null;
     }
 
     private static string? NestedText(JsonElement element, string objectName, string propertyName)
@@ -216,6 +308,12 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
             if (TryFindProperty(element, name, out var value) && value.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined)
                 return value.ToString().Trim();
         return null;
+    }
+
+    private static int? FirstInt(JsonElement element, params string[] names)
+    {
+        var value = FirstText(element, names);
+        return int.TryParse(value, out var parsed) ? parsed : null;
     }
 
     private static bool? FirstBool(JsonElement element, params string[] names)
@@ -276,4 +374,16 @@ public sealed record FleetioVehicle(
     bool? Vor,
     DateTimeOffset? PmiDueUtc,
     DateTimeOffset? MotDueUtc,
-    string? ServiceStatus);
+    string? ServiceStatus,
+    int? Year,
+    string? Make,
+    string? Model,
+    string? Trim,
+    int? IssuesCount,
+    int? WorkOrdersCount,
+    string? PrimaryMeterValue,
+    string? PrimaryMeterUnit);
+public sealed record FleetioIssue(string Id, string? Number, string Name, string? State, DateTimeOffset? ReportedAtUtc, DateTimeOffset? DueAtUtc);
+public sealed record FleetioWorkOrder(string Id, string? Number, string? Status, string? Description, DateTimeOffset? IssuedAtUtc, DateTimeOffset? ExpectedCompletedAtUtc);
+public sealed record FleetioInspection(string Id, string Title, DateTimeOffset? SubmittedAtUtc, int? FailedItems, string? SubmittedBy);
+public sealed record FleetioMaintenanceSnapshot(string FleetioId, IReadOnlyList<FleetioIssue> OpenIssues, IReadOnlyList<FleetioWorkOrder> ActiveWorkOrders, FleetioInspection? LatestInspection, DateTimeOffset RetrievedAtUtc);
