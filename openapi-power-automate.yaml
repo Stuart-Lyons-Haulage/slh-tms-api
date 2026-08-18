@@ -1,8 +1,8 @@
 swagger: '2.0'
 info:
   title: SLH TMS API
-  version: '1.1'
-host: REPLACE_WITH_APP.azurewebsites.net
+  version: '1.2'
+host: slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
 basePath: /api/v1
 schemes: [https]
 produces: [application/json]
@@ -119,15 +119,36 @@ paths:
   /order-intake/email:
     post:
       operationId: IntakeInfoMailboxEmail
-      summary: Parse an Info mailbox email and stage identified orders for approval
+      summary: Parse one complete Info mailbox email and stage identified orders for review
       parameters:
         - name: body
           in: body
           required: true
           schema: { $ref: '#/definitions/MailboxEmailIntakeRequest' }
       responses:
-        '202': { description: Email parsed and orders staged }
+        '202': { description: Email parsed and one or more orders staged }
         '200': { description: Email ignored or previously processed }
+  /customer-communications/pending:
+    get:
+      operationId: GetPendingCustomerAcknowledgements
+      summary: Get customer acknowledgements due after Order Review acceptance
+      parameters:
+        - { name: take, in: query, type: integer, required: false, default: 50, maximum: 200 }
+      responses:
+        '200': { description: Pending consolidated acknowledgements }
+  /customer-communications/{communicationKey}/sent:
+    post:
+      operationId: MarkCustomerAcknowledgementSent
+      summary: Mark an acknowledgement sent only after Outlook reply succeeds
+      parameters:
+        - { name: communicationKey, in: path, required: true, type: string }
+        - name: body
+          in: body
+          required: true
+          schema: { $ref: '#/definitions/CommunicationSentRequest' }
+      responses:
+        '200': { description: Communication marked sent idempotently }
+        '404': { description: Communication source not found }
   /planning-day/{date}/reset-preview:
     get:
       operationId: PreviewPlanningDayReset
@@ -192,6 +213,10 @@ definitions:
       attachments:
         type: array
         items: { $ref: '#/definitions/MailboxAttachmentRequest' }
+  CommunicationSentRequest:
+    type: object
+    properties:
+      providerMessageId: { type: string, description: Outlook reply/result message ID returned after a successful send }
   Customer:
     type: object
     properties: { id: { type: string, format: uuid }, code: { type: string }, name: { type: string }, active: { type: boolean } }
