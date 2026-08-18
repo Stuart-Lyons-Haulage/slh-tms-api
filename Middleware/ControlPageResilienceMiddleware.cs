@@ -1,15 +1,11 @@
 namespace Slh.Tms.Api.Middleware;
 
 /// <summary>
-/// Last-resort resilience for read-only control/reporting screens. These routes
-/// aggregate several pilot datasets and must never make the operational portal
-/// unusable because one reporting query or optional schema element is unhealthy.
-/// Authentication/authorization runs before this middleware; write routes are
-/// deliberately excluded.
+/// Compatible fallback payloads for read-only operational intelligence routes.
+/// The original exception is logged with a trace ID; authentication and write
+/// operations are never bypassed.
 /// </summary>
-public sealed class ControlPageResilienceMiddleware(
-    RequestDelegate next,
-    ILogger<ControlPageResilienceMiddleware> logger)
+internal static class ControlPageFallback
 {
     private static readonly HashSet<string> ProtectedGetPaths = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -21,40 +17,26 @@ public sealed class ControlPageResilienceMiddleware(
         "/api/v1/management/eta-precision"
     };
 
-    public async Task InvokeAsync(HttpContext context)
+    public static bool IsProtectedGet(HttpRequest request) =>
+        HttpMethods.IsGet(request.Method) && ProtectedGetPaths.Contains(request.Path.Value ?? string.Empty);
+
+    public static async Task WriteAsync(HttpContext context, Exception exception)
     {
-        if (!HttpMethods.IsGet(context.Request.Method) || !ProtectedGetPaths.Contains(context.Request.Path.Value ?? string.Empty))
-        {
-            await next(context);
-            return;
-        }
+        if (context.Response.HasStarted) throw exception;
 
-        try
-        {
-            await next(context);
-        }
-        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            if (context.Response.HasStarted) throw;
+        var logger = context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("Tms.ControlPageResilience");
+        logger.LogError(exception,
+            "Control page query failed for {Path}. Returning degraded operational response. Trace {TraceId}",
+            context.Request.Path, context.TraceIdentifier);
 
-            logger.LogError(ex,
-                "Control page query failed for {Path}. Returning a degraded operational response. Trace {TraceId}",
-                context.Request.Path, context.TraceIdentifier);
-
-            context.Response.Clear();
-            context.Response.StatusCode = StatusCodes.Status200OK;
-            context.Response.Headers["X-SLH-Degraded"] = "true";
-            context.Response.Headers["X-SLH-Trace"] = context.TraceIdentifier;
-
-            await context.Response.WriteAsJsonAsync(BuildFallback(context), context.RequestAborted);
-        }
+        context.Response.Clear();
+        context.Response.StatusCode = StatusCodes.Status200OK;
+        context.Response.Headers["X-SLH-Degraded"] = "true";
+        context.Response.Headers["X-SLH-Trace"] = context.TraceIdentifier;
+        await context.Response.WriteAsJsonAsync(Build(context), context.RequestAborted);
     }
 
-    private static object BuildFallback(HttpContext context)
+    private static object Build(HttpContext context)
     {
         var path = context.Request.Path.Value ?? string.Empty;
         var now = DateTimeOffset.UtcNow;
