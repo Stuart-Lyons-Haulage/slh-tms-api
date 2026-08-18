@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -12,27 +13,299 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class OperationalMasterDataController(TmsDbContext db) : ControllerBase
 {
     [HttpGet("drivers/search")]
-    public async Task<IActionResult> SearchDrivers([FromQuery] string q, CancellationToken ct)
+    public async Task<IActionResult> SearchDrivers([FromQuery] string? q, [FromQuery] bool includeInactive, CancellationToken ct)
     {
-        q ??= string.Empty;
-        var result = await db.Drivers
-            .Where(x => x.Active && x.DisplayName.Contains(q))
-            .OrderBy(x => x.DisplayName)
-            .Take(25)
-            .Select(x => new { x.Id, x.DisplayName, x.EmployeeNumber, x.TachoName, x.Active })
-            .ToListAsync(ct);
+        q = (q ?? string.Empty).Trim();
+        var query = db.Drivers.AsNoTracking().Where(x => includeInactive || x.Active);
+        if (q.Length > 0)
+            query = query.Where(x => x.DisplayName.Contains(q) || x.EmployeeNumber.Contains(q) || (x.TachoName != null && x.TachoName.Contains(q)));
+
+        var result = await query.OrderBy(x => x.DisplayName).Take(50)
+            .Select(x => new
+            {
+                x.Id, x.DisplayName, x.EmployeeNumber, x.TachoName, x.MobileNumber,
+                x.DriverType, x.DriverGroup, x.Skills, x.Active,
+                x.TachoDriveAvailableTodayMinutes, x.TachoDriveAvailableWeekMinutes,
+                x.TachoWorkAvailableWeekMinutes, x.LastTachoSyncUtc
+            }).ToListAsync(ct);
         return Ok(result);
     }
 
-    [HttpPost("drivers/{id:guid}/archive")]
-    [Authorize(Policy = "TmsApprove")]
-    public async Task<IActionResult> ArchiveDriver(Guid id, CancellationToken ct)
+    [HttpGet("drivers/{id:guid}")]
+    public async Task<IActionResult> GetDriver(Guid id, CancellationToken ct)
+    {
+        var driver = await db.Drivers.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, ct);
+        return driver is null ? NotFound() : Ok(driver);
+    }
+
+    [HttpPut("drivers/{id:guid}"), Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> UpdateDriver(Guid id, DriverUpdateRequest request, CancellationToken ct)
     {
         var driver = await db.Drivers.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (driver is null) return NotFound();
-        driver.Active = false;
-        db.Add(new MasterDataAudit { EntityType = "Driver", EntityId = id, Action = "Archive", ChangedBy = User.Identity?.Name });
-        await db.SaveChangesAsync(ct);
-        return Ok(new { archived = true });
+        var before = Snapshot(driver);
+        driver.DisplayName = CleanRequired(request.DisplayName, driver.DisplayName);
+        driver.EmployeeNumber = CleanRequired(request.EmployeeNumber, driver.EmployeeNumber);
+        driver.TachoName = Clean(request.TachoName);
+        driver.MobileNumber = Clean(request.MobileNumber);
+        driver.DriverType = Clean(request.DriverType);
+        driver.DriverGroup = Clean(request.DriverGroup);
+        driver.Skills = Clean(request.Skills);
+        await Audit("Driver", id, "Updated", before, Snapshot(driver), ct);
+        return Ok(driver);
     }
+
+    [HttpPost("drivers/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
+    public Task<IActionResult> ArchiveDriver(Guid id, CancellationToken ct) => SetDriverActive(id, false, ct);
+
+    [HttpPost("drivers/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
+    public Task<IActionResult> RestoreDriver(Guid id, CancellationToken ct) => SetDriverActive(id, true, ct);
+
+    [HttpGet("vehicles/search")]
+    public async Task<IActionResult> SearchVehicles([FromQuery] string? q, [FromQuery] bool includeInactive, CancellationToken ct)
+    {
+        q = NormalizeReg(q ?? string.Empty);
+        var query = db.Vehicles.AsNoTracking().Where(x => includeInactive || x.Active);
+        if (q.Length > 0)
+            query = query.Where(x => x.Registration.Replace(" ", "").Contains(q) || (x.Abbreviation != null && x.Abbreviation.Contains(q)) || (x.FleetNumber != null && x.FleetNumber.Contains(q)));
+
+        var vehicles = await query.OrderBy(x => x.Registration).Take(50).ToListAsync(ct);
+        var identifiers = vehicles.SelectMany(v => new[] { NormalizeReg(v.Registration), NormalizeReg(v.Abbreviation ?? string.Empty) }).Where(x => x.Length > 0).Distinct().ToList();
+        var live = await db.VehicleLiveStatuses.AsNoTracking().Where(x => identifiers.Contains(x.VehicleIdentifier.Replace(" ", "").ToUpper())).ToListAsync(ct);
+        var result = vehicles.Select(v =>
+        {
+            var status = live.OrderByDescending(x => x.LastEventTimeUtc).FirstOrDefault(x => NormalizeReg(x.VehicleIdentifier) == NormalizeReg(v.Registration) || NormalizeReg(x.VehicleIdentifier) == NormalizeReg(v.Abbreviation ?? string.Empty));
+            return new
+            {
+                v.Id, v.Registration, v.FleetNumber, v.Abbreviation, v.Transmission, v.Active, v.FleetioStatus,
+                lastLocation = status is null ? null : new { status.Latitude, status.Longitude, status.LastEventTimeUtc, status.IsMoving, status.LastKnownStatus }
+            };
+        });
+        return Ok(result);
+    }
+
+    [HttpGet("vehicles/{id:guid}")]
+    public async Task<IActionResult> GetVehicle(Guid id, CancellationToken ct)
+    {
+        var vehicle = await db.Vehicles.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (vehicle is null) return NotFound();
+        var reg = NormalizeReg(vehicle.Registration);
+        var abbreviation = NormalizeReg(vehicle.Abbreviation ?? string.Empty);
+        var live = await db.VehicleLiveStatuses.AsNoTracking()
+            .Where(x => x.VehicleIdentifier.Replace(" ", "").ToUpper() == reg || (abbreviation.Length > 0 && x.VehicleIdentifier.Replace(" ", "").ToUpper() == abbreviation))
+            .OrderByDescending(x => x.LastEventTimeUtc).FirstOrDefaultAsync(ct);
+        var lastLoad = await db.Loads.AsNoTracking().Where(x => x.VehicleId == id).OrderByDescending(x => x.PlanningDate).ThenByDescending(x => x.CreatedAtUtc).Select(x => new { x.Id, x.Reference, x.PlanningDate, x.DriverId, x.TrailerId, x.Status }).FirstOrDefaultAsync(ct);
+        return Ok(new { vehicle, live, lastLoad });
+    }
+
+    [HttpPut("vehicles/{id:guid}"), Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> UpdateVehicle(Guid id, VehicleUpdateRequest request, CancellationToken ct)
+    {
+        var vehicle = await db.Vehicles.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (vehicle is null) return NotFound();
+        var before = Snapshot(vehicle);
+        vehicle.Registration = CleanRequired(request.Registration, vehicle.Registration).ToUpperInvariant();
+        vehicle.FleetNumber = Clean(request.FleetNumber);
+        vehicle.Abbreviation = Clean(request.Abbreviation)?.ToUpperInvariant();
+        vehicle.Transmission = Clean(request.Transmission);
+        vehicle.DvsCompliant = request.DvsCompliant;
+        vehicle.CabMobile = Clean(request.CabMobile);
+        vehicle.Notes = Clean(request.Notes);
+        vehicle.FleetioId = Clean(request.FleetioId);
+        vehicle.FleetioName = Clean(request.FleetioName);
+        await Audit("Vehicle", id, "Updated", before, Snapshot(vehicle), ct);
+        return Ok(vehicle);
+    }
+
+    [HttpPost("vehicles/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
+    public Task<IActionResult> ArchiveVehicle(Guid id, CancellationToken ct) => SetVehicleActive(id, false, ct);
+
+    [HttpPost("vehicles/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
+    public Task<IActionResult> RestoreVehicle(Guid id, CancellationToken ct) => SetVehicleActive(id, true, ct);
+
+    [HttpGet("trailers/search")]
+    public async Task<IActionResult> SearchTrailers([FromQuery] string? q, [FromQuery] bool includeInactive, CancellationToken ct)
+    {
+        q = (q ?? string.Empty).Trim();
+        var query = db.Trailers.AsNoTracking().Where(x => includeInactive || x.Active);
+        if (q.Length > 0) query = query.Where(x => x.TrailerNumber.Contains(q) || (x.Type != null && x.Type.Contains(q)));
+        return Ok(await query.OrderBy(x => x.TrailerNumber).Take(50).ToListAsync(ct));
+    }
+
+    [HttpPut("trailers/{id:guid}"), Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> UpdateTrailer(Guid id, TrailerUpdateRequest request, CancellationToken ct)
+    {
+        var trailer = await db.Trailers.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (trailer is null) return NotFound();
+        var before = Snapshot(trailer);
+        trailer.TrailerNumber = CleanRequired(request.TrailerNumber, trailer.TrailerNumber);
+        trailer.Type = Clean(request.Type);
+        trailer.StandardCapacity = request.StandardCapacity;
+        trailer.EuroCapacity = request.EuroCapacity;
+        await Audit("Trailer", id, "Updated", before, Snapshot(trailer), ct);
+        return Ok(trailer);
+    }
+
+    [HttpPost("trailers/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
+    public Task<IActionResult> ArchiveTrailer(Guid id, CancellationToken ct) => SetActive(db.Trailers, id, false, "Trailer", x => x.Id, x => x.Active, (x, v) => x.Active = v, ct);
+
+    [HttpPost("trailers/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
+    public Task<IActionResult> RestoreTrailer(Guid id, CancellationToken ct) => SetActive(db.Trailers, id, true, "Trailer", x => x.Id, x => x.Active, (x, v) => x.Active = v, ct);
+
+    [HttpGet("sites/search")]
+    public async Task<IActionResult> SearchSites([FromQuery] string? q, [FromQuery] bool includeInactive, CancellationToken ct)
+    {
+        q = (q ?? string.Empty).Trim();
+        var query = db.Sites.AsNoTracking().Where(x => includeInactive || x.Active);
+        if (q.Length > 0) query = query.Where(x => x.Name.Contains(q) || x.ExternalCode.Contains(q) || (x.DriverTextName != null && x.DriverTextName.Contains(q)));
+        return Ok(await query.OrderBy(x => x.Name).Take(100).ToListAsync(ct));
+    }
+
+    [HttpPut("sites/{id:guid}"), Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> UpdateSite(Guid id, SiteUpdateRequest request, CancellationToken ct)
+    {
+        var site = await db.Sites.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (site is null) return NotFound();
+        var before = Snapshot(site);
+        site.ExternalCode = CleanRequired(request.ExternalCode, site.ExternalCode);
+        site.Name = CleanRequired(request.Name, site.Name);
+        site.DriverTextName = Clean(request.DriverTextName);
+        site.CollectionAddress = Clean(request.CollectionAddress);
+        site.CollectionInstructions = Clean(request.CollectionInstructions);
+        site.MapLink = Clean(request.MapLink);
+        await Audit("Site", id, "Updated", before, Snapshot(site), ct);
+        return Ok(site);
+    }
+
+    [HttpPost("sites/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
+    public Task<IActionResult> ArchiveSite(Guid id, CancellationToken ct) => SetActive(db.Sites, id, false, "Site", x => x.Id, x => x.Active, (x, v) => x.Active = v, ct);
+
+    [HttpPost("sites/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
+    public Task<IActionResult> RestoreSite(Guid id, CancellationToken ct) => SetActive(db.Sites, id, true, "Site", x => x.Id, x => x.Active, (x, v) => x.Active = v, ct);
+
+    [HttpGet("customers/search")]
+    public async Task<IActionResult> SearchCustomers([FromQuery] string? q, [FromQuery] bool includeInactive, CancellationToken ct)
+    {
+        q = (q ?? string.Empty).Trim();
+        var query = db.Customers.AsNoTracking().Where(x => includeInactive || x.Active);
+        if (q.Length > 0) query = query.Where(x => x.Name.Contains(q) || x.Code.Contains(q));
+        return Ok(await query.OrderBy(x => x.Name).Take(100).ToListAsync(ct));
+    }
+
+    [HttpPut("customers/{id:guid}"), Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> UpdateCustomer(Guid id, CustomerUpdateRequest request, CancellationToken ct)
+    {
+        var customer = await db.Customers.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (customer is null) return NotFound();
+        var before = Snapshot(customer);
+        customer.Code = CleanRequired(request.Code, customer.Code);
+        customer.Name = CleanRequired(request.Name, customer.Name);
+        await Audit("Customer", id, "Updated", before, Snapshot(customer), ct);
+        return Ok(customer);
+    }
+
+    [HttpPost("customers/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
+    public Task<IActionResult> ArchiveCustomer(Guid id, CancellationToken ct) => SetActive(db.Customers, id, false, "Customer", x => x.Id, x => x.Active, (x, v) => x.Active = v, ct);
+
+    [HttpPost("customers/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
+    public Task<IActionResult> RestoreCustomer(Guid id, CancellationToken ct) => SetActive(db.Customers, id, true, "Customer", x => x.Id, x => x.Active, (x, v) => x.Active = v, ct);
+
+    [HttpGet("geofences/search")]
+    public async Task<IActionResult> SearchGeofences([FromQuery] string? q, [FromQuery] bool includeInactive, CancellationToken ct)
+    {
+        q = (q ?? string.Empty).Trim();
+        var query = db.SiteGeofences.AsNoTracking().Where(x => includeInactive || x.Active);
+        if (q.Length > 0) query = query.Where(x => x.Name.Contains(q) || (x.SiteNumber != null && x.SiteNumber.Contains(q)) || (x.Category != null && x.Category.Contains(q)));
+        return Ok(await query.OrderBy(x => x.Name).Take(100).ToListAsync(ct));
+    }
+
+    [HttpPut("geofences/{id:guid}"), Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> UpdateGeofence(Guid id, GeofenceUpdateRequest request, CancellationToken ct)
+    {
+        var item = await db.SiteGeofences.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (item is null) return NotFound();
+        var before = Snapshot(item);
+        item.Name = CleanRequired(request.Name, item.Name);
+        item.NormalizedName = NormalizeName(item.Name);
+        item.Category = Clean(request.Category);
+        item.CategoryMaxWaitMinutes = request.CategoryMaxWaitMinutes;
+        item.MaxWaitMinutes = request.MaxWaitMinutes;
+        item.PendingEntryMinutes = Math.Max(0, request.PendingEntryMinutes);
+        item.PendingExitMinutes = Math.Max(0, request.PendingExitMinutes);
+        item.SiteNumber = Clean(request.SiteNumber);
+        item.SiteId = request.SiteId;
+        if (!string.IsNullOrWhiteSpace(request.PolygonJson)) item.PolygonJson = request.PolygonJson.Trim();
+        item.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await Audit("Geofence", id, "Updated", before, Snapshot(item), ct);
+        return Ok(item);
+    }
+
+    [HttpPost("geofences/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
+    public Task<IActionResult> ArchiveGeofence(Guid id, CancellationToken ct) => SetActive(db.SiteGeofences, id, false, "Geofence", x => x.Id, x => x.Active, (x, v) => { x.Active = v; x.UpdatedAtUtc = DateTimeOffset.UtcNow; }, ct);
+
+    [HttpPost("geofences/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
+    public Task<IActionResult> RestoreGeofence(Guid id, CancellationToken ct) => SetActive(db.SiteGeofences, id, true, "Geofence", x => x.Id, x => x.Active, (x, v) => { x.Active = v; x.UpdatedAtUtc = DateTimeOffset.UtcNow; }, ct);
+
+    [HttpGet("audit/{entityType}/{entityId:guid}")]
+    public async Task<IActionResult> AuditHistory(string entityType, Guid entityId, CancellationToken ct)
+        => Ok(await db.MasterDataAudits.AsNoTracking().Where(x => x.EntityType == entityType && x.EntityId == entityId).OrderByDescending(x => x.ChangedAtUtc).Take(200).ToListAsync(ct));
+
+    private async Task<IActionResult> SetDriverActive(Guid id, bool active, CancellationToken ct)
+    {
+        var driver = await db.Drivers.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (driver is null) return NotFound();
+        if (driver.Active == active) return Ok(new { active });
+        var before = Snapshot(driver);
+        driver.Active = active;
+        await Audit("Driver", id, active ? "Restored" : "Archived", before, Snapshot(driver), ct);
+        return Ok(new { active });
+    }
+
+    private async Task<IActionResult> SetVehicleActive(Guid id, bool active, CancellationToken ct)
+    {
+        var vehicle = await db.Vehicles.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (vehicle is null) return NotFound();
+        if (vehicle.Active == active) return Ok(new { active });
+        var before = Snapshot(vehicle);
+        vehicle.Active = active;
+        await Audit("Vehicle", id, active ? "Restored" : "Archived", before, Snapshot(vehicle), ct);
+        return Ok(new { active });
+    }
+
+    private async Task<IActionResult> SetActive<TEntity>(DbSet<TEntity> set, Guid id, bool active, string entityType, Func<TEntity, Guid> idGetter, Func<TEntity, bool> activeGetter, Action<TEntity, bool> activeSetter, CancellationToken ct) where TEntity : class
+    {
+        var item = await set.FirstOrDefaultAsync(x => idGetter(x) == id, ct);
+        if (item is null) return NotFound();
+        if (activeGetter(item) == active) return Ok(new { active });
+        var before = Snapshot(item);
+        activeSetter(item, active);
+        await Audit(entityType, id, active ? "Restored" : "Archived", before, Snapshot(item), ct);
+        return Ok(new { active });
+    }
+
+    private async Task Audit(string entityType, Guid entityId, string action, string before, string after, CancellationToken ct)
+    {
+        db.MasterDataAudits.Add(new MasterDataAudit
+        {
+            EntityType = entityType,
+            EntityId = entityId,
+            Action = action,
+            ChangesJson = JsonSerializer.Serialize(new { before = JsonDocument.Parse(before).RootElement, after = JsonDocument.Parse(after).RootElement }),
+            ChangedBy = User.Identity?.Name ?? User.FindFirst("preferred_username")?.Value ?? "unknown"
+        });
+        await db.SaveChangesAsync(ct);
+    }
+
+    private static string Snapshot<T>(T value) => JsonSerializer.Serialize(value);
+    private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    private static string CleanRequired(string? value, string fallback) => string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+    private static string NormalizeReg(string value) => value.Replace(" ", string.Empty).Replace("-", string.Empty).Trim().ToUpperInvariant();
+    private static string NormalizeName(string value) => string.Join(' ', value.Trim().ToUpperInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries));
 }
+
+public sealed record DriverUpdateRequest(string? DisplayName, string? EmployeeNumber, string? TachoName, string? MobileNumber, string? DriverType, string? DriverGroup, string? Skills);
+public sealed record VehicleUpdateRequest(string? Registration, string? FleetNumber, string? Abbreviation, string? Transmission, bool? DvsCompliant, string? CabMobile, string? Notes, string? FleetioId, string? FleetioName);
+public sealed record TrailerUpdateRequest(string? TrailerNumber, string? Type, int? StandardCapacity, int? EuroCapacity);
+public sealed record SiteUpdateRequest(string? ExternalCode, string? Name, string? DriverTextName, string? CollectionAddress, string? CollectionInstructions, string? MapLink);
+public sealed record CustomerUpdateRequest(string? Code, string? Name);
+public sealed record GeofenceUpdateRequest(string? Name, string? Category, int? CategoryMaxWaitMinutes, int? MaxWaitMinutes, int PendingEntryMinutes, int PendingExitMinutes, string? SiteNumber, Guid? SiteId, string? PolygonJson);
