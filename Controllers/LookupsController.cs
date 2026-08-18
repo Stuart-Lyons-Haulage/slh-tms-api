@@ -39,10 +39,9 @@ public sealed class LookupsController(TmsDbContext db) : ControllerBase
         return Ok(rows.OrderBy(row => row.Market).ThenBy(row => row.Name));
     }
 
-
     [HttpPut("vehicles/{id:guid}")]
     [Authorize(Policy = "TmsWrite")]
-    public async Task<IActionResult> UpdateVehicle(Guid id, [FromBody] VehicleUpdateRequest request, CancellationToken ct)
+    public async Task<IActionResult> UpdateVehicle(Guid id, [FromBody] LookupVehicleUpdateRequest request, CancellationToken ct)
     {
         var vehicle = await db.Vehicles.SingleOrDefaultAsync(item => item.Id == id, ct);
         if (vehicle is null) return NotFound();
@@ -69,7 +68,7 @@ public sealed class LookupsController(TmsDbContext db) : ControllerBase
     }
 
     [HttpPut("drivers/{id:guid}"), Authorize(Policy = "TmsWrite")]
-    public async Task<IActionResult> UpdateDriver(Guid id, [FromBody] DriverUpdateRequest request, CancellationToken ct)
+    public async Task<IActionResult> UpdateDriver(Guid id, [FromBody] LookupDriverUpdateRequest request, CancellationToken ct)
     {
         var driver = await db.Drivers.SingleOrDefaultAsync(x => x.Id == id, ct);
         if (driver is null) return NotFound();
@@ -84,7 +83,7 @@ public sealed class LookupsController(TmsDbContext db) : ControllerBase
     }
 
     [HttpPut("customers/{id:guid}"), Authorize(Policy = "TmsWrite")]
-    public async Task<IActionResult> UpdateCustomer(Guid id, [FromBody] CustomerUpdateRequest request, CancellationToken ct)
+    public async Task<IActionResult> UpdateCustomer(Guid id, [FromBody] LookupCustomerUpdateRequest request, CancellationToken ct)
     {
         var customer = await db.Customers.SingleOrDefaultAsync(x => x.Id == id, ct);
         if (customer is null) return NotFound();
@@ -110,7 +109,7 @@ public sealed class LookupsController(TmsDbContext db) : ControllerBase
     }
 
     [HttpPut("trailers/{id:guid}"), Authorize(Policy = "TmsWrite")]
-    public async Task<IActionResult> UpdateTrailer(Guid id, [FromBody] TrailerUpdateRequest request, CancellationToken ct)
+    public async Task<IActionResult> UpdateTrailer(Guid id, [FromBody] LookupTrailerUpdateRequest request, CancellationToken ct)
     {
         var trailer = await db.Trailers.SingleOrDefaultAsync(x => x.Id == id, ct);
         if (trailer is null) return NotFound();
@@ -122,7 +121,7 @@ public sealed class LookupsController(TmsDbContext db) : ControllerBase
     }
 
     [HttpPut("sites/{id:guid}"), Authorize(Policy = "TmsWrite")]
-    public async Task<IActionResult> UpdateSite(Guid id, [FromBody] SiteUpdateRequest request, CancellationToken ct)
+    public async Task<IActionResult> UpdateSite(Guid id, [FromBody] LookupSiteUpdateRequest request, CancellationToken ct)
     {
         var site = await db.Sites.SingleOrDefaultAsync(x => x.Id == id, ct);
         if (site is null) return NotFound();
@@ -149,9 +148,9 @@ public sealed class LookupsController(TmsDbContext db) : ControllerBase
     }
 }
 
-public sealed record VehicleUpdateRequest(string Registration, string? FleetNumber, string? Abbreviation, string? Transmission, bool? DvsCompliant, string? FuelProvider, string? CabMobile, string? FuelPin, string? ShellCard, string? BpRedCard, string? BpPlainCard, string? Notes, string? FuelPinSecretName, string? FuelCardLastFour, bool Active);
-public sealed record DriverUpdateRequest(string? EmployeeNumber, string? DisplayName, string? TachoName, string? MobileNumber, string? DriverType, string? DriverGroup, string? Skills, string? Coding, string? AgencyName, bool? NorthEligible, bool? PreloadEligible, string? Notes, string? TachoMasterDriverId, string? DrivingLicenceNumber, DateOnly? LicenceExpiry, string? LicenceStatus, bool Active);
-public sealed record CustomerUpdateRequest(string? Code, string? Name, bool Active);
+public sealed record LookupVehicleUpdateRequest(string Registration, string? FleetNumber, string? Abbreviation, string? Transmission, bool? DvsCompliant, string? FuelProvider, string? CabMobile, string? FuelPin, string? ShellCard, string? BpRedCard, string? BpPlainCard, string? Notes, string? FuelPinSecretName, string? FuelCardLastFour, bool Active);
+public sealed record LookupDriverUpdateRequest(string? EmployeeNumber, string? DisplayName, string? TachoName, string? MobileNumber, string? DriverType, string? DriverGroup, string? Skills, string? Coding, string? AgencyName, bool? NorthEligible, bool? PreloadEligible, string? Notes, string? TachoMasterDriverId, string? DrivingLicenceNumber, DateOnly? LicenceExpiry, string? LicenceStatus, bool Active);
+public sealed record LookupCustomerUpdateRequest(string? Code, string? Name, bool Active);
 public sealed record CustomerContactUpdateRequest(string? CustomerCode, string? Name, string? Email, string? MobileNumber, bool ReceivesEtaUpdates, bool Active);
-public sealed record TrailerUpdateRequest(string? TrailerNumber, string? Type, int? StandardCapacity, int? EuroCapacity, string? Notes, bool Active);
-public sealed record SiteUpdateRequest(string? ExternalCode, string? Name, string? DriverTextName, string? Aliases, string? CollectionAddress, string? CollectionInstructions, string? MapLink, decimal? Latitude, decimal? Longitude, string? CustomField1, string? CustomField2, string? CustomField3, bool Active);
+public sealed record LookupTrailerUpdateRequest(string? TrailerNumber, string? Type, int? StandardCapacity, int? EuroCapacity, string? Notes, bool Active);
+public sealed record LookupSiteUpdateRequest(string? ExternalCode, string? Name, string? DriverTextName, string? Aliases, string? CollectionAddress, string? CollectionInstructions, string? MapLink, decimal? Latitude, decimal? Longitude, string? CustomField1, string? CustomField2, string? CustomField3, bool Active);
