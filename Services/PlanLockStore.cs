@@ -58,9 +58,19 @@ END;
     public static async Task LockAsync(TmsDbContext db, DateOnly date, string? user, CancellationToken ct)
     {
         await EnsureSchemaAsync(db, ct);
-        var loads = await db.Loads.AsNoTracking().Include(x => x.Stops)
-            .Where(x => x.PlanningDate == date && x.Status != LoadStatus.Cancelled)
-            .OrderBy(x => x.Reference).ToListAsync(ct);
+        List<Load> loads;
+        try
+        {
+            loads = await db.Loads.AsNoTracking().Include(x => x.Stops)
+                .Where(x => x.PlanningDate == date && x.Status != LoadStatus.Cancelled)
+                .OrderBy(x => x.Reference).ToListAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            loads = (await PlanningRegisterStore.ReadLoadsAsync(db, date, ct))
+                .Where(x => x.Status != LoadStatus.Cancelled).OrderBy(x => x.Reference).ToList();
+        }
         var snapshot = JsonSerializer.Serialize(loads.Select(Snapshot));
         var connection = (SqlConnection)db.Database.GetDbConnection();
         await OpenAsync(connection, ct);
