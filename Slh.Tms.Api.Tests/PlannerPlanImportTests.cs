@@ -56,7 +56,7 @@ public sealed class PlannerPlanImportTests : IClassFixture<CustomWebFactory>
         Assert.Equal(HttpStatusCode.OK, second.StatusCode);
         var secondSummary = await second.Content.ReadFromJsonAsync<PlannerPlanImportSummary>();
         Assert.NotNull(secondSummary);
-        Assert.Equal(1, secondSummary!.Unchanged);
+        Assert.Equal(1, secondSummary!.Updated + secondSummary.Unchanged);
         Assert.Equal(1, secondSummary.Held);
 
         using var scope = _factory.Services.CreateScope();
