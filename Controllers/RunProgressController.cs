@@ -9,38 +9,66 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/run-progress")]
 [Authorize]
-public sealed class RunProgressController(TmsDbContext db) : ControllerBase
+public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressController> logger) : ControllerBase
 {
     [HttpGet]
     public async Task<IActionResult> Get([FromQuery] DateOnly? date, CancellationToken ct)
     {
-        await GeofenceRunProgression.EnsureSchemaAsync(db, ct);
-        var planningDate = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
+        var planningDate = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
         var now = DateTimeOffset.UtcNow;
 
-        var loads = await db.Loads.AsNoTracking().Include(x => x.Stops)
-            .Where(x => x.PlanningDate == planningDate && x.Status != LoadStatus.Cancelled)
-            .OrderBy(x => x.Reference)
-            .Take(500)
-            .ToListAsync(ct);
+        var geofenceAvailable = true;
+        string? geofenceWarning = null;
+        try
+        {
+            await GeofenceRunProgression.EnsureSchemaAsync(db, ct);
+        }
+        catch (Exception exception) when (IsSchemaUnavailable(exception))
+        {
+            db.ChangeTracker.Clear();
+            geofenceAvailable = false;
+            geofenceWarning = $"Geofence progress schema is not available yet: {exception.GetBaseException().Message}";
+            logger.LogWarning(exception, "Live run progress is continuing without geofence visit data.");
+        }
 
+        var (loads, loadSource, loadWarning) = await LoadRunsAsync(planningDate, ct);
         var loadIds = loads.Select(x => x.Id).ToList();
-        var visits = loadIds.Count == 0
-            ? []
-            : await db.GeofenceVisits.AsNoTracking()
-                .Where(x => x.LoadId != null && loadIds.Contains(x.LoadId.Value))
-                .OrderBy(x => x.EnteredAtUtc)
-                .ToListAsync(ct);
 
-        var geofenceIds = visits.Select(x => x.GeofenceId).Distinct().ToList();
-        var geofences = geofenceIds.Count == 0
-            ? new Dictionary<Guid, SiteGeofence>()
-            : await db.SiteGeofences.AsNoTracking().Where(x => geofenceIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        List<GeofenceVisit> visits = [];
+        Dictionary<Guid, SiteGeofence> geofences = [];
+        if (geofenceAvailable && loadIds.Count > 0)
+        {
+            try
+            {
+                visits = await db.GeofenceVisits.AsNoTracking()
+                    .Where(x => x.LoadId != null && loadIds.Contains(x.LoadId.Value))
+                    .OrderBy(x => x.EnteredAtUtc)
+                    .ToListAsync(ct);
+
+                var geofenceIds = visits.Select(x => x.GeofenceId).Distinct().ToList();
+                geofences = geofenceIds.Count == 0
+                    ? []
+                    : await db.SiteGeofences.AsNoTracking()
+                        .Where(x => geofenceIds.Contains(x.Id))
+                        .ToDictionaryAsync(x => x.Id, ct);
+            }
+            catch (Exception exception) when (IsSchemaUnavailable(exception))
+            {
+                db.ChangeTracker.Clear();
+                geofenceAvailable = false;
+                geofenceWarning = $"Geofence visit data is not available yet: {exception.GetBaseException().Message}";
+                logger.LogWarning(exception, "Live run progress loaded runs but skipped geofence visit data.");
+                visits = [];
+                geofences = [];
+            }
+        }
 
         var records = loads.Select(load =>
         {
             var orderedStops = load.Stops.OrderBy(x => x.Sequence).ToList();
-            var loadVisits = visits.Where(x => x.LoadId == load.Id).ToList();
+            var loadVisits = geofenceAvailable
+                ? visits.Where(x => x.LoadId == load.Id).ToList()
+                : [];
             var completedStopIds = loadVisits
                 .Where(x => x.LoadStopId != null && x.ConfirmedAtUtc != null && x.ExitedAtUtc != null && x.Status == "Departed")
                 .Select(x => x.LoadStopId!.Value)
@@ -94,6 +122,64 @@ public sealed class RunProgressController(TmsDbContext db) : ControllerBase
             };
         }).ToList();
 
-        return Ok(new { planningDate, calculatedAtUtc = now, count = records.Count, records });
+        return Ok(new
+        {
+            planningDate,
+            calculatedAtUtc = now,
+            count = records.Count,
+            source = loadSource,
+            geofenceAvailable,
+            warning = loadWarning ?? geofenceWarning,
+            records
+        });
+    }
+
+    private async Task<(List<Load> Loads, string Source, string? Warning)> LoadRunsAsync(DateOnly planningDate, CancellationToken ct)
+    {
+        try
+        {
+            var loads = await db.Loads.AsNoTracking().Include(x => x.Stops)
+                .Where(x => x.PlanningDate == planningDate && x.Status != LoadStatus.Cancelled)
+                .OrderBy(x => x.Reference)
+                .Take(500)
+                .ToListAsync(ct);
+
+            if (loads.Count > 0) return (loads, "Loads", null);
+
+            var registerLoads = await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct);
+            if (registerLoads.Count > 0)
+                return (registerLoads, "PlanningRegister", "No dedicated planning loads were returned, so the live progress panel is using the audited planning register fallback.");
+
+            return (loads, "Loads", null);
+        }
+        catch (Exception exception) when (IsSchemaUnavailable(exception))
+        {
+            db.ChangeTracker.Clear();
+            var registerLoads = await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct);
+            return (registerLoads, "PlanningRegister", $"Dedicated planning load tables are not available yet: {exception.GetBaseException().Message}");
+        }
+    }
+
+    private static DateOnly UkOperatingDate(DateTimeOffset value)
+    {
+        try
+        {
+            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return DateOnly.FromDateTime(value.UtcDateTime);
+        }
+    }
+
+    private static bool IsSchemaUnavailable(Exception exception)
+    {
+        var message = exception.GetBaseException().Message;
+        return exception is InvalidOperationException or DbUpdateException ||
+            message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("already an object named", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("There is already an object named", StringComparison.OrdinalIgnoreCase);
     }
 }
