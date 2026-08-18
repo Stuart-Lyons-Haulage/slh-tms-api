@@ -97,9 +97,12 @@ public sealed class NwfPalletOrderCsvParser
                     if (!string.IsNullOrWhiteSpace(poToken))
                         matchKeys.Insert(0, $"NWF|{date:yyyy-MM-dd}|PO:{poToken}:{collectionToken}:{depotToken}");
 
-                    // The customer's PO is the operational TMS reference. Sales Order ID is
-                    // retained as source evidence/matching data, not promoted as the main job ref.
-                    var referenceRoot = !string.IsNullOrWhiteSpace(poRef) ? poRef : salesOrderId;
+                    // PO REF is the primary TMS identity. Sales Order ID is retained in
+                    // the reference as a subordinate discriminator because one NWF PO can
+                    // contain multiple sales orders for the same collection/depot route.
+                    var referenceRoot = !string.IsNullOrWhiteSpace(poRef)
+                        ? $"{poRef}/{salesOrderId}"
+                        : salesOrderId;
                     var reference = Clip($"{referenceRoot}/{collection}/{depotId ?? depotDescription}", 80);
                     var instructions = string.Join(" · ", new[]
                     {
