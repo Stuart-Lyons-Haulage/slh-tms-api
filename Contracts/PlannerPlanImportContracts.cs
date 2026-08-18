@@ -9,33 +9,41 @@ public sealed record PlannerPlanImportRequest(
     List<PlannerPlanExceptionRequest>? Exceptions = null);
 
 public sealed record PlannerPlanRunRequest(
-    string RunRef,
-    string? PlannerRun,
-    string? RunType,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string RunRef,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? PlannerRun,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? RunType,
     DateOnly PlanningDate,
-    string? Driver,
-    string? Vehicle,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? Driver,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? Vehicle,
     [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? Trailer,
-    string? PlannerNote,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? PlannerNote,
     bool IncludeInImport,
-    string? ReconciliationStatus,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? ReconciliationStatus,
     PlannerPlanSourceRequest? Source,
     List<PlannerPlanStopRequest> Stops);
 
 public sealed record PlannerPlanStopRequest(
     int Sequence,
-    string? CollectionSite,
-    string? DeliverySite,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? CollectionSite,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? DeliverySite,
     decimal? Pallets,
-    string? Reference,
-    string? PalletType,
-    string? CollectFrom,
-    string? CollectTo,
-    string? Deadline,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? Reference,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? PalletType,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? CollectFrom,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? CollectTo,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? Deadline,
     int? SourceRow);
 
-public sealed record PlannerPlanSourceRequest(string? Workbook, string? Sheet);
-public sealed record PlannerPlanExceptionRequest(string? Severity, string? RunRef, string? Code, string? Detail, string? Source);
+public sealed record PlannerPlanSourceRequest(
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? Workbook,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? Sheet);
+
+public sealed record PlannerPlanExceptionRequest(
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? Severity,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? RunRef,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? Code,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? Detail,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? Source);
 
 public sealed record PlannerPlanImportSummary(
     DateOnly PlanningDate,
