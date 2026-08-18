@@ -1,0 +1,1 @@
+CI validation for driver preferred vehicle inference and protection prompts.
