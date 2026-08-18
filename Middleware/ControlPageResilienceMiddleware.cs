@@ -45,7 +45,21 @@ internal static class ControlPageFallback
         if (path.EndsWith("/attention", StringComparison.OrdinalIgnoreCase))
         {
             var day = QueryDate(context, "date", DateOnly.FromDateTime(DateTime.UtcNow));
-            return new { planningDate = day, generatedAtUtc = now, count = 0, items = Array.Empty<object>(), degraded = true, warnings = new[] { warning } };
+            var items = new[]
+            {
+                new
+                {
+                    id = "degraded-live-intelligence",
+                    severity = "High",
+                    type = "DataUnavailable",
+                    title = "Live attention data temporarily unavailable",
+                    detail = warning,
+                    entityId = (string?)null,
+                    entityType = (string?)null,
+                    href = "/operations-control"
+                }
+            };
+            return new { planningDate = day, generatedAtUtc = now, count = items.Length, items, degraded = true, warnings = new[] { warning } };
         }
 
         if (path.EndsWith("/readiness", StringComparison.OrdinalIgnoreCase))
