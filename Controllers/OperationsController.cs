@@ -76,14 +76,16 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
                         source = eta is null ? "Unavailable" : "Planned";
                     }
                 }
+                var windowStart = order?.DeliveryWindowStartUtc;
+                var windowEnd = order?.DeliveryWindowEndUtc ?? (IsDeliveryStop(stop) ? stop.PlannedArrivalUtc : null);
                 var tachoAssessment = source == "Live"
                     ? TachoAssessment(tacho, cumulativeDrivingMinutes, breakDelayMinutes)
                     : (Status: "RouteUnavailable", Explanation: tacho is null
                         ? "Live route and current TachoMaster duty are unavailable; this ETA must be verified before export."
                         : "TachoMaster matched the driver, but no fresh live route could be calculated; the planned ETA has not been adjusted for a break.");
                 records.Add(new DeliveryEtaResponse(load.Id, load.Reference, load.Status.ToString(), stop.Id, stop.Sequence, stop.Name,
-                    order?.Reference, order?.CustomerCode, vehicle?.Registration, eta, source, order?.DeliveryWindowStartUtc, order?.DeliveryWindowEndUtc,
-                    Risk(eta, order?.DeliveryWindowStartUtc, order?.DeliveryWindowEndUtc), live?.LastEventTimeUtc,
+                    order?.Reference, order?.CustomerCode, vehicle?.Registration, eta, source, windowStart, windowEnd,
+                    Risk(eta, windowStart, windowEnd), live?.LastEventTimeUtc,
                     tacho?.DriverName, tacho?.DriveAvailableTodayMinutes, (int)Math.Ceiling(cumulativeDrivingMinutes), breakDelayMinutes,
                     tachoAssessment.Status, tachoAssessment.Explanation));
             }
@@ -203,6 +205,7 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
         return ("WithinDriveTime", "Current TachoMaster availability covers the calculated route without an additional driving break.");
     }
     private static string Normalise(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static bool IsDeliveryStop(LoadStop stop) => stop.Name.StartsWith("Deliver", StringComparison.OrdinalIgnoreCase);
     private static string Risk(DateTimeOffset? eta, DateTimeOffset? start, DateTimeOffset? end)
     {
         if (eta is null || end is null) return "Pending";
