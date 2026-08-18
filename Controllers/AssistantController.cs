@@ -7,7 +7,11 @@ using Slh.Tms.Api.Services;
 namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/assistant"), Authorize]
-public sealed class AssistantController(TmsAssistantService assistant, TmsDbContext db) : ControllerBase
+public sealed class AssistantController(
+    TmsAssistantService assistant,
+    TmsDbContext db,
+    AzureMapsRouteClient maps,
+    ILogger<AssistantSafeFixService> safeFixLogger) : ControllerBase
 {
     [HttpGet("snapshot")]
     public async Task<IActionResult> Snapshot([FromQuery] DateOnly? date, CancellationToken ct) =>
@@ -58,7 +62,11 @@ public sealed class AssistantController(TmsAssistantService assistant, TmsDbCont
     }
 
     [HttpPost("fix-safe-validations"), Authorize(Policy = "TmsApprove")]
-    public async Task<IActionResult> FixSafeValidations(CancellationToken ct) => Ok(await assistant.ApplySafeFixes(ct));
+    public async Task<IActionResult> FixSafeValidations(CancellationToken ct)
+    {
+        var safeFixes = new AssistantSafeFixService(db, maps, safeFixLogger);
+        return Ok(await safeFixes.Apply(ct));
+    }
 
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 }
