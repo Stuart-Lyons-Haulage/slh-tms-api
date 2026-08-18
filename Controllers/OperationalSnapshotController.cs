@@ -1,0 +1,206 @@
+using System.Text.Json;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Services;
+
+namespace Slh.Tms.Api.Controllers;
+
+[ApiController]
+[Route("api/v1/operations")]
+[Authorize]
+public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<OperationalSnapshotController> logger) : ControllerBase
+{
+    [HttpGet("readiness-snapshot")]
+    public async Task<IActionResult> Readiness([FromQuery] DateOnly? date, CancellationToken ct)
+    {
+        var day = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
+        var (loads, source) = await ReadLoads(day, ct);
+        var vehicles = await ReadVehicles(ct);
+        var drivers = await ReadDrivers(ct);
+
+        var assignedVehicleIds = loads.Where(x => x.VehicleId is not null).Select(x => x.VehicleId!.Value).Distinct().ToHashSet();
+        var assignedDriverIds = loads.Where(x => x.DriverId is not null).Select(x => x.DriverId!.Value).Distinct().ToHashSet();
+        var pendingReview = await PendingOrdersForDate(day, ct);
+        var vorConflicts = loads.Count(x => x.VehicleId is Guid id && vehicles.TryGetValue(id, out var vehicle) && IsVor(vehicle));
+        var tachoConcerns = loads.Count(x => x.DriverId is Guid id && drivers.TryGetValue(id, out var driver) && string.IsNullOrWhiteSpace(driver.TachoName));
+        var geofenceGaps = loads.Sum(x => x.Stops.Count(stop => stop.Latitude is null || stop.Longitude is null));
+        var missingAllocations = loads.Count(x => x.DriverId is null || x.VehicleId is null);
+        var ready = loads.Count > 0 && missingAllocations == 0 && vorConflicts == 0 && tachoConcerns == 0 && geofenceGaps == 0 && pendingReview.Count == 0;
+
+        PlanLockInfo? planLock = null;
+        try { planLock = await PlanLockStore.GetAsync(db, day, ct); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogDebug(ex, "Plan-lock state is unavailable for {PlanningDate}.", day);
+            db.ChangeTracker.Clear();
+        }
+
+        return Ok(new
+        {
+            planningDate = day,
+            generatedAtUtc = DateTimeOffset.UtcNow,
+            source,
+            ready,
+            runs = loads.Count,
+            assignedDrivers = assignedDriverIds.Count,
+            activeDrivers = drivers.Values.Count(x => x.Active),
+            assignedVehicles = assignedVehicleIds.Count,
+            activeVehicles = vehicles.Values.Count(x => x.Active),
+            missingAllocations,
+            vorConflicts,
+            tachoConcerns,
+            geofenceGaps,
+            unreviewedOrders = pendingReview.Count,
+            planLock
+        });
+    }
+
+    [HttpGet("attention-snapshot")]
+    public async Task<IActionResult> Attention([FromQuery] DateOnly? date, CancellationToken ct)
+    {
+        var day = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
+        var (loads, source) = await ReadLoads(day, ct);
+        var vehicles = await ReadVehicles(ct);
+        var drivers = await ReadDrivers(ct);
+        var items = new List<object>();
+
+        foreach (var staged in await PendingOrdersForDate(day, ct))
+        {
+            items.Add(new
+            {
+                id = $"staging-{staged.Id}", severity = "High", type = "OrderReview",
+                title = "Order awaiting review", detail = staged.Source ?? "Customer order intake",
+                entityId = staged.Id, entityType = "staging", href = "/staging"
+            });
+        }
+
+        foreach (var load in loads)
+        {
+            if (load.DriverId is null)
+                items.Add(Item(load, "High", "UnallocatedDriver", "Run has no driver", "Allocate a driver before dispatch."));
+            if (load.VehicleId is null)
+                items.Add(Item(load, "High", "UnallocatedVehicle", "Run has no vehicle", "Allocate a vehicle before dispatch."));
+            if (load.Stops.Count == 0)
+                items.Add(Item(load, "High", "NoStops", "Run has no operational stops", "Add the collection and delivery stops before dispatch."));
+            else if (load.Stops.Any(x => x.Latitude is null || x.Longitude is null))
+                items.Add(Item(load, "Medium", "MissingGeocode", "Run contains an unmapped stop", "Map the operational stop so routing and geofence matching can work."));
+
+            if (load.VehicleId is Guid vehicleId && vehicles.TryGetValue(vehicleId, out var vehicle) && IsVor(vehicle))
+                items.Add(Item(load, "High", "VorVehicle", $"VOR vehicle allocated: {vehicle.Registration}", vehicle.FleetioStatus ?? "Vehicle is marked out of service."));
+            if (load.DriverId is Guid driverId && drivers.TryGetValue(driverId, out var driver) && string.IsNullOrWhiteSpace(driver.TachoName))
+                items.Add(Item(load, "Medium", "TachoMapping", $"Driver missing Tacho mapping: {driver.DisplayName}", "Tacho-aware planning cannot be fully validated."));
+        }
+
+        try
+        {
+            var loadIds = loads.Select(x => x.Id).ToList();
+            if (loadIds.Count > 0)
+            {
+                var visits = await db.GeofenceVisits.AsNoTracking()
+                    .Where(x => x.LoadId != null && loadIds.Contains(x.LoadId.Value) && (x.Status == "SiteDelay" || x.Status == "PassThrough"))
+                    .OrderByDescending(x => x.UpdatedAtUtc).Take(100).ToListAsync(ct);
+                foreach (var visit in visits)
+                {
+                    var load = loads.FirstOrDefault(x => x.Id == visit.LoadId);
+                    if (load is null) continue;
+                    items.Add(Item(load, visit.Status == "SiteDelay" ? "High" : "Medium", visit.Status,
+                        visit.Status == "SiteDelay" ? "Site dwell exceeded limit" : "Possible missed/short site visit",
+                        visit.StatusReason ?? $"Dwell {visit.DwellMinutes} min"));
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogDebug(ex, "Geofence attention enrichment unavailable for {PlanningDate}.", day);
+            db.ChangeTracker.Clear();
+        }
+
+        return Ok(new { planningDate = day, generatedAtUtc = DateTimeOffset.UtcNow, source, count = items.Count, items });
+    }
+
+    private async Task<(List<Load> Loads, string Source)> ReadLoads(DateOnly day, CancellationToken ct)
+    {
+        try
+        {
+            var loads = await db.Loads.AsNoTracking().Include(x => x.Stops)
+                .Where(x => x.PlanningDate == day && x.Status != LoadStatus.Cancelled)
+                .OrderBy(x => x.Reference).Take(1000).ToListAsync(ct);
+            return (loads, "TMS planning tables");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogInformation(ex, "Dedicated Loads table unavailable for {PlanningDate}; using audited planning register.", day);
+            db.ChangeTracker.Clear();
+            var loads = await PlanningRegisterStore.ReadLoadsAsync(db, day, ct);
+            return (loads.Where(x => x.Status != LoadStatus.Cancelled).ToList(), "TMS planning register");
+        }
+    }
+
+    private async Task<Dictionary<Guid, Vehicle>> ReadVehicles(CancellationToken ct)
+    {
+        try { return await db.Vehicles.AsNoTracking().Where(x => x.Active).ToDictionaryAsync(x => x.Id, ct); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogDebug(ex, "Vehicle enrichment unavailable for operational snapshot.");
+            db.ChangeTracker.Clear();
+            return [];
+        }
+    }
+
+    private async Task<Dictionary<Guid, Driver>> ReadDrivers(CancellationToken ct)
+    {
+        try { return await db.Drivers.AsNoTracking().Where(x => x.Active).ToDictionaryAsync(x => x.Id, ct); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogDebug(ex, "Driver enrichment unavailable for operational snapshot.");
+            db.ChangeTracker.Clear();
+            return [];
+        }
+    }
+
+    private async Task<List<StagedImport>> PendingOrdersForDate(DateOnly day, CancellationToken ct)
+    {
+        var rows = await db.StagedImports.AsNoTracking()
+            .Where(x => x.EntityType == "order" && x.Status == StagingStatus.PendingReview)
+            .OrderByDescending(x => x.ReceivedAtUtc).Take(2000).ToListAsync(ct);
+        return rows.Where(row => PayloadMatchesDate(row.PayloadJson, day)).ToList();
+    }
+
+    private static bool PayloadMatchesDate(string payloadJson, DateOnly day)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(payloadJson);
+            var root = document.RootElement;
+            foreach (var name in new[] { "collectionDate", "deliveryDate" })
+            {
+                if (TryGet(root, name, out var value) && DateOnly.TryParse(value.ValueKind == JsonValueKind.String ? value.GetString() : value.ToString(), out var parsed) && parsed == day)
+                    return true;
+            }
+        }
+        catch (JsonException) { }
+        return false;
+    }
+
+    private static bool TryGet(JsonElement root, string name, out JsonElement value)
+    {
+        if (root.TryGetProperty(name, out value)) return true;
+        foreach (var property in root.EnumerateObject())
+            if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase)) { value = property.Value; return true; }
+        value = default;
+        return false;
+    }
+
+    private static object Item(Load load, string severity, string type, string title, string detail) => new
+    {
+        id = $"{type}-{load.Id}", severity, type, title, detail,
+        entityId = load.Id, entityType = "run", href = $"/timeline/run/{load.Id}"
+    };
+
+    private static bool IsVor(Vehicle vehicle) => vehicle.FleetioVor == true
+        || (vehicle.FleetioStatus?.Contains("VOR", StringComparison.OrdinalIgnoreCase) ?? false)
+        || (vehicle.FleetioStatus?.Contains("out of service", StringComparison.OrdinalIgnoreCase) ?? false);
+}
