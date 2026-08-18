@@ -33,6 +33,8 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
     {
         if (string.IsNullOrWhiteSpace(request.IdempotencyKey)) return BadRequest(new ErrorResponse("invalid_idempotency_key", "IdempotencyKey is required", HttpContext.TraceIdentifier));
         if (request.IdempotencyKey.Length > 200) return BadRequest(new ErrorResponse("invalid_idempotency_key", "IdempotencyKey must be 200 characters or fewer.", HttpContext.TraceIdentifier));
+        if (IsExplicitZeroPalletOrder(request))
+            return Ok(new { ignored = true, reason = "zero_pallet_order", message = "The source row has zero pallets and was retained as source evidence rather than staged as a transport order." });
         var existing = await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(x => x.IdempotencyKey == request.IdempotencyKey, ct);
         if (existing is not null) return Ok(service.ToResponse(existing, Request));
         try
@@ -52,20 +54,24 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
         if (requests.Count == 0 || requests.Count > 500) return BadRequest(new ErrorResponse("invalid_batch", "Submit between 1 and 500 records.", HttpContext.TraceIdentifier));
         if (requests.Any(request => string.IsNullOrWhiteSpace(request.IdempotencyKey))) return BadRequest(new ErrorResponse("invalid_idempotency_key", "Every record needs an IdempotencyKey.", HttpContext.TraceIdentifier));
         if (requests.Any(request => request.IdempotencyKey.Length > 200)) return BadRequest(new ErrorResponse("invalid_idempotency_key", "Every IdempotencyKey must be 200 characters or fewer.", HttpContext.TraceIdentifier));
-        var keys = requests.Select(request => request.IdempotencyKey).ToList();
+        var filteredRequests = requests.Where(request => !IsExplicitZeroPalletOrder(request)).ToList();
+        var skippedZeroPallets = requests.Count - filteredRequests.Count;
+        if (filteredRequests.Count == 0)
+            return Accepted(new { received = requests.Count, existing = 0, created = 0, skippedZeroPallets, records = Array.Empty<StageImportResponse>() });
+        var keys = filteredRequests.Select(request => request.IdempotencyKey).ToList();
         if (keys.Distinct(StringComparer.OrdinalIgnoreCase).Count() != keys.Count) return BadRequest(new ErrorResponse("duplicate_batch_key", "Idempotency keys must be unique within the batch.", HttpContext.TraceIdentifier));
         var existing = await db.StagedImports.AsNoTracking().Where(item => keys.Contains(item.IdempotencyKey)).ToDictionaryAsync(item => item.IdempotencyKey, ct);
         var existingCount = existing.Count;
         var responses = new List<StageImportResponse>();
         try
         {
-            foreach (var request in requests)
+            foreach (var request in filteredRequests)
             {
                 if (existing.TryGetValue(request.IdempotencyKey, out var item)) responses.Add(service.ToResponse(item, Request));
                 else { var created = service.Create(request); db.StagedImports.Add(created); responses.Add(service.ToResponse(created, Request)); }
             }
             await db.SaveChangesAsync(ct);
-            return Accepted(new { received = responses.Count, existing = existingCount, created = responses.Count - existingCount, records = responses });
+            return Accepted(new { received = requests.Count, existing = existingCount, created = responses.Count - existingCount, skippedZeroPallets, records = responses });
         }
         catch (ArgumentException ex)
         {
@@ -111,6 +117,22 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
     {
         try { return Ok(await service.ReviewAndPromote(id, false, request.Note, User, ct)); }
         catch (KeyNotFoundException) { return NotFound(); }
+    }
+
+    private static bool IsExplicitZeroPalletOrder(StageImportRequest request)
+    {
+        if (!string.Equals(request.EntityType, "order", StringComparison.OrdinalIgnoreCase)) return false;
+        if (!TryGetProperty(request.Payload, "pallets", out var pallets)
+            && !TryGetProperty(request.Payload, "palletQty", out pallets)
+            && !TryGetProperty(request.Payload, "palletQuantity", out pallets))
+            return false;
+
+        return pallets.ValueKind switch
+        {
+            JsonValueKind.Number => pallets.TryGetDecimal(out var number) && number <= 0,
+            JsonValueKind.String => decimal.TryParse(pallets.GetString(), out var number) && number <= 0,
+            _ => false
+        };
     }
 
     private static bool IsExplicitPreOrder(string payloadJson)
