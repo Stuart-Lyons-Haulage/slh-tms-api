@@ -39,6 +39,8 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
         {
             details.TryGetValue(Normalise(order.Reference), out var detail);
             var ordered = Math.Max(order.Pallets ?? detail?.Pallets ?? 0, 0);
+            if (ordered <= 0) continue;
+
             var hasExplicitAllocations = explicitAllocations.Keys.Any(key => key.OrderId == order.Id);
             var allocations = explicitAllocations.Values
                 .Where(x => x.OrderId == order.Id && x.Pallets > 0)
@@ -57,9 +59,9 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
             var planned = allocations.Sum(x => x.Pallets);
             var outstanding = Math.Max(ordered - planned, 0);
             var overplanned = Math.Max(planned - ordered, 0);
-            var group = PlanningGroup(detail, order);
-            var destination = Destination(detail, order);
             var collection = Collection(detail, order);
+            var group = collection;
+            var destination = Destination(detail, order);
             var temperature = detail?.Temperature;
             var late = firstRunCreated is not null && order.CreatedAtUtc > firstRunCreated.Value.AddMinutes(15);
             if (late) lateCount++;
