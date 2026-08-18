@@ -32,7 +32,15 @@ public sealed record PlannerPlanStopRequest(
     [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? CollectFrom,
     [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? CollectTo,
     [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? Deadline,
-    int? SourceRow);
+    int? SourceRow,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? CollectionSiteArrDate = null,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? CollectionSiteArrTime = null,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? DespatchedDate = null,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? DespatchedTime = null,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? DeliveredDate = null,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? DeliveryArrivalTime = null,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? DeliveryDepartTime = null,
+    [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? ReasonForLate = null);
 
 public sealed record PlannerPlanSourceRequest(
     [property: JsonConverter(typeof(FlexibleStringJsonConverter))] string? Workbook,
