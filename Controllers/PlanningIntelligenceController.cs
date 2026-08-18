@@ -18,10 +18,15 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
         if (load is null) return NotFound("Run not found.");
         await LoadCommercialStore.EnrichAsync(db, new[] { load }, ct);
 
-        var firstStop = load.Stops.OrderBy(x => x.Sequence).FirstOrDefault();
+        var orderedStops = load.Stops.OrderBy(x => x.Sequence).ToList();
+        var firstStop = orderedStops.FirstOrDefault();
+        var lastStop = orderedStops.LastOrDefault();
         var firstPoint = firstStop?.Latitude is not null && firstStop.Longitude is not null
             ? (Lat: firstStop.Latitude.Value, Lon: firstStop.Longitude.Value)
             : ((decimal Lat, decimal Lon)?)null;
+        var plannedSpanMinutes = PlannedSpanMinutes(orderedStops);
+        var projectedShiftMinutes = plannedSpanMinutes is null ? null : plannedSpanMinutes + 15; // mandatory walkround allowance
+        var projectedShiftRisk = ShiftLengthRisk(projectedShiftMinutes);
 
         IReadOnlyDictionary<string, TachoVehicleDriverStatus> tacho = new Dictionary<string, TachoVehicleDriverStatus>();
         try { tacho = await tachoMaster.GetCurrentDriverStatusesByVehicleAsync(load.PlanningDate, ct); }
@@ -42,27 +47,35 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
             decimal? reposition = firstPoint is not null && final?.Latitude is not null && final.Longitude is not null
                 ? EstimatedRoadMiles((final.Latitude.Value, final.Longitude.Value), firstPoint.Value)
                 : null;
+            var daily = tachoMatch?.DriveAvailableTodayMinutes ?? driver.TachoDriveAvailableTodayMinutes;
+            var weekly = tachoMatch?.DriveAvailableWeekMinutes ?? driver.TachoDriveAvailableWeekMinutes;
+            var weeklyWork = tachoMatch?.WorkAvailableWeekMinutes ?? driver.TachoWorkAvailableWeekMinutes;
             var score = 100m - Math.Min(reposition ?? 40m, 40m);
-            if (tachoMatch?.DriveAvailableWeekMinutes is int weekly && weekly < 600) score -= 25;
-            if (tachoMatch?.DriveAvailableTodayMinutes is int daily && daily < 240) score -= 35;
+            if (weekly is int weeklyMinutes && weeklyMinutes < 600) score -= 25;
+            if (daily is int dailyMinutes && dailyMinutes < 240) score -= 35;
+            if (projectedShiftMinutes is int shift && shift >= 13 * 60) score -= shift >= 15 * 60 ? 35 : 15;
             if (previous?.PlanningDate == load.PlanningDate.AddDays(-1)) score += 10;
+            var availabilityRisk = ShiftRisk(daily, weekly);
+            var combinedRisk = WorstRisk(availabilityRisk, projectedShiftRisk);
             return new
             {
                 driver.Id,
                 driver.DisplayName,
                 driver.EmployeeNumber,
                 driver.TachoName,
-                dailyRemainingMinutes = tachoMatch?.DriveAvailableTodayMinutes ?? driver.TachoDriveAvailableTodayMinutes,
-                weeklyRemainingMinutes = tachoMatch?.DriveAvailableWeekMinutes ?? driver.TachoDriveAvailableWeekMinutes,
-                weeklyWorkRemainingMinutes = tachoMatch?.WorkAvailableWeekMinutes ?? driver.TachoWorkAvailableWeekMinutes,
+                dailyRemainingMinutes = daily,
+                weeklyRemainingMinutes = weekly,
+                weeklyWorkRemainingMinutes = weeklyWork,
                 tachoVehicle = tachoMatch?.VehicleCode,
                 previousRun = previous?.Reference,
                 previousDate = previous?.PlanningDate,
                 previousEnd = final?.Name,
                 estimatedRepositionMiles = reposition,
+                projectedShiftMinutes,
+                projectedShiftRisk,
                 score = Math.Round(score, 1),
-                shiftRisk = ShiftRisk(tachoMatch?.DriveAvailableTodayMinutes ?? driver.TachoDriveAvailableTodayMinutes, tachoMatch?.DriveAvailableWeekMinutes ?? driver.TachoDriveAvailableWeekMinutes),
-                reason = DriverReason(previous, final, reposition, tachoMatch)
+                shiftRisk = combinedRisk,
+                reason = DriverReason(previous, final, reposition, tachoMatch, projectedShiftMinutes)
             };
         }).OrderByDescending(x => x.score).ThenBy(x => x.estimatedRepositionMiles ?? 999m).Take(12).ToList();
 
@@ -102,6 +115,10 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
             load.Reference,
             load.PlanningDate,
             firstStop = firstStop is null ? null : new { firstStop.Id, firstStop.Name, firstStop.Latitude, firstStop.Longitude, firstStop.PlannedArrivalUtc },
+            lastStop = lastStop is null ? null : new { lastStop.Id, lastStop.Name, lastStop.Latitude, lastStop.Longitude, lastStop.PlannedArrivalUtc },
+            projectedShiftMinutes,
+            projectedShiftRisk,
+            walkroundMinutes = 15,
             nightOutRequired = ReadNightOut(load.PlannerNotes),
             driverSuggestions,
             vehicleSuggestions,
@@ -129,14 +146,48 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
         await LoadCommercialStore.EnrichAsync(db, loads, ct);
         var driverIds = loads.Where(x => x.DriverId != null).Select(x => x.DriverId!.Value).Distinct().ToList();
         var drivers = await db.Drivers.AsNoTracking().Where(x => driverIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        var vehicleIds = loads.Where(x => x.VehicleId != null).Select(x => x.VehicleId!.Value).Distinct().ToList();
+        var vehicles = await db.Vehicles.AsNoTracking().Where(x => vehicleIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
         var rows = loads.Where(x => ReadNightOut(x.PlannerNotes) is not null).Select(load =>
         {
             drivers.TryGetValue(load.DriverId!.Value, out var driver);
+            var vehicle = load.VehicleId is Guid vehicleId && vehicles.TryGetValue(vehicleId, out var matchedVehicle) ? matchedVehicle : null;
             var requested = ReadNightOut(load.PlannerNotes) == true;
             var final = load.Stops.OrderByDescending(x => x.Sequence).FirstOrDefault();
-            return new { load.Id, load.Reference, load.PlanningDate, driverId = load.DriverId, driverName = driver?.DisplayName, requested, finalStop = final?.Name, status = requested ? "Planner confirmed" : "No night out" };
+            return new
+            {
+                load.Id,
+                load.Reference,
+                load.PlanningDate,
+                driverId = load.DriverId,
+                driverName = driver?.DisplayName,
+                vehicle = vehicle?.Registration,
+                requested,
+                finalStop = final?.Name,
+                finalLatitude = final?.Latitude,
+                finalLongitude = final?.Longitude,
+                status = requested ? "Planner confirmed - validate against DOT/Tacho where available" : "No night out"
+            };
         }).OrderBy(x => x.PlanningDate).ThenBy(x => x.driverName).ToList();
         return Ok(new { from, to, rows, counts = rows.Where(x => x.requested).GroupBy(x => x.driverName ?? "Unknown").Select(g => new { driver = g.Key, nights = g.Count() }).OrderByDescending(x => x.nights) });
+    }
+
+    private static int? PlannedSpanMinutes(IReadOnlyList<LoadStop> stops)
+    {
+        var timed = stops.Where(x => x.PlannedArrivalUtc is not null).OrderBy(x => x.Sequence).ToList();
+        if (timed.Count < 2) return null;
+        var first = timed.First().PlannedArrivalUtc!.Value;
+        var last = timed.Last().PlannedArrivalUtc!.Value;
+        if (last < first) return null;
+        return (int)Math.Ceiling((last - first).TotalMinutes);
+    }
+
+    private static string ShiftLengthRisk(int? projectedMinutes)
+    {
+        if (projectedMinutes is null) return "Unknown";
+        if (projectedMinutes >= 15 * 60) return "Red";
+        if (projectedMinutes >= 13 * 60) return "Amber";
+        return "Green";
     }
 
     private static string ShiftRisk(int? today, int? week)
@@ -146,12 +197,19 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
         return today is null && week is null ? "Unknown" : "Green";
     }
 
-    private static string DriverReason(Load? previous, LoadStop? final, decimal? miles, TachoVehicleDriverStatus? tacho)
+    private static string WorstRisk(string a, string b)
+    {
+        static int Rank(string risk) => risk switch { "Red" => 3, "Amber" => 2, "Green" => 1, _ => 0 };
+        return Rank(a) >= Rank(b) ? a : b;
+    }
+
+    private static string DriverReason(Load? previous, LoadStop? final, decimal? miles, TachoVehicleDriverStatus? tacho, int? projectedShiftMinutes)
     {
         var parts = new List<string>();
         if (previous is not null) parts.Add($"Last planned on {previous.Reference}{(final is null ? string.Empty : $" ending at {final.Name}")}");
         if (miles is not null) parts.Add($"about {miles:0} reposition miles to the first stop");
         if (tacho is not null) parts.Add($"TachoMaster live duty is in vehicle {tacho.VehicleCode}");
+        if (projectedShiftMinutes is int shift) parts.Add($"planned run span plus 15-minute walkround is about {shift / 60}h {shift % 60:00}m");
         return parts.Count == 0 ? "No recent run position or TachoMaster duty was matched." : string.Join("; ", parts) + ".";
     }
 
