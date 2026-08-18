@@ -147,10 +147,10 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
     }
 
     [HttpPost("trailers/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
-    public Task<IActionResult> ArchiveTrailer(Guid id, CancellationToken ct) => SetActive(db.Trailers, id, false, "Trailer", x => x.Id, x => x.Active, (x, v) => x.Active = v, ct);
+    public Task<IActionResult> ArchiveTrailer(Guid id, CancellationToken ct) => SetActive(db.Trailers, id, false, "Trailer", x => x.Active, (x, v) => x.Active = v, ct);
 
     [HttpPost("trailers/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
-    public Task<IActionResult> RestoreTrailer(Guid id, CancellationToken ct) => SetActive(db.Trailers, id, true, "Trailer", x => x.Id, x => x.Active, (x, v) => x.Active = v, ct);
+    public Task<IActionResult> RestoreTrailer(Guid id, CancellationToken ct) => SetActive(db.Trailers, id, true, "Trailer", x => x.Active, (x, v) => x.Active = v, ct);
 
     [HttpGet("sites/search")]
     public async Task<IActionResult> SearchSites([FromQuery] string? q, [FromQuery] bool includeInactive, CancellationToken ct)
@@ -178,10 +178,10 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
     }
 
     [HttpPost("sites/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
-    public Task<IActionResult> ArchiveSite(Guid id, CancellationToken ct) => SetActive(db.Sites, id, false, "Site", x => x.Id, x => x.Active, (x, v) => x.Active = v, ct);
+    public Task<IActionResult> ArchiveSite(Guid id, CancellationToken ct) => SetActive(db.Sites, id, false, "Site", x => x.Active, (x, v) => x.Active = v, ct);
 
     [HttpPost("sites/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
-    public Task<IActionResult> RestoreSite(Guid id, CancellationToken ct) => SetActive(db.Sites, id, true, "Site", x => x.Id, x => x.Active, (x, v) => x.Active = v, ct);
+    public Task<IActionResult> RestoreSite(Guid id, CancellationToken ct) => SetActive(db.Sites, id, true, "Site", x => x.Active, (x, v) => x.Active = v, ct);
 
     [HttpGet("customers/search")]
     public async Task<IActionResult> SearchCustomers([FromQuery] string? q, [FromQuery] bool includeInactive, CancellationToken ct)
@@ -205,10 +205,10 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
     }
 
     [HttpPost("customers/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
-    public Task<IActionResult> ArchiveCustomer(Guid id, CancellationToken ct) => SetActive(db.Customers, id, false, "Customer", x => x.Id, x => x.Active, (x, v) => x.Active = v, ct);
+    public Task<IActionResult> ArchiveCustomer(Guid id, CancellationToken ct) => SetActive(db.Customers, id, false, "Customer", x => x.Active, (x, v) => x.Active = v, ct);
 
     [HttpPost("customers/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
-    public Task<IActionResult> RestoreCustomer(Guid id, CancellationToken ct) => SetActive(db.Customers, id, true, "Customer", x => x.Id, x => x.Active, (x, v) => x.Active = v, ct);
+    public Task<IActionResult> RestoreCustomer(Guid id, CancellationToken ct) => SetActive(db.Customers, id, true, "Customer", x => x.Active, (x, v) => x.Active = v, ct);
 
     [HttpGet("geofences/search")]
     public async Task<IActionResult> SearchGeofences([FromQuery] string? q, [FromQuery] bool includeInactive, CancellationToken ct)
@@ -241,10 +241,10 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
     }
 
     [HttpPost("geofences/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
-    public Task<IActionResult> ArchiveGeofence(Guid id, CancellationToken ct) => SetActive(db.SiteGeofences, id, false, "Geofence", x => x.Id, x => x.Active, (x, v) => { x.Active = v; x.UpdatedAtUtc = DateTimeOffset.UtcNow; }, ct);
+    public Task<IActionResult> ArchiveGeofence(Guid id, CancellationToken ct) => SetActive(db.SiteGeofences, id, false, "Geofence", x => x.Active, (x, v) => { x.Active = v; x.UpdatedAtUtc = DateTimeOffset.UtcNow; }, ct);
 
     [HttpPost("geofences/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
-    public Task<IActionResult> RestoreGeofence(Guid id, CancellationToken ct) => SetActive(db.SiteGeofences, id, true, "Geofence", x => x.Id, x => x.Active, (x, v) => { x.Active = v; x.UpdatedAtUtc = DateTimeOffset.UtcNow; }, ct);
+    public Task<IActionResult> RestoreGeofence(Guid id, CancellationToken ct) => SetActive(db.SiteGeofences, id, true, "Geofence", x => x.Active, (x, v) => { x.Active = v; x.UpdatedAtUtc = DateTimeOffset.UtcNow; }, ct);
 
     [HttpGet("audit/{entityType}/{entityId:guid}")]
     public async Task<IActionResult> AuditHistory(string entityType, Guid entityId, CancellationToken ct)
@@ -272,9 +272,9 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         return Ok(new { active });
     }
 
-    private async Task<IActionResult> SetActive<TEntity>(DbSet<TEntity> set, Guid id, bool active, string entityType, Func<TEntity, Guid> idGetter, Func<TEntity, bool> activeGetter, Action<TEntity, bool> activeSetter, CancellationToken ct) where TEntity : class
+    private async Task<IActionResult> SetActive<TEntity>(DbSet<TEntity> set, Guid id, bool active, string entityType, Func<TEntity, bool> activeGetter, Action<TEntity, bool> activeSetter, CancellationToken ct) where TEntity : class
     {
-        var item = await set.FirstOrDefaultAsync(x => idGetter(x) == id, ct);
+        var item = await set.FindAsync(new object?[] { id }, ct);
         if (item is null) return NotFound();
         if (activeGetter(item) == active) return Ok(new { active });
         var before = Snapshot(item);
