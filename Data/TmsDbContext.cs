@@ -21,6 +21,7 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<FuelPrice> FuelPrices => Set<FuelPrice>();
     public DbSet<IntegrationMapping> IntegrationMappings => Set<IntegrationMapping>();
     public DbSet<DriverStatusLog> DriverStatusLogs => Set<DriverStatusLog>();
+    public DbSet<MasterDataAudit> MasterDataAudits => Set<MasterDataAudit>();
     public DbSet<SiteGeofence> SiteGeofences => Set<SiteGeofence>();
     public DbSet<GeofenceVisit> GeofenceVisits => Set<GeofenceVisit>();
     public DbSet<EtaSnapshot> EtaSnapshots => Set<EtaSnapshot>();
@@ -52,6 +53,14 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<DriverStatusLog>()
             .HasIndex(x => x.CapturedAtUtc)
             .HasDatabaseName("IX_DriverStatusLogs_CapturedAtUtc");
+
+        b.Entity<MasterDataAudit>()
+            .HasIndex(x => new { x.EntityType, x.EntityId, x.ChangedAtUtc })
+            .HasDatabaseName("IX_MasterDataAudits_Entity_History");
+        b.Entity<MasterDataAudit>()
+            .HasIndex(x => x.ChangedAtUtc)
+            .HasDatabaseName("IX_MasterDataAudits_ChangedAtUtc");
+
         b.Entity<StagedImport>().HasIndex(x => x.IdempotencyKey).IsUnique();
         b.Entity<StagedImport>().Property(x => x.RowVersion).IsRowVersion();
         b.Entity<TransportOrder>().HasIndex(x => x.Reference).IsUnique();
