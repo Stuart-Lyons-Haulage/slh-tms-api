@@ -1,0 +1,1 @@
+CI validation only. Night rota bounded DOT query and startup-deployed MasterDataAudits schema are already on main.
