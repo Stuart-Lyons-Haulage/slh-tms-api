@@ -160,7 +160,7 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
         var sourceRows = run.Stops.OrderBy(stop => stop.Sequence).ToList();
         var stops = new List<LoadStop>();
 
-        foreach (var group in GroupBySite(sourceRows, stop => stop.CollectionSite))
+        foreach (var group in GroupByCollectionWindow(sourceRows))
         {
             stops.Add(new LoadStop
             {
@@ -173,7 +173,7 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
             });
         }
 
-        foreach (var group in GroupBySite(sourceRows, stop => stop.DeliverySite))
+        foreach (var group in GroupByDeliveryDeadline(sourceRows))
         {
             var order = FirstMatchingOrder(group.Rows, orders);
             stops.Add(new LoadStop
@@ -201,18 +201,26 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
             }).ToList();
     }
 
-    private static IEnumerable<(string Site, List<PlannerPlanStopRequest> Rows)> GroupBySite(
+    private static IEnumerable<(string Site, string WindowKey, List<PlannerPlanStopRequest> Rows)> GroupByCollectionWindow(IReadOnlyCollection<PlannerPlanStopRequest> rows) =>
+        GroupBySiteAndWindow(rows, stop => stop.CollectionSite, stop => $"{Clean(stop.CollectFrom)}-{Clean(stop.CollectTo)}");
+
+    private static IEnumerable<(string Site, string WindowKey, List<PlannerPlanStopRequest> Rows)> GroupByDeliveryDeadline(IReadOnlyCollection<PlannerPlanStopRequest> rows) =>
+        GroupBySiteAndWindow(rows, stop => stop.DeliverySite, stop => Clean(stop.Deadline));
+
+    private static IEnumerable<(string Site, string WindowKey, List<PlannerPlanStopRequest> Rows)> GroupBySiteAndWindow(
         IReadOnlyCollection<PlannerPlanStopRequest> rows,
-        Func<PlannerPlanStopRequest, string?> siteSelector)
+        Func<PlannerPlanStopRequest, string?> siteSelector,
+        Func<PlannerPlanStopRequest, string> windowSelector)
     {
-        var groups = new List<(string Site, List<PlannerPlanStopRequest> Rows)>();
+        var groups = new List<(string Site, string WindowKey, List<PlannerPlanStopRequest> Rows)>();
         foreach (var row in rows)
         {
             var site = siteSelector(row)?.Trim();
             if (string.IsNullOrWhiteSpace(site)) continue;
-            var existingIndex = groups.FindIndex(group => string.Equals(Normalize(group.Site), Normalize(site), StringComparison.Ordinal));
+            var window = windowSelector(row);
+            var existingIndex = groups.FindIndex(group => string.Equals(Normalize(group.Site), Normalize(site), StringComparison.Ordinal) && string.Equals(group.WindowKey, window, StringComparison.Ordinal));
             if (existingIndex >= 0) groups[existingIndex].Rows.Add(row);
-            else groups.Add((site, [row]));
+            else groups.Add((site, window, [row]));
         }
         return groups;
     }
@@ -237,11 +245,14 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
             var parts = new[]
             {
                 routePart,
+                includeDelivery ? Window(row.CollectFrom, row.CollectTo) : Deadline(row.Deadline),
                 row.Pallets is null ? null : $"{row.Pallets:0.##} pallets",
                 string.IsNullOrWhiteSpace(row.Reference) ? null : $"Ref {row.Reference}",
-                string.IsNullOrWhiteSpace(row.CollectFrom) ? null : $"collect {row.CollectFrom}",
-                string.IsNullOrWhiteSpace(row.CollectTo) ? null : $"to {row.CollectTo}",
-                string.IsNullOrWhiteSpace(row.Deadline) ? null : $"deadline {row.Deadline}"
+                Actual("collection arrived", row.CollectionSiteArrDate, row.CollectionSiteArrTime),
+                Actual("despatched", row.DespatchedDate, row.DespatchedTime),
+                Actual("delivery arrived", row.DeliveredDate, row.DeliveryArrivalTime),
+                Actual("delivery departed", row.DeliveredDate, row.DeliveryDepartTime),
+                ManualEta(row.ReasonForLate)
             }.Where(part => !string.IsNullOrWhiteSpace(part));
             return string.Join(" · ", parts);
         }).Where(detail => !string.IsNullOrWhiteSpace(detail));
@@ -269,16 +280,38 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
 
     private static bool IsPlaceholder(string? value) => string.Equals(value?.Trim(), "c/o", StringComparison.OrdinalIgnoreCase) || string.Equals(value?.Trim(), "tbc", StringComparison.OrdinalIgnoreCase);
     private static string Normalize(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static string Clean(string? value) => string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim();
     private static string? Clip(string? value, int length) => string.IsNullOrWhiteSpace(value) ? null : value.Trim()[..Math.Min(value.Trim().Length, length)];
     private static string? BuildStopDetail(PlannerPlanStopRequest stop) => string.Join(" | ", new[]
     {
         string.IsNullOrWhiteSpace(stop.Reference) ? null : $"Ref {stop.Reference}",
         stop.Pallets is null ? null : $"{stop.Pallets:0.##} pallets",
         string.IsNullOrWhiteSpace(stop.PalletType) ? null : stop.PalletType,
-        string.IsNullOrWhiteSpace(stop.CollectFrom) ? null : $"Collect from {stop.CollectFrom}",
-        string.IsNullOrWhiteSpace(stop.CollectTo) ? null : $"Collect to {stop.CollectTo}",
-        string.IsNullOrWhiteSpace(stop.Deadline) ? null : $"Deadline {stop.Deadline}"
+        Window(stop.CollectFrom, stop.CollectTo),
+        Deadline(stop.Deadline),
+        Actual("collection arrived", stop.CollectionSiteArrDate, stop.CollectionSiteArrTime),
+        Actual("despatched", stop.DespatchedDate, stop.DespatchedTime),
+        Actual("delivery arrived", stop.DeliveredDate, stop.DeliveryArrivalTime),
+        Actual("delivery departed", stop.DeliveredDate, stop.DeliveryDepartTime),
+        ManualEta(stop.ReasonForLate)
     }.Where(x => x is not null));
+
+    private static string? Window(string? from, string? to) => string.IsNullOrWhiteSpace(from) && string.IsNullOrWhiteSpace(to)
+        ? null
+        : $"collect window {Clean(from)}{(string.IsNullOrWhiteSpace(from) || string.IsNullOrWhiteSpace(to) ? string.Empty : "-")}{Clean(to)}";
+
+    private static string? Deadline(string? value) => string.IsNullOrWhiteSpace(value) ? null : $"deadline {value.Trim()}";
+
+    private static string? Actual(string label, string? date, string? time) => string.IsNullOrWhiteSpace(date) && string.IsNullOrWhiteSpace(time)
+        ? null
+        : $"{label} {Clean(date)} {Clean(time)}".Trim();
+
+    private static string? ManualEta(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var text = value.Trim();
+        return text.StartsWith("eta", StringComparison.OrdinalIgnoreCase) ? $"manual ETA {text[3..].Trim()}" : $"note {text}";
+    }
 
     private static DateTimeOffset? EarliestPlannerTime(DateOnly date, IEnumerable<string?> values)
     {
