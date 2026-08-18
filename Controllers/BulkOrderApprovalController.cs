@@ -20,7 +20,7 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
         if (request.Ids is null || request.Ids.Count == 0)
             return BadRequest(new { message = "Select at least one staged order to approve." });
         if (request.Ids.Count > 500)
-            return BadRequest(new { message = "A maximum of 500 orders can be mass-approved at once." });
+            return BadRequest(new { message = "A maximum of 500 orders can be approved at once." });
         if (request.Ids.Distinct().Count() != request.Ids.Count)
             return BadRequest(new { message = "The approval request contains duplicate staging IDs." });
 
@@ -35,7 +35,7 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
 
         foreach (var item in items)
         {
-            var eligibility = CheckEligibility(item, request.Date);
+            var eligibility = CheckEligibility(item, request.Date, request.AcknowledgeReviewFlags);
             if (eligibility is not null)
             {
                 skipped.Add(new { id = item.Id, reason = eligibility });
@@ -44,12 +44,10 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
 
             try
             {
-                await stagingService.ReviewAndPromote(
-                    item.Id,
-                    true,
-                    $"Mass approved from Order Review for {request.Date:yyyy-MM-dd}. Clean, planner-ready order.",
-                    User,
-                    ct);
+                var note = request.AcknowledgeReviewFlags
+                    ? $"Explicitly selected and approved from Order Control for {request.Date:yyyy-MM-dd}; any visible review flags were acknowledged by the planner."
+                    : $"Approved from Order Control for {request.Date:yyyy-MM-dd}. Clean, planner-ready order.";
+                await stagingService.ReviewAndPromote(item.Id, true, note, User, ct);
                 approved++;
             }
             catch (Exception ex) when (ex is InvalidOperationException or DbUpdateException or JsonException)
@@ -70,12 +68,12 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
             skippedItems = skipped.Take(100).ToList(),
             failedItems = failed.Take(100).ToList(),
             message = approved == 0
-                ? "No orders were mass-approved. Anything uncertain remains in Order Review."
-                : $"{approved} clean order{(approved == 1 ? "" : "s")} approved into live Orders. Anything uncertain remains in Order Review."
+                ? "No selected orders were approved. Blocked or incomplete work remains in Order Control."
+                : $"{approved} selected order{(approved == 1 ? "" : "s")} approved into live Orders."
         });
     }
 
-    private static string? CheckEligibility(StagedImport item, DateOnly requestedDate)
+    private static string? CheckEligibility(StagedImport item, DateOnly requestedDate, bool acknowledgeReviewFlags)
     {
         if (item.EntityType != "order") return "Not an order staging record.";
         if (item.Status != StagingStatus.PendingReview) return $"Status is {item.Status}, not PendingReview.";
@@ -101,11 +99,14 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
             if (string.Equals(Text(payload, "intakeStatus"), "PreOrder", StringComparison.OrdinalIgnoreCase))
                 return "Pre-order awaiting customer instruction.";
 
-            var confidence = Text(payload, "intakeConfidence");
-            if (!string.Equals(confidence, "High", StringComparison.OrdinalIgnoreCase))
-                return $"Intake confidence is {confidence ?? "not set"}; individual review required.";
+            if (!acknowledgeReviewFlags)
+            {
+                var confidence = Text(payload, "intakeConfidence");
+                if (!string.Equals(confidence, "High", StringComparison.OrdinalIgnoreCase))
+                    return $"Intake confidence is {confidence ?? "not set"}; explicit planner review is required.";
+                if (HasWarnings(payload)) return "Source/intake warnings require explicit planner review.";
+            }
 
-            if (HasWarnings(payload)) return "Source/intake warnings require individual review.";
             return null;
         }
         catch (JsonException)
@@ -171,4 +172,4 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
     }
 }
 
-public sealed record BulkApproveOrdersRequest(DateOnly Date, List<Guid> Ids);
+public sealed record BulkApproveOrdersRequest(DateOnly Date, List<Guid> Ids, bool AcknowledgeReviewFlags = false);
