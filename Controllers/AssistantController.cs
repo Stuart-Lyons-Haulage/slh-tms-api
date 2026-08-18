@@ -14,8 +14,11 @@ public sealed class AssistantController(
     ILogger<AssistantSafeFixService> safeFixLogger) : ControllerBase
 {
     [HttpGet("snapshot")]
-    public async Task<IActionResult> Snapshot([FromQuery] DateOnly? date, CancellationToken ct) =>
-        Ok(await assistant.GetSnapshot(date ?? DateOnly.FromDateTime(DateTime.UtcNow), ct));
+    public async Task<IActionResult> Snapshot([FromQuery] DateOnly? date, CancellationToken ct)
+    {
+        var snapshot = await assistant.GetSnapshot(date ?? DateOnly.FromDateTime(DateTime.UtcNow), ct);
+        return Ok(snapshot with { Suggestions = EnableSafeExactDuplicates(snapshot.Suggestions) });
+    }
 
     [HttpPost("advice")]
     public async Task<IActionResult> Advice(AssistantAdviceRequest request, CancellationToken ct)
@@ -58,7 +61,8 @@ public sealed class AssistantController(
         }
 
         var userKey = User.FindFirst("oid")?.Value ?? User.Identity?.Name ?? "slh-planner";
-        return Ok(await assistant.Advise(request.Date ?? DateOnly.FromDateTime(DateTime.UtcNow), plannerQuestion, userKey, ct));
+        var advice = await assistant.Advise(request.Date ?? DateOnly.FromDateTime(DateTime.UtcNow), plannerQuestion, userKey, ct);
+        return Ok(advice with { Suggestions = EnableSafeExactDuplicates(advice.Suggestions) });
     }
 
     [HttpPost("fix-safe-validations"), Authorize(Policy = "TmsApprove")]
@@ -67,6 +71,13 @@ public sealed class AssistantController(
         var safeFixes = new AssistantSafeFixService(db, maps, safeFixLogger);
         return Ok(await safeFixes.Apply(ct));
     }
+
+    private static IReadOnlyList<AssistantSuggestion> EnableSafeExactDuplicates(IReadOnlyList<AssistantSuggestion> suggestions) =>
+        suggestions.Select(item => item.Id == "sites-duplicates" ? item with
+        {
+            AutoFixAvailable = true,
+            Detail = item.Detail + " Exact name + full-address duplicates can be consolidated safely; ambiguous groups remain review-only."
+        } : item).ToList();
 
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 }
