@@ -102,6 +102,88 @@ public static class MasterDetailStore
         return placeholders.Count;
     }
 
+    public static async Task<TrailerAliasMergeResult> MergeSlhTrailerAliasesAsync(TmsDbContext db, CancellationToken ct)
+    {
+        var trailers = await db.Trailers.ToListAsync(ct);
+        var renamed = 0;
+        var merged = 0;
+        var reassignedLoads = 0;
+        var reassignedMappings = 0;
+        var reassignedAuditEntries = 0;
+
+        for (var number = 1; number <= 88; number++)
+        {
+            var numericName = number.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var canonicalName = $"SLH{number}";
+            var numeric = trailers.FirstOrDefault(item => string.Equals(item.TrailerNumber.Trim(), numericName, StringComparison.OrdinalIgnoreCase));
+            var canonical = trailers.FirstOrDefault(item => string.Equals(item.TrailerNumber.Trim(), canonicalName, StringComparison.OrdinalIgnoreCase));
+
+            if (numeric is null) continue;
+
+            if (canonical is null)
+            {
+                numeric.TrailerNumber = canonicalName;
+                db.MasterDataAudits.Add(new MasterDataAudit
+                {
+                    EntityType = "Trailer",
+                    EntityId = numeric.Id,
+                    Action = "Canonicalised",
+                    ChangedBy = "startup-repair",
+                    ChangesJson = JsonSerializer.Serialize(new { from = numericName, to = canonicalName })
+                });
+                renamed++;
+                continue;
+            }
+
+            canonical.Type ??= numeric.Type;
+            canonical.StandardCapacity ??= numeric.StandardCapacity;
+            canonical.EuroCapacity ??= numeric.EuroCapacity;
+            canonical.Active = canonical.Active || numeric.Active;
+
+            var loads = await db.Loads.Where(load => load.TrailerId == numeric.Id).ToListAsync(ct);
+            foreach (var load in loads) load.TrailerId = canonical.Id;
+            reassignedLoads += loads.Count;
+
+            var mappings = await db.IntegrationMappings
+                .Where(mapping => mapping.TmsEntityType == "Trailer" && mapping.TmsEntityId == numeric.Id)
+                .ToListAsync(ct);
+            foreach (var mapping in mappings) mapping.TmsEntityId = canonical.Id;
+            reassignedMappings += mappings.Count;
+
+            var auditEntries = await db.MasterDataAudits
+                .Where(audit => audit.EntityType == "Trailer" && audit.EntityId == numeric.Id)
+                .ToListAsync(ct);
+            foreach (var audit in auditEntries) audit.EntityId = canonical.Id;
+            reassignedAuditEntries += auditEntries.Count;
+
+            db.MasterDataAudits.Add(new MasterDataAudit
+            {
+                EntityType = "Trailer",
+                EntityId = canonical.Id,
+                Action = "MergedAlias",
+                ChangedBy = "startup-repair",
+                ChangesJson = JsonSerializer.Serialize(new
+                {
+                    canonical = canonicalName,
+                    mergedAlias = numericName,
+                    mergedTrailerId = numeric.Id,
+                    loadsReassigned = loads.Count,
+                    mappingsReassigned = mappings.Count,
+                    auditEntriesReassigned = auditEntries.Count
+                })
+            });
+
+            db.Trailers.Remove(numeric);
+            trailers.Remove(numeric);
+            merged++;
+        }
+
+        if (renamed > 0 || merged > 0 || reassignedLoads > 0 || reassignedMappings > 0 || reassignedAuditEntries > 0)
+            await db.SaveChangesAsync(ct);
+
+        return new TrailerAliasMergeResult(renamed, merged, reassignedLoads, reassignedMappings, reassignedAuditEntries);
+    }
+
     private static string NormaliseKey(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
     private static string? Text(JsonElement payload, string name)
     {
@@ -119,3 +201,5 @@ public static class MasterDetailStore
     private static int? Int(JsonElement payload, string name) => int.TryParse(Text(payload, name), out var value) ? value : null;
     private static decimal? Decimal(JsonElement payload, string name) => decimal.TryParse(Text(payload, name), System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var value) ? value : null;
 }
+
+public sealed record TrailerAliasMergeResult(int Renamed, int Merged, int LoadsReassigned, int MappingsReassigned, int AuditEntriesReassigned);

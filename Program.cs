@@ -177,6 +177,11 @@ if (!app.Environment.IsEnvironment("Testing"))
         var quarantinedFleetioPlaceholders = await MasterDetailStore.QuarantineFleetioPlaceholdersAsync(db, CancellationToken.None);
         if (quarantinedFleetioPlaceholders > 0)
             logger.LogWarning("Quarantined {PlaceholderCount} Fleetio placeholder vehicle records from operational master data.", quarantinedFleetioPlaceholders);
+        var trailerMerge = await MasterDetailStore.MergeSlhTrailerAliasesAsync(db, CancellationToken.None);
+        if (trailerMerge.Renamed > 0 || trailerMerge.Merged > 0)
+            logger.LogWarning(
+                "Canonicalised trailer register: {Renamed} numeric trailers renamed, {Merged} duplicate aliases merged, {LoadsReassigned} loads, {MappingsReassigned} mappings and {AuditEntriesReassigned} audit entries reassigned.",
+                trailerMerge.Renamed, trailerMerge.Merged, trailerMerge.LoadsReassigned, trailerMerge.MappingsReassigned, trailerMerge.AuditEntriesReassigned);
         var register = scope.ServiceProvider.GetRequiredService<StagingService>();
         await register.LinkRegistered(25, CancellationToken.None);
     }
