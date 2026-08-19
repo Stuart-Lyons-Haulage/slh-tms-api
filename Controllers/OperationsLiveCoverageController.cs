@@ -10,10 +10,10 @@ namespace Slh.Tms.Api.Controllers;
 
 /// <summary>
 /// Live operational coverage for Ops Control.
-/// DOT/RoadTech is the source of vehicle location and movement.
-/// TachoMaster is the source of driver/card identity and legal-hours data.
-/// Live DOT driver/card identity is matched directly to the TachoMaster directory before
-/// falling back to the planned TMS allocation, so moving vehicles do not depend on a Loads table.
+/// DOT/RoadTech is the source of vehicle location and live driver/card evidence.
+/// TachoMaster is the source of tachograph identity and legal-hours data.
+/// A planned TMS allocation is reconciliation context only: it must never be treated
+/// as proof of the driver actually occupying a vehicle or as authority to attach legal hours.
 /// </summary>
 [ApiController]
 [Route("api/v1/operations")]
@@ -95,18 +95,17 @@ public sealed class OperationsLiveCoverageController(
             if (vehicle is not null) allocationsByVehicle.TryGetValue(vehicle.Id, out allocation);
             if (allocation is not null) movingWithPlannedAllocation++;
 
+            // Legal-hours enrichment is permitted only when the live source proves identity.
+            // Planned allocation matching is retained below solely to explain reconciliation gaps.
             var liveDotProfile = liveTachoStatus is null ? MatchLiveDriverProfile(record, tachoProfiles) : null;
-            var allocationProfile = liveTachoStatus is null && liveDotProfile is null
-                ? MatchDriverProfile(allocation?.Driver, tachoProfiles)
-                : null;
-            var profile = liveDotProfile ?? allocationProfile;
+            var plannedProfile = allocation is null ? null : MatchDriverProfile(allocation.Driver, tachoProfiles);
 
             if (liveTachoStatus is not null)
             {
                 movingWithLiveTacho++;
                 if (liveTachoStatus.MemberCode > 0) movingWithLiveTachoMember++;
             }
-            else if (profile is not null)
+            else if (liveDotProfile is not null)
             {
                 movingWithTachoProfile++;
             }
@@ -121,10 +120,12 @@ public sealed class OperationsLiveCoverageController(
                     allocation?.Driver.DisplayName,
                     allocation?.LoadReference,
                     !string.IsNullOrWhiteSpace(record.DriverCardNumber) || !string.IsNullOrWhiteSpace(record.DriverName)
-                        ? "DOT reports a live driver/card, but it did not match the TachoMaster member directory."
-                        : allocation is null
-                            ? "No live driver/card and no planned TMS allocation matched this moving vehicle."
-                            : "The planned TMS driver did not match the TachoMaster member directory."));
+                        ? "DOT reports a live driver/card, but it did not match the TachoMaster member directory. Legal hours were not attached."
+                        : plannedProfile is not null
+                            ? "A planned driver has a TachoMaster profile, but no live Tacho/DOT identity confirms that driver is actually in this vehicle. Legal hours were not attached."
+                            : allocation is null
+                                ? "No live Tacho/DOT driver identity is available for this moving vehicle."
+                                : "A driver is planned on this vehicle, but the planned name is not accepted as live proof of identity."));
             }
 
             if (!string.IsNullOrWhiteSpace(record.DriverName) || !string.IsNullOrWhiteSpace(record.DriverCardNumber)) movingWithLiveCardOrName++;
@@ -132,12 +133,11 @@ public sealed class OperationsLiveCoverageController(
             var status = liveTachoStatus is not null
                 ? liveTachoStatus.MemberCode > 0 ? "LiveTachoCardConfirmed" : "LiveIdentityOnly"
                 : liveDotProfile is not null ? "LiveDotTachoProfile"
-                : allocationProfile is not null ? "AllocationTachoProfile"
+                : allocation is not null ? "PlannedOnlyUnconfirmed"
                 : "Attention";
 
             var source = liveTachoStatus is not null ? "LiveTachoCard"
                 : liveDotProfile is not null ? "LiveDOT→TachoMasterProfile"
-                : allocationProfile is not null ? "PlannedAllocationTachoProfile"
                 : null;
 
             movingVehicleRows.Add(new LiveVehicleCoverageRow(
@@ -146,9 +146,9 @@ public sealed class OperationsLiveCoverageController(
                 record.SpeedKph,
                 record.Latitude,
                 record.Longitude,
-                liveTachoStatus?.DriverName ?? profile?.DriverName,
-                liveTachoStatus?.CardNumber ?? profile?.CardNumber,
-                liveTachoStatus?.MemberCode > 0 || profile is not null,
+                liveTachoStatus?.DriverName ?? liveDotProfile?.DriverName,
+                liveTachoStatus?.CardNumber ?? liveDotProfile?.CardNumber,
+                liveTachoStatus?.MemberCode > 0 || liveDotProfile is not null,
                 allocation?.Driver.DisplayName,
                 allocation?.LoadReference,
                 source,
@@ -158,14 +158,14 @@ public sealed class OperationsLiveCoverageController(
         var tachoDutyLike = tachoStatuses.Values.Count(status => status.DriveMinutes > 0 || status.WorkMinutes > 0 || status.AvailableMinutes > 0 || status.RestMinutes > 0);
         var tachoMemberIdentities = tachoStatuses.Values.Count(status => status.MemberCode > 0);
         var liveOnlyIdentities = Math.Max(0, tachoStatuses.Count - tachoMemberIdentities);
-        var anyTachoCoverage = movingWithLiveTacho + movingWithTachoProfile;
+        var actualTachoCoverage = movingWithLiveTacho + movingWithTachoProfile;
 
         return Ok(new LiveCoverageResponse(
             now,
             operatingDate,
             new DotCoverage(tracking.IsConfigured, dotProvider, dotRecords.Records.Count, movingRecords.Count, latestDotEvent),
             new TachoCoverage(tachoMaster.IsConfigured, tachoError is null && tachoMaster.IsConfigured, tachoStatuses.Count, tachoDutyLike, tachoMemberIdentities, liveOnlyIdentities, tachoProfiles.Count, tachoError),
-            new LiveCoverageSummary(movingRecords.Count, anyTachoCoverage, movingWithLiveTachoMember + movingWithTachoProfile, movingWithLiveCardOrName, Math.Max(0, movingRecords.Count - anyTachoCoverage), movingWithoutTacho.Count, movingWithLiveTacho, movingWithLiveTachoMember, movingWithTachoProfile, movingWithPlannedAllocation),
+            new LiveCoverageSummary(movingRecords.Count, actualTachoCoverage, movingWithLiveTachoMember + movingWithTachoProfile, movingWithLiveCardOrName, Math.Max(0, movingRecords.Count - actualTachoCoverage), movingWithoutTacho.Count, movingWithLiveTacho, movingWithLiveTachoMember, movingWithTachoProfile, movingWithPlannedAllocation),
             movingVehicleRows,
             movingWithoutTacho));
     }
@@ -244,7 +244,7 @@ public sealed class OperationsLiveCoverageController(
         }
         catch (Exception exception) when (IsSchemaUnavailable(exception))
         {
-            logger.LogWarning(exception, "Driver master data is unavailable for allocation-backed TachoMaster coverage.");
+            logger.LogWarning(exception, "Driver master data is unavailable for allocation reconciliation context.");
             return [];
         }
     }
