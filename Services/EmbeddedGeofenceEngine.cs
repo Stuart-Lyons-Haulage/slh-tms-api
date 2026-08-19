@@ -1,0 +1,294 @@
+using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Models.Tracking;
+
+namespace Slh.Tms.Api.Services;
+
+/// <summary>
+/// Production-safe geofence engine that requires no geofence-specific SQL tables.
+/// It derives site visits from the approved embedded SLH/Falcon geofence seed,
+/// existing RoadTech tracking history and the audited planning register.
+/// </summary>
+public static class EmbeddedGeofenceEngine
+{
+    private const int DefaultConfirmDwellMinutes = 10;
+    private static readonly Lazy<IReadOnlyList<EmbeddedFence>> Fences = new(ParseFences);
+
+    public static IReadOnlyList<EmbeddedFence> ApprovedFences => Fences.Value;
+
+    public static async Task<EmbeddedGeofenceSnapshot> BuildAsync(TmsDbContext db, DateOnly planningDate, IReadOnlyCollection<Load> loads, CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var fences = Fences.Value;
+        var vehicleIds = loads.Where(x => x.VehicleId is not null).Select(x => x.VehicleId!.Value).Distinct().ToList();
+        var vehicles = vehicleIds.Count == 0
+            ? []
+            : await db.Vehicles.AsNoTracking()
+                .Where(x => vehicleIds.Contains(x.Id))
+                .Select(x => new Vehicle { Id = x.Id, Registration = x.Registration, FleetNumber = x.FleetNumber, Abbreviation = x.Abbreviation, Active = x.Active })
+                .ToListAsync(ct);
+
+        var aliasesByVehicle = vehicles.ToDictionary(
+            x => x.Id,
+            x => new[] { x.Registration, x.FleetNumber, x.Abbreviation }
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => Normalize(value!))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase));
+
+        var allAliases = aliasesByVehicle.Values.SelectMany(x => x).Distinct(StringComparer.OrdinalIgnoreCase).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var (startUtc, endUtc) = OperatingWindow(planningDate);
+        var events = allAliases.Count == 0
+            ? []
+            : await db.VehicleTrackingEvents.AsNoTracking()
+                .Where(x => x.EventTimeUtc >= startUtc.AddHours(-2) && x.EventTimeUtc < endUtc.AddHours(2))
+                .OrderBy(x => x.EventTimeUtc)
+                .Take(20000)
+                .ToListAsync(ct);
+
+        var matchedEvents = events
+            .Where(x => allAliases.Contains(Normalize(x.VehicleIdentifier)))
+            .ToList();
+
+        var visits = new List<DerivedVisit>();
+        foreach (var vehicle in vehicles)
+        {
+            var aliases = aliasesByVehicle.GetValueOrDefault(vehicle.Id) ?? [];
+            var vehicleEvents = matchedEvents.Where(x => aliases.Contains(Normalize(x.VehicleIdentifier))).OrderBy(x => x.EventTimeUtc).ToList();
+            visits.AddRange(DeriveVisits(vehicle.Id, vehicle.Registration, vehicleEvents, fences, now));
+        }
+
+        LinkVisitsToRuns(visits, loads);
+
+        var activeVisits = visits.Where(x => x.ExitedAtUtc is null && now - x.LastInsideAtUtc <= TimeSpan.FromMinutes(15)).ToList();
+        var confirmed = visits.Where(x => x.ConfirmedAtUtc is not null).ToList();
+        return new EmbeddedGeofenceSnapshot(
+            fences,
+            visits,
+            activeVisits,
+            confirmed,
+            matchedEvents.Count,
+            matchedEvents.OrderByDescending(x => x.EventTimeUtc).FirstOrDefault()?.EventTimeUtc);
+    }
+
+    public static async Task<IReadOnlyList<EmbeddedFenceStatus>> FenceStatusesAsync(TmsDbContext db, CancellationToken ct)
+    {
+        List<Site> sites;
+        try { sites = await GeofenceSiteResolver.LoadActiveSitesAsync(db, ct); }
+        catch { sites = []; db.ChangeTracker.Clear(); }
+
+        return Fences.Value.Select(fence =>
+        {
+            var site = MatchSite(fence, sites);
+            return new EmbeddedFenceStatus(fence, site?.Id, site?.Name);
+        }).ToList();
+    }
+
+    private static IReadOnlyList<EmbeddedFence> ParseFences()
+    {
+        using var document = JsonDocument.Parse(GeofenceSeedPayload.Json);
+        var result = new List<EmbeddedFence>();
+        foreach (var record in document.RootElement.EnumerateArray())
+        {
+            var name = Text(record, "name")?.Trim();
+            if (string.IsNullOrWhiteSpace(name) || !record.TryGetProperty("points", out var points) || points.ValueKind != JsonValueKind.Array)
+                continue;
+
+            var parsedPoints = points.EnumerateArray().Select(ReadPoint).Where(x => x is not null).Select(x => x!.Value).ToList();
+            if (parsedPoints.Count < 3) continue;
+
+            result.Add(new EmbeddedFence(
+                StableId(name),
+                name,
+                Text(record, "category"),
+                Int(record, "category_max_wait_time"),
+                Int(record, "max_wait_time"),
+                Int(record, "pending_entry_minutes") ?? 0,
+                Int(record, "pending_exit_minutes") ?? 0,
+                Text(record, "site_no"),
+                parsedPoints));
+        }
+        return result;
+    }
+
+    private static IEnumerable<DerivedVisit> DeriveVisits(Guid vehicleId, string registration, IReadOnlyList<VehicleTrackingEvent> events, IReadOnlyList<EmbeddedFence> fences, DateTimeOffset now)
+    {
+        var visits = new List<DerivedVisit>();
+        EmbeddedFence? currentFence = null;
+        DerivedVisit? current = null;
+
+        foreach (var evt in events)
+        {
+            var fence = fences.FirstOrDefault(x => Contains(x.Points, evt.Longitude, evt.Latitude));
+            if (fence?.Id == currentFence?.Id)
+            {
+                if (current is not null)
+                {
+                    current.LastInsideAtUtc = evt.EventTimeUtc;
+                    current.DwellMinutes = Math.Max(0, (int)Math.Floor((current.LastInsideAtUtc - current.EnteredAtUtc).TotalMinutes));
+                    var confirmMinutes = Math.Max(DefaultConfirmDwellMinutes, current.Fence.PendingEntryMinutes);
+                    if (current.ConfirmedAtUtc is null && current.DwellMinutes >= confirmMinutes)
+                        current.ConfirmedAtUtc = evt.EventTimeUtc;
+                }
+                continue;
+            }
+
+            if (current is not null)
+            {
+                var exitMinutes = Math.Max(0, current.Fence.PendingExitMinutes);
+                if (evt.EventTimeUtc - current.LastInsideAtUtc >= TimeSpan.FromMinutes(exitMinutes))
+                {
+                    current.ExitedAtUtc = evt.EventTimeUtc;
+                    current.DwellMinutes = Math.Max(0, (int)Math.Floor((current.ExitedAtUtc.Value - current.EnteredAtUtc).TotalMinutes));
+                    visits.Add(current);
+                    current = null;
+                    currentFence = null;
+                }
+            }
+
+            if (fence is not null)
+            {
+                currentFence = fence;
+                current = new DerivedVisit
+                {
+                    Id = StableId($"{registration}|{fence.Name}|{evt.EventTimeUtc:O}"),
+                    VehicleId = vehicleId,
+                    VehicleIdentifier = registration,
+                    Fence = fence,
+                    EnteredAtUtc = evt.EventTimeUtc,
+                    LastInsideAtUtc = evt.EventTimeUtc,
+                    DwellMinutes = 0
+                };
+            }
+        }
+
+        if (current is not null)
+        {
+            current.DwellMinutes = Math.Max(0, (int)Math.Floor((Math.Min(now, current.LastInsideAtUtc) - current.EnteredAtUtc).TotalMinutes));
+            var confirmMinutes = Math.Max(DefaultConfirmDwellMinutes, current.Fence.PendingEntryMinutes);
+            if (current.ConfirmedAtUtc is null && current.DwellMinutes >= confirmMinutes)
+                current.ConfirmedAtUtc = current.LastInsideAtUtc;
+            visits.Add(current);
+        }
+
+        return visits;
+    }
+
+    private static void LinkVisitsToRuns(List<DerivedVisit> visits, IReadOnlyCollection<Load> loads)
+    {
+        var usedStops = new HashSet<Guid>();
+        foreach (var visit in visits.OrderBy(x => x.EnteredAtUtc))
+        {
+            var candidates = loads
+                .Where(load => load.VehicleId == visit.VehicleId && load.Status != LoadStatus.Cancelled)
+                .SelectMany(load => (load.Stops ?? []).Where(stop => !usedStops.Contains(stop.Id)).Select(stop => new { load, stop }))
+                .Where(x => NamesOverlap(x.stop.Name, visit.Fence.Name) || NamesOverlap(x.stop.Address ?? string.Empty, visit.Fence.Name))
+                .Select(x => new
+                {
+                    x.load,
+                    x.stop,
+                    delta = x.stop.PlannedArrivalUtc is null ? double.MaxValue : Math.Abs((x.stop.PlannedArrivalUtc.Value - visit.EnteredAtUtc).TotalMinutes)
+                })
+                .OrderBy(x => x.delta)
+                .ThenBy(x => x.stop.Sequence)
+                .FirstOrDefault();
+
+            if (candidates is null) continue;
+            visit.LoadId = candidates.load.Id;
+            visit.LoadStopId = candidates.stop.Id;
+            usedStops.Add(candidates.stop.Id);
+        }
+    }
+
+    private static Site? MatchSite(EmbeddedFence fence, IReadOnlyCollection<Site> sites)
+    {
+        var siteNumber = Normalize(fence.SiteNumber);
+        var fenceName = Normalize(fence.Name);
+        if (siteNumber.Length > 0)
+        {
+            var byCode = sites.FirstOrDefault(site => Normalize(site.ExternalCode) == siteNumber);
+            if (byCode is not null) return byCode;
+        }
+        var exact = sites.FirstOrDefault(site => Normalize(site.Name) == fenceName || Normalize(site.DriverTextName) == fenceName);
+        if (exact is not null) return exact;
+        return sites.FirstOrDefault(site => NamesOverlap(site.Name, fence.Name) || NamesOverlap(site.DriverTextName ?? string.Empty, fence.Name));
+    }
+
+    private static (DateTimeOffset StartUtc, DateTimeOffset EndUtc) OperatingWindow(DateOnly date)
+    {
+        try
+        {
+            var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+            var localStart = DateTime.SpecifyKind(date.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
+            return (new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(localStart, zone)), new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(localStart.AddDays(1), zone)));
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            var utc = new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+            return (utc, utc.AddDays(1));
+        }
+    }
+
+    private static bool Contains(IReadOnlyList<GeoPoint> points, decimal longitude, decimal latitude)
+    {
+        var x = (double)longitude;
+        var y = (double)latitude;
+        var inside = false;
+        for (int i = 0, j = points.Count - 1; i < points.Count; j = i++)
+        {
+            var pi = points[i];
+            var pj = points[j];
+            if (((pi.Latitude > y) != (pj.Latitude > y)) && x < (pj.Longitude - pi.Longitude) * (y - pi.Latitude) / (pj.Latitude - pi.Latitude) + pi.Longitude)
+                inside = !inside;
+        }
+        return inside;
+    }
+
+    private static GeoPoint? ReadPoint(JsonElement point)
+    {
+        if (point.ValueKind == JsonValueKind.Array && point.GetArrayLength() >= 2 && point[0].TryGetDouble(out var x) && point[1].TryGetDouble(out var y))
+            return new GeoPoint(x, y);
+        if (point.ValueKind != JsonValueKind.Object) return null;
+        var longitude = Double(point, "longitude") ?? Double(point, "lng") ?? Double(point, "lon") ?? Double(point, "x");
+        var latitude = Double(point, "latitude") ?? Double(point, "lat") ?? Double(point, "y");
+        return longitude is not null && latitude is not null ? new GeoPoint(longitude.Value, latitude.Value) : null;
+    }
+
+    private static bool NamesOverlap(string? left, string? right)
+    {
+        var a = Normalize(left);
+        var b = Normalize(right);
+        return a.Length >= 4 && b.Length >= 4 && (a == b || a.Contains(b, StringComparison.Ordinal) || b.Contains(a, StringComparison.Ordinal));
+    }
+
+    private static Guid StableId(string value)
+    {
+        var bytes = System.Security.Cryptography.MD5.HashData(System.Text.Encoding.UTF8.GetBytes(value));
+        return new Guid(bytes);
+    }
+
+    private static string Normalize(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static string? Text(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined ? value.ToString() : null;
+    private static int? Int(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.TryGetInt32(out var number) ? number : null;
+    private static double? Double(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.TryGetDouble(out var number) ? number : null;
+}
+
+public sealed record GeoPoint(double Longitude, double Latitude);
+public sealed record EmbeddedFence(Guid Id, string Name, string? Category, int? CategoryMaxWaitMinutes, int? MaxWaitMinutes, int PendingEntryMinutes, int PendingExitMinutes, string? SiteNumber, IReadOnlyList<GeoPoint> Points);
+public sealed record EmbeddedFenceStatus(EmbeddedFence Fence, Guid? SiteId, string? SiteName);
+public sealed record EmbeddedGeofenceSnapshot(IReadOnlyList<EmbeddedFence> Fences, IReadOnlyList<DerivedVisit> Visits, IReadOnlyList<DerivedVisit> ActiveVisits, IReadOnlyList<DerivedVisit> ConfirmedVisits, int TrackingEventCount, DateTimeOffset? LatestTrackingUtc);
+public sealed class DerivedVisit
+{
+    public Guid Id { get; set; }
+    public Guid VehicleId { get; set; }
+    public string VehicleIdentifier { get; set; } = string.Empty;
+    public required EmbeddedFence Fence { get; set; }
+    public Guid? LoadId { get; set; }
+    public Guid? LoadStopId { get; set; }
+    public DateTimeOffset EnteredAtUtc { get; set; }
+    public DateTimeOffset? ConfirmedAtUtc { get; set; }
+    public DateTimeOffset? ExitedAtUtc { get; set; }
+    public DateTimeOffset LastInsideAtUtc { get; set; }
+    public int DwellMinutes { get; set; }
+}
