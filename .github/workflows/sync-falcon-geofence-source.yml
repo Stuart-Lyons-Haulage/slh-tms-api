@@ -1,0 +1,70 @@
+name: Sync validated Falcon geofence source
+
+on:
+  push:
+    branches:
+      - fix/falcon-geofence-source-555-v2
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: ${{ !contains(github.event.head_commit.message, '[payload-sync]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout current repair branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/falcon-geofence-source-555-v2
+          fetch-depth: 0
+
+      - name: Copy validated source onto current main architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin fix/falcon-geofence-source-555
+
+          for n in 01 02 03 04 05 06 07 08 09 10; do
+            git show "origin/fix/falcon-geofence-source-555:Services/GeofenceSeedPayload.Part${n}.cs" > "/tmp/part${n}.cs"
+            sed \
+              -e "s/internal static partial class GeofenceSeedPayloadParts/internal static class GeofencePayloadChunk${n}/" \
+              -e "s/internal const string Part${n}/internal const string Value/" \
+              "/tmp/part${n}.cs" > "Services/GeofencePayloadChunk${n}.cs"
+          done
+
+          git show origin/fix/falcon-geofence-source-555:Services/EmbeddedGeofenceEngine.cs > /tmp/EmbeddedGeofenceEngine.cs
+          sed \
+            -e 's/GeofenceSeedPayload\.Json/OperationalGeofencePayload.Json/g' \
+            -e 's/GeofenceSeedPayload\.ApprovedGeofenceCount/OperationalGeofencePayload.ExpectedFenceCount/g' \
+            /tmp/EmbeddedGeofenceEngine.cs > Services/EmbeddedGeofenceEngine.cs
+
+          git show origin/fix/falcon-geofence-source-555:Slh.Tms.Api.Tests/EmbeddedGeofenceEngineTests.cs > Slh.Tms.Api.Tests/EmbeddedGeofenceEngineTests.cs
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          chunks=[]
+          for n in range(1,11):
+              text=Path(f'Services/GeofencePayloadChunk{n:02d}.cs').read_text()
+              m=re.search(r'internal const string Value = "([A-Za-z0-9+/=]+)";', text)
+              assert m, f'chunk {n:02d} missing payload'
+              chunks.append(m.group(1))
+          encoded=''.join(chunks)
+          assert len(encoded)==153228, len(encoded)
+          print(f'Validated concatenated Base64 length: {len(encoded)}')
+          PY
+
+      - name: Commit synced payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Services/GeofencePayloadChunk*.cs Services/EmbeddedGeofenceEngine.cs Slh.Tms.Api.Tests/EmbeddedGeofenceEngineTests.cs
+          if git diff --cached --quiet; then
+            echo "No changes required"
+            exit 0
+          fi
+          git commit -m "Sync validated Falcon geofence payload [payload-sync]"
+          git push origin HEAD:fix/falcon-geofence-source-555-v2
