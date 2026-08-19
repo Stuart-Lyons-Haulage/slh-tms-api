@@ -1,29 +1,25 @@
 using System.Reflection;
 using Slh.Tms.Api.Services;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace Slh.Tms.Api.Tests;
 
-public sealed class EmbeddedGeofenceEngineTests(ITestOutputHelper output)
+public sealed class EmbeddedGeofenceEngineTests
 {
     [Fact]
-    public void Embedded_geofence_payload_is_valid_base64()
+    public void Embedded_geofence_payload_reports_base64_shape()
     {
         var payloadType = typeof(EmbeddedGeofenceEngine).Assembly.GetType("Slh.Tms.Api.Services.GeofenceSeedPayload", throwOnError: true)!;
         var field = payloadType.GetField("GzipBase64", BindingFlags.NonPublic | BindingFlags.Static)!;
         var encoded = (string)field.GetRawConstantValue()!;
-        var invalid = encoded
+        var compact = new string(encoded.Where(c => !char.IsWhiteSpace(c)).ToArray());
+        var invalid = compact
             .Select((character, index) => new { character, index })
-            .Where(x => !(char.IsLetterOrDigit(x.character) || x.character is '+' or '/' or '=' || char.IsWhiteSpace(x.character)))
+            .Where(x => !(char.IsLetterOrDigit(x.character) || x.character is '+' or '/' or '='))
             .Take(20)
             .ToList();
-
-        output.WriteLine($"Length={encoded.Length}; Mod4={encoded.Length % 4}; InvalidCount={invalid.Count}");
-        foreach (var item in invalid) output.WriteLine($"Invalid at {item.index}: U+{(int)item.character:X4} '{item.character}'");
-
-        Assert.Empty(invalid);
-        Assert.NotEqual(1, encoded.Where(c => !char.IsWhiteSpace(c)).Count() % 4);
+        var diagnostic = $"Length={compact.Length}; Mod4={compact.Length % 4}; InvalidCount={invalid.Count}; Tail={compact[^Math.Min(12, compact.Length)..]}";
+        Assert.True(false, diagnostic);
     }
 
     [Fact]
