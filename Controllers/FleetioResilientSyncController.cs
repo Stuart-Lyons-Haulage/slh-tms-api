@@ -47,7 +47,28 @@ public sealed class FleetioResilientSyncController(
             var vehiclesCreated = 0;
             var trailersUpdated = 0;
             var trailersCreated = 0;
+            var trailerAliasesCanonicalised = 0;
+            var trailerDuplicatesMerged = 0;
             var skipped = 0;
+
+            // Repair numeric trailer aliases already created by earlier Fleetio syncs.
+            // "1" and "SLH1" are one operational trailer identity; SLH is canonical.
+            foreach (var numeric in trailers.Where(item => item.Active && TryTrailerIndex(item.TrailerNumber, out _) && !item.TrailerNumber.Trim().StartsWith("SLH", StringComparison.OrdinalIgnoreCase)).ToList())
+            {
+                if (!TryTrailerIndex(numeric.TrailerNumber, out var index)) continue;
+                var canonicalNumber = $"SLH{index}";
+                var canonical = trailers.FirstOrDefault(item => item.Id != numeric.Id && item.Active && string.Equals(CanonicalTrailerNumber(item.TrailerNumber), canonicalNumber, StringComparison.OrdinalIgnoreCase));
+                if (canonical is null)
+                {
+                    numeric.TrailerNumber = canonicalNumber;
+                    trailerAliasesCanonicalised++;
+                    continue;
+                }
+
+                await ReassignTrailerLoads(numeric.Id, canonical.Id, ct);
+                numeric.Active = false;
+                trailerDuplicatesMerged++;
+            }
 
             foreach (var asset in vehicleAssets)
             {
@@ -62,9 +83,7 @@ public sealed class FleetioResilientSyncController(
                 var registrationKey = Normalise(registration);
                 var vehicle = mappedId is not null ? vehicles.FirstOrDefault(item => item.Id == mappedId.Value) : null;
                 vehicle ??= vehicles.FirstOrDefault(item => Normalise(item.Registration) == registrationKey);
-                vehicle ??= vehicles.FirstOrDefault(item =>
-                    !string.IsNullOrWhiteSpace(item.FleetioId) &&
-                    string.Equals(item.FleetioId, asset.Id, StringComparison.OrdinalIgnoreCase));
+                vehicle ??= vehicles.FirstOrDefault(item => !string.IsNullOrWhiteSpace(item.FleetioId) && string.Equals(item.FleetioId, asset.Id, StringComparison.OrdinalIgnoreCase));
 
                 if (vehicle is null)
                 {
@@ -99,7 +118,8 @@ public sealed class FleetioResilientSyncController(
             {
                 var fleetioName = asset.Name?.Trim();
                 var cNumber = asset.Registration?.Trim();
-                var preferredTrailerNumber = !string.IsNullOrWhiteSpace(fleetioName) ? fleetioName : cNumber;
+                var canonicalNumber = CanonicalTrailerNumber(fleetioName);
+                var preferredTrailerNumber = canonicalNumber ?? (!string.IsNullOrWhiteSpace(fleetioName) ? fleetioName : cNumber);
                 if (string.IsNullOrWhiteSpace(preferredTrailerNumber))
                 {
                     skipped++;
@@ -107,12 +127,15 @@ public sealed class FleetioResilientSyncController(
                 }
 
                 var mappedId = MappingTarget(matchingMappings, asset.Id, "Trailer");
-                var trailer = mappedId is not null ? trailers.FirstOrDefault(item => item.Id == mappedId.Value) : null;
+                var trailer = mappedId is not null ? trailers.FirstOrDefault(item => item.Id == mappedId.Value && item.Active) : null;
+                trailer ??= !string.IsNullOrWhiteSpace(canonicalNumber)
+                    ? trailers.FirstOrDefault(item => item.Active && string.Equals(CanonicalTrailerNumber(item.TrailerNumber), canonicalNumber, StringComparison.OrdinalIgnoreCase))
+                    : null;
                 trailer ??= !string.IsNullOrWhiteSpace(fleetioName)
-                    ? trailers.FirstOrDefault(item => Normalise(item.TrailerNumber) == Normalise(fleetioName))
+                    ? trailers.FirstOrDefault(item => item.Active && Normalise(item.TrailerNumber) == Normalise(fleetioName))
                     : null;
                 trailer ??= !string.IsNullOrWhiteSpace(cNumber)
-                    ? trailers.FirstOrDefault(item => Normalise(item.TrailerNumber) == Normalise(cNumber))
+                    ? trailers.FirstOrDefault(item => item.Active && Normalise(item.TrailerNumber) == Normalise(cNumber))
                     : null;
 
                 if (trailer is null)
@@ -129,7 +152,8 @@ public sealed class FleetioResilientSyncController(
                 }
                 else
                 {
-                    if (!string.IsNullOrWhiteSpace(fleetioName)) trailer.TrailerNumber = ClipRequired(fleetioName, 40);
+                    // Never replace the SLH operational identity with Fleetio's short numeric name or C-number.
+                    if (!string.IsNullOrWhiteSpace(canonicalNumber)) trailer.TrailerNumber = canonicalNumber;
                     trailer.Type = Clip(asset.Type, 80) ?? trailer.Type;
                     trailer.Active = true;
                     trailersUpdated++;
@@ -138,32 +162,23 @@ public sealed class FleetioResilientSyncController(
                 desiredMappings.Add(new DesiredMapping(asset.Id, fleetioName ?? cNumber ?? preferredTrailerNumber, "Trailer", trailer.Id));
             }
 
-            // Commit the operational master first. IntegrationMappings is useful identity metadata,
-            // but a stale/temporarily unavailable mapping table must never block Vehicles/Trailers.
             await db.SaveChangesAsync(ct);
 
             string? mappingWarning = null;
             var mappingsUpdated = 0;
             if (!mappingsAvailable)
             {
-                mappingWarning = "Fleetio assets were synced to the TMS master, but Integration Mappings is temporarily unavailable. Registration/name matching remains active.";
+                mappingWarning = "Integration Mappings is temporarily unavailable. Fleetio sync still uses deterministic registration and SLH trailer-number matching, so the TMS master remains authoritative.";
             }
             else
             {
                 try
                 {
                     db.ChangeTracker.Clear();
-                    var trackedMappings = await db.IntegrationMappings
-                        .Where(item => item.Provider == "Fleetio")
-                        .ToListAsync(ct);
-
+                    var trackedMappings = await db.IntegrationMappings.Where(item => item.Provider == "Fleetio").ToListAsync(ct);
                     foreach (var wanted in desiredMappings)
                     {
-                        var mapping = trackedMappings.FirstOrDefault(item =>
-                            item.Active &&
-                            string.Equals(item.ExternalKey, wanted.ExternalKey, StringComparison.OrdinalIgnoreCase) &&
-                            string.Equals(item.TmsEntityType, wanted.EntityType, StringComparison.OrdinalIgnoreCase));
-
+                        var mapping = trackedMappings.FirstOrDefault(item => item.Active && string.Equals(item.ExternalKey, wanted.ExternalKey, StringComparison.OrdinalIgnoreCase) && string.Equals(item.TmsEntityType, wanted.EntityType, StringComparison.OrdinalIgnoreCase));
                         if (mapping is null)
                         {
                             mapping = new IntegrationMapping
@@ -194,11 +209,11 @@ public sealed class FleetioResilientSyncController(
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     logger.LogWarning(ex, "Fleetio assets synced but IntegrationMappings could not be persisted.");
-                    mappingWarning = $"Fleetio assets were synced to the TMS master, but Integration Mappings could not be updated: {ex.GetBaseException().Message}";
+                    mappingWarning = "Integration Mappings could not be persisted, but deterministic vehicle registration and SLH trailer-number matching completed successfully.";
                 }
             }
 
-            var summary = $"Fleetio sync completed: {vehiclesUpdated} vehicle(s) updated, {vehiclesCreated} vehicle(s) created, {trailersUpdated} trailer(s) updated and {trailersCreated} trailer(s) created.";
+            var summary = $"Fleetio sync completed: {vehiclesUpdated} vehicle(s) updated, {vehiclesCreated} vehicle(s) created, {trailersUpdated} trailer(s) updated, {trailersCreated} trailer(s) created, {trailerAliasesCanonicalised} numeric trailer alias(es) renamed to SLH numbers and {trailerDuplicatesMerged} duplicate trailer record(s) consolidated.";
             if (!string.IsNullOrWhiteSpace(mappingWarning)) summary += $" {mappingWarning}";
 
             return Ok(new
@@ -212,6 +227,8 @@ public sealed class FleetioResilientSyncController(
                 vehiclesCreated,
                 trailersUpdated,
                 trailersCreated,
+                trailerAliasesCanonicalised,
+                trailerDuplicatesMerged,
                 skipped,
                 mappingsUpdated,
                 mappingWarning,
@@ -231,25 +248,40 @@ public sealed class FleetioResilientSyncController(
         }
     }
 
+    private async Task ReassignTrailerLoads(Guid fromTrailerId, Guid toTrailerId, CancellationToken ct)
+    {
+        try
+        {
+            var loads = await db.Loads.Where(load => load.TrailerId == fromTrailerId).ToListAsync(ct);
+            foreach (var load in loads) load.TrailerId = toTrailerId;
+        }
+        catch (Exception ex) when (SchemaUnavailable(ex))
+        {
+            db.ChangeTracker.Clear();
+            var loads = await PlanningRegisterStore.ReadLoadsAsync(db, null, ct);
+            foreach (var load in loads.Where(load => load.TrailerId == fromTrailerId))
+            {
+                load.TrailerId = toTrailerId;
+                await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name ?? "Fleetio trailer consolidation", ct);
+            }
+        }
+    }
+
     private async Task<(List<IntegrationMapping> Mappings, bool Available)> TryReadMappings(CancellationToken ct)
     {
         try
         {
-            return (await db.IntegrationMappings.AsNoTracking()
-                .Where(item => item.Active && item.Provider == "Fleetio")
-                .ToListAsync(ct), true);
+            return (await db.IntegrationMappings.AsNoTracking().Where(item => item.Active && item.Provider == "Fleetio").ToListAsync(ct), true);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogWarning(ex, "IntegrationMappings unavailable during Fleetio sync; falling back to registration/name identity matching.");
+            logger.LogWarning(ex, "IntegrationMappings unavailable during Fleetio sync; falling back to deterministic master identity matching.");
             return ([], false);
         }
     }
 
     private static Guid? MappingTarget(IEnumerable<IntegrationMapping> mappings, string fleetioId, string entityType) =>
-        mappings.FirstOrDefault(item =>
-            string.Equals(item.ExternalKey, fleetioId, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(item.TmsEntityType, entityType, StringComparison.OrdinalIgnoreCase))?.TmsEntityId;
+        mappings.FirstOrDefault(item => string.Equals(item.ExternalKey, fleetioId, StringComparison.OrdinalIgnoreCase) && string.Equals(item.TmsEntityType, entityType, StringComparison.OrdinalIgnoreCase))?.TmsEntityId;
 
     private static bool IsTrailer(FleetioVehicle asset)
     {
@@ -257,10 +289,23 @@ public sealed class FleetioResilientSyncController(
         return !string.IsNullOrWhiteSpace(asset.Registration) && Regex.IsMatch(asset.Registration.Trim(), "^C\\d{5,}$", RegexOptions.IgnoreCase);
     }
 
+    private static string? CanonicalTrailerNumber(string? value)
+    {
+        if (!TryTrailerIndex(value, out var index)) return null;
+        return $"SLH{index}";
+    }
+
+    private static bool TryTrailerIndex(string? value, out int index)
+    {
+        index = 0;
+        var text = value?.Trim() ?? string.Empty;
+        var match = Regex.Match(text, "^(?:SLH)?0*(\\d{1,3})$", RegexOptions.IgnoreCase);
+        return match.Success && int.TryParse(match.Groups[1].Value, out index) && index is >= 1 and <= 999;
+    }
+
     private static string? BestVehicleRegistration(FleetioVehicle asset)
     {
-        if (!string.IsNullOrWhiteSpace(asset.Registration) && !Regex.IsMatch(asset.Registration.Trim(), "^C\\d{5,}$", RegexOptions.IgnoreCase))
-            return asset.Registration.Trim();
+        if (!string.IsNullOrWhiteSpace(asset.Registration) && !Regex.IsMatch(asset.Registration.Trim(), "^C\\d{5,}$", RegexOptions.IgnoreCase)) return asset.Registration.Trim();
         if (!string.IsNullOrWhiteSpace(asset.Name) && LooksLikeUkRegistration(asset.Name)) return asset.Name.Trim();
         return null;
     }
@@ -269,6 +314,12 @@ public sealed class FleetioResilientSyncController(
     {
         var key = Normalise(value);
         return key.Length is >= 5 and <= 8 && key.Any(char.IsLetter) && key.Any(char.IsDigit);
+    }
+
+    private static bool SchemaUnavailable(Exception exception)
+    {
+        var message = exception.GetBaseException().Message;
+        return exception is InvalidOperationException or DbUpdateException || message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase) || message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string Normalise(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
