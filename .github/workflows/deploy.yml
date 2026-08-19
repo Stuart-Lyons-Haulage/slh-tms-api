@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: slh-tms-api-production
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   deploy:
