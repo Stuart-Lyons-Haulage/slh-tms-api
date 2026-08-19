@@ -51,23 +51,39 @@ public sealed class FleetioResilientSyncController(
             var trailerDuplicatesMerged = 0;
             var skipped = 0;
 
-            // Repair numeric and zero-padded trailer aliases already created by earlier Fleetio syncs.
-            // "02", "2", "TRL 02" and "SLH02" are one operational trailer identity: SLH2.
-            foreach (var numeric in trailers.Where(item => item.Active && TryTrailerIndex(item.TrailerNumber, out _) && !item.TrailerNumber.Trim().StartsWith("SLH", StringComparison.OrdinalIgnoreCase)).ToList())
+            // Canonicalise every active numeric trailer identity before matching Fleetio.
+            // 02, 2, SLH02, SLH2, Trailer 02 and TRL-02 are all the same operational asset: SLH2.
+            var canonicalGroups = trailers
+                .Where(item => item.Active && TryTrailerIndex(item.TrailerNumber, out _))
+                .GroupBy(item => CanonicalTrailerNumber(item.TrailerNumber)!, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            foreach (var group in canonicalGroups)
             {
-                if (!TryTrailerIndex(numeric.TrailerNumber, out var index)) continue;
-                var canonicalNumber = $"SLH{index}";
-                var canonical = trailers.FirstOrDefault(item => item.Id != numeric.Id && item.Active && string.Equals(CanonicalTrailerNumber(item.TrailerNumber), canonicalNumber, StringComparison.OrdinalIgnoreCase));
-                if (canonical is null)
+                var canonicalNumber = group.Key;
+                var candidates = group.ToList();
+                var keeper = candidates.FirstOrDefault(item => string.Equals(item.TrailerNumber.Trim(), canonicalNumber, StringComparison.OrdinalIgnoreCase))
+                    ?? candidates.FirstOrDefault(item => item.TrailerNumber.Trim().StartsWith("SLH", StringComparison.OrdinalIgnoreCase))
+                    ?? candidates[0];
+
+                if (!string.Equals(keeper.TrailerNumber.Trim(), canonicalNumber, StringComparison.OrdinalIgnoreCase))
                 {
-                    numeric.TrailerNumber = canonicalNumber;
+                    keeper.TrailerNumber = canonicalNumber;
                     trailerAliasesCanonicalised++;
-                    continue;
                 }
 
-                await ReassignTrailerLoads(numeric.Id, canonical.Id, ct);
-                numeric.Active = false;
-                trailerDuplicatesMerged++;
+                foreach (var duplicate in candidates.Where(item => item.Id != keeper.Id))
+                {
+                    keeper.Type ??= duplicate.Type;
+                    keeper.StandardCapacity ??= duplicate.StandardCapacity;
+                    keeper.EuroCapacity ??= duplicate.EuroCapacity;
+                    await ReassignTrailerLoads(duplicate.Id, keeper.Id, ct);
+                    duplicate.Active = false;
+                    trailerDuplicatesMerged++;
+
+                    foreach (var mapping in matchingMappings.Where(item => item.Active && string.Equals(item.TmsEntityType, "Trailer", StringComparison.OrdinalIgnoreCase) && item.TmsEntityId == duplicate.Id))
+                        mapping.TmsEntityId = keeper.Id;
+                }
             }
 
             foreach (var asset in vehicleAssets)
@@ -217,7 +233,7 @@ public sealed class FleetioResilientSyncController(
                 }
             }
 
-            var summary = $"Fleetio sync completed: {vehiclesUpdated} vehicle(s) updated, {vehiclesCreated} vehicle(s) created, {trailersUpdated} trailer(s) updated, {trailersCreated} trailer(s) created, {trailerAliasesCanonicalised} numeric trailer alias(es) renamed to SLH numbers and {trailerDuplicatesMerged} duplicate trailer record(s) consolidated.";
+            var summary = $"Fleetio sync completed: {vehiclesUpdated} vehicle(s) updated, {vehiclesCreated} vehicle(s) created, {trailersUpdated} trailer(s) updated, {trailersCreated} trailer(s) created, {trailerAliasesCanonicalised} trailer alias(es) canonicalised to SLH numbers and {trailerDuplicatesMerged} duplicate trailer record(s) consolidated.";
             if (!string.IsNullOrWhiteSpace(mappingWarning)) summary += $" {mappingWarning}";
 
             return Ok(new
