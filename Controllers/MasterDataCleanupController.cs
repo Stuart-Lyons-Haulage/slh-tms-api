@@ -13,25 +13,34 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class MasterDataCleanupController(TmsDbContext db) : ControllerBase
 {
     [HttpPost("{entity}/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
-    public Task<IActionResult> Archive(string entity, Guid id, CancellationToken ct)
-        => SetActive(entity, id, false, ct);
+    public Task<IActionResult> Archive(string entity, Guid id, CancellationToken ct) => SetActive(entity, id, false, ct);
 
     [HttpPost("{entity}/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
-    public Task<IActionResult> Restore(string entity, Guid id, CancellationToken ct)
-        => SetActive(entity, id, true, ct);
+    public Task<IActionResult> Restore(string entity, Guid id, CancellationToken ct) => SetActive(entity, id, true, ct);
 
     [HttpDelete("{entity}/{id:guid}"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> Delete(string entity, Guid id, CancellationToken ct)
     {
-        entity = CanonicalEntity(entity);
-        if (entity.Length == 0) return BadRequest(new { code = "unsupported_master_entity", message = "This master-data type cannot be deleted from the cleanup screen." });
+        entity = Canonical(entity);
+        if (entity.Length == 0) return Unsupported("deleted");
 
-        var activeState = await ReadActive(entity, id, ct);
-        if (activeState is null) return NotFound(new { code = "master_data_not_found", message = "This master-data record no longer exists." });
-        if (activeState.Value)
+        var active = await ReadActive(entity, id, ct);
+        if (active is null) return NotFound(new { code = "master_data_not_found", message = "This master-data record no longer exists." });
+        if (active.Value)
             return Conflict(new { code = "archive_before_delete", message = "Archive this record first. Permanent delete is only available for an archived duplicate or incorrect master record." });
 
-        var usage = await Usage(entity, id, ct);
+        List<object> usage;
+        try { usage = await Usage(entity, id, ct); }
+        catch (Exception ex)
+        {
+            return Conflict(new
+            {
+                code = "reference_check_unavailable",
+                message = "The TMS could not safely prove that this record is unused, so it was not deleted. Archive it instead until the history check is available.",
+                detail = ex.GetBaseException().Message
+            });
+        }
+
         if (usage.Count > 0)
             return Conflict(new
             {
@@ -40,46 +49,45 @@ public sealed class MasterDataCleanupController(TmsDbContext db) : ControllerBas
                 references = usage
             });
 
-        var result = await Remove(entity, id, ct);
-        if (result is null) return NotFound(new { code = "master_data_not_found", message = "This master-data record no longer exists." });
+        var mappingsRemoved = await Remove(entity, id, ct);
+        if (mappingsRemoved is null) return NotFound(new { code = "master_data_not_found", message = "This master-data record no longer exists." });
 
         return Ok(new
         {
             deleted = true,
             entity,
             id,
-            integrationMappingsRemoved = result.Value.MappingsRemoved,
+            integrationMappingsRemoved = mappingsRemoved.Value,
             message = $"{Title(Singular(entity))} permanently deleted from the TMS master. Historical operational records were not removed."
         });
     }
 
     private async Task<IActionResult> SetActive(string entity, Guid id, bool active, CancellationToken ct)
     {
-        entity = CanonicalEntity(entity);
-        if (entity.Length == 0) return BadRequest(new { code = "unsupported_master_entity", message = "This master-data type cannot be archived from the cleanup screen." });
-
-        object? item = entity switch
-        {
-            "drivers" => await db.Drivers.FirstOrDefaultAsync(x => x.Id == id, ct),
-            "vehicles" => await db.Vehicles.FirstOrDefaultAsync(x => x.Id == id, ct),
-            "trailers" => await db.Trailers.FirstOrDefaultAsync(x => x.Id == id, ct),
-            "sites" => await db.Sites.FirstOrDefaultAsync(x => x.Id == id, ct),
-            "customers" => await db.Customers.FirstOrDefaultAsync(x => x.Id == id, ct),
-            "geofences" => await db.SiteGeofences.FirstOrDefaultAsync(x => x.Id == id, ct),
-            _ => null
-        };
+        entity = Canonical(entity);
+        if (entity.Length == 0) return Unsupported(active ? "restored" : "archived");
+        var item = await Find(entity, id, ct);
         if (item is null) return NotFound(new { code = "master_data_not_found", message = "This master-data record no longer exists." });
-
-        var current = Active(item);
-        if (current == active) return Ok(new { active, unchanged = true });
+        if (GetActive(item) == active) return Ok(new { active, unchanged = true });
 
         var before = Snapshot(item);
         SetActiveValue(item, active);
         if (item is SiteGeofence geofence) geofence.UpdatedAtUtc = DateTimeOffset.UtcNow;
-        db.MasterDataAudits.Add(NewAudit(Title(Singular(entity)), id, active ? "Restored" : "Archived", before, Snapshot(item)));
+        db.MasterDataAudits.Add(Audit(Title(Singular(entity)), id, active ? "Restored" : "Archived", before, Snapshot(item)));
         await db.SaveChangesAsync(ct);
         return Ok(new { active, entity, id });
     }
+
+    private async Task<object?> Find(string entity, Guid id, CancellationToken ct) => entity switch
+    {
+        "drivers" => await db.Drivers.FirstOrDefaultAsync(x => x.Id == id, ct),
+        "vehicles" => await db.Vehicles.FirstOrDefaultAsync(x => x.Id == id, ct),
+        "trailers" => await db.Trailers.FirstOrDefaultAsync(x => x.Id == id, ct),
+        "sites" => await db.Sites.FirstOrDefaultAsync(x => x.Id == id, ct),
+        "customers" => await db.Customers.FirstOrDefaultAsync(x => x.Id == id, ct),
+        "geofences" => await db.SiteGeofences.FirstOrDefaultAsync(x => x.Id == id, ct),
+        _ => null
+    };
 
     private async Task<bool?> ReadActive(string entity, Guid id, CancellationToken ct) => entity switch
     {
@@ -95,112 +103,95 @@ public sealed class MasterDataCleanupController(TmsDbContext db) : ControllerBas
     private async Task<List<object>> Usage(string entity, Guid id, CancellationToken ct)
     {
         var result = new List<object>();
-        var idText = id.ToString();
+        void Add(string area, int count) { if (count > 0) result.Add(new { area, count }); }
 
-        if (entity == "vehicles")
+        switch (entity)
         {
-            var loads = await db.Loads.AsNoTracking().CountAsync(x => x.VehicleId == id, ct);
-            if (loads > 0) result.Add(new { area = "Runs", count = loads });
-            var visits = await db.GeofenceVisits.AsNoTracking().CountAsync(x => x.VehicleId == id, ct);
-            if (visits > 0) result.Add(new { area = "Geofence history", count = visits });
-        }
-        else if (entity == "drivers")
-        {
-            var loads = await db.Loads.AsNoTracking().CountAsync(x => x.DriverId == id, ct);
-            if (loads > 0) result.Add(new { area = "Runs", count = loads });
-            var statuses = await db.DriverStatusLogs.AsNoTracking().CountAsync(x => x.DriverId == id, ct);
-            if (statuses > 0) result.Add(new { area = "Driver status history", count = statuses });
-        }
-        else if (entity == "trailers")
-        {
-            var loads = await db.Loads.AsNoTracking().CountAsync(x => x.TrailerId == id, ct);
-            if (loads > 0) result.Add(new { area = "Runs", count = loads });
-        }
-        else if (entity == "sites")
-        {
-            var geofences = await db.SiteGeofences.AsNoTracking().CountAsync(x => x.SiteId == id, ct);
-            if (geofences > 0) result.Add(new { area = "Geofences", count = geofences });
-        }
-        else if (entity == "geofences")
-        {
-            var visits = await db.GeofenceVisits.AsNoTracking().CountAsync(x => x.GeofenceId == id, ct);
-            if (visits > 0) result.Add(new { area = "Geofence visit history", count = visits });
-        }
-        else if (entity == "customers")
-        {
-            var customer = await db.Customers.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, ct);
-            if (customer is null) return result;
-            var orders = await db.TransportOrders.AsNoTracking().CountAsync(x => x.CustomerCode == customer.Code, ct);
-            if (orders > 0) result.Add(new { area = "Orders", count = orders });
-            var contacts = await db.CustomerContacts.AsNoTracking().CountAsync(x => x.CustomerCode == customer.Code, ct);
-            if (contacts > 0) result.Add(new { area = "Customer contacts", count = contacts });
-            var stagedByCode = await db.StagedImports.AsNoTracking().CountAsync(x => x.PayloadJson.Contains(customer.Code), ct);
-            if (stagedByCode > 0) result.Add(new { area = "Import / planning history", count = stagedByCode });
-            return result;
+            case "vehicles":
+                Add("Runs", await db.Loads.AsNoTracking().CountAsync(x => x.VehicleId == id, ct));
+                Add("Geofence history", await db.GeofenceVisits.AsNoTracking().CountAsync(x => x.VehicleId == id, ct));
+                break;
+            case "drivers":
+                Add("Runs", await db.Loads.AsNoTracking().CountAsync(x => x.DriverId == id, ct));
+                Add("Driver status history", await db.DriverStatusLogs.AsNoTracking().CountAsync(x => x.DriverId == id, ct));
+                break;
+            case "trailers":
+                Add("Runs", await db.Loads.AsNoTracking().CountAsync(x => x.TrailerId == id, ct));
+                break;
+            case "sites":
+                Add("Geofences", await db.SiteGeofences.AsNoTracking().CountAsync(x => x.SiteId == id, ct));
+                break;
+            case "geofences":
+                Add("Geofence visit history", await db.GeofenceVisits.AsNoTracking().CountAsync(x => x.GeofenceId == id, ct));
+                break;
+            case "customers":
+            {
+                var customer = await db.Customers.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, ct);
+                if (customer is null) return result;
+                Add("Orders", await db.TransportOrders.AsNoTracking().CountAsync(x => x.CustomerCode == customer.Code, ct));
+                Add("Customer contacts", await db.CustomerContacts.AsNoTracking().CountAsync(x => x.CustomerCode == customer.Code, ct));
+                Add("Import / planning history", await db.StagedImports.AsNoTracking().CountAsync(x => x.PayloadJson.Contains(customer.Code), ct));
+                return result;
+            }
         }
 
-        var staged = await db.StagedImports.AsNoTracking().CountAsync(x => x.PayloadJson.Contains(idText), ct);
-        if (staged > 0) result.Add(new { area = "Import / planning history", count = staged });
+        Add("Import / planning history", await db.StagedImports.AsNoTracking().CountAsync(x => x.PayloadJson.Contains(id.ToString()), ct));
         return result;
     }
 
-    private async Task<(int MappingsRemoved)?> Remove(string entity, Guid id, CancellationToken ct)
+    private async Task<int?> Remove(string entity, Guid id, CancellationToken ct)
     {
-        object? item = entity switch
-        {
-            "drivers" => await db.Drivers.FirstOrDefaultAsync(x => x.Id == id, ct),
-            "vehicles" => await db.Vehicles.FirstOrDefaultAsync(x => x.Id == id, ct),
-            "trailers" => await db.Trailers.FirstOrDefaultAsync(x => x.Id == id, ct),
-            "sites" => await db.Sites.FirstOrDefaultAsync(x => x.Id == id, ct),
-            "customers" => await db.Customers.FirstOrDefaultAsync(x => x.Id == id, ct),
-            "geofences" => await db.SiteGeofences.FirstOrDefaultAsync(x => x.Id == id, ct),
-            _ => null
-        };
+        var item = await Find(entity, id, ct);
         if (item is null) return null;
-
         var snapshot = Snapshot(item);
+
         var mappings = await db.IntegrationMappings.Where(x => x.TmsEntityId == id).ToListAsync(ct);
         if (mappings.Count > 0) db.IntegrationMappings.RemoveRange(mappings);
 
         switch (item)
         {
-            case Driver driver: db.Drivers.Remove(driver); break;
-            case Vehicle vehicle: db.Vehicles.Remove(vehicle); break;
-            case Trailer trailer: db.Trailers.Remove(trailer); break;
-            case Site site: db.Sites.Remove(site); break;
-            case Customer customer: db.Customers.Remove(customer); break;
-            case SiteGeofence geofence: db.SiteGeofences.Remove(geofence); break;
+            case Driver value: db.Drivers.Remove(value); break;
+            case Vehicle value: db.Vehicles.Remove(value); break;
+            case Trailer value: db.Trailers.Remove(value); break;
+            case Site value: db.Sites.Remove(value); break;
+            case Customer value: db.Customers.Remove(value); break;
+            case SiteGeofence value: db.SiteGeofences.Remove(value); break;
             default: return null;
         }
 
-        db.MasterDataAudits.Add(NewAudit(Title(Singular(entity)), id, "Deleted", snapshot, "null"));
+        db.MasterDataAudits.Add(Audit(Title(Singular(entity)), id, "Deleted", snapshot, null));
         await db.SaveChangesAsync(ct);
-        return (mappings.Count);
+        return mappings.Count;
     }
 
-    private MasterDataAudit NewAudit(string entityType, Guid entityId, string action, string before, string after)
-        => new()
+    private MasterDataAudit Audit(string entityType, Guid entityId, string action, string before, string? after)
+    {
+        using var beforeDoc = JsonDocument.Parse(before);
+        using var afterDoc = after is null ? null : JsonDocument.Parse(after);
+        return new MasterDataAudit
         {
             EntityType = entityType,
             EntityId = entityId,
             Action = action,
             ChangesJson = JsonSerializer.Serialize(new
             {
-                before = JsonDocument.Parse(before).RootElement,
-                after = after == "null" ? (JsonElement?)null : JsonDocument.Parse(after).RootElement
+                before = beforeDoc.RootElement.Clone(),
+                after = afterDoc?.RootElement.Clone()
             }),
             ChangedBy = User.Identity?.Name ?? User.FindFirst("preferred_username")?.Value ?? "unknown"
         };
+    }
 
-    private static bool Active(object item) => item switch
+    private IActionResult Unsupported(string action) => BadRequest(new
     {
-        Driver x => x.Active,
-        Vehicle x => x.Active,
-        Trailer x => x.Active,
-        Site x => x.Active,
-        Customer x => x.Active,
-        SiteGeofence x => x.Active,
-        _ => false
+        code = "unsupported_master_entity",
+        message = $"This master-data type cannot be {action} from the cleanup screen."
+    });
+
+    private static bool GetActive(object item) => item switch
+    {
+        Driver x => x.Active, Vehicle x => x.Active, Trailer x => x.Active,
+        Site x => x.Active, Customer x => x.Active, SiteGeofence x => x.Active, _ => false
     };
 
     private static void SetActiveValue(object item, bool active)
@@ -216,17 +207,12 @@ public sealed class MasterDataCleanupController(TmsDbContext db) : ControllerBas
         }
     }
 
-    private static string CanonicalEntity(string value) => value.Trim().ToLowerInvariant() switch
+    private static string Canonical(string value) => value.Trim().ToLowerInvariant() switch
     {
-        "driver" or "drivers" => "drivers",
-        "vehicle" or "vehicles" => "vehicles",
-        "trailer" or "trailers" => "trailers",
-        "site" or "sites" => "sites",
-        "customer" or "customers" => "customers",
-        "geofence" or "geofences" => "geofences",
-        _ => string.Empty
+        "driver" or "drivers" => "drivers", "vehicle" or "vehicles" => "vehicles",
+        "trailer" or "trailers" => "trailers", "site" or "sites" => "sites",
+        "customer" or "customers" => "customers", "geofence" or "geofences" => "geofences", _ => string.Empty
     };
-
     private static string Singular(string entity) => entity.EndsWith('s') ? entity[..^1] : entity;
     private static string Title(string value) => value.Length == 0 ? value : char.ToUpperInvariant(value[0]) + value[1..];
     private static string Snapshot<T>(T value) => JsonSerializer.Serialize(value);
