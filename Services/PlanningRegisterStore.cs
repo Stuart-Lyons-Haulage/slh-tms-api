@@ -30,8 +30,10 @@ public static class PlanningRegisterStore
     {
         var rows = await db.StagedImports.AsNoTracking().Where(x => x.EntityType == LoadType && x.Status == StagingStatus.Promoted)
             .OrderBy(x => x.ReceivedAtUtc).Take(2000).ToListAsync(ct);
-        return rows.Select(ParseLoad).Where(x => x is not null && (date is null || x.PlanningDate == date)).Cast<Load>()
+        var loads = rows.Select(ParseLoad).Where(x => x is not null && (date is null || x.PlanningDate == date)).Cast<Load>()
             .OrderBy(x => x.PlanningDate).ThenBy(x => x.Reference).Take(500).ToList();
+        await PlanningAllocationStore.ReconcileSingleOrderRunsAsync(db, loads, "SLH automatic reconciliation", ct);
+        return loads;
     }
 
     public static async Task<Load?> GetLoadAsync(TmsDbContext db, Guid id, CancellationToken ct) =>
