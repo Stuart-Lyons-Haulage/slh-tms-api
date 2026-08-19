@@ -29,9 +29,16 @@ public sealed class DriverPlanningController(TmsDbContext db) : ControllerBase
         }
         catch (Exception exception) when (IsSchemaUnavailable(exception))
         {
-            return Ok(Array.Empty<DriverAssignmentResponse>());
+            db.ChangeTracker.Clear();
+            loads = (await PlanningRegisterStore.ReadLoadsAsync(db, null, ct))
+                .Where(load => load.PlanningDate >= firstDate && load.PlanningDate <= lastDate)
+                .OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference)
+                .Take(2000).ToList();
         }
-        await LoadCommercialStore.EnrichAsync(db, loads, ct);
+
+        try { await LoadCommercialStore.EnrichAsync(db, loads, ct); }
+        catch (Exception exception) when (IsSchemaUnavailable(exception)) { db.ChangeTracker.Clear(); }
+
         var driverIds = loads.Where(load => load.DriverId != null).Select(load => load.DriverId!.Value).Distinct().ToList();
         var vehicleIds = loads.Where(load => load.VehicleId != null).Select(load => load.VehicleId!.Value).Distinct().ToList();
         var trailerIds = loads.Where(load => load.TrailerId != null).Select(load => load.TrailerId!.Value).Distinct().ToList();
@@ -68,10 +75,23 @@ public sealed class DriverPlanningController(TmsDbContext db) : ControllerBase
         }
         catch (Exception exception) when (IsSchemaUnavailable(exception))
         {
-            return Ok(new { planningDate, generatedAtUtc = DateTimeOffset.UtcNow, suggestions = Array.Empty<ReturnLoadSuggestion>() });
+            db.ChangeTracker.Clear();
+            var registerLoads = await PlanningRegisterStore.ReadLoadsAsync(db, null, ct);
+            recentLoads = registerLoads
+                .Where(load => load.PlanningDate >= lookback && load.PlanningDate < planningDate && load.DriverId != null && load.Status != LoadStatus.Cancelled)
+                .OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).ToList();
+            targetLoads = registerLoads
+                .Where(load => load.PlanningDate == planningDate && load.DriverId == null && load.Status != LoadStatus.Cancelled)
+                .OrderBy(load => load.Reference).ToList();
         }
-        await LoadCommercialStore.EnrichAsync(db, recentLoads, ct);
-        await LoadCommercialStore.EnrichAsync(db, targetLoads, ct);
+
+        try
+        {
+            await LoadCommercialStore.EnrichAsync(db, recentLoads, ct);
+            await LoadCommercialStore.EnrichAsync(db, targetLoads, ct);
+        }
+        catch (Exception exception) when (IsSchemaUnavailable(exception)) { db.ChangeTracker.Clear(); }
+
         var driverIds = recentLoads.Select(load => load.DriverId!.Value).Distinct().ToList();
         var drivers = await SafeDictionary(db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id) && driver.Active), driver => driver.Id, ct);
 
