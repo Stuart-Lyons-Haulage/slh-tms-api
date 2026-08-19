@@ -1,3 +1,5 @@
+using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
@@ -36,6 +38,24 @@ public sealed class ExecutionIdentityResolverTests
 
         var first = ExecutionIdentityResolver.FirstMovement(new[] { "KY71CVP" }, events, signOn);
         Assert.Equal(signOn.AddMinutes(14), first);
+    }
+
+    [Fact]
+    public async Task Explicit_dot_and_tacho_vehicle_mappings_join_the_same_tms_vehicle_identity()
+    {
+        var vehicle = new Vehicle { Id = Guid.NewGuid(), Registration = "KY71CVP", Active = true };
+        var options = new DbContextOptionsBuilder<TmsDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
+        await using var db = new TmsDbContext(options);
+        db.Vehicles.Add(vehicle);
+        db.IntegrationMappings.AddRange(
+            new IntegrationMapping { Provider = "DotTracking", ExternalKey = "FALCON-001", TmsEntityType = "Vehicle", TmsEntityId = vehicle.Id },
+            new IntegrationMapping { Provider = "TachoMaster", ExternalKey = "TM-71", TmsEntityType = "Vehicle", TmsEntityId = vehicle.Id });
+        await db.SaveChangesAsync();
+
+        var aliases = await ExecutionIdentityResolver.VehicleAliasesAsync(db, new[] { vehicle }, CancellationToken.None);
+        Assert.Contains("KY71CVP", aliases[vehicle.Id]);
+        Assert.Contains("FALCON001", aliases[vehicle.Id]);
+        Assert.Contains("TM71", aliases[vehicle.Id]);
     }
 
     private static VehicleTrackingEvent Tracking(string id, DateTimeOffset at, decimal speed) => new()
