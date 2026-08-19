@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 
@@ -24,6 +25,24 @@ public static class PlanningAllocationStore
             .Select(stop => stop.OrderId!.Value)
             .Distinct()
             .ToList();
+
+        if (orderIds.Count == 0)
+        {
+            try
+            {
+                orderIds = await db.LoadStops.AsNoTracking()
+                    .Where(stop => stop.LoadId == load.Id && stop.OrderId != null)
+                    .Select(stop => stop.OrderId!.Value)
+                    .Distinct()
+                    .Take(2)
+                    .ToListAsync(ct);
+            }
+            catch (Exception ex) when (SchemaUnavailable(ex))
+            {
+                db.ChangeTracker.Clear();
+            }
+        }
+
         if (orderIds.Count != 1) return false;
 
         var quantity = decimal.ToInt32(load.PalletSpacesUsed.Value);
@@ -41,6 +60,14 @@ public static class PlanningAllocationStore
             ReviewNote = $"Single-order run quantity synchronised automatically at {quantity} pallet{(quantity == 1 ? string.Empty : "s")}."
         });
         return true;
+    }
+
+    private static bool SchemaUnavailable(Exception ex)
+    {
+        var message = ex.GetBaseException().Message;
+        return message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase);
     }
 
     private sealed record AllocationState(Guid OrderId, Guid LoadId, int Pallets, DateOnly Date, DateTimeOffset UpdatedAtUtc, string? UpdatedBy);
