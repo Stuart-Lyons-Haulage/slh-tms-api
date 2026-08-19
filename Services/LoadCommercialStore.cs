@@ -44,6 +44,7 @@ public static class LoadCommercialStore
         stored.ReviewedBy = reviewedBy;
         stored.ReviewNote = "Commercial control updated from the Planner.";
         Apply(load, values);
+        await PlanningAllocationStore.SyncSingleOrderRunAsync(db, load, reviewedBy, ct);
         await db.SaveChangesAsync(ct);
     }
 
