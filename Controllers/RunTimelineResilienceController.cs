@@ -26,6 +26,7 @@ public sealed class RunTimelineResilienceController(TmsDbContext db) : Controlle
         catch (Exception exception) when (exception is not OperationCanceledException) { db.ChangeTracker.Clear(); }
 
         var displayReference = RunDisplayLabel.For(load);
+        var timelineStatus = load.Status.ToString();
         var events = new List<TimelineEvent>
         {
             new(load.CreatedAtUtc, "Run created", displayReference, "Planning", null)
@@ -49,38 +50,94 @@ public sealed class RunTimelineResilienceController(TmsDbContext db) : Controlle
             db.ChangeTracker.Clear();
         }
 
+        var derivedTrackingAdded = false;
         try
         {
-            var visits = await db.GeofenceVisits.AsNoTracking()
-                .Where(x => x.LoadId == id)
-                .ToListAsync(ct);
+            // Live progression is intentionally table-free. Rebuild the same physical
+            // visit truth used by /run-progress rather than relying on GeofenceVisits,
+            // which may not exist or may contain no rows in production.
+            var geofenceLoad = GeofencePlanningMatch.PrepareLoad(load);
+            var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, load.PlanningDate, [geofenceLoad], ct);
+            var visits = snapshot.Visits.Where(x => x.LoadId == id).OrderBy(x => x.EnteredAtUtc).ToList();
+            derivedTrackingAdded = visits.Count > 0;
+
             foreach (var visit in visits)
             {
                 events.Add(new TimelineEvent(
                     visit.EnteredAtUtc,
                     "Geofence arrival",
-                    visit.StatusReason ?? visit.VehicleIdentifier,
+                    $"{visit.Fence.Name} · {visit.VehicleIdentifier}",
                     "Tracking",
                     null));
                 if (visit.ConfirmedAtUtc is not null)
                     events.Add(new TimelineEvent(
                         visit.ConfirmedAtUtc.Value,
                         "Site visit confirmed",
-                        $"Dwell threshold confirmed · {visit.DwellMinutes} min",
+                        $"{visit.Fence.Name} · dwell threshold confirmed · {visit.DwellMinutes} min",
                         "Tracking",
                         null));
                 if (visit.ExitedAtUtc is not null)
                     events.Add(new TimelineEvent(
                         visit.ExitedAtUtc.Value,
                         "Geofence departure",
-                        visit.Status,
+                        $"{visit.Fence.Name} · {visit.DwellMinutes} min dwell",
                         "Tracking",
                         null));
             }
+
+            var completedStopIds = GeofencePlanningMatch.CompletedStopIds(load, visits);
+            var totalStops = (load.Stops ?? []).Count;
+            var active = snapshot.ActiveVisits.Any(x => x.LoadId == id);
+            timelineStatus = totalStops > 0 && completedStopIds.Count >= totalStops
+                ? "Completed"
+                : active
+                    ? "On site"
+                    : completedStopIds.Count > 0
+                        ? "In progress"
+                        : timelineStatus;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             db.ChangeTracker.Clear();
+        }
+
+        // Preserve legacy visit history as a fallback only. Using it in addition to the
+        // derived engine would duplicate events on environments where both happen to exist.
+        if (!derivedTrackingAdded)
+        {
+            try
+            {
+                var visits = await db.GeofenceVisits.AsNoTracking()
+                    .Where(x => x.LoadId == id)
+                    .ToListAsync(ct);
+                foreach (var visit in visits)
+                {
+                    events.Add(new TimelineEvent(
+                        visit.EnteredAtUtc,
+                        "Geofence arrival",
+                        visit.StatusReason ?? visit.VehicleIdentifier,
+                        "Tracking",
+                        null));
+                    if (visit.ConfirmedAtUtc is not null)
+                        events.Add(new TimelineEvent(
+                            visit.ConfirmedAtUtc.Value,
+                            "Site visit confirmed",
+                            $"Dwell threshold confirmed · {visit.DwellMinutes} min",
+                            "Tracking",
+                            null));
+                    if (visit.ExitedAtUtc is not null)
+                        events.Add(new TimelineEvent(
+                            visit.ExitedAtUtc.Value,
+                            "Geofence departure",
+                            visit.Status,
+                            "Tracking",
+                            null));
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                db.ChangeTracker.Clear();
+            }
         }
 
         try
@@ -106,7 +163,7 @@ public sealed class RunTimelineResilienceController(TmsDbContext db) : Controlle
             id = load.Id,
             reference = displayReference,
             planningDate = load.PlanningDate,
-            status = load.Status.ToString(),
+            status = timelineStatus,
             events = events.OrderBy(x => x.AtUtc)
         });
     }
