@@ -52,6 +52,7 @@ public static class PlanningRegisterStore
         row.ReviewedAtUtc = DateTimeOffset.UtcNow;
         row.ReviewedBy = user;
         row.ReviewNote = "Saved in the audited planning register because dedicated planning tables are unavailable.";
+        await PlanningAllocationStore.SyncSingleOrderRunAsync(db, load, user, ct);
         await db.SaveChangesAsync(ct);
     }
 
