@@ -70,8 +70,8 @@ internal static partial class RunDisplayLabel
         if (numeric.Success)
         {
             var number = int.TryParse(numeric.Groups[1].Value, out var parsed) ? parsed.ToString() : numeric.Groups[1].Value;
-            var embeddedPeriod = ExplicitPeriod(numeric.Groups[2].Value);
-            return $"Run {number}{(embeddedPeriod ?? period) is { } resolved ? $" {resolved}" : string.Empty}";
+            var resolvedPeriod = ExplicitPeriod(numeric.Groups[2].Value) ?? period;
+            return $"Run {number}{(resolvedPeriod is null ? string.Empty : $" {resolvedPeriod}")}";
         }
 
         clean = Regex.Replace(clean, @"^RUN[\s:_-]*", string.Empty, RegexOptions.IgnoreCase).Trim();
