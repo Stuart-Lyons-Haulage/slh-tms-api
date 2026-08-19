@@ -19,6 +19,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
     [HttpGet("pallets")]
     public async Task<IActionResult> Get([FromQuery] DateOnly date, CancellationToken ct)
     {
+        Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
         var orders = await ReadOrders(date, ct);
         var loads = await ReadLoads(date, ct);
         var details = await ReadOrderDetails(date, ct);
@@ -38,7 +39,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
         foreach (var order in orders.Where(x => x.Status != OrderStatus.Cancelled))
         {
             details.TryGetValue(Normalise(order.Reference), out var detail);
-            var ordered = Math.Max(order.Pallets ?? detail?.Pallets ?? 0, 0);
+            var ordered = EffectiveOrderedPallets(order, detail);
             if (ordered <= 0) continue;
 
             var hasExplicitAllocations = explicitAllocations.Keys.Any(key => key.OrderId == order.Id);
@@ -97,7 +98,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
                 planningGroup = group,
                 temperature,
                 source = detail?.Source,
-                receivedAtUtc = detail?.ReceivedAtUtc ?? order.CreatedAtUtc,
+                receivedAtUtc = detail?.UpdatedAtUtc ?? order.CreatedAtUtc,
                 lateAddition = late,
                 allocations = allocations.Select(x => new
                 {
@@ -191,7 +192,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
 
         var allLatest = await ReadLatestAllocations(request.Date, ct);
         var totalPlanned = allLatest.Values.Where(x => x.OrderId == order.Id).Sum(x => Math.Max(x.Pallets, 0));
-        var ordered = Math.Max(order.Pallets ?? detail?.Pallets ?? 0, 0);
+        var ordered = EffectiveOrderedPallets(order, detail);
         return Ok(new
         {
             orderId = order.Id,
@@ -245,7 +246,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
         var result = new Dictionary<string, OrderDetail>(StringComparer.OrdinalIgnoreCase);
         var rows = await db.StagedImports.AsNoTracking()
             .Where(x => (x.EntityType == "order" || x.EntityType == "register:order") && x.Status != StagingStatus.Rejected)
-            .OrderByDescending(x => x.ReceivedAtUtc).Take(8000).ToListAsync(ct);
+            .OrderByDescending(x => x.ReviewedAtUtc ?? x.ReceivedAtUtc).ThenByDescending(x => x.ReceivedAtUtc).Take(8000).ToListAsync(ct);
         foreach (var row in rows)
         {
             try
@@ -260,7 +261,8 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
                 var group = Text(root, "planningGroup", "palletOrderGroup", "collectionGroup");
                 var temperature = Text(root, "temperature", "temperatureC", "temp", "temperatureRequirement") ?? Tagged(Text(root, "driverInstructions", "notes"), "Temperature");
                 var pallets = Int(root, "pallets", "palletQty", "palletQuantity", "quantity");
-                result[Normalise(reference)] = new OrderDetail(reference, collection, destination, group, temperature, pallets, row.Source, row.ReceivedAtUtc);
+                var amended = row.ReviewNote?.Contains("Amended from Manage Jobs", StringComparison.OrdinalIgnoreCase) == true;
+                result[Normalise(reference)] = new OrderDetail(reference, collection, destination, group, temperature, pallets, row.Source, row.ReviewedAtUtc ?? row.ReceivedAtUtc, amended);
             }
             catch (JsonException) { }
         }
@@ -334,7 +336,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
             }
             if (!target.Stops.Any(stop => stop.OrderId == order.Id)) continue;
             details.TryGetValue(Normalise(order.Reference), out var detail);
-            pallets += Math.Max(order.Pallets ?? detail?.Pallets ?? 0, 0);
+            pallets += EffectiveOrderedPallets(order, detail);
         }
 
         try
@@ -355,6 +357,14 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
         registered.PalletSpacesUsed = pallets;
         if (registered.TotalPalletSpaces is null) registered.TotalPalletSpaces = 26;
         await PlanningRegisterStore.SaveLoadAsync(db, registered, User.Identity?.Name, ct);
+    }
+
+    private static int EffectiveOrderedPallets(TransportOrder order, OrderDetail? detail)
+    {
+        // A register-backed order amended in Manage Jobs updates its audited staged payload rather than
+        // an older duplicate TransportOrders row. In that case the amended payload must be authoritative.
+        var value = detail?.Amended == true ? detail.Pallets ?? order.Pallets : order.Pallets ?? detail?.Pallets;
+        return Math.Max(value ?? 0, 0);
     }
 
     private static string PlanningGroup(OrderDetail? detail, TransportOrder order)
@@ -404,7 +414,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
     private static bool SchemaUnavailable(Exception ex) => ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || ex.GetBaseException().Message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
 
-    private sealed record OrderDetail(string Reference, string? Collection, string? Destination, string? Group, string? Temperature, int? Pallets, string? Source, DateTimeOffset ReceivedAtUtc);
+    private sealed record OrderDetail(string Reference, string? Collection, string? Destination, string? Group, string? Temperature, int? Pallets, string? Source, DateTimeOffset UpdatedAtUtc, bool Amended);
     private sealed record AllocationState(Guid OrderId, Guid LoadId, int Pallets, DateOnly Date, DateTimeOffset UpdatedAtUtc, string? UpdatedBy);
     public sealed record PalletAllocationRequest(Guid OrderId, Guid LoadId, DateOnly Date, int Pallets, string? Note);
 
