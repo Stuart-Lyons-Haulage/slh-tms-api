@@ -30,13 +30,12 @@ public static class EmbeddedGeofenceEngine
                 .ToListAsync(ct);
 
         // Use the same canonical vehicle aliases as Fleet Status and customer ETA
-        // evidence, including explicit DotTracking/TachoMaster mappings. A run must not
-        // change vehicle identity as it moves between integrations.
+        // evidence, including explicit DotTracking/TachoMaster mappings and the same
+        // registration/fleet suffix forms used by the live DOT screen.
         var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles, ct);
 
-        var allAliases = aliasesByVehicle.Values.SelectMany(x => x).Distinct(StringComparer.OrdinalIgnoreCase).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var (startUtc, endUtc) = OperatingWindow(planningDate);
-        List<VehicleTrackingEvent> events = allAliases.Count == 0
+        List<VehicleTrackingEvent> events = vehicles.Count == 0
             ? new List<VehicleTrackingEvent>()
             : await db.VehicleTrackingEvents.AsNoTracking()
                 .Where(x => x.EventTimeUtc >= startUtc.AddHours(-2) && x.EventTimeUtc < endUtc.AddHours(2))
@@ -44,15 +43,18 @@ public static class EmbeddedGeofenceEngine
                 .Take(20000)
                 .ToListAsync(ct);
 
-        var matchedEvents = events.Where(x => allAliases.Contains(Normalize(x.VehicleIdentifier))).ToList();
+        var matchedEvents = events
+            .Where(item => aliasesByVehicle.Values.Any(aliases =>
+                ExecutionIdentityResolver.MatchesVehicleIdentifier(aliases, item.VehicleIdentifier)))
+            .ToList();
 
         // Falcon's current-telemetry endpoint can legitimately return the same provider
         // event while a vehicle is stationary. The event is correctly deduplicated in
         // VehicleTrackingEvents, but VehicleLiveStatus.LastReceivedAtUtc still proves that
-        // the same position was freshly observed. For today's operating date only, append
-        // that fresh observation so a genuine stationary site visit can accumulate dwell.
-        Dictionary<string, VehicleLiveStatus> freshLiveByAlias = new(StringComparer.OrdinalIgnoreCase);
-        if (allAliases.Count > 0 && planningDate == UkOperatingDate(now))
+        // the same position was freshly observed. Resolve those live observations using
+        // the identical alias rules as the historic tracking event stream.
+        var freshLiveByVehicle = new Dictionary<Guid, VehicleLiveStatus>();
+        if (vehicles.Count > 0 && planningDate == UkOperatingDate(now))
         {
             var freshnessFloor = now.AddMinutes(-5);
             var liveStatuses = await db.VehicleLiveStatuses.AsNoTracking()
@@ -60,10 +62,18 @@ public static class EmbeddedGeofenceEngine
                 .ToListAsync(ct);
             foreach (var live in liveStatuses)
             {
-                var key = Normalize(live.VehicleIdentifier);
-                if (!allAliases.Contains(key)) continue;
-                if (!freshLiveByAlias.TryGetValue(key, out var existing) || live.LastReceivedAtUtc > existing.LastReceivedAtUtc)
-                    freshLiveByAlias[key] = live;
+                foreach (var vehicle in vehicles)
+                {
+                    if (!aliasesByVehicle.TryGetValue(vehicle.Id, out var aliases) ||
+                        !ExecutionIdentityResolver.MatchesVehicleIdentifier(aliases, live.VehicleIdentifier))
+                        continue;
+
+                    if (!freshLiveByVehicle.TryGetValue(vehicle.Id, out var existing) ||
+                        live.LastReceivedAtUtc > existing.LastReceivedAtUtc)
+                    {
+                        freshLiveByVehicle[vehicle.Id] = live;
+                    }
+                }
             }
         }
 
@@ -72,13 +82,12 @@ public static class EmbeddedGeofenceEngine
         foreach (var vehicle in vehicles)
         {
             var aliases = aliasesByVehicle.TryGetValue(vehicle.Id, out var known) ? known : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var vehicleEvents = matchedEvents.Where(x => aliases.Contains(Normalize(x.VehicleIdentifier))).OrderBy(x => x.EventTimeUtc).ToList();
+            var vehicleEvents = matchedEvents
+                .Where(item => ExecutionIdentityResolver.MatchesVehicleIdentifier(aliases, item.VehicleIdentifier))
+                .OrderBy(x => x.EventTimeUtc)
+                .ToList();
 
-            var live = aliases
-                .Select(alias => freshLiveByAlias.GetValueOrDefault(alias))
-                .Where(x => x is not null)
-                .OrderByDescending(x => x!.LastReceivedAtUtc)
-                .FirstOrDefault();
+            var live = freshLiveByVehicle.GetValueOrDefault(vehicle.Id);
             if (live is not null && (vehicleEvents.Count == 0 || live.LastReceivedAtUtc > vehicleEvents[^1].EventTimeUtc))
             {
                 vehicleEvents.Add(new VehicleTrackingEvent
@@ -104,12 +113,16 @@ public static class EmbeddedGeofenceEngine
         LinkVisitsToRuns(visits, loads);
         var activeVisits = visits.Where(x => x.ExitedAtUtc is null && now - x.LastInsideAtUtc <= TimeSpan.FromMinutes(15)).ToList();
         var confirmed = visits.Where(x => x.ConfirmedAtUtc is not null).ToList();
-        var latestTracking = visits.Count > 0
-            ? new[] { matchedEvents.OrderByDescending(x => x.EventTimeUtc).FirstOrDefault()?.EventTimeUtc, freshLiveByAlias.Values.OrderByDescending(x => x.LastReceivedAtUtc).FirstOrDefault()?.LastReceivedAtUtc }
-                .Where(x => x is not null)
-                .Max()
-            : matchedEvents.OrderByDescending(x => x.EventTimeUtc).FirstOrDefault()?.EventTimeUtc;
-        return new EmbeddedGeofenceSnapshot(fences, visits, activeVisits, confirmed, observationCount, latestTracking);
+        var latestTracking = new[]
+            {
+                matchedEvents.OrderByDescending(x => x.EventTimeUtc).FirstOrDefault()?.EventTimeUtc,
+                freshLiveByVehicle.Values.OrderByDescending(x => x.LastReceivedAtUtc).FirstOrDefault()?.LastReceivedAtUtc
+            }
+            .Where(x => x is not null)
+            .Select(x => x!.Value)
+            .DefaultIfEmpty()
+            .Max();
+        return new EmbeddedGeofenceSnapshot(fences, visits, activeVisits, confirmed, observationCount, latestTracking == default ? null : latestTracking);
     }
 
     public static async Task<IReadOnlyList<EmbeddedFenceStatus>> FenceStatusesAsync(TmsDbContext db, CancellationToken ct)
