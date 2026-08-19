@@ -78,7 +78,7 @@ public static class EmbeddedGeofenceEngine
         {
             var name = Text(record, "name")?.Trim();
             if (string.IsNullOrWhiteSpace(name) || !record.TryGetProperty("points", out var points) || points.ValueKind != JsonValueKind.Array) continue;
-            var parsedPoints = points.EnumerateArray().Select(ReadPoint).Where(x => x is not null).Select(x => x!.Value).ToList();
+            var parsedPoints = points.EnumerateArray().Select(ReadPoint).Where(x => x is not null).Select(x => x!).ToList();
             if (parsedPoints.Count < 3) continue;
             result.Add(new EmbeddedFence(StableId(name), name, Text(record, "category"), Int(record, "category_max_wait_time"), Int(record, "max_wait_time"), Int(record, "pending_entry_minutes") ?? 0, Int(record, "pending_exit_minutes") ?? 0, Text(record, "site_no"), parsedPoints));
         }
