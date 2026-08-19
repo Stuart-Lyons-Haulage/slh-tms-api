@@ -27,6 +27,7 @@ public static class LoadCommercialStore
             }
             catch (JsonException) { /* Leave malformed legacy control data blank and editable. */ }
         }
+        await PlanningAllocationStore.ReconcileSingleOrderRunsAsync(db, rows, "SLH automatic reconciliation", ct);
     }
 
     public static async Task SaveAsync(TmsDbContext db, Load load, LoadCommercialValues values, string? reviewedBy, CancellationToken ct)
@@ -44,6 +45,7 @@ public static class LoadCommercialStore
         stored.ReviewedBy = reviewedBy;
         stored.ReviewNote = "Commercial control updated from the Planner.";
         Apply(load, values);
+        await PlanningAllocationStore.SyncSingleOrderRunAsync(db, load, reviewedBy, ct);
         await db.SaveChangesAsync(ct);
     }
 
