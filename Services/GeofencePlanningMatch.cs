@@ -43,17 +43,31 @@ public static class GeofencePlanningMatch
     }
 
     /// <summary>
-    /// Falcon NWF collection fences use names such as "Merston (Natures Way)"
-    /// while the planner deliberately shows "NWF-Merston". Present both concepts
-    /// to the engine so the physical site can be linked safely.
+    /// The planner deliberately shows concise labels such as "NWF-Runcton".
+    /// Resolve the locality against the actual uploaded Falcon NWF Collection fence
+    /// rather than assuming a supplier suffix; the category exports are authoritative.
     /// </summary>
     public static string MatchText(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return value ?? string.Empty;
         var words = Words(value);
-        if (words.Count >= 2 && words[0].Equals("NWF", StringComparison.OrdinalIgnoreCase))
-            return $"{string.Join(' ', words.Skip(1))} Natures Way";
-        return value;
+        if (words.Count < 2 || !words[0].Equals("NWF", StringComparison.OrdinalIgnoreCase)) return value;
+
+        var locality = words.Skip(1).ToList();
+        var categoryMatches = EmbeddedGeofenceEngine.ApprovedFences
+            .Where(fence => string.Equals(fence.Category, "NWF Collection", StringComparison.OrdinalIgnoreCase))
+            .Where(fence => ContainsAllWords(fence.Name, locality))
+            .ToList();
+        if (categoryMatches.Count == 1) return categoryMatches[0].Name;
+
+        var estateMatches = EmbeddedGeofenceEngine.ApprovedFences
+            .Where(fence => ContainsAllWords(fence.Name, locality))
+            .ToList();
+        if (estateMatches.Count == 1) return estateMatches[0].Name;
+
+        // A locality-only value is still safer than carrying the planner's NWF prefix:
+        // the engine permits one sufficiently specific token but rejects generic brands.
+        return string.Join(' ', locality);
     }
 
     public static HashSet<Guid> CompletedStopIds(Load load, IEnumerable<DerivedVisit> visits)
@@ -89,6 +103,12 @@ public static class GeofencePlanningMatch
         var common = left.Intersect(right, StringComparer.OrdinalIgnoreCase).ToList();
         if (common.Count >= 2) return true;
         return common.Count == 1 && common[0].Length >= 5 && (left.Count == 1 || right.Count == 1);
+    }
+
+    private static bool ContainsAllWords(string value, IReadOnlyCollection<string> required)
+    {
+        var words = Words(value).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return required.Count > 0 && required.All(words.Contains);
     }
 
     private static HashSet<string> MeaningfulTokens(string? value)
