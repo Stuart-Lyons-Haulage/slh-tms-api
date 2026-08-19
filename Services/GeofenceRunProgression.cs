@@ -114,12 +114,10 @@ END;
         {
             if (record.Latitude is null || record.Longitude is null) continue;
             var vehicle = vehicles.FirstOrDefault(v => VehicleMatches(v, record.VehicleIdentifier));
-            var load = vehicle is null ? null : await db.Loads.Include(x => x.Stops)
-                .Where(x => x.VehicleId == vehicle.Id && x.Status != LoadStatus.Completed && x.Status != LoadStatus.Cancelled)
-                .OrderByDescending(x => x.PlanningDate).FirstOrDefaultAsync(ct);
             var openVisit = await db.GeofenceVisits.OrderByDescending(x => x.EnteredAtUtc)
                 .FirstOrDefaultAsync(x => x.VehicleIdentifier == record.VehicleIdentifier && x.ExitedAtUtc == null, ct);
             var inside = geofences.FirstOrDefault(g => Contains(g.PolygonJson, record.Longitude.Value, record.Latitude.Value));
+            var load = await ResolveLoadAsync(db, vehicle?.Id, openVisit?.LoadId, record.EventTimeUtc, inside?.Name, ct);
 
             if (inside is not null)
             {
@@ -135,12 +133,19 @@ END;
                     {
                         GeofenceId = inside.Id, LoadId = load?.Id, LoadStopId = stop?.Id, VehicleId = vehicle?.Id,
                         VehicleIdentifier = record.VehicleIdentifier, EnteredAtUtc = record.EventTimeUtc,
-                        LastInsideAtUtc = record.EventTimeUtc, Status = "Arrived", StatusReason = $"Entered {inside.Name}."
+                        LastInsideAtUtc = record.EventTimeUtc, Status = "Arrived", StatusReason = stop is null
+                            ? $"Entered {inside.Name}; no remaining run stop could be matched safely."
+                            : $"Entered {inside.Name}; matched to stop {stop.Name}."
                     };
                     db.GeofenceVisits.Add(openVisit);
                 }
                 else
                 {
+                    if (openVisit.LoadId is null && load is not null)
+                    {
+                        openVisit.LoadId = load.Id;
+                        openVisit.LoadStopId ??= MatchNextStop(load, inside.Name, await CompletedStopIds(db, load.Id, ct))?.Id;
+                    }
                     openVisit.LastInsideAtUtc = record.EventTimeUtc;
                     openVisit.DwellMinutes = Math.Max(0, (int)Math.Floor((record.EventTimeUtc - openVisit.EnteredAtUtc).TotalMinutes));
                     var confirmMinutes = Math.Max(DefaultConfirmDwellMinutes, inside.PendingEntryMinutes);
@@ -149,7 +154,12 @@ END;
                         openVisit.ConfirmedAtUtc = record.EventTimeUtc;
                         openVisit.Status = "OnSiteConfirmed";
                         openVisit.StatusReason = $"Confirmed after {openVisit.DwellMinutes} minutes in {inside.Name}.";
-                        if (load is not null && load.Status is LoadStatus.Dispatched or LoadStatus.Planned) load.Status = LoadStatus.InProgress;
+                        if (load is not null && load.Status is LoadStatus.Dispatched or LoadStatus.Planned)
+                        {
+                            load.Status = LoadStatus.InProgress;
+                            if (db.Entry(load).State == EntityState.Detached)
+                                await PlanningRegisterStore.SaveLoadAsync(db, load, "RoadTech Geofence Engine", ct);
+                        }
                     }
                     var waitLimit = inside.MaxWaitMinutes ?? inside.CategoryMaxWaitMinutes;
                     if (waitLimit is int limit && openVisit.DwellMinutes > limit)
@@ -170,11 +180,12 @@ END;
                     await CloseVisitAsync(db, openVisit, record.EventTimeUtc,
                         confirmed ? "Departed" : "PassThrough",
                         confirmed ? "Confirmed site visit completed on geofence exit." : "Vehicle left before the minimum dwell confirmation.", ct);
-                    if (confirmed && load is not null)
+                    if (confirmed && openVisit.LoadId is Guid visitLoadId)
                     {
+                        var visitLoad = load?.Id == visitLoadId ? load : await ResolveLoadAsync(db, vehicle?.Id, visitLoadId, record.EventTimeUtc, null, ct);
                         db.DriverStatusLogs.Add(new DriverStatusLog
                         {
-                            LoadId = load.Id, DriverId = load.DriverId, Status = "GeofenceStopCompleted",
+                            LoadId = visitLoadId, DriverId = visitLoad?.DriverId, Status = "GeofenceStopCompleted",
                             Notes = $"Stop {openVisit.LoadStopId} completed from geofence exit at {record.EventTimeUtc:u}.", CapturedBy = "RoadTech Geofence Engine"
                         });
                     }
@@ -184,21 +195,117 @@ END;
         }
     }
 
+    private static async Task<Load?> ResolveLoadAsync(
+        TmsDbContext db,
+        Guid? vehicleId,
+        Guid? preferredLoadId,
+        DateTimeOffset eventTimeUtc,
+        string? geofenceName,
+        CancellationToken ct)
+    {
+        if (preferredLoadId is Guid preferred)
+        {
+            try
+            {
+                var dedicated = await db.Loads.Include(x => x.Stops).SingleOrDefaultAsync(x => x.Id == preferred, ct);
+                if (dedicated is not null) return dedicated;
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                db.ChangeTracker.Clear();
+            }
+
+            try
+            {
+                var registered = await PlanningRegisterStore.GetLoadAsync(db, preferred, ct);
+                if (registered is not null) return registered;
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                db.ChangeTracker.Clear();
+            }
+        }
+
+        if (vehicleId is null) return null;
+        var planningDate = UkOperatingDate(eventTimeUtc);
+        var candidates = new List<Load>();
+
+        try
+        {
+            candidates.AddRange(await db.Loads.Include(x => x.Stops)
+                .Where(x => x.PlanningDate == planningDate && x.VehicleId == vehicleId && x.Status != LoadStatus.Completed && x.Status != LoadStatus.Cancelled)
+                .ToListAsync(ct));
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+        }
+
+        try
+        {
+            var registered = (await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct))
+                .Where(x => x.VehicleId == vehicleId && x.Status != LoadStatus.Completed && x.Status != LoadStatus.Cancelled);
+            foreach (var load in registered)
+                if (candidates.All(existing => existing.Id != load.Id)) candidates.Add(load);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+        }
+
+        if (candidates.Count == 0) return null;
+        if (candidates.Count == 1) return candidates[0];
+
+        var candidateIds = candidates.Select(x => x.Id).ToList();
+        var completedByLoad = new Dictionary<Guid, HashSet<Guid>>();
+        try
+        {
+            var completed = await db.GeofenceVisits.AsNoTracking()
+                .Where(x => x.LoadId != null && candidateIds.Contains(x.LoadId.Value) && x.LoadStopId != null && x.ConfirmedAtUtc != null && x.ExitedAtUtc != null && x.Status == "Departed")
+                .Select(x => new { LoadId = x.LoadId!.Value, StopId = x.LoadStopId!.Value })
+                .ToListAsync(ct);
+            completedByLoad = completed.GroupBy(x => x.LoadId).ToDictionary(group => group.Key, group => group.Select(x => x.StopId).ToHashSet());
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+        }
+
+        return candidates
+            .Select(load =>
+            {
+                var completed = completedByLoad.GetValueOrDefault(load.Id) ?? [];
+                var remaining = (load.Stops ?? []).Where(stop => !completed.Contains(stop.Id)).OrderBy(stop => stop.Sequence).ToList();
+                var siteMatch = !string.IsNullOrWhiteSpace(geofenceName) && remaining.Any(stop => NamesOverlap(stop.Name, geofenceName));
+                var planned = remaining.Where(stop => stop.PlannedArrivalUtc != null).Select(stop => stop.PlannedArrivalUtc!.Value).FirstOrDefault();
+                var distance = planned == default ? double.MaxValue : Math.Abs((planned - eventTimeUtc).TotalMinutes);
+                return new { load, siteMatch, priority = LoadPriority(load.Status), distance };
+            })
+            .OrderByDescending(x => x.siteMatch)
+            .ThenByDescending(x => x.priority)
+            .ThenBy(x => x.distance)
+            .ThenBy(x => x.load.Reference)
+            .Select(x => x.load)
+            .First();
+    }
+
     private static async Task<HashSet<Guid>> CompletedStopIds(TmsDbContext db, Guid? loadId, CancellationToken ct)
     {
         if (loadId is null) return [];
-        return (await db.GeofenceVisits.AsNoTracking().Where(x => x.LoadId == loadId && x.LoadStopId != null && x.ExitedAtUtc != null && x.ConfirmedAtUtc != null)
+        return (await db.GeofenceVisits.AsNoTracking().Where(x => x.LoadId == loadId && x.LoadStopId != null && x.ExitedAtUtc != null && x.ConfirmedAtUtc != null && x.Status == "Departed")
             .Select(x => x.LoadStopId!.Value).ToListAsync(ct)).ToHashSet();
     }
 
-    private static LoadStop? MatchNextStop(Load? load, string geofenceName, HashSet<Guid> completed) => load?.Stops
-        .Where(x => !completed.Contains(x.Id))
-        .OrderBy(x => x.Sequence)
-        .FirstOrDefault(x => NamesOverlap(x.Name, geofenceName))
-        ?? load?.Stops.Where(x => !completed.Contains(x.Id)).OrderBy(x => x.Sequence).FirstOrDefault();
+    private static LoadStop? MatchNextStop(Load? load, string geofenceName, HashSet<Guid> completed)
+    {
+        var remaining = load?.Stops.Where(x => !completed.Contains(x.Id)).OrderBy(x => x.Sequence).ToList() ?? [];
+        var matched = remaining.FirstOrDefault(x => NamesOverlap(x.Name, geofenceName));
+        return matched ?? (remaining.Count == 1 ? remaining[0] : null);
+    }
 
     private static async Task CloseVisitAsync(TmsDbContext db, GeofenceVisit visit, DateTimeOffset at, string status, string reason, CancellationToken ct)
     {
+        if (db.Entry(visit).State == EntityState.Detached) db.GeofenceVisits.Attach(visit);
         visit.ExitedAtUtc = at;
         visit.DwellMinutes = Math.Max(0, (int)Math.Floor((at - visit.EnteredAtUtc).TotalMinutes));
         visit.Status = status; visit.StatusReason = reason; visit.UpdatedAtUtc = DateTimeOffset.UtcNow;
@@ -227,7 +334,8 @@ END;
     private static bool Contains(string polygonJson, decimal longitude, decimal latitude)
     {
         using var doc = JsonDocument.Parse(polygonJson);
-        var points = doc.RootElement.EnumerateArray().Select(p => (X: p[0].GetDouble(), Y: p[1].GetDouble())).ToArray();
+        var points = doc.RootElement.EnumerateArray().Select(ReadPoint).Where(point => point is not null).Select(point => point!.Value).ToArray();
+        if (points.Length < 3) return false;
         var x = (double)longitude; var y = (double)latitude; var inside = false;
         for (int i = 0, j = points.Length - 1; i < points.Length; j = i++)
         {
@@ -237,9 +345,41 @@ END;
         return inside;
     }
 
+    private static (double X, double Y)? ReadPoint(JsonElement point)
+    {
+        if (point.ValueKind == JsonValueKind.Array && point.GetArrayLength() >= 2 && point[0].TryGetDouble(out var x) && point[1].TryGetDouble(out var y))
+            return (x, y);
+        if (point.ValueKind != JsonValueKind.Object) return null;
+        var longitude = Double(point, "longitude") ?? Double(point, "lng") ?? Double(point, "lon") ?? Double(point, "x");
+        var latitude = Double(point, "latitude") ?? Double(point, "lat") ?? Double(point, "y");
+        return longitude is not null && latitude is not null ? (longitude.Value, latitude.Value) : null;
+    }
+
+    private static int LoadPriority(LoadStatus status) => status switch
+    {
+        LoadStatus.InProgress => 4,
+        LoadStatus.Dispatched => 3,
+        LoadStatus.Planned => 2,
+        LoadStatus.Draft => 1,
+        _ => 0
+    };
+
+    private static DateOnly UkOperatingDate(DateTimeOffset value)
+    {
+        try
+        {
+            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return DateOnly.FromDateTime(value.UtcDateTime);
+        }
+    }
+
     private static string Normalize(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
     private static string? Text(JsonElement e, string name) => e.TryGetProperty(name, out var v) && v.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined ? v.ToString() : null;
     private static int? Int(JsonElement e, string name) => e.TryGetProperty(name, out var v) && v.TryGetInt32(out var n) ? n : null;
+    private static double? Double(JsonElement e, string name) => e.TryGetProperty(name, out var v) && v.TryGetDouble(out var n) ? n : null;
 }
 
 public sealed record GeofenceImportResult(int Inserted, int Updated, int SiteMatched);

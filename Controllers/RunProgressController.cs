@@ -37,6 +37,9 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
                 count = 0,
                 source = "Unavailable",
                 geofenceAvailable = false,
+                geofenceCount = 0,
+                geofenceVisitCount = 0,
+                geofenceLinkedRuns = 0,
                 warning,
                 records = Array.Empty<object>()
             });
@@ -46,11 +49,18 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
     private async Task<object> BuildProgressAsync(DateOnly planningDate, DateTimeOffset now, CancellationToken ct)
     {
         var geofenceAvailable = true;
+        var geofenceCount = 0;
         string? geofenceWarning = null;
 
         try
         {
             await GeofenceRunProgression.EnsureSchemaAsync(db, ct);
+            geofenceCount = await db.SiteGeofences.AsNoTracking().CountAsync(x => x.Active, ct);
+            if (geofenceCount == 0)
+            {
+                geofenceAvailable = false;
+                geofenceWarning = "No active geofences are loaded into the live geofence engine.";
+            }
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -159,7 +169,10 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
             count = records.Count,
             source = loadSource,
             geofenceAvailable,
-            warning = loadWarning ?? geofenceWarning,
+            geofenceCount,
+            geofenceVisitCount = visits.Count,
+            geofenceLinkedRuns = visits.Where(x => x.LoadId != null).Select(x => x.LoadId!.Value).Distinct().Count(),
+            warning = CombineWarnings(loadWarning, geofenceWarning),
             records
         };
     }
@@ -178,7 +191,7 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
 
             var registerLoads = await SafeReadRegisterLoadsAsync(planningDate, ct);
             if (registerLoads.Count > 0)
-                return (registerLoads, "PlanningRegister", "No dedicated planning loads were returned, so the live progress panel is using the audited planning register fallback.");
+                return (registerLoads, "PlanningRegister", "No dedicated planning loads were returned, so live run progress is using the audited planning register.");
 
             return (loads, "Loads", null);
         }
@@ -186,7 +199,7 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
         {
             db.ChangeTracker.Clear();
             var registerLoads = await SafeReadRegisterLoadsAsync(planningDate, ct);
-            return (registerLoads, "PlanningRegister", $"Dedicated planning load tables are not available yet: {exception.GetBaseException().Message}");
+            return (registerLoads, "PlanningRegister", $"Dedicated planning load tables are unavailable: {exception.GetBaseException().Message}");
         }
     }
 
@@ -237,9 +250,19 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
             count = records.Count,
             source = "PlanningRegisterSafeFallback",
             geofenceAvailable = false,
+            geofenceCount = 0,
+            geofenceVisitCount = 0,
+            geofenceLinkedRuns = 0,
             warning,
             records
         };
+    }
+
+    private static string? CombineWarnings(string? first, string? second)
+    {
+        if (string.IsNullOrWhiteSpace(first)) return second;
+        if (string.IsNullOrWhiteSpace(second)) return first;
+        return $"{first} {second}";
     }
 
     private static DateOnly UkOperatingDate(DateTimeOffset value)
