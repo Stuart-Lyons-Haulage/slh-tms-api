@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
+using Slh.Tms.Api.Controllers;
 
 namespace Slh.Tms.Api.Middleware;
 
@@ -35,7 +36,7 @@ public sealed class PlanLockMiddleware(RequestDelegate next)
 
         var db = context.RequestServices.GetRequiredService<TmsDbContext>();
         var target = await ResolveTargetAsync(context, db, context.RequestAborted);
-        if (target.Date is null || !await PlanLockStore.IsLockedAsync(db, target.Date.Value, context.RequestAborted))
+        if (target.Date is null || !await SafeIsLockedAsync(db, target.Date.Value, context.RequestAborted))
         {
             await next(context);
             return;
@@ -54,24 +55,25 @@ public sealed class PlanLockMiddleware(RequestDelegate next)
             return;
         }
 
-        LoadBaseline? before = null;
-        if (target.LoadId is Guid loadId)
-        {
-            var load = await db.Loads.AsNoTracking().Include(x => x.Stops).SingleOrDefaultAsync(x => x.Id == loadId, context.RequestAborted);
-            if (load is not null) before = PlanLockStore.Snapshot(load);
-        }
+        var before = target.LoadId is Guid loadId
+            ? await SafeSnapshotAsync(db, loadId, context.RequestAborted)
+            : null;
 
         await next(context);
         if (context.Response.StatusCode < 200 || context.Response.StatusCode >= 300) return;
 
-        LoadBaseline? after = null;
-        if (target.LoadId is Guid changedLoadId)
-        {
-            var load = await db.Loads.AsNoTracking().Include(x => x.Stops).SingleOrDefaultAsync(x => x.Id == changedLoadId, context.RequestAborted);
-            if (load is not null) after = PlanLockStore.Snapshot(load);
-        }
+        var after = target.LoadId is Guid changedLoadId
+            ? await SafeSnapshotAsync(db, changedLoadId, context.RequestAborted)
+            : null;
         var type = ChangeType(context.Request.Path, before, after);
-        await PlanLockStore.RecordChangeAsync(db, target.Date.Value, target.LoadId, type, reason, context.User.Identity?.Name, before, after, context.RequestAborted);
+        try
+        {
+            await PlanLockStore.RecordChangeAsync(db, target.Date.Value, target.LoadId, type, reason, context.User.Identity?.Name, before, after, context.RequestAborted);
+        }
+        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex))
+        {
+            db.ChangeTracker.Clear();
+        }
     }
 
     private static bool IsOperationalPlanWrite(HttpRequest request)
@@ -91,8 +93,8 @@ public sealed class PlanLockMiddleware(RequestDelegate next)
         var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length >= 4 && Guid.TryParse(parts[3], out var id))
         {
-            var date = await db.Loads.AsNoTracking().Where(x => x.Id == id).Select(x => (DateOnly?)x.PlanningDate).SingleOrDefaultAsync(ct);
-            return (date, id);
+            var load = await PlanningResilience.ReadLoadAsync(db, id, ct);
+            return (load?.PlanningDate, id);
         }
         if (path.Equals("/api/v1/loads", StringComparison.OrdinalIgnoreCase) && context.Request.Method == "POST")
         {
@@ -108,6 +110,26 @@ public sealed class PlanLockMiddleware(RequestDelegate next)
             catch (JsonException) { }
         }
         return (null, null);
+    }
+
+    private static async Task<bool> SafeIsLockedAsync(TmsDbContext db, DateOnly date, CancellationToken ct)
+    {
+        try { return await PlanLockStore.IsLockedAsync(db, date, ct); }
+        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); return false; }
+    }
+
+    private static async Task<LoadBaseline?> SafeSnapshotAsync(TmsDbContext db, Guid id, CancellationToken ct)
+    {
+        try
+        {
+            var load = await PlanningResilience.ReadLoadAsync(db, id, ct);
+            return load is null ? null : PlanLockStore.Snapshot(load);
+        }
+        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex))
+        {
+            db.ChangeTracker.Clear();
+            return null;
+        }
     }
 
     private static string ChangeType(PathString path, LoadBaseline? before, LoadBaseline? after)
