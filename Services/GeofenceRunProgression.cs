@@ -305,6 +305,7 @@ END;
 
     private static async Task CloseVisitAsync(TmsDbContext db, GeofenceVisit visit, DateTimeOffset at, string status, string reason, CancellationToken ct)
     {
+        if (db.Entry(visit).State == EntityState.Detached) db.GeofenceVisits.Attach(visit);
         visit.ExitedAtUtc = at;
         visit.DwellMinutes = Math.Max(0, (int)Math.Floor((at - visit.EnteredAtUtc).TotalMinutes));
         visit.Status = status; visit.StatusReason = reason; visit.UpdatedAtUtc = DateTimeOffset.UtcNow;
