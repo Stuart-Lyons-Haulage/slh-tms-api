@@ -4,7 +4,7 @@ using Slh.Tms.Api.Models.Tracking;
 
 namespace Slh.Tms.Api.Services;
 
-public sealed class DotTrackingTelemetryStore(TmsDbContext db)
+public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTrackingTelemetryStore> logger)
 {
     public async Task PersistAsync(IEnumerable<DotTelemetryRecord> records, CancellationToken ct)
     {
@@ -40,13 +40,15 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db)
         if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync(ct);
 
         // Geofence progression is deliberately downstream of telemetry persistence.
-        // A geofence/Fleetio failure must never prevent core RoadTech tracking from being stored.
+        // A geofence failure must never prevent core RoadTech tracking from being stored,
+        // but it must be visible in logs because Live Runs depends on this progression.
         try
         {
             await GeofenceRunProgression.ProcessTelemetryAsync(db, batch, ct);
         }
-        catch (Exception) when (!ct.IsCancellationRequested)
+        catch (Exception exception) when (!ct.IsCancellationRequested)
         {
+            logger.LogWarning(exception, "RoadTech telemetry was stored but geofence run progression failed for {RecordCount} record(s).", batch.Count);
             db.ChangeTracker.Clear();
         }
     }
