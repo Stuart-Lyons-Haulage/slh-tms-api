@@ -1,0 +1,254 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Models.Tracking;
+using Slh.Tms.Api.Services;
+
+namespace Slh.Tms.Api.Controllers;
+
+[ApiController, Route("api/v1/tv-display")]
+public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient maps) : ControllerBase
+{
+    [HttpGet("key"), Authorize(Policy = "TmsAccess")]
+    public async Task<IActionResult> Key(CancellationToken ct)
+    {
+        var access = await TvDisplayKeyStore.GetOrCreateAsync(db, User.Identity?.Name, ct);
+        return Ok(new
+        {
+            access.Key,
+            access.CreatedAtUtc,
+            urlPath = $"/live-runs/tv?key={Uri.EscapeDataString(access.Key)}"
+        });
+    }
+
+    [HttpPost("key/rotate"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> Rotate(CancellationToken ct)
+    {
+        var access = await TvDisplayKeyStore.RotateAsync(db, User.Identity?.Name, ct);
+        return Ok(new
+        {
+            access.Key,
+            access.CreatedAtUtc,
+            urlPath = $"/live-runs/tv?key={Uri.EscapeDataString(access.Key)}"
+        });
+    }
+
+    [HttpGet("live-runs"), AllowAnonymous]
+    public async Task<IActionResult> LiveRuns([FromQuery] string? key, [FromQuery] DateOnly? date, CancellationToken ct)
+    {
+        if (!await TvDisplayKeyStore.ValidateAsync(db, key, ct))
+            return Unauthorized(new { message = "This TV display link is not valid. Generate a fresh link from Live Runs in the signed-in TMS." });
+
+        var day = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
+        var now = DateTimeOffset.UtcNow;
+        var loads = (await PlanningResilience.ReadLoadsAsync(db, day, ct))
+            .Where(load => load.Status != LoadStatus.Cancelled)
+            .OrderBy(load => load.Reference)
+            .ToList();
+        await RunOperationalStore.EnrichAsync(db, loads, ct);
+
+        var driverIds = loads.Where(x => x.DriverId is not null).Select(x => x.DriverId!.Value).Distinct().ToList();
+        var vehicleIds = loads.Where(x => x.VehicleId is not null).Select(x => x.VehicleId!.Value).Distinct().ToList();
+        var trailerIds = loads.Where(x => x.TrailerId is not null).Select(x => x.TrailerId!.Value).Distinct().ToList();
+
+        var drivers = await SafeDictionary(db.Drivers.AsNoTracking().Where(x => driverIds.Contains(x.Id)), x => x.Id, ct);
+        var vehicles = await SafeDictionary(db.Vehicles.AsNoTracking().Where(x => vehicleIds.Contains(x.Id)), x => x.Id, ct);
+        var trailers = await SafeDictionary(db.Trailers.AsNoTracking().Where(x => trailerIds.Contains(x.Id)), x => x.Id, ct);
+        var liveStatuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
+
+        var rows = new List<object>();
+        foreach (var load in loads)
+        {
+            drivers.TryGetValue(load.DriverId ?? Guid.Empty, out var driver);
+            vehicles.TryGetValue(load.VehicleId ?? Guid.Empty, out var vehicle);
+            trailers.TryGetValue(load.TrailerId ?? Guid.Empty, out var trailer);
+            var live = vehicle is null ? null : MatchLive(vehicle, liveStatuses);
+            var stops = load.Stops.OrderBy(x => x.Sequence).ToList();
+            var nextStop = PickNextStop(stops, now, load.Status);
+            var firstStop = stops.FirstOrDefault();
+            var finalStop = stops.LastOrDefault();
+
+            DateTimeOffset? eta = nextStop?.PlannedArrivalUtc;
+            var etaSource = eta is null ? "Unavailable" : "Planned";
+            if (live is not null && nextStop?.Latitude is not null && nextStop.Longitude is not null && now - live.LastEventTimeUtc <= TimeSpan.FromMinutes(30))
+            {
+                try
+                {
+                    var travel = await maps.TravelTime((live.Longitude, live.Latitude), (nextStop.Longitude.Value, nextStop.Latitude.Value), ct);
+                    eta = now + travel;
+                    etaSource = "Live";
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    etaSource = eta is null ? "Unavailable" : "Planned";
+                }
+            }
+
+            var trackingAgeMinutes = live is null ? (double?)null : Math.Max(0, (now - live.LastEventTimeUtc).TotalMinutes);
+            var state = State(load, driver, vehicle, live, trackingAgeMinutes, eta, nextStop?.PlannedArrivalUtc);
+            rows.Add(new
+            {
+                id = load.Id,
+                reference = load.Reference,
+                status = load.Status.ToString(),
+                driver = driver?.DisplayName ?? "Driver TBC",
+                vehicle = vehicle?.Registration ?? "Vehicle TBC",
+                trailer = trailer?.TrailerNumber,
+                firstPlannedUtc = firstStop?.PlannedArrivalUtc,
+                finalPlannedUtc = finalStop?.PlannedArrivalUtc,
+                nextStop = nextStop?.Name,
+                etaUtc = eta,
+                etaSource,
+                tracking = live is null ? "No live tracking" : TrackingText(live, trackingAgeMinutes ?? 0),
+                trackingUpdatedAtUtc = live?.LastEventTimeUtc,
+                speedKph = live?.SpeedKph,
+                state = state.Label,
+                stateDetail = state.Detail,
+                priority = state.Priority
+            });
+        }
+
+        return Ok(new
+        {
+            planningDate = day,
+            generatedAtUtc = now,
+            refreshSeconds = 20,
+            runCount = rows.Count,
+            runs = rows.OrderByDescending(row => (int)row.GetType().GetProperty("priority")!.GetValue(row)!).ToList()
+        });
+    }
+
+    private static LoadStop? PickNextStop(List<LoadStop> stops, DateTimeOffset now, LoadStatus status)
+    {
+        if (status == LoadStatus.Completed || stops.Count == 0) return null;
+        var cutoff = now - TimeSpan.FromMinutes(15);
+        return stops.FirstOrDefault(stop => stop.PlannedArrivalUtc is null || stop.PlannedArrivalUtc >= cutoff) ?? stops.Last();
+    }
+
+    private static (string Label, string Detail, int Priority) State(Load load, Driver? driver, Vehicle? vehicle, VehicleLiveStatus? live, double? ageMinutes, DateTimeOffset? eta, DateTimeOffset? planned)
+    {
+        if (load.Status == LoadStatus.Completed) return ("COMPLETED", "Run completed", 0);
+        if (driver is null || vehicle is null) return ("NEEDS ALLOCATION", "Driver or vehicle not allocated", 100);
+        if (live is null) return (load.Status == LoadStatus.InProgress ? "IN PROGRESS" : "UPCOMING", "Waiting for live vehicle tracking", 60);
+        if (ageMinutes is > 30) return ("TRACKING STALE", $"Last tracking update {Math.Round(ageMinutes.Value)} min ago", 90);
+
+        var moving = live.IsMoving == true || (live.SpeedKph ?? 0) > 2;
+        if (moving)
+        {
+            if (eta is not null && planned is not null && eta > planned.Value.AddMinutes(15))
+                return ("AT RISK", "Live ETA is more than 15 minutes behind plan", 95);
+            return ("MOVING", eta is null ? "Live vehicle movement" : "Live ETA active", 80);
+        }
+
+        if (live.IgnitionOn == true) return ("STATIONARY", "Vehicle signed on / stationary", 70);
+        return (load.Status == LoadStatus.InProgress ? "IN PROGRESS" : "UPCOMING", "Vehicle parked", 50);
+    }
+
+    private static string TrackingText(VehicleLiveStatus live, double ageMinutes)
+    {
+        var age = ageMinutes < 1 ? "now" : $"{Math.Round(ageMinutes)}m ago";
+        if (live.IsMoving == true || (live.SpeedKph ?? 0) > 2) return $"Moving · {Math.Round(live.SpeedKph ?? 0)} km/h · {age}";
+        if (live.IgnitionOn == true) return $"Stationary · {age}";
+        return $"Parked · {age}";
+    }
+
+    private static VehicleLiveStatus? MatchLive(Vehicle vehicle, List<VehicleLiveStatus> statuses)
+    {
+        var aliases = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => Normalise(value!))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return statuses
+            .Where(status => aliases.Contains(Normalise(status.VehicleIdentifier)))
+            .OrderByDescending(status => status.LastEventTimeUtc)
+            .FirstOrDefault();
+    }
+
+    private static string Normalise(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
+    private static async Task<Dictionary<TKey, TValue>> SafeDictionary<TValue, TKey>(IQueryable<TValue> query, Func<TValue, TKey> key, CancellationToken ct) where TKey : notnull
+    {
+        try { return await query.ToDictionaryAsync(key, ct); }
+        catch { dbChangeTrackerNoop(); return new Dictionary<TKey, TValue>(); }
+        static void dbChangeTrackerNoop() { }
+    }
+
+    private static async Task<List<TValue>> SafeList<TValue>(IQueryable<TValue> query, CancellationToken ct)
+    {
+        try { return await query.ToListAsync(ct); }
+        catch { return []; }
+    }
+}
+
+internal static class TvDisplayKeyStore
+{
+    private const string EntityType = "tvdisplaykey";
+    private const string IdempotencyKey = "tvdisplay:key:v1";
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    public static async Task<TvDisplayAccess> GetOrCreateAsync(TmsDbContext db, string? user, CancellationToken ct)
+    {
+        var existing = await ExistingAsync(db, ct);
+        if (existing is not null) return existing;
+        return await SaveAsync(db, NewKey(), user, ct);
+    }
+
+    public static Task<TvDisplayAccess> RotateAsync(TmsDbContext db, string? user, CancellationToken ct) => SaveAsync(db, NewKey(), user, ct);
+
+    public static async Task<bool> ValidateAsync(TmsDbContext db, string? supplied, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(supplied)) return false;
+        var existing = await ExistingAsync(db, ct);
+        if (existing is null) return false;
+        var expectedHash = SHA256.HashData(Encoding.UTF8.GetBytes(existing.Key));
+        var suppliedHash = SHA256.HashData(Encoding.UTF8.GetBytes(supplied.Trim()));
+        return CryptographicOperations.FixedTimeEquals(expectedHash, suppliedHash);
+    }
+
+    private static async Task<TvDisplayAccess?> ExistingAsync(TmsDbContext db, CancellationToken ct)
+    {
+        var row = await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(x => x.EntityType == EntityType && x.IdempotencyKey == IdempotencyKey && x.Status == StagingStatus.Promoted, ct);
+        if (row is null) return null;
+        try { return JsonSerializer.Deserialize<TvDisplayAccess>(row.PayloadJson, JsonOptions); }
+        catch (JsonException) { return null; }
+    }
+
+    private static async Task<TvDisplayAccess> SaveAsync(TmsDbContext db, string key, string? user, CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var access = new TvDisplayAccess(key, now);
+        var row = await db.StagedImports.SingleOrDefaultAsync(x => x.IdempotencyKey == IdempotencyKey, ct);
+        if (row is null)
+        {
+            row = new StagedImport
+            {
+                EntityType = EntityType,
+                IdempotencyKey = IdempotencyKey,
+                PayloadJson = "{}",
+                Source = "SLH secure TV display"
+            };
+            db.StagedImports.Add(row);
+        }
+        row.EntityType = EntityType;
+        row.PayloadJson = JsonSerializer.Serialize(access, JsonOptions);
+        row.Status = StagingStatus.Promoted;
+        row.ReviewedAtUtc = now;
+        row.ReviewedBy = user;
+        row.ReviewNote = "Read-only Live Runs TV display key generated/rotated.";
+        await db.SaveChangesAsync(ct);
+        return access;
+    }
+
+    private static string NewKey()
+    {
+        var value = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        return value.TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    }
+}
+
+internal sealed record TvDisplayAccess(string Key, DateTimeOffset CreatedAtUtc);
