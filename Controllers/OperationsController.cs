@@ -46,7 +46,7 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            logger.LogWarning(exception, "Geofence progression was unavailable while calculating delivery ETAs; route calculations will continue without completed-stop suppression.");
+            logger.LogWarning(exception, "Geofence progression was unavailable while calculating delivery ETAs; live ETAs will fail closed rather than routing completed work again.");
             db.ChangeTracker.Clear();
         }
 
@@ -77,7 +77,11 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
                 orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
                 var eta = stop.PlannedArrivalUtc;
                 var source = eta is null ? "Unavailable" : "Planned";
-                if (current is not null && stop.Longitude is not null && stop.Latitude is not null && live is not null && now - live.LastEventTimeUtc <= TimeSpan.FromMinutes(30))
+
+                // Without geofence execution we cannot prove the remaining sequence. Keep
+                // the planned ETA rather than publishing a live route that may include
+                // already-completed collections/deliveries.
+                if (geofence is not null && current is not null && stop.Longitude is not null && stop.Latitude is not null && live is not null && now - live.LastEventTimeUtc <= TimeSpan.FromMinutes(30))
                 {
                     try
                     {
@@ -104,9 +108,11 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
                 var windowEnd = order?.DeliveryWindowEndUtc ?? (IsDeliveryStop(stop) ? stop.PlannedArrivalUtc : null);
                 var tachoAssessment = source == "Live"
                     ? TachoAssessment(tacho, cumulativeDrivingMinutes, breakDelayMinutes)
-                    : (Status: "RouteUnavailable", Explanation: tacho is null
-                        ? "Live route and current TachoMaster duty are unavailable; this ETA must be verified before export."
-                        : "TachoMaster matched the vehicle, but no fresh live route could be calculated; the planned ETA has not been adjusted for a break.");
+                    : (Status: "RouteUnavailable", Explanation: geofence is null
+                        ? "Geofence execution was unavailable, so the remaining route could not be proved and no live ETA was issued."
+                        : tacho is null
+                            ? "Live route and current TachoMaster duty are unavailable; this ETA must be verified before export."
+                            : "TachoMaster matched the vehicle, but no fresh live route could be calculated; the planned ETA has not been adjusted for a break.");
                 records.Add(new DeliveryEtaResponse(load.Id, RunDisplayLabel.For(load), load.Status.ToString(), stop.Id, stop.Sequence, stop.Name,
                     order?.Reference, order?.CustomerCode, vehicle?.Registration, eta, source, windowStart, windowEnd,
                     Risk(eta, windowStart, windowEnd), live?.LastEventTimeUtc,
