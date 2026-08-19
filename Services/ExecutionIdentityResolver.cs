@@ -18,11 +18,7 @@ public static class ExecutionIdentityResolver
     {
         var result = vehicles.ToDictionary(
             vehicle => vehicle.Id,
-            vehicle => new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }
-                .Where(value => !string.IsNullOrWhiteSpace(value))
-                .Select(value => NormaliseVehicle(value!))
-                .Where(value => value.Length > 0)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase));
+            vehicle => ExpandAliases(new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }));
 
         if (vehicles.Count == 0) return result;
         var ids = vehicles.Select(vehicle => vehicle.Id).ToList();
@@ -37,8 +33,8 @@ public static class ExecutionIdentityResolver
                 .ToListAsync(ct);
             foreach (var mapping in mappings)
             {
-                var alias = NormaliseVehicle(mapping.ExternalKey);
-                if (alias.Length > 0 && result.TryGetValue(mapping.TmsEntityId, out var aliases)) aliases.Add(alias);
+                if (!result.TryGetValue(mapping.TmsEntityId, out var aliases)) continue;
+                foreach (var alias in VehicleAliasVariants(mapping.ExternalKey)) aliases.Add(alias);
             }
         }
         catch (Exception exception) when (SchemaUnavailable(exception))
@@ -48,13 +44,50 @@ public static class ExecutionIdentityResolver
         return result;
     }
 
+    /// <summary>
+    /// Returns the same operational aliases used by the Fleet Status screen. This includes
+    /// the complete identifier plus safe UK fleet/registration suffixes. Three-character
+    /// abbreviations are retained because SLH master data and Falcon both use them.
+    /// </summary>
+    public static IReadOnlyCollection<string> VehicleAliasVariants(string? value)
+    {
+        var normalised = NormaliseVehicle(value);
+        if (normalised.Length == 0) return [];
+
+        var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { normalised };
+        for (var length = 3; length <= Math.Min(6, normalised.Length); length++)
+            aliases.Add(normalised[^length..]);
+
+        if (normalised.Length == 7 &&
+            char.IsLetter(normalised[0]) &&
+            char.IsLetter(normalised[1]) &&
+            char.IsDigit(normalised[2]) &&
+            char.IsDigit(normalised[3]))
+        {
+            aliases.Add(normalised[2..]);
+        }
+
+        if (normalised.EndsWith("H", StringComparison.OrdinalIgnoreCase) && normalised.Length > 4)
+            aliases.Add(normalised[..^1]);
+
+        return aliases;
+    }
+
+    public static bool MatchesVehicleIdentifier(
+        IReadOnlyCollection<string> aliases,
+        string? providerIdentifier)
+    {
+        if (aliases.Count == 0 || string.IsNullOrWhiteSpace(providerIdentifier)) return false;
+        var keys = ExpandAliases(aliases);
+        return VehicleAliasVariants(providerIdentifier).Any(keys.Contains);
+    }
+
     public static VehicleLiveStatus? MatchLive(
         IReadOnlyCollection<string> aliases,
         IEnumerable<VehicleLiveStatus> statuses)
     {
-        var keys = aliases.ToHashSet(StringComparer.OrdinalIgnoreCase);
         return statuses
-            .Where(status => keys.Contains(NormaliseVehicle(status.VehicleIdentifier)))
+            .Where(status => MatchesVehicleIdentifier(aliases, status.VehicleIdentifier))
             .OrderByDescending(status => status.LastEventTimeUtc)
             .FirstOrDefault();
     }
@@ -63,16 +96,22 @@ public static class ExecutionIdentityResolver
         IReadOnlyCollection<string> aliases,
         IReadOnlyDictionary<string, TachoVehicleDriverStatus> statuses)
     {
-        foreach (var alias in aliases)
-            if (statuses.TryGetValue(alias, out var status)) return status;
-
-        // Some providers retain formatting in dictionary keys. Normalise once as a safe fallback.
-        var normalised = statuses
-            .GroupBy(pair => NormaliseVehicle(pair.Key), StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(group => group.Key, group => group.First().Value, StringComparer.OrdinalIgnoreCase);
-        foreach (var alias in aliases)
-            if (normalised.TryGetValue(alias, out var status)) return status;
-        return null;
+        var keys = ExpandAliases(aliases);
+        return statuses
+            .Select(pair => new
+            {
+                Status = pair.Value,
+                MatchLength = VehicleAliasVariants(pair.Key)
+                    .Where(keys.Contains)
+                    .Select(alias => alias.Length)
+                    .DefaultIfEmpty(0)
+                    .Max()
+            })
+            .Where(item => item.MatchLength > 0)
+            .OrderByDescending(item => item.MatchLength)
+            .ThenByDescending(item => item.Status.DutyStartUtc)
+            .Select(item => item.Status)
+            .FirstOrDefault();
     }
 
     public static DateTimeOffset? FirstMovement(
@@ -80,9 +119,8 @@ public static class ExecutionIdentityResolver
         IEnumerable<VehicleTrackingEvent> events,
         DateTimeOffset? notBeforeUtc = null)
     {
-        var keys = aliases.ToHashSet(StringComparer.OrdinalIgnoreCase);
         return events
-            .Where(item => keys.Contains(NormaliseVehicle(item.VehicleIdentifier)))
+            .Where(item => MatchesVehicleIdentifier(aliases, item.VehicleIdentifier))
             .Where(item => notBeforeUtc is null || item.EventTimeUtc >= notBeforeUtc.Value)
             .Where(item => item.IsMoving == true || item.SpeedKph.GetValueOrDefault() > 2)
             .OrderBy(item => item.EventTimeUtc)
@@ -122,6 +160,15 @@ public static class ExecutionIdentityResolver
             .Select(word => new string(word.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray()))
             .Where(word => word.Length > 0)
             .OrderBy(word => word, StringComparer.Ordinal));
+
+    private static HashSet<string> ExpandAliases(IEnumerable<string?> values)
+    {
+        var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var value in values)
+            foreach (var alias in VehicleAliasVariants(value))
+                aliases.Add(alias);
+        return aliases;
+    }
 
     private static bool SchemaUnavailable(Exception exception)
     {
