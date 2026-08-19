@@ -12,7 +12,7 @@ namespace Slh.Tms.Api.Controllers;
 /// </summary>
 [ApiController, Route("api/v1/intelligence/run-timeline")]
 [Authorize]
-public sealed class RunTimelineResilienceController(TmsDbContext db) : ControllerBase
+public sealed class RunTimelineResilienceController(TmsDbContext db, TachoMasterClient tachoMaster) : ControllerBase
 {
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> Get(Guid id, CancellationToken ct)
@@ -20,8 +20,6 @@ public sealed class RunTimelineResilienceController(TmsDbContext db) : Controlle
         var load = await PlanningResilience.ReadLoadAsync(db, id, ct);
         if (load is null) return NotFound();
 
-        // Planner notes carry the human-facing run name for SQL-backed rows.
-        // Failure here must never take the operational timeline down.
         try { await LoadCommercialStore.EnrichAsync(db, [load], ct); }
         catch (Exception exception) when (exception is not OperationCanceledException) { db.ChangeTracker.Clear(); }
 
@@ -50,12 +48,60 @@ public sealed class RunTimelineResilienceController(TmsDbContext db) : Controlle
             db.ChangeTracker.Clear();
         }
 
+        // Make the start of execution visible: planned allocation -> Tacho duty ->
+        // first physical DOT/Falcon movement. This is the beginning of the same
+        // evidence chain later used for site progression and customer ETA proof.
+        try
+        {
+            if (load.VehicleId is Guid vehicleId)
+            {
+                var vehicle = await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(x => x.Id == vehicleId, ct);
+                if (vehicle is not null)
+                {
+                    var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, [vehicle], ct);
+                    var aliases = aliasesByVehicle.GetValueOrDefault(vehicle.Id) ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    var tachoStatuses = await tachoMaster.GetCurrentDriverStatusesByVehicleAsync(load.PlanningDate, ct);
+                    var tacho = ExecutionIdentityResolver.MatchTacho(aliases, tachoStatuses);
+                    if (tacho is not null)
+                    {
+                        events.Add(new TimelineEvent(
+                            tacho.DutyStartUtc,
+                            "Tacho sign-on / duty start",
+                            $"{tacho.DriverName} · vehicle {vehicle.Registration} · {tacho.DriveAvailableTodayMinutes?.ToString() ?? "unknown"} drive minutes available today",
+                            "TachoMaster",
+                            null));
+                    }
+
+                    var (startUtc, endUtc) = OperatingWindow(load.PlanningDate);
+                    var tracking = await db.VehicleTrackingEvents.AsNoTracking()
+                        .Where(x => x.EventTimeUtc >= startUtc.AddHours(-2) && x.EventTimeUtc < endUtc.AddHours(2))
+                        .OrderBy(x => x.EventTimeUtc)
+                        .Take(30000)
+                        .ToListAsync(ct);
+                    var firstMovement = ExecutionIdentityResolver.FirstMovement(aliases, tracking, tacho?.DutyStartUtc);
+                    if (firstMovement is not null)
+                    {
+                        var delay = tacho is null ? (int?)null : Math.Max(0, (int)Math.Floor((firstMovement.Value - tacho.DutyStartUtc).TotalMinutes));
+                        events.Add(new TimelineEvent(
+                            firstMovement.Value,
+                            "First DOT/Falcon movement",
+                            delay is null
+                                ? $"{vehicle.Registration} first movement for the operating day; no matched Tacho duty was available."
+                                : $"{vehicle.Registration} moved {delay} minute{(delay == 1 ? string.Empty : "s")} after Tacho sign-on.",
+                            "DOT/Falcon",
+                            null));
+                    }
+                }
+            }
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+        }
+
         var derivedTrackingAdded = false;
         try
         {
-            // Live progression is intentionally table-free. Rebuild the same physical
-            // visit truth used by /run-progress rather than relying on GeofenceVisits,
-            // which may not exist or may contain no rows in production.
             var geofenceLoad = GeofencePlanningMatch.PrepareLoad(load);
             var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, load.PlanningDate, [geofenceLoad], ct);
             var visits = snapshot.Visits.Where(x => x.LoadId == id).OrderBy(x => x.EnteredAtUtc).ToList();
@@ -101,8 +147,6 @@ public sealed class RunTimelineResilienceController(TmsDbContext db) : Controlle
             db.ChangeTracker.Clear();
         }
 
-        // Preserve legacy visit history as a fallback only. Using it in addition to the
-        // derived engine would duplicate events on environments where both happen to exist.
         if (!derivedTrackingAdded)
         {
             try
@@ -166,6 +210,21 @@ public sealed class RunTimelineResilienceController(TmsDbContext db) : Controlle
             status = timelineStatus,
             events = events.OrderBy(x => x.AtUtc)
         });
+    }
+
+    private static (DateTimeOffset StartUtc, DateTimeOffset EndUtc) OperatingWindow(DateOnly date)
+    {
+        try
+        {
+            var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+            var localStart = DateTime.SpecifyKind(date.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
+            return (new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(localStart, zone)), new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(localStart.AddDays(1), zone)));
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            var start = new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+            return (start, start.AddDays(1));
+        }
     }
 
     private sealed record TimelineEvent(DateTimeOffset AtUtc, string Title, string Detail, string Source, string? By);

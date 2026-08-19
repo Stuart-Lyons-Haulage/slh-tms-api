@@ -29,12 +29,10 @@ public static class EmbeddedGeofenceEngine
                 .Select(x => new Vehicle { Id = x.Id, Registration = x.Registration, FleetNumber = x.FleetNumber, Abbreviation = x.Abbreviation, Active = x.Active })
                 .ToListAsync(ct);
 
-        var aliasesByVehicle = vehicles.ToDictionary(
-            x => x.Id,
-            x => new[] { x.Registration, x.FleetNumber, x.Abbreviation }
-                .Where(value => !string.IsNullOrWhiteSpace(value))
-                .Select(value => Normalize(value!))
-                .ToHashSet(StringComparer.OrdinalIgnoreCase));
+        // Use the same canonical vehicle aliases as Fleet Status and customer ETA
+        // evidence, including explicit DotTracking/TachoMaster mappings. A run must not
+        // change vehicle identity as it moves between integrations.
+        var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles, ct);
 
         var allAliases = aliasesByVehicle.Values.SelectMany(x => x).Distinct(StringComparer.OrdinalIgnoreCase).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var (startUtc, endUtc) = OperatingWindow(planningDate);
