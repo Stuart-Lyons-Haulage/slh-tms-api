@@ -21,6 +21,7 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
                     SpeedKph = record.SpeedKph, IgnitionOn = record.IgnitionOn, IsMoving = record.IsMoving, RawPayload = record.RawPayload, MatchStatus = "Received"
                 });
             }
+
             var live = await db.VehicleLiveStatuses.SingleOrDefaultAsync(item => item.VehicleIdentifier == record.VehicleIdentifier, ct);
             if (live is null)
             {
@@ -32,32 +33,26 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
             }
             else if (record.EventTimeUtc >= live.LastEventTimeUtc)
             {
-                live.LastEventTimeUtc = record.EventTimeUtc; live.LastReceivedAtUtc = DateTimeOffset.UtcNow;
-                if (record.Latitude is not null && record.Longitude is not null) { live.Latitude = record.Latitude.Value; live.Longitude = record.Longitude.Value; }
-                live.SpeedKph = record.SpeedKph; live.IgnitionOn = record.IgnitionOn; live.IsMoving = record.IsMoving; live.LastKnownStatus = record.Status;
+                live.LastEventTimeUtc = record.EventTimeUtc;
+                live.LastReceivedAtUtc = DateTimeOffset.UtcNow;
+                if (record.Latitude is not null && record.Longitude is not null)
+                {
+                    live.Latitude = record.Latitude.Value;
+                    live.Longitude = record.Longitude.Value;
+                }
+                live.SpeedKph = record.SpeedKph;
+                live.IgnitionOn = record.IgnitionOn;
+                live.IsMoving = record.IsMoving;
+                live.LastKnownStatus = record.Status;
             }
         }
+
         if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync(ct);
 
-        // Geofence progression is deliberately downstream of telemetry persistence.
-        // A geofence failure must never prevent core RoadTech tracking from being stored.
-        // If the geofence engine is empty, restore the approved SLH seed automatically
-        // before processing the current telemetry batch.
-        try
-        {
-            var seed = await GeofenceAutoSeed.EnsureAsync(db, ct);
-            if (seed.Seeded)
-                logger.LogWarning("Restored {ImportedCount} approved SLH geofences automatically; {SiteMatchedCount} matched to master sites.", seed.Imported, seed.SiteMatched);
-
-            await GeofenceRunProgression.ProcessTelemetryAsync(db, batch, ct);
-            var repaired = await GeofenceVisitRepair.RepairRecentAsync(db, ct);
-            if (repaired > 0)
-                logger.LogInformation("Re-linked {RepairedCount} recent orphan geofence visit(s) to live planning runs.", repaired);
-        }
-        catch (Exception exception) when (!ct.IsCancellationRequested)
-        {
-            logger.LogWarning(exception, "RoadTech telemetry was stored but geofence run progression failed for {RecordCount} record(s).", batch.Count);
-            db.ChangeTracker.Clear();
-        }
+        // Geofence progression is now derived from this persisted RoadTech history
+        // plus the approved embedded SLH geofence set. Do not invoke runtime CREATE
+        // TABLE/ALTER TABLE geofence maintenance from telemetry ingestion.
+        if (batch.Count > 0)
+            logger.LogDebug("Stored {RecordCount} RoadTech telemetry record(s) for table-free geofence progression.", batch.Count);
     }
 }
