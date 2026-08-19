@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO.Compression;
 using System.Reflection;
 using System.Text;
@@ -19,22 +20,21 @@ public sealed class EmbeddedGeofenceEngineTests
     }
 
     [Fact]
-    public void Recover_single_missing_base64_character_from_geofence_payload()
+    public void Recover_single_missing_base64_character_from_entire_geofence_payload()
     {
         var compact = new string(EncodedPayload().Where(c => !char.IsWhiteSpace(c)).ToArray());
         Assert.Equal(16339, compact.Length);
         Assert.Equal(3, compact.Length % 4);
+        var stopwatch = Stopwatch.StartNew();
+        long candidates = 0;
 
-        // Chunked decompression located the first corruption at compressed byte ~1744,
-        // corresponding to Base64 character ~2325. Search a deliberately bounded
-        // window around that point and accept only a complete, valid 53-fence payload.
-        const int startIndex = 2200;
-        const int endIndex = 2400;
-
-        for (var index = startIndex; index <= endIndex; index++)
+        // Search every possible insertion point. Indexes 0-15 are skipped because the
+        // existing payload already has a valid gzip header and corruption occurs later.
+        for (var index = 16; index <= compact.Length; index++)
         {
             foreach (var character in Base64Alphabet)
             {
+                candidates++;
                 var candidate = compact.Insert(index, character.ToString());
                 try
                 {
@@ -56,7 +56,7 @@ public sealed class EmbeddedGeofenceEngineTests
                         points.GetArrayLength() >= 3);
                     if (!valid) continue;
 
-                    Assert.Fail($"RECOVERED missing Base64 character: index={index}; char={character}; correctedLength={candidate.Length}; jsonLength={json.Length}; geofences=53");
+                    Assert.Fail($"RECOVERED missing Base64 character: index={index}; char={character}; correctedLength={candidate.Length}; jsonLength={json.Length}; geofences=53; candidates={candidates}; elapsedMs={stopwatch.ElapsedMilliseconds}");
                 }
                 catch (FormatException)
                 {
@@ -70,6 +70,6 @@ public sealed class EmbeddedGeofenceEngineTests
             }
         }
 
-        Assert.Fail($"No valid 53-geofence payload found between Base64 indexes {startIndex} and {endIndex}.");
+        Assert.Fail($"No valid 53-geofence payload found after testing {candidates} single-character insertions across the complete Base64 string in {stopwatch.ElapsedMilliseconds} ms.");
     }
 }
