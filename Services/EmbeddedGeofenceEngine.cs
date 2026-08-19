@@ -56,7 +56,7 @@ public static class EmbeddedGeofenceEngine
         {
             var aliases = aliasesByVehicle.GetValueOrDefault(vehicle.Id) ?? [];
             var vehicleEvents = matchedEvents.Where(x => aliases.Contains(Normalize(x.VehicleIdentifier))).OrderBy(x => x.EventTimeUtc).ToList();
-            visits.AddRange(DeriveVisits(vehicle.Id, vehicle.Registration, vehicleEvents, fences, now));
+            visits.AddRange(DeriveVisits(vehicle.Id, vehicle.Registration, vehicleEvents, fences));
         }
 
         LinkVisitsToRuns(visits, loads);
@@ -112,7 +112,7 @@ public static class EmbeddedGeofenceEngine
         return result;
     }
 
-    private static IEnumerable<DerivedVisit> DeriveVisits(Guid vehicleId, string registration, IReadOnlyList<VehicleTrackingEvent> events, IReadOnlyList<EmbeddedFence> fences, DateTimeOffset now)
+    private static IEnumerable<DerivedVisit> DeriveVisits(Guid vehicleId, string registration, IReadOnlyList<VehicleTrackingEvent> events, IReadOnlyList<EmbeddedFence> fences)
     {
         var visits = new List<DerivedVisit>();
         EmbeddedFence? currentFence = null;
@@ -165,7 +165,7 @@ public static class EmbeddedGeofenceEngine
 
         if (current is not null)
         {
-            current.DwellMinutes = Math.Max(0, (int)Math.Floor((Math.Min(now, current.LastInsideAtUtc) - current.EnteredAtUtc).TotalMinutes));
+            current.DwellMinutes = Math.Max(0, (int)Math.Floor((current.LastInsideAtUtc - current.EnteredAtUtc).TotalMinutes));
             var confirmMinutes = Math.Max(DefaultConfirmDwellMinutes, current.Fence.PendingEntryMinutes);
             if (current.ConfirmedAtUtc is null && current.DwellMinutes >= confirmMinutes)
                 current.ConfirmedAtUtc = current.LastInsideAtUtc;
@@ -180,7 +180,7 @@ public static class EmbeddedGeofenceEngine
         var usedStops = new HashSet<Guid>();
         foreach (var visit in visits.OrderBy(x => x.EnteredAtUtc))
         {
-            var candidates = loads
+            var candidate = loads
                 .Where(load => load.VehicleId == visit.VehicleId && load.Status != LoadStatus.Cancelled)
                 .SelectMany(load => (load.Stops ?? []).Where(stop => !usedStops.Contains(stop.Id)).Select(stop => new { load, stop }))
                 .Where(x => NamesOverlap(x.stop.Name, visit.Fence.Name) || NamesOverlap(x.stop.Address ?? string.Empty, visit.Fence.Name))
@@ -194,10 +194,10 @@ public static class EmbeddedGeofenceEngine
                 .ThenBy(x => x.stop.Sequence)
                 .FirstOrDefault();
 
-            if (candidates is null) continue;
-            visit.LoadId = candidates.load.Id;
-            visit.LoadStopId = candidates.stop.Id;
-            usedStops.Add(candidates.stop.Id);
+            if (candidate is null) continue;
+            visit.LoadId = candidate.load.Id;
+            visit.LoadStopId = candidate.stop.Id;
+            usedStops.Add(candidate.stop.Id);
         }
     }
 
