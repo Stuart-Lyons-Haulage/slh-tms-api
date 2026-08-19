@@ -35,13 +35,45 @@ public static class EmbeddedGeofenceEngine
         var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles, ct);
 
         var (startUtc, endUtc) = OperatingWindow(planningDate);
-        List<VehicleTrackingEvent> events = vehicles.Count == 0
-            ? new List<VehicleTrackingEvent>()
-            : await db.VehicleTrackingEvents.AsNoTracking()
-                .Where(x => x.EventTimeUtc >= startUtc.AddHours(-2) && x.EventTimeUtc < endUtc.AddHours(2))
-                .OrderBy(x => x.EventTimeUtc)
-                .Take(20000)
+        var windowStartUtc = startUtc.AddHours(-2);
+        var windowEndUtc = endUtc.AddHours(2);
+        List<VehicleTrackingEvent> events;
+        if (vehicles.Count == 0)
+        {
+            events = [];
+        }
+        else
+        {
+            // Never truncate the operating day before vehicle matching. The previous
+            // implementation took the first 20,000 fleet-wide events and only then
+            // matched them to planned vehicles. As the day accumulated telemetry,
+            // later events (including departures/final deliveries) disappeared from
+            // reconstruction, making completed runs regress to Upcoming.
+            //
+            // First discover the small set of provider identifiers present in the
+            // operating window, resolve those against the planned vehicle aliases,
+            // then read the complete history only for the matched identifiers.
+            var providerIdentifiers = await db.VehicleTrackingEvents.AsNoTracking()
+                .Where(x => x.EventTimeUtc >= windowStartUtc && x.EventTimeUtc < windowEndUtc)
+                .Select(x => x.VehicleIdentifier)
+                .Distinct()
                 .ToListAsync(ct);
+
+            var matchedIdentifiers = providerIdentifiers
+                .Where(identifier => aliasesByVehicle.Values.Any(aliases =>
+                    ExecutionIdentityResolver.MatchesVehicleIdentifier(aliases, identifier)))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            events = matchedIdentifiers.Count == 0
+                ? []
+                : await db.VehicleTrackingEvents.AsNoTracking()
+                    .Where(x => x.EventTimeUtc >= windowStartUtc &&
+                                x.EventTimeUtc < windowEndUtc &&
+                                matchedIdentifiers.Contains(x.VehicleIdentifier))
+                    .OrderBy(x => x.EventTimeUtc)
+                    .ToListAsync(ct);
+        }
 
         var matchedEvents = events
             .Where(item => aliasesByVehicle.Values.Any(aliases =>
