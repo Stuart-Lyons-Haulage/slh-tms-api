@@ -8,7 +8,7 @@ using Slh.Tms.Api.Services;
 namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/runs"), Authorize]
-public sealed class RunAllocationResilienceController(TmsDbContext db) : ControllerBase
+public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMapsRouteClient maps) : ControllerBase
 {
     [HttpGet]
     public async Task<IActionResult> Runs([FromQuery] DateOnly? date, CancellationToken ct)
@@ -37,7 +37,7 @@ public sealed class RunAllocationResilienceController(TmsDbContext db) : Control
     [HttpPut("{id:guid}/allocation"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> Allocate(Guid id, RunAllocationRequest request, CancellationToken ct)
     {
-        var (load, register) = await FindLoadAsync(id, ct);
+        var (load, register) = await FindLoadAsync(id, includeStops: false, tracking: true, ct);
         if (load is null) return NotFound(new { message = "The run could not be found." });
 
         if (request.VehicleId is Guid vehicleId && !await db.Vehicles.AsNoTracking().AnyAsync(x => x.Id == vehicleId && x.Active, ct))
@@ -51,24 +51,7 @@ public sealed class RunAllocationResilienceController(TmsDbContext db) : Control
         load.DriverId = request.DriverId;
         load.TrailerId = request.TrailerId;
         load.Status = request.VehicleId is not null && request.DriverId is not null ? LoadStatus.Planned : LoadStatus.Draft;
-
-        if (register)
-        {
-            await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
-        }
-        else
-        {
-            try
-            {
-                await db.SaveChangesAsync(ct);
-            }
-            catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex))
-            {
-                db.ChangeTracker.Clear();
-                await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
-            }
-        }
-
+        await SaveCoreLoadAsync(load, register, ct);
         await RunOperationalStore.EnrichAsync(db, [load], ct);
         return Ok(load);
     }
@@ -79,7 +62,7 @@ public sealed class RunAllocationResilienceController(TmsDbContext db) : Control
         if (request.PalletSpacesUsed < 0 || request.TotalPalletSpaces < 0)
             return BadRequest(new { message = "Capacity values cannot be negative." });
 
-        var (load, register) = await FindLoadAsync(id, ct);
+        var (load, register) = await FindLoadAsync(id, includeStops: false, tracking: true, ct);
         if (load is null) return NotFound(new { message = "The run could not be found." });
 
         var values = new RunOperationalValues(
@@ -95,11 +78,55 @@ public sealed class RunAllocationResilienceController(TmsDbContext db) : Control
         return Ok(load);
     }
 
-    private async Task<(Load? Load, bool Register)> FindLoadAsync(Guid id, CancellationToken ct)
+    [HttpPut("{id:guid}/stops"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> UpdateStops(Guid id, List<RunStopRequest> request, CancellationToken ct)
+    {
+        if (request.Count == 0 || request.Any(x => string.IsNullOrWhiteSpace(x.Name)))
+            return BadRequest(new { message = "At least one named stop is required." });
+
+        var (load, register) = await FindLoadAsync(id, includeStops: true, tracking: true, ct);
+        if (load is null) return NotFound(new { message = "The run could not be found." });
+
+        if (!register) db.LoadStops.RemoveRange(load.Stops);
+        load.Stops = request.Select((stop, index) => new LoadStop
+        {
+            Id = Guid.NewGuid(),
+            LoadId = load.Id,
+            OrderId = stop.OrderId,
+            Sequence = index + 1,
+            Name = stop.Name.Trim(),
+            Address = Clip(stop.Address, 500),
+            Latitude = stop.Latitude,
+            Longitude = stop.Longitude,
+            PlannedArrivalUtc = stop.PlannedArrivalUtc
+        }).ToList();
+
+        await SaveCoreLoadAsync(load, register, ct);
+        await RunOperationalStore.EnrichAsync(db, [load], ct);
+        return Ok(load);
+    }
+
+    [HttpGet("{id:guid}/route")]
+    public async Task<IActionResult> Route(Guid id, CancellationToken ct)
+    {
+        var (load, _) = await FindLoadAsync(id, includeStops: true, tracking: false, ct);
+        if (load is null) return NotFound(new { message = "The run could not be found." });
+        var points = load.Stops
+            .Where(x => x.Longitude is not null && x.Latitude is not null)
+            .OrderBy(x => x.Sequence)
+            .Select(x => (x.Longitude!.Value, x.Latitude!.Value))
+            .ToList();
+        if (points.Count < 2) return BadRequest(new { message = "At least two mapped stops are required before calculating a route." });
+        return Ok(await maps.Directions(points, ct));
+    }
+
+    private async Task<(Load? Load, bool Register)> FindLoadAsync(Guid id, bool includeStops, bool tracking, CancellationToken ct)
     {
         try
         {
-            var load = await db.Loads.SingleOrDefaultAsync(x => x.Id == id, ct);
+            IQueryable<Load> query = tracking ? db.Loads : db.Loads.AsNoTracking();
+            if (includeStops) query = query.Include(x => x.Stops);
+            var load = await query.SingleOrDefaultAsync(x => x.Id == id, ct);
             if (load is not null)
             {
                 await RunOperationalStore.EnrichAsync(db, [load], ct);
@@ -116,8 +143,28 @@ public sealed class RunAllocationResilienceController(TmsDbContext db) : Control
         return (registered, registered is not null);
     }
 
+    private async Task SaveCoreLoadAsync(Load load, bool register, CancellationToken ct)
+    {
+        if (register)
+        {
+            await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
+            return;
+        }
+
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex))
+        {
+            db.ChangeTracker.Clear();
+            await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
+        }
+    }
+
     private static string? Clip(string? value, int length) => string.IsNullOrWhiteSpace(value) ? null : value.Trim()[..Math.Min(value.Trim().Length, length)];
 }
 
 public sealed record RunAllocationRequest(Guid? VehicleId, Guid? DriverId, Guid? TrailerId);
 public sealed record RunOperationalRequest(decimal? PalletSpacesUsed, decimal? TotalPalletSpaces, string? CapacityType, string? DepotSplits, decimal? TemperatureC, string? PlannerNotes);
+public sealed record RunStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc);
