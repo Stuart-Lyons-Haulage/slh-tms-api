@@ -41,9 +41,11 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
 
         // Geofence progression is deliberately downstream of telemetry persistence.
         // A geofence failure must never prevent core RoadTech tracking from being stored,
-        // but it must be visible in logs because Live Runs depends on this progression.
+        // but Live Runs depends on this progression so repair the legacy schema before
+        // every progression batch rather than relying only on startup migration state.
         try
         {
+            await GeofenceRuntimeRepair.EnsureAsync(db, ct);
             await GeofenceRunProgression.ProcessTelemetryAsync(db, batch, ct);
             var repaired = await GeofenceVisitRepair.RepairRecentAsync(db, ct);
             if (repaired > 0)
