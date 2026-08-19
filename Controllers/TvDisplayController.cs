@@ -22,7 +22,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
         {
             access.Key,
             access.CreatedAtUtc,
-            urlPath = $"/live-runs/tv?key={Uri.EscapeDataString(access.Key)}"
+            urlPath = $"/live-runs/tv#key={Uri.EscapeDataString(access.Key)}"
         });
     }
 
@@ -34,15 +34,15 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
         {
             access.Key,
             access.CreatedAtUtc,
-            urlPath = $"/live-runs/tv?key={Uri.EscapeDataString(access.Key)}"
+            urlPath = $"/live-runs/tv#key={Uri.EscapeDataString(access.Key)}"
         });
     }
 
     [HttpGet("live-runs"), AllowAnonymous]
-    public async Task<IActionResult> LiveRuns([FromQuery] string? key, [FromQuery] DateOnly? date, CancellationToken ct)
+    public async Task<IActionResult> LiveRuns([FromHeader(Name = "X-TV-Display-Key")] string? displayKey, [FromQuery] DateOnly? date, CancellationToken ct)
     {
-        if (!await TvDisplayKeyStore.ValidateAsync(db, key, ct))
-            return Unauthorized(new { message = "This TV display link is not valid. Generate a fresh link from Live Runs in the signed-in TMS." });
+        if (!await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct))
+            return Unauthorized(new { message = "This TV display link is not valid. Generate a fresh link from the signed-in TMS TV display page." });
 
         var day = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
         var now = DateTimeOffset.UtcNow;
@@ -61,7 +61,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
         var trailers = await SafeDictionary(db.Trailers.AsNoTracking().Where(x => trailerIds.Contains(x.Id)), x => x.Id, ct);
         var liveStatuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
 
-        var rows = new List<object>();
+        var rows = new List<TvRunDisplayRow>();
         foreach (var load in loads)
         {
             drivers.TryGetValue(load.DriverId ?? Guid.Empty, out var driver);
@@ -91,26 +91,24 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
 
             var trackingAgeMinutes = live is null ? (double?)null : Math.Max(0, (now - live.LastEventTimeUtc).TotalMinutes);
             var state = State(load, driver, vehicle, live, trackingAgeMinutes, eta, nextStop?.PlannedArrivalUtc);
-            rows.Add(new
-            {
-                id = load.Id,
-                reference = load.Reference,
-                status = load.Status.ToString(),
-                driver = driver?.DisplayName ?? "Driver TBC",
-                vehicle = vehicle?.Registration ?? "Vehicle TBC",
-                trailer = trailer?.TrailerNumber,
-                firstPlannedUtc = firstStop?.PlannedArrivalUtc,
-                finalPlannedUtc = finalStop?.PlannedArrivalUtc,
-                nextStop = nextStop?.Name,
-                etaUtc = eta,
+            rows.Add(new TvRunDisplayRow(
+                load.Id,
+                load.Reference,
+                load.Status.ToString(),
+                driver?.DisplayName ?? "Driver TBC",
+                vehicle?.Registration ?? "Vehicle TBC",
+                trailer?.TrailerNumber,
+                firstStop?.PlannedArrivalUtc,
+                finalStop?.PlannedArrivalUtc,
+                nextStop?.Name,
+                eta,
                 etaSource,
-                tracking = live is null ? "No live tracking" : TrackingText(live, trackingAgeMinutes ?? 0),
-                trackingUpdatedAtUtc = live?.LastEventTimeUtc,
-                speedKph = live?.SpeedKph,
-                state = state.Label,
-                stateDetail = state.Detail,
-                priority = state.Priority
-            });
+                live is null ? "No live tracking" : TrackingText(live, trackingAgeMinutes ?? 0),
+                live?.LastEventTimeUtc,
+                live?.SpeedKph,
+                state.Label,
+                state.Detail,
+                state.Priority));
         }
 
         return Ok(new
@@ -119,7 +117,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
             generatedAtUtc = now,
             refreshSeconds = 20,
             runCount = rows.Count,
-            runs = rows.OrderByDescending(row => (int)row.GetType().GetProperty("priority")!.GetValue(row)!).ToList()
+            runs = rows.OrderByDescending(row => row.Priority).ThenBy(row => row.FirstPlannedUtc ?? DateTimeOffset.MaxValue).ToList()
         });
     }
 
@@ -174,8 +172,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
     private static async Task<Dictionary<TKey, TValue>> SafeDictionary<TValue, TKey>(IQueryable<TValue> query, Func<TValue, TKey> key, CancellationToken ct) where TKey : notnull
     {
         try { return await query.ToDictionaryAsync(key, ct); }
-        catch { dbChangeTrackerNoop(); return new Dictionary<TKey, TValue>(); }
-        static void dbChangeTrackerNoop() { }
+        catch { return new Dictionary<TKey, TValue>(); }
     }
 
     private static async Task<List<TValue>> SafeList<TValue>(IQueryable<TValue> query, CancellationToken ct)
@@ -252,3 +249,6 @@ internal static class TvDisplayKeyStore
 }
 
 internal sealed record TvDisplayAccess(string Key, DateTimeOffset CreatedAtUtc);
+internal sealed record TvRunDisplayRow(Guid Id, string Reference, string Status, string Driver, string Vehicle, string? Trailer,
+    DateTimeOffset? FirstPlannedUtc, DateTimeOffset? FinalPlannedUtc, string? NextStop, DateTimeOffset? EtaUtc, string EtaSource,
+    string Tracking, DateTimeOffset? TrackingUpdatedAtUtc, decimal? SpeedKph, string State, string StateDetail, int Priority);
