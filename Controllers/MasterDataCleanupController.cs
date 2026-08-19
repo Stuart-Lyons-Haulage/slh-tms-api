@@ -49,15 +49,17 @@ public sealed class MasterDataCleanupController(TmsDbContext db) : ControllerBas
                 references = usage
             });
 
-        var mappingsRemoved = await Remove(entity, id, ct);
-        if (mappingsRemoved is null) return NotFound(new { code = "master_data_not_found", message = "This master-data record no longer exists." });
+        var removed = await Remove(entity, id, ct);
+        if (removed is null) return NotFound(new { code = "master_data_not_found", message = "This master-data record no longer exists." });
 
+        var auditRecorded = await TryAudit(Title(Singular(entity)), id, "Deleted", removed.Value.Snapshot, null, ct);
         return Ok(new
         {
             deleted = true,
             entity,
             id,
-            integrationMappingsRemoved = mappingsRemoved.Value,
+            integrationMappingsRemoved = removed.Value.MappingsRemoved,
+            auditRecorded,
             message = $"{Title(Singular(entity))} permanently deleted from the TMS master. Historical operational records were not removed."
         });
     }
@@ -73,9 +75,12 @@ public sealed class MasterDataCleanupController(TmsDbContext db) : ControllerBas
         var before = Snapshot(item);
         SetActiveValue(item, active);
         if (item is SiteGeofence geofence) geofence.UpdatedAtUtc = DateTimeOffset.UtcNow;
-        db.MasterDataAudits.Add(Audit(Title(Singular(entity)), id, active ? "Restored" : "Archived", before, Snapshot(item)));
+
+        // Persist the operational state first. Audit history is deliberately best-effort so
+        // a stale optional audit schema can never make Archive/Restore appear to fail.
         await db.SaveChangesAsync(ct);
-        return Ok(new { active, entity, id });
+        var auditRecorded = await TryAudit(Title(Singular(entity)), id, active ? "Restored" : "Archived", before, Snapshot(item), ct);
+        return Ok(new { active, entity, id, auditRecorded });
     }
 
     private async Task<object?> Find(string entity, Guid id, CancellationToken ct) => entity switch
@@ -139,7 +144,7 @@ public sealed class MasterDataCleanupController(TmsDbContext db) : ControllerBas
         return result;
     }
 
-    private async Task<int?> Remove(string entity, Guid id, CancellationToken ct)
+    private async Task<(int MappingsRemoved, string Snapshot)?> Remove(string entity, Guid id, CancellationToken ct)
     {
         var item = await Find(entity, id, ct);
         if (item is null) return null;
@@ -159,12 +164,26 @@ public sealed class MasterDataCleanupController(TmsDbContext db) : ControllerBas
             default: return null;
         }
 
-        db.MasterDataAudits.Add(Audit(Title(Singular(entity)), id, "Deleted", snapshot, null));
         await db.SaveChangesAsync(ct);
-        return mappings.Count;
+        return (mappings.Count, snapshot);
     }
 
-    private MasterDataAudit Audit(string entityType, Guid entityId, string action, string before, string? after)
+    private async Task<bool> TryAudit(string entityType, Guid entityId, string action, string before, string? after, CancellationToken ct)
+    {
+        try
+        {
+            db.MasterDataAudits.Add(BuildAudit(entityType, entityId, action, before, after));
+            await db.SaveChangesAsync(ct);
+            return true;
+        }
+        catch
+        {
+            db.ChangeTracker.Clear();
+            return false;
+        }
+    }
+
+    private MasterDataAudit BuildAudit(string entityType, Guid entityId, string action, string before, string? after)
     {
         using var beforeDoc = JsonDocument.Parse(before);
         using var afterDoc = after is null ? null : JsonDocument.Parse(after);
@@ -173,11 +192,7 @@ public sealed class MasterDataCleanupController(TmsDbContext db) : ControllerBas
             EntityType = entityType,
             EntityId = entityId,
             Action = action,
-            ChangesJson = JsonSerializer.Serialize(new
-            {
-                before = beforeDoc.RootElement.Clone(),
-                after = afterDoc?.RootElement.Clone()
-            }),
+            ChangesJson = JsonSerializer.Serialize(new { before = beforeDoc.RootElement.Clone(), after = afterDoc?.RootElement.Clone() }),
             ChangedBy = User.Identity?.Name ?? User.FindFirst("preferred_username")?.Value ?? "unknown"
         };
     }
