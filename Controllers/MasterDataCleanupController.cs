@@ -76,7 +76,7 @@ public sealed class MasterDataCleanupController(TmsDbContext db) : ControllerBas
         SetActiveValue(item, active);
         if (item is SiteGeofence geofence) geofence.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
-        // Persist the operational state first. Audit history is deliberately best-effort so
+        // Operational state is persisted first. Audit history is deliberately best-effort so
         // a stale optional audit schema can never make Archive/Restore appear to fail.
         await db.SaveChangesAsync(ct);
         var auditRecorded = await TryAudit(Title(Singular(entity)), id, active ? "Restored" : "Archived", before, Snapshot(item), ct);
@@ -135,12 +135,17 @@ public sealed class MasterDataCleanupController(TmsDbContext db) : ControllerBas
                 if (customer is null) return result;
                 Add("Orders", await db.TransportOrders.AsNoTracking().CountAsync(x => x.CustomerCode == customer.Code, ct));
                 Add("Customer contacts", await db.CustomerContacts.AsNoTracking().CountAsync(x => x.CustomerCode == customer.Code, ct));
-                Add("Import / planning history", await db.StagedImports.AsNoTracking().CountAsync(x => x.PayloadJson.Contains(customer.Code), ct));
+                Add("Order / planning register", await db.StagedImports.AsNoTracking().CountAsync(x =>
+                    (x.EntityType == "order" || x.EntityType == "register:order") &&
+                    x.Status != StagingStatus.Rejected && x.PayloadJson.Contains(customer.Code), ct));
                 return result;
             }
         }
 
-        Add("Import / planning history", await db.StagedImports.AsNoTracking().CountAsync(x => x.PayloadJson.Contains(id.ToString()), ct));
+        // Historic recovery-register loads can carry master GUIDs even when dbo.Loads is
+        // unavailable. Ordinary master-import evidence is intentionally not a delete blocker.
+        Add("Planning register", await db.StagedImports.AsNoTracking().CountAsync(x =>
+            x.EntityType.StartsWith("register:") && x.Status != StagingStatus.Rejected && x.PayloadJson.Contains(id.ToString()), ct));
         return result;
     }
 
