@@ -8,12 +8,23 @@ using Slh.Tms.Api.Services;
 namespace Slh.Tms.Api.Controllers;
 
 /// <summary>
-/// Shared production-safe planning readers used where the legacy Loads table may not exist.
+/// Shared production-safe planning readers. Production planning is register-first;
+/// legacy Loads/LoadStops are used only as a fallback for older environments.
 /// </summary>
 internal static class PlanningResilience
 {
     public static async Task<List<Load>> ReadLoadsAsync(TmsDbContext db, DateOnly? date, CancellationToken ct)
     {
+        try
+        {
+            var registered = await PlanningRegisterStore.ReadLoadsAsync(db, date, ct);
+            if (registered.Count > 0) return registered;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+        }
+
         try
         {
             var query = db.Loads.AsNoTracking().Include(x => x.Stops).AsQueryable();
@@ -23,7 +34,7 @@ internal static class PlanningResilience
         catch (Exception ex) when (SchemaUnavailable(ex))
         {
             db.ChangeTracker.Clear();
-            return await PlanningRegisterStore.ReadLoadsAsync(db, date, ct);
+            return [];
         }
     }
 
@@ -31,14 +42,23 @@ internal static class PlanningResilience
     {
         try
         {
-            var load = await db.Loads.AsNoTracking().Include(x => x.Stops).SingleOrDefaultAsync(x => x.Id == id, ct);
-            if (load is not null) return load;
+            var registered = await PlanningRegisterStore.GetLoadAsync(db, id, ct);
+            if (registered is not null) return registered;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+        }
+
+        try
+        {
+            return await db.Loads.AsNoTracking().Include(x => x.Stops).SingleOrDefaultAsync(x => x.Id == id, ct);
         }
         catch (Exception ex) when (SchemaUnavailable(ex))
         {
             db.ChangeTracker.Clear();
+            return null;
         }
-        return await PlanningRegisterStore.GetLoadAsync(db, id, ct);
     }
 
     public static bool SchemaUnavailable(Exception ex)
