@@ -72,14 +72,7 @@ public sealed class PlannerAutosaveController(TmsDbContext db) : ControllerBase
             await db.SaveChangesAsync(ct);
         }
 
-        return Ok(new
-        {
-            loadId = load.Id,
-            loadReference = load.Reference,
-            status = load.Status.ToString(),
-            stopCount = load.Stops.Count,
-            updatedAtUtc = DateTimeOffset.UtcNow
-        });
+        return Ok(load);
     }
 
     private static bool SchemaUnavailable(Exception exception)
