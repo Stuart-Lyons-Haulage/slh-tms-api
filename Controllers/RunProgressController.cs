@@ -25,7 +25,11 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
                 .OrderBy(x => x.Reference)
                 .ToList();
 
-            var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, loads, ct);
+            // The planner intentionally uses concise operational labels such as
+            // NWF-Merston, while Falcon calls the same fence Merston (Natures Way).
+            // Match on a cloned view so the planner-facing labels remain unchanged.
+            var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
+            var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, geofenceLoads, ct);
             var records = loads.Select(load => BuildRecord(load, snapshot, now)).ToList();
 
             return Ok(new
@@ -102,10 +106,7 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
     {
         var orderedStops = (load.Stops ?? []).OrderBy(x => x.Sequence).ToList();
         var visits = snapshot.Visits.Where(x => x.LoadId == load.Id).OrderBy(x => x.EnteredAtUtc).ToList();
-        var completedStopIds = visits
-            .Where(x => x.LoadStopId != null && x.ConfirmedAtUtc != null && x.ExitedAtUtc != null)
-            .Select(x => x.LoadStopId!.Value)
-            .ToHashSet();
+        var completedStopIds = GeofencePlanningMatch.CompletedStopIds(load, visits);
 
         var activeVisit = snapshot.ActiveVisits
             .Where(x => x.LoadId == load.Id)
