@@ -58,7 +58,7 @@ public sealed class AssistantController(
         }
         catch
         {
-            // Site lookup is enrichment only; Assistant advice must remain available if master-data lookup is temporarily unavailable.
+            db.ChangeTracker.Clear();
         }
 
         var userKey = User.FindFirst("oid")?.Value ?? User.Identity?.Name ?? "slh-planner";
@@ -70,8 +70,21 @@ public sealed class AssistantController(
     [HttpPost("fix-safe-validations"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> FixSafeValidations(CancellationToken ct)
     {
-        var safeFixes = new AssistantSafeFixService(db, maps, safeFixLogger);
-        return Ok(await safeFixes.Apply(ct));
+        try
+        {
+            var safeFixes = new AssistantSafeFixService(db, maps, safeFixLogger);
+            return Ok(await safeFixes.Apply(ct));
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            safeFixLogger.LogError(exception, "SLH Assistant master-data fixes failed; returning a controlled result instead of HTTP 500.");
+            db.ChangeTracker.Clear();
+            return Ok(new SafeFixResult(
+                0,
+                1,
+                Array.Empty<string>(),
+                new[] { $"Master data repair could not complete: {exception.GetBaseException().Message}" }));
+        }
     }
 
     private async Task<IReadOnlyList<AssistantSuggestion>> AddMarketSuggestions(IReadOnlyList<AssistantSuggestion> suggestions, CancellationToken ct)
@@ -109,6 +122,7 @@ public sealed class AssistantController(
         }
         catch
         {
+            db.ChangeTracker.Clear();
             return suggestions;
         }
     }
