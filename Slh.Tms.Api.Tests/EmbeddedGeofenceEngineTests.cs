@@ -1,5 +1,7 @@
 using System.IO.Compression;
 using System.Reflection;
+using System.Text;
+using System.Text.Json;
 using Slh.Tms.Api.Services;
 using Xunit;
 
@@ -7,6 +9,8 @@ namespace Slh.Tms.Api.Tests;
 
 public sealed class EmbeddedGeofenceEngineTests
 {
+    private const string Base64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
     private static string EncodedPayload()
     {
         var payloadType = typeof(EmbeddedGeofenceEngine).Assembly.GetType("Slh.Tms.Api.Services.GeofenceSeedPayload", throwOnError: true)!;
@@ -15,43 +19,57 @@ public sealed class EmbeddedGeofenceEngineTests
     }
 
     [Fact]
-    public void Locate_corruption_in_padded_geofence_stream()
+    public void Recover_single_missing_base64_character_from_geofence_payload()
     {
         var compact = new string(EncodedPayload().Where(c => !char.IsWhiteSpace(c)).ToArray());
-        var bytes = Convert.FromBase64String(compact + "=");
-        using var raw = new MemoryStream(bytes);
-        using var input = new ChunkedReadStream(raw, 16);
-        using var output = new MemoryStream();
-        try
-        {
-            using var gzip = new GZipStream(input, CompressionMode.Decompress, leaveOpen: true);
-            var buffer = new byte[256];
-            while (true)
-            {
-                var read = gzip.Read(buffer, 0, buffer.Length);
-                if (read == 0) break;
-                output.Write(buffer, 0, read);
-            }
-            Assert.Fail($"Unexpectedly decompressed full stream. compressedPosition={raw.Position}; outputLength={output.Length}");
-        }
-        catch (InvalidDataException exception)
-        {
-            Assert.Fail($"Corruption: compressedBytes={bytes.Length}; compressedPosition={raw.Position}; approxBase64={(raw.Position * 4) / 3}; outputLength={output.Length}; message={exception.Message}");
-        }
-    }
+        Assert.Equal(16339, compact.Length);
+        Assert.Equal(3, compact.Length % 4);
 
-    private sealed class ChunkedReadStream(Stream inner, int maxChunk) : Stream
-    {
-        public override bool CanRead => inner.CanRead;
-        public override bool CanSeek => inner.CanSeek;
-        public override bool CanWrite => false;
-        public override long Length => inner.Length;
-        public override long Position { get => inner.Position; set => inner.Position = value; }
-        public override void Flush() => inner.Flush();
-        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, Math.Min(count, maxChunk));
-        public override int Read(Span<byte> buffer) => inner.Read(buffer[..Math.Min(buffer.Length, maxChunk)]);
-        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
-        public override void SetLength(long value) => throw new NotSupportedException();
-        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        // Chunked decompression located the first corruption at compressed byte ~1744,
+        // corresponding to Base64 character ~2325. Search a deliberately bounded
+        // window around that point and accept only a complete, valid 53-fence payload.
+        const int startIndex = 2200;
+        const int endIndex = 2400;
+
+        for (var index = startIndex; index <= endIndex; index++)
+        {
+            foreach (var character in Base64Alphabet)
+            {
+                var candidate = compact.Insert(index, character.ToString());
+                try
+                {
+                    var bytes = Convert.FromBase64String(candidate);
+                    using var input = new MemoryStream(bytes);
+                    using var gzip = new GZipStream(input, CompressionMode.Decompress);
+                    using var output = new MemoryStream();
+                    gzip.CopyTo(output);
+
+                    var json = Encoding.UTF8.GetString(output.ToArray());
+                    using var document = JsonDocument.Parse(json);
+                    if (document.RootElement.ValueKind != JsonValueKind.Array || document.RootElement.GetArrayLength() != 53) continue;
+
+                    var valid = document.RootElement.EnumerateArray().All(record =>
+                        record.TryGetProperty("name", out var name) &&
+                        !string.IsNullOrWhiteSpace(name.GetString()) &&
+                        record.TryGetProperty("points", out var points) &&
+                        points.ValueKind == JsonValueKind.Array &&
+                        points.GetArrayLength() >= 3);
+                    if (!valid) continue;
+
+                    Assert.Fail($"RECOVERED missing Base64 character: index={index}; char={character}; correctedLength={candidate.Length}; jsonLength={json.Length}; geofences=53");
+                }
+                catch (FormatException)
+                {
+                }
+                catch (InvalidDataException)
+                {
+                }
+                catch (JsonException)
+                {
+                }
+            }
+        }
+
+        Assert.Fail($"No valid 53-geofence payload found between Base64 indexes {startIndex} and {endIndex}.");
     }
 }
