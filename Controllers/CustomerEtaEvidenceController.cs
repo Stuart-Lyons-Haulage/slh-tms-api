@@ -26,8 +26,7 @@ public sealed class CustomerEtaEvidenceController(
     public async Task<IActionResult> Get([FromQuery] DateOnly? date, CancellationToken ct)
     {
         var planningDate = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
-        var snapshot = await BuildAsync(planningDate, ct);
-        return Ok(snapshot);
+        return Ok(await BuildAsync(planningDate, ct));
     }
 
     [HttpGet("export.csv")]
@@ -38,11 +37,12 @@ public sealed class CustomerEtaEvidenceController(
         var csv = new StringBuilder();
         csv.AppendLine(string.Join(',', new[]
         {
-            "Generated UTC", "Planning date", "Run", "Order reference", "Customer", "Driver", "Vehicle",
-            "Tacho sign-on UTC", "First DOT/Falcon movement UTC", "Latest tracking UTC", "Last confirmed site",
-            "Last site arrival UTC", "Last site departure UTC", "Delivery stop", "ETA UTC", "ETA source",
-            "Window end UTC", "Risk", "Drive available today minutes", "Route driving minutes", "Break included minutes",
-            "Tacho status", "Evidence status", "Customer promise ready", "Evidence explanation"
+            "Generated UTC", "Planning date", "Run", "Order reference", "Customer", "Planned driver", "Tacho driver",
+            "Driver/Tacho match", "Vehicle", "Tacho sign-on UTC", "First DOT/Falcon movement after sign-on UTC",
+            "Sign-on to movement minutes", "Latest tracking UTC", "Last confirmed site", "Last site arrival UTC",
+            "Last site departure UTC", "Delivery stop", "ETA UTC", "ETA source", "Window end UTC", "Risk",
+            "Drive available today minutes", "Remaining route driving minutes", "Break included minutes", "Tacho status",
+            "Evidence status", "Customer promise ready", "Evidence explanation"
         }.Select(Csv)));
 
         foreach (var record in snapshot.Records.Where(record => record.IsDelivery))
@@ -50,8 +50,9 @@ public sealed class CustomerEtaEvidenceController(
             csv.AppendLine(string.Join(',', new[]
             {
                 snapshot.GeneratedAtUtc.ToString("O"), snapshot.PlanningDate.ToString("yyyy-MM-dd"), record.LoadReference,
-                record.OrderReference, record.CustomerCode, record.DriverName, record.VehicleRegistration,
-                Iso(record.TachoSignOnUtc), Iso(record.FirstMovementUtc), Iso(record.LatestTrackingUtc), record.LastConfirmedSite,
+                record.OrderReference, record.CustomerCode, record.PlannedDriverName, record.TachoDriverName,
+                record.DriverEvidenceStatus, record.VehicleRegistration, Iso(record.TachoSignOnUtc), Iso(record.FirstMovementUtc),
+                record.SignOnToMovementMinutes?.ToString(), Iso(record.LatestTrackingUtc), record.LastConfirmedSite,
                 Iso(record.LastSiteArrivalUtc), Iso(record.LastSiteDepartureUtc), record.StopName, Iso(record.EtaUtc), record.EtaSource,
                 Iso(record.DeliveryWindowEndUtc), record.Risk, record.DriveAvailableTodayMinutes?.ToString(),
                 record.RouteDrivingMinutes.ToString(), record.BreakMinutesIncluded.ToString(), record.TachoStatus,
@@ -84,6 +85,7 @@ public sealed class CustomerEtaEvidenceController(
         var driverIds = loads.Where(load => load.DriverId is not null).Select(load => load.DriverId!.Value).Distinct().ToList();
         var vehicles = await SafeDictionary(db.Vehicles.AsNoTracking().Where(vehicle => vehicleIds.Contains(vehicle.Id)), vehicle => vehicle.Id, ct);
         var drivers = await SafeDictionary(db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id)), driver => driver.Id, ct);
+        var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles.Values.ToList(), ct);
         var liveStatuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
 
         IReadOnlyDictionary<string, TachoVehicleDriverStatus> tachoStatuses = new Dictionary<string, TachoVehicleDriverStatus>();
@@ -115,14 +117,24 @@ public sealed class CustomerEtaEvidenceController(
         {
             var vehicle = load.VehicleId is Guid vehicleId && vehicles.TryGetValue(vehicleId, out var matchedVehicle) ? matchedVehicle : null;
             var driver = load.DriverId is Guid driverId && drivers.TryGetValue(driverId, out var matchedDriver) ? matchedDriver : null;
-            var live = vehicle is null ? null : MatchLive(vehicle, liveStatuses);
-            var tacho = vehicle is null ? null : MatchTacho(vehicle, tachoStatuses);
-            var firstMovement = vehicle is null ? null : FirstMovement(vehicle, trackingEvents);
+            var aliases = vehicle is not null && aliasesByVehicle.TryGetValue(vehicle.Id, out var knownAliases)
+                ? knownAliases
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var live = vehicle is null ? null : ExecutionIdentityResolver.MatchLive(aliases, liveStatuses);
+            var tacho = vehicle is null ? null : ExecutionIdentityResolver.MatchTacho(aliases, tachoStatuses);
+            var firstMovement = vehicle is null ? null : ExecutionIdentityResolver.FirstMovement(aliases, trackingEvents, tacho?.DutyStartUtc);
+            var signOnToMovementMinutes = tacho is not null && firstMovement is not null
+                ? Math.Max(0, (int)Math.Floor((firstMovement.Value - tacho.DutyStartUtc).TotalMinutes))
+                : (int?)null;
             var latestTracking = live?.LastEventTimeUtc;
+            var driverEvidenceStatus = ExecutionIdentityResolver.DriverEvidenceStatus(driver, tacho);
             var evidenceStatus = RunExecutionEvidenceRules.EvidenceStatus(tacho, latestTracking, now);
-            var evidenceExplanation = RunExecutionEvidenceRules.Explanation(tacho, firstMovement, latestTracking, now);
+            var evidenceExplanation = RunExecutionEvidenceRules.Explanation(tacho, firstMovement, latestTracking, now) +
+                $" Planned/Tacho driver correlation: {driverEvidenceStatus}.";
+
             var visits = geofence?.Visits.Where(visit => visit.LoadId == load.Id && visit.ConfirmedAtUtc is not null)
                 .OrderBy(visit => visit.EnteredAtUtc).ToList() ?? [];
+            var completedStopIds = geofence is null ? new HashSet<Guid>() : GeofencePlanningMatch.CompletedStopIds(load, visits);
             var lastVisit = visits.LastOrDefault();
 
             var current = live is null ? ((decimal Longitude, decimal Latitude)?)null : (live.Longitude, live.Latitude);
@@ -131,7 +143,9 @@ public sealed class CustomerEtaEvidenceController(
             var breakDelayMinutes = 0;
             var initialContinuousDriving = tacho is null ? 0 : tacho.BreakMinutes >= 45 ? tacho.DriveMinutes % 270 : Math.Min(tacho.DriveMinutes, 270);
 
-            foreach (var stop in load.Stops.OrderBy(stop => stop.Sequence))
+            // A customer ETA is for the uncompleted journey only. Stops that have a
+            // confirmed arrival and departure are evidence, not future route legs.
+            foreach (var stop in load.Stops.OrderBy(stop => stop.Sequence).Where(stop => !completedStopIds.Contains(stop.Id)))
             {
                 orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
                 var eta = stop.PlannedArrivalUtc;
@@ -166,14 +180,15 @@ public sealed class CustomerEtaEvidenceController(
                     ? OperationsController.TachoAssessment(tacho, cumulativeDrivingMinutes, breakDelayMinutes)
                     : (Status: "RouteUnavailable", Explanation: tacho is null
                         ? "Live route and current TachoMaster duty are unavailable; this ETA must be verified before export."
-                        : "TachoMaster matched the driver, but no fresh live route could be calculated; the planned ETA has not been adjusted for a break.");
+                        : "TachoMaster matched the vehicle, but no fresh live route could be calculated; the planned ETA has not been adjusted for a break.");
                 var customerPromiseReady = etaSource == "Live" && evidenceStatus == "VerifiedLive" &&
+                    driverEvidenceStatus == "Matched" &&
                     tachoAssessment.Status is "WithinDriveTime" or "BreakIncluded" && eta is not null;
 
                 records.Add(new CustomerEtaEvidenceRecord(
                     load.Id, RunDisplayLabel.For(load), load.Status.ToString(), stop.Id, stop.Sequence, stop.Name, IsDeliveryStop(stop),
-                    order?.Reference, order?.CustomerCode, driver?.DisplayName ?? tacho?.DriverName, vehicle?.Registration,
-                    tacho?.DutyStartUtc, firstMovement, latestTracking,
+                    order?.Reference, order?.CustomerCode, driver?.DisplayName, tacho?.DriverName, driverEvidenceStatus, vehicle?.Registration,
+                    tacho?.DutyStartUtc, firstMovement, signOnToMovementMinutes, latestTracking,
                     lastVisit?.Fence.Name, lastVisit?.EnteredAtUtc, lastVisit?.ExitedAtUtc,
                     eta, etaSource, windowStart, windowEnd, Risk(eta, windowStart, windowEnd),
                     tacho?.DriveAvailableTodayMinutes, (int)Math.Ceiling(cumulativeDrivingMinutes), breakDelayMinutes,
@@ -191,41 +206,10 @@ public sealed class CustomerEtaEvidenceController(
             records);
     }
 
-    private static VehicleLiveStatus? MatchLive(Vehicle vehicle, IReadOnlyCollection<VehicleLiveStatus> statuses)
-    {
-        var aliases = VehicleAliases(vehicle);
-        return statuses.Where(status => aliases.Contains(Normalise(status.VehicleIdentifier)))
-            .OrderByDescending(status => status.LastEventTimeUtc).FirstOrDefault();
-    }
-
-    private static TachoVehicleDriverStatus? MatchTacho(Vehicle vehicle, IReadOnlyDictionary<string, TachoVehicleDriverStatus> statuses)
-    {
-        foreach (var alias in VehicleAliases(vehicle))
-            if (statuses.TryGetValue(alias, out var status)) return status;
-        return null;
-    }
-
-    private static DateTimeOffset? FirstMovement(Vehicle vehicle, IReadOnlyCollection<VehicleTrackingEvent> events)
-    {
-        var aliases = VehicleAliases(vehicle);
-        return events.Where(item => aliases.Contains(Normalise(item.VehicleIdentifier)))
-            .Where(item => item.IsMoving == true || item.SpeedKph.GetValueOrDefault() > 2)
-            .OrderBy(item => item.EventTimeUtc)
-            .Select(item => (DateTimeOffset?)item.EventTimeUtc)
-            .FirstOrDefault();
-    }
-
-    private static HashSet<string> VehicleAliases(Vehicle vehicle) =>
-        new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }
-            .Where(value => !string.IsNullOrWhiteSpace(value))
-            .Select(value => Normalise(value!))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-    private static async Task<Dictionary<TKey, T>> SafeDictionary<T, TKey>(IQueryable<T> query, Func<T, TKey> keySelector, CancellationToken ct) where TKey : notnull
+    private async Task<Dictionary<TKey, T>> SafeDictionary<T, TKey>(IQueryable<T> query, Func<T, TKey> keySelector, CancellationToken ct) where TKey : notnull
     {
         try { return await query.ToDictionaryAsync(keySelector, ct); }
-        catch (Exception exception) when (IsSchemaUnavailable(exception)) { dbCleanup(query); return []; }
-        static void dbCleanup(IQueryable<T> _) { }
+        catch (Exception exception) when (IsSchemaUnavailable(exception)) { db.ChangeTracker.Clear(); return []; }
     }
 
     private async Task<List<T>> SafeList<T>(IQueryable<T> query, CancellationToken ct)
@@ -274,7 +258,6 @@ public sealed class CustomerEtaEvidenceController(
         catch (TimeZoneNotFoundException) { return DateOnly.FromDateTime(value.UtcDateTime); }
     }
 
-    private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
     private static string Iso(DateTimeOffset? value) => value?.ToString("O") ?? string.Empty;
     private static string Csv(string? value)
     {
@@ -302,10 +285,13 @@ public sealed record CustomerEtaEvidenceRecord(
     bool IsDelivery,
     string? OrderReference,
     string? CustomerCode,
-    string? DriverName,
+    string? PlannedDriverName,
+    string? TachoDriverName,
+    string DriverEvidenceStatus,
     string? VehicleRegistration,
     DateTimeOffset? TachoSignOnUtc,
     DateTimeOffset? FirstMovementUtc,
+    int? SignOnToMovementMinutes,
     DateTimeOffset? LatestTrackingUtc,
     string? LastConfirmedSite,
     DateTimeOffset? LastSiteArrivalUtc,
