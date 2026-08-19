@@ -73,17 +73,26 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
                 };
             }).ToList();
 
+            var geofenceCount = 0;
+            try { geofenceCount = EmbeddedGeofenceEngine.ApprovedFences.Count; }
+            catch (Exception geofenceException) when (geofenceException is not OperationCanceledException)
+            {
+                logger.LogError(geofenceException, "Approved geofence payload could not be initialised while building safe run-progress fallback.");
+            }
+
             return Ok(new
             {
                 planningDate,
                 calculatedAtUtc = now,
                 count = records.Count,
                 source = "PlanningRegisterSafeFallback",
-                geofenceAvailable = EmbeddedGeofenceEngine.ApprovedFences.Count > 0,
-                geofenceCount = EmbeddedGeofenceEngine.ApprovedFences.Count,
+                geofenceAvailable = geofenceCount > 0,
+                geofenceCount,
                 geofenceVisitCount = 0,
                 geofenceLinkedRuns = 0,
-                warning = "Approved SLH geofences are loaded, but live progression could not be calculated from tracking on this refresh.",
+                warning = geofenceCount > 0
+                    ? "Approved SLH geofences are loaded, but live progression could not be calculated from tracking on this refresh."
+                    : "Live run progression could not be calculated and the approved geofence payload was unavailable on this refresh.",
                 records
             });
         }
