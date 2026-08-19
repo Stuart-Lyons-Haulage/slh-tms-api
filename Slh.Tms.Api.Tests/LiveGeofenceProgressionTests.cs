@@ -21,52 +21,22 @@ public sealed class LiveGeofenceProgressionTests
         var now = DateTimeOffset.UtcNow;
         var planningDate = UkDate(now);
 
-        var options = new DbContextOptionsBuilder<TmsDbContext>()
-            .UseInMemoryDatabase(Guid.NewGuid().ToString())
-            .Options;
+        var options = new DbContextOptionsBuilder<TmsDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
         await using var db = new TmsDbContext(options);
 
         db.Vehicles.Add(new Vehicle { Id = vehicleId, Registration = "AB12CDE", Active = true });
-        db.VehicleTrackingEvents.Add(new VehicleTrackingEvent
-        {
-            ProviderName = "RoadTech Falcon",
-            ProviderEventId = "entry",
-            VehicleIdentifier = "AB12CDE",
-            EventTimeUtc = now.AddMinutes(-12),
-            Latitude = (decimal)latitude,
-            Longitude = (decimal)longitude,
-            RawPayload = "{}",
-            MatchStatus = "Received"
-        });
+        db.VehicleTrackingEvents.Add(Tracking("entry", "AB12CDE", now.AddMinutes(-12), latitude, longitude));
         db.VehicleLiveStatuses.Add(new VehicleLiveStatus
         {
-            VehicleIdentifier = "AB12CDE",
-            LastEventTimeUtc = now.AddMinutes(-12),
-            LastReceivedAtUtc = now,
-            Latitude = (decimal)latitude,
-            Longitude = (decimal)longitude,
-            LastKnownStatus = "Received"
+            VehicleIdentifier = "AB12CDE", LastEventTimeUtc = now.AddMinutes(-12), LastReceivedAtUtc = now,
+            Latitude = (decimal)latitude, Longitude = (decimal)longitude, LastKnownStatus = "Received"
         });
         await db.SaveChangesAsync();
 
         var load = new Load
         {
-            Id = loadId,
-            Reference = "TEST-LIVE",
-            PlanningDate = planningDate,
-            Status = LoadStatus.InProgress,
-            VehicleId = vehicleId,
-            Stops =
-            [
-                new LoadStop
-                {
-                    Id = stopId,
-                    LoadId = loadId,
-                    Sequence = 1,
-                    Name = "Aldi Swindon",
-                    PlannedArrivalUtc = now.AddMinutes(-15)
-                }
-            ]
+            Id = loadId, Reference = "TEST-LIVE", PlanningDate = planningDate, Status = LoadStatus.InProgress, VehicleId = vehicleId,
+            Stops = [new LoadStop { Id = stopId, LoadId = loadId, Sequence = 1, Name = "Aldi Swindon", PlannedArrivalUtc = now.AddMinutes(-15) }]
         };
 
         var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, [load], CancellationToken.None);
@@ -82,7 +52,7 @@ public sealed class LiveGeofenceProgressionTests
     [Fact]
     public async Task Run1am_style_nwf_visit_links_and_clears_consecutive_same_site_jobs()
     {
-        var fence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences.Where(x => x.Name.Trim() == "Runcton (Natures Way)"));
+        var fence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences.Where(x => x.Name.Contains("Runcton", StringComparison.OrdinalIgnoreCase)));
         var longitude = fence.Points.Average(x => x.Longitude);
         var latitude = fence.Points.Average(x => x.Latitude);
         var vehicleId = Guid.NewGuid();
@@ -92,9 +62,7 @@ public sealed class LiveGeofenceProgressionTests
         var now = DateTimeOffset.UtcNow;
         var planningDate = UkDate(now);
 
-        var options = new DbContextOptionsBuilder<TmsDbContext>()
-            .UseInMemoryDatabase(Guid.NewGuid().ToString())
-            .Options;
+        var options = new DbContextOptionsBuilder<TmsDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
         await using var db = new TmsDbContext(options);
         db.Vehicles.Add(new Vehicle { Id = vehicleId, Registration = "KY71CVP", Active = true });
         db.VehicleTrackingEvents.AddRange(
@@ -105,11 +73,7 @@ public sealed class LiveGeofenceProgressionTests
 
         var load = new Load
         {
-            Id = loadId,
-            Reference = "RUN-1-AM",
-            PlanningDate = planningDate,
-            Status = LoadStatus.Planned,
-            VehicleId = vehicleId,
+            Id = loadId, Reference = "RUN-1-AM", PlanningDate = planningDate, Status = LoadStatus.Planned, VehicleId = vehicleId,
             Stops =
             [
                 new LoadStop { Id = firstRuncton, LoadId = loadId, Sequence = 1, Name = "NWF-Runcton", PlannedArrivalUtc = now.AddMinutes(-30) },
@@ -142,20 +106,11 @@ public sealed class LiveGeofenceProgressionTests
         Assert.Equal(expected, GeofencePlanningMatch.MatchText(planner), ignoreCase: true);
     }
 
-    private static VehicleTrackingEvent Tracking(string id, string vehicle, DateTimeOffset at, double latitude, double longitude)
+    private static VehicleTrackingEvent Tracking(string id, string vehicle, DateTimeOffset at, double latitude, double longitude) => new()
     {
-        return new VehicleTrackingEvent
-        {
-            ProviderName = "RoadTech Falcon",
-            ProviderEventId = id,
-            VehicleIdentifier = vehicle,
-            EventTimeUtc = at,
-            Latitude = (decimal)latitude,
-            Longitude = (decimal)longitude,
-            RawPayload = "{}",
-            MatchStatus = "Received"
-        };
-    }
+        ProviderName = "RoadTech Falcon", ProviderEventId = id, VehicleIdentifier = vehicle, EventTimeUtc = at,
+        Latitude = (decimal)latitude, Longitude = (decimal)longitude, RawPayload = "{}", MatchStatus = "Received"
+    };
 
     private static DateOnly UkDate(DateTimeOffset value)
     {
