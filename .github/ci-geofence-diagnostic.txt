@@ -1,0 +1,1 @@
+Temporary CI diagnostic marker for the geofence build failure. Safe to remove before merge.
