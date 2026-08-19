@@ -216,7 +216,7 @@ public static class EmbeddedGeofenceEngine
 
     private static GeoPoint? ReadPoint(JsonElement point)
     {
-        if (point.ValueKind == JsonValueKind.Array && point.GetArrayLength() >= 2 && point[0].TryGetDouble(out var x) && point[1].TryGetDouble(out var y)) return new GeoPoint(x, y);
+        if (point.ValueKind == JsonValueKind.Array && point.GetArrayLength() >= 2 && point[0].ValueKind == JsonValueKind.Number && point[1].ValueKind == JsonValueKind.Number && point[0].TryGetDouble(out var x) && point[1].TryGetDouble(out var y)) return new GeoPoint(x, y);
         if (point.ValueKind != JsonValueKind.Object) return null;
         var longitude = Double(point, "longitude") ?? Double(point, "lng") ?? Double(point, "lon") ?? Double(point, "x");
         var latitude = Double(point, "latitude") ?? Double(point, "lat") ?? Double(point, "y");
@@ -233,8 +233,8 @@ public static class EmbeddedGeofenceEngine
     private static Guid StableId(string value) => new(System.Security.Cryptography.MD5.HashData(System.Text.Encoding.UTF8.GetBytes(value)));
     private static string Normalize(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
     private static string? Text(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined ? value.ToString() : null;
-    private static int? Int(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.TryGetInt32(out var number) ? number : null;
-    private static double? Double(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.TryGetDouble(out var number) ? number : null;
+    private static int? Int(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number) ? number : null;
+    private static double? Double(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var number) ? number : null;
 }
 
 public sealed record GeoPoint(double Longitude, double Latitude);
