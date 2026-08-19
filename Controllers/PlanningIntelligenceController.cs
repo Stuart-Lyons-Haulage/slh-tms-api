@@ -14,9 +14,10 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
     [HttpGet("loads/{id:guid}")]
     public async Task<IActionResult> LoadIntelligence(Guid id, CancellationToken ct)
     {
-        var load = await db.Loads.AsNoTracking().Include(x => x.Stops).FirstOrDefaultAsync(x => x.Id == id, ct);
+        var load = await PlanningResilience.ReadLoadAsync(db, id, ct);
         if (load is null) return NotFound("Run not found.");
-        await LoadCommercialStore.EnrichAsync(db, new[] { load }, ct);
+        try { await LoadCommercialStore.EnrichAsync(db, new[] { load }, ct); }
+        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); }
 
         var orderedStops = load.Stops.OrderBy(x => x.Sequence).ToList();
         var firstStop = orderedStops.FirstOrDefault();
@@ -25,19 +26,26 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
             ? (Lat: firstStop.Latitude.Value, Lon: firstStop.Longitude.Value)
             : ((decimal Lat, decimal Lon)?)null;
         var plannedSpanMinutes = PlannedSpanMinutes(orderedStops);
-        var projectedShiftMinutes = plannedSpanMinutes is null ? null : plannedSpanMinutes + 15; // mandatory walkround allowance
+        var projectedShiftMinutes = plannedSpanMinutes is null ? null : plannedSpanMinutes + 15;
         var projectedShiftRisk = ShiftLengthRisk(projectedShiftMinutes);
 
         IReadOnlyDictionary<string, TachoVehicleDriverStatus> tacho = new Dictionary<string, TachoVehicleDriverStatus>();
         try { tacho = await tachoMaster.GetCurrentDriverStatusesByVehicleAsync(load.PlanningDate, ct); }
         catch (Exception ex) when (ex is not OperationCanceledException) { logger.LogWarning(ex, "TachoMaster planning enrichment unavailable for {LoadId}", id); }
 
-        var drivers = await db.Drivers.AsNoTracking().Where(x => x.Active).OrderBy(x => x.DisplayName).ToListAsync(ct);
-        var vehicles = await db.Vehicles.AsNoTracking().Where(x => x.Active).OrderBy(x => x.Registration).ToListAsync(ct);
-        var live = await db.VehicleLiveStatuses.AsNoTracking().OrderByDescending(x => x.LastEventTimeUtc).Take(1000).ToListAsync(ct);
-        var previousLoads = await db.Loads.AsNoTracking().Include(x => x.Stops)
+        List<Driver> drivers;
+        List<Vehicle> vehicles;
+        List<VehicleLiveStatus> live;
+        try { drivers = await db.Drivers.AsNoTracking().Where(x => x.Active).OrderBy(x => x.DisplayName).ToListAsync(ct); }
+        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); drivers = []; }
+        try { vehicles = await db.Vehicles.AsNoTracking().Where(x => x.Active).OrderBy(x => x.Registration).ToListAsync(ct); }
+        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); vehicles = []; }
+        try { live = await db.VehicleLiveStatuses.AsNoTracking().OrderByDescending(x => x.LastEventTimeUtc).Take(1000).ToListAsync(ct); }
+        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); live = []; }
+
+        var previousLoads = (await PlanningResilience.ReadLoadsAsync(db, null, ct))
             .Where(x => x.PlanningDate < load.PlanningDate && x.PlanningDate >= load.PlanningDate.AddDays(-7) && x.Status != LoadStatus.Cancelled)
-            .OrderByDescending(x => x.PlanningDate).ThenByDescending(x => x.CreatedAtUtc).Take(1000).ToListAsync(ct);
+            .OrderByDescending(x => x.PlanningDate).ThenByDescending(x => x.CreatedAtUtc).Take(1000).ToList();
 
         var driverSuggestions = drivers.Select(driver =>
         {
@@ -129,25 +137,45 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
     [HttpPut("loads/{id:guid}/night-out"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> SetNightOut(Guid id, NightOutRequest request, CancellationToken ct)
     {
-        var load = await db.Loads.Include(x => x.Stops).FirstOrDefaultAsync(x => x.Id == id, ct);
+        var load = await PlanningResilience.ReadLoadAsync(db, id, ct);
         if (load is null) return NotFound("Run not found.");
-        await LoadCommercialStore.EnrichAsync(db, new[] { load }, ct);
+        try { await LoadCommercialStore.EnrichAsync(db, new[] { load }, ct); }
+        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); }
         load.PlannerNotes = UpsertTag(load.PlannerNotes, "Night out", request.Required ? "Yes" : "No");
-        await LoadCommercialStore.SaveAsync(db, load, new LoadCommercialValues(load.RevenueAmount, load.FuelSurchargeAmount, load.EstimatedCostAmount, load.ActualCostAmount,
-            load.EstimatedDistanceMiles, load.EmptyMiles, load.InvoiceStatus, load.CommercialNotes, load.PalletSpacesUsed, load.TotalPalletSpaces, load.CapacityType,
-            load.DepotSplits, load.TemperatureC, load.PlannerNotes), User.Identity?.Name, ct);
+
+        var savedToRegister = false;
+        try
+        {
+            var tracked = await db.Loads.Include(x => x.Stops).SingleOrDefaultAsync(x => x.Id == id, ct);
+            if (tracked is not null)
+            {
+                tracked.PlannerNotes = load.PlannerNotes;
+                await LoadCommercialStore.SaveAsync(db, tracked, new LoadCommercialValues(tracked.RevenueAmount, tracked.FuelSurchargeAmount, tracked.EstimatedCostAmount, tracked.ActualCostAmount,
+                    tracked.EstimatedDistanceMiles, tracked.EmptyMiles, tracked.InvoiceStatus, tracked.CommercialNotes, tracked.PalletSpacesUsed, tracked.TotalPalletSpaces, tracked.CapacityType,
+                    tracked.DepotSplits, tracked.TemperatureC, tracked.PlannerNotes), User.Identity?.Name, ct);
+            }
+            else savedToRegister = true;
+        }
+        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); savedToRegister = true; }
+        if (savedToRegister) await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
         return Ok(new { load.Id, request.Required, load.PlannerNotes });
     }
 
     [HttpGet("night-outs")]
     public async Task<IActionResult> NightOutReport([FromQuery] DateOnly from, [FromQuery] DateOnly to, CancellationToken ct)
     {
-        var loads = await db.Loads.AsNoTracking().Include(x => x.Stops).Where(x => x.PlanningDate >= from && x.PlanningDate <= to && x.DriverId != null && x.Status != LoadStatus.Cancelled).ToListAsync(ct);
-        await LoadCommercialStore.EnrichAsync(db, loads, ct);
+        var loads = (await PlanningResilience.ReadLoadsAsync(db, null, ct))
+            .Where(x => x.PlanningDate >= from && x.PlanningDate <= to && x.DriverId != null && x.Status != LoadStatus.Cancelled).ToList();
+        try { await LoadCommercialStore.EnrichAsync(db, loads, ct); }
+        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); }
         var driverIds = loads.Where(x => x.DriverId != null).Select(x => x.DriverId!.Value).Distinct().ToList();
-        var drivers = await db.Drivers.AsNoTracking().Where(x => driverIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        var drivers = new Dictionary<Guid, Driver>();
+        try { drivers = await db.Drivers.AsNoTracking().Where(x => driverIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct); }
+        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); }
         var vehicleIds = loads.Where(x => x.VehicleId != null).Select(x => x.VehicleId!.Value).Distinct().ToList();
-        var vehicles = await db.Vehicles.AsNoTracking().Where(x => vehicleIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        var vehicles = new Dictionary<Guid, Vehicle>();
+        try { vehicles = await db.Vehicles.AsNoTracking().Where(x => vehicleIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct); }
+        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); }
         var rows = loads.Where(x => ReadNightOut(x.PlannerNotes) is not null).Select(load =>
         {
             drivers.TryGetValue(load.DriverId!.Value, out var driver);
