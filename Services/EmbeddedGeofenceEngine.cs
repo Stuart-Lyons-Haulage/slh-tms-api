@@ -10,6 +10,10 @@ public static class EmbeddedGeofenceEngine
 {
     private const int DefaultConfirmDwellMinutes = 10;
     private static readonly Lazy<IReadOnlyList<EmbeddedFence>> Fences = new(ParseFences);
+    private static readonly HashSet<string> IgnoredNameTokens = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "THE", "LTD", "LIMITED", "PLC", "RDC", "SITE", "DEPOT", "DELIVERY", "COLLECTION", "CUSTOMER"
+    };
 
     public static IReadOnlyList<EmbeddedFence> ApprovedFences => Fences.Value;
 
@@ -43,18 +47,71 @@ public static class EmbeddedGeofenceEngine
                 .ToListAsync(ct);
 
         var matchedEvents = events.Where(x => allAliases.Contains(Normalize(x.VehicleIdentifier))).ToList();
+
+        // Falcon's current-telemetry endpoint can legitimately return the same provider
+        // event while a vehicle is stationary. The event is correctly deduplicated in
+        // VehicleTrackingEvents, but VehicleLiveStatus.LastReceivedAtUtc still proves that
+        // the same position was freshly observed. For today's operating date only, append
+        // that fresh observation so a genuine stationary site visit can accumulate dwell.
+        Dictionary<string, VehicleLiveStatus> freshLiveByAlias = new(StringComparer.OrdinalIgnoreCase);
+        if (allAliases.Count > 0 && planningDate == UkOperatingDate(now))
+        {
+            var freshnessFloor = now.AddMinutes(-5);
+            var liveStatuses = await db.VehicleLiveStatuses.AsNoTracking()
+                .Where(x => x.LastReceivedAtUtc >= freshnessFloor)
+                .ToListAsync(ct);
+            foreach (var live in liveStatuses)
+            {
+                var key = Normalize(live.VehicleIdentifier);
+                if (!allAliases.Contains(key)) continue;
+                if (!freshLiveByAlias.TryGetValue(key, out var existing) || live.LastReceivedAtUtc > existing.LastReceivedAtUtc)
+                    freshLiveByAlias[key] = live;
+            }
+        }
+
         var visits = new List<DerivedVisit>();
+        var observationCount = matchedEvents.Count;
         foreach (var vehicle in vehicles)
         {
             var aliases = aliasesByVehicle.TryGetValue(vehicle.Id, out var known) ? known : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var vehicleEvents = matchedEvents.Where(x => aliases.Contains(Normalize(x.VehicleIdentifier))).OrderBy(x => x.EventTimeUtc).ToList();
-            visits.AddRange(DeriveVisits(vehicle.Id, vehicle.Registration, vehicleEvents, fences));
+
+            var live = aliases
+                .Select(alias => freshLiveByAlias.GetValueOrDefault(alias))
+                .Where(x => x is not null)
+                .OrderByDescending(x => x!.LastReceivedAtUtc)
+                .FirstOrDefault();
+            if (live is not null && (vehicleEvents.Count == 0 || live.LastReceivedAtUtc > vehicleEvents[^1].EventTimeUtc))
+            {
+                vehicleEvents.Add(new VehicleTrackingEvent
+                {
+                    ProviderName = "RoadTech Falcon live observation",
+                    ProviderEventId = $"live-{live.Id}-{live.LastReceivedAtUtc:O}",
+                    VehicleIdentifier = live.VehicleIdentifier,
+                    EventTimeUtc = live.LastReceivedAtUtc,
+                    Latitude = live.Latitude,
+                    Longitude = live.Longitude,
+                    SpeedKph = live.SpeedKph,
+                    IgnitionOn = live.IgnitionOn,
+                    IsMoving = live.IsMoving,
+                    RawPayload = "{}",
+                    MatchStatus = "FreshLiveObservation"
+                });
+                observationCount++;
+            }
+
+            visits.AddRange(DeriveVisits(vehicle.Id, vehicle.Registration, vehicleEvents.OrderBy(x => x.EventTimeUtc).ToList(), fences));
         }
 
         LinkVisitsToRuns(visits, loads);
         var activeVisits = visits.Where(x => x.ExitedAtUtc is null && now - x.LastInsideAtUtc <= TimeSpan.FromMinutes(15)).ToList();
         var confirmed = visits.Where(x => x.ConfirmedAtUtc is not null).ToList();
-        return new EmbeddedGeofenceSnapshot(fences, visits, activeVisits, confirmed, matchedEvents.Count, matchedEvents.OrderByDescending(x => x.EventTimeUtc).FirstOrDefault()?.EventTimeUtc);
+        var latestTracking = visits.Count > 0
+            ? new[] { matchedEvents.OrderByDescending(x => x.EventTimeUtc).FirstOrDefault()?.EventTimeUtc, freshLiveByAlias.Values.OrderByDescending(x => x.LastReceivedAtUtc).FirstOrDefault()?.LastReceivedAtUtc }
+                .Where(x => x is not null)
+                .Max()
+            : matchedEvents.OrderByDescending(x => x.EventTimeUtc).FirstOrDefault()?.EventTimeUtc;
+        return new EmbeddedGeofenceSnapshot(fences, visits, activeVisits, confirmed, observationCount, latestTracking);
     }
 
     public static async Task<IReadOnlyList<EmbeddedFenceStatus>> FenceStatusesAsync(TmsDbContext db, CancellationToken ct)
@@ -200,6 +257,18 @@ public static class EmbeddedGeofenceEngine
         }
     }
 
+    private static DateOnly UkOperatingDate(DateTimeOffset value)
+    {
+        try
+        {
+            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return DateOnly.FromDateTime(value.UtcDateTime);
+        }
+    }
+
     private static bool Contains(IReadOnlyList<GeoPoint> points, decimal longitude, decimal latitude)
     {
         var x = (double)longitude;
@@ -227,7 +296,29 @@ public static class EmbeddedGeofenceEngine
     {
         var a = Normalize(left);
         var b = Normalize(right);
-        return a.Length >= 4 && b.Length >= 4 && (a == b || a.Contains(b, StringComparison.Ordinal) || b.Contains(a, StringComparison.Ordinal));
+        if (a.Length >= 4 && b.Length >= 4 && (a == b || a.Contains(b, StringComparison.Ordinal) || b.Contains(a, StringComparison.Ordinal)))
+            return true;
+
+        var leftTokens = NameTokens(left);
+        var rightTokens = NameTokens(right);
+        if (leftTokens.Count == 0 || rightTokens.Count == 0) return false;
+        var common = leftTokens.Intersect(rightTokens, StringComparer.OrdinalIgnoreCase).ToList();
+        if (common.Count >= 2) return true;
+
+        // One-token names are only considered safe when the token itself is specific.
+        // This avoids linking every generic "Aldi" or "Morrisons" stop to the wrong RDC.
+        var smaller = leftTokens.Count <= rightTokens.Count ? leftTokens : rightTokens;
+        return smaller.Count == 1 && common.Count == 1 && common[0].Length >= 7;
+    }
+
+    private static List<string> NameTokens(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return [];
+        var spaced = new string(value.Select(character => char.IsLetterOrDigit(character) ? char.ToUpperInvariant(character) : ' ').ToArray());
+        return spaced.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(token => token.Length >= 2 && !IgnoredNameTokens.Contains(token))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private static Guid StableId(string value) => new(System.Security.Cryptography.MD5.HashData(System.Text.Encoding.UTF8.GetBytes(value)));
