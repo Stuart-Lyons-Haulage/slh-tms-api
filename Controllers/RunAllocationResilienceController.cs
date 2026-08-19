@@ -26,8 +26,11 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
             db.ChangeTracker.Clear();
         }
 
+        // A planning-register copy exists when a resilient write had to bypass an
+        // unavailable core planning schema. It is therefore the authoritative
+        // version for that run and must replace, not lose to, an older core row.
         foreach (var load in await PlanningRegisterStore.ReadLoadsAsync(db, date, ct))
-            if (!merged.ContainsKey(load.Id)) merged[load.Id] = load;
+            merged[load.Id] = load;
 
         var rows = merged.Values.OrderBy(x => x.PlanningDate).ThenBy(x => x.Reference).Take(1000).ToList();
         await RunOperationalStore.EnrichAsync(db, rows, ct);
@@ -184,6 +187,16 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
 
     private async Task<(Load? Load, bool Register)> FindLoadAsync(Guid id, bool includeStops, bool tracking, CancellationToken ct)
     {
+        // Once a run has a planning-register copy, that copy contains the latest
+        // resilient allocation / stop edits. Prefer it consistently for reads and
+        // subsequent writes so a stale core row cannot overwrite the saved state.
+        var registered = await PlanningRegisterStore.GetLoadAsync(db, id, ct);
+        if (registered is not null)
+        {
+            await RunOperationalStore.EnrichAsync(db, [registered], ct);
+            return (registered, true);
+        }
+
         try
         {
             IQueryable<Load> query = tracking ? db.Loads : db.Loads.AsNoTracking();
@@ -200,9 +213,7 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
             db.ChangeTracker.Clear();
         }
 
-        var registered = await PlanningRegisterStore.GetLoadAsync(db, id, ct);
-        if (registered is not null) await RunOperationalStore.EnrichAsync(db, [registered], ct);
-        return (registered, registered is not null);
+        return (null, false);
     }
 
     private async Task SaveCoreLoadAsync(Load load, bool register, CancellationToken ct)
