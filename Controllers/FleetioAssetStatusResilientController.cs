@@ -64,18 +64,20 @@ public sealed class FleetioAssetStatusResilientController(
             var trailerRows = assets.Where(IsTrailer).Select(asset =>
             {
                 var mappedId = MappingTarget(mappings, asset.Id, "Trailer");
-                var slh = asset.Name?.Trim();
+                var fleetioName = asset.Name?.Trim();
+                var canonical = CanonicalTrailerNumber(fleetioName);
                 var cNumber = asset.Registration?.Trim();
                 var match = mappedId is not null ? trailers.FirstOrDefault(item => item.Id == mappedId.Value) : null;
-                match ??= !string.IsNullOrWhiteSpace(slh) ? trailers.FirstOrDefault(item => Normalise(item.TrailerNumber) == Normalise(slh)) : null;
+                match ??= !string.IsNullOrWhiteSpace(canonical) ? trailers.FirstOrDefault(item => string.Equals(CanonicalTrailerNumber(item.TrailerNumber), canonical, StringComparison.OrdinalIgnoreCase)) : null;
+                match ??= !string.IsNullOrWhiteSpace(fleetioName) ? trailers.FirstOrDefault(item => Normalise(item.TrailerNumber) == Normalise(fleetioName)) : null;
                 match ??= !string.IsNullOrWhiteSpace(cNumber) ? trailers.FirstOrDefault(item => Normalise(item.TrailerNumber) == Normalise(cNumber)) : null;
                 return new
                 {
                     tmsTrailerId = match?.Id,
-                    trailerNumber = match?.TrailerNumber ?? slh ?? cNumber ?? asset.Id,
+                    trailerNumber = match?.TrailerNumber ?? canonical ?? fleetioName ?? cNumber ?? asset.Id,
                     fleetioCNumber = cNumber,
                     fleetioId = asset.Id,
-                    fleetioName = slh,
+                    fleetioName,
                     fleetioStatus = asset.Status,
                     fleetioVor = asset.Vor == true || IsVorText(asset.Status),
                     type = asset.Type,
@@ -91,7 +93,7 @@ public sealed class FleetioAssetStatusResilientController(
                     serviceStatus = asset.ServiceStatus,
                     matched = match is not null
                 };
-            }).OrderBy(item => item.trailerNumber).ToList();
+            }).OrderBy(item => TrailerSort(item.trailerNumber)).ThenBy(item => item.trailerNumber).ToList();
 
             return Ok(new
             {
@@ -113,21 +115,17 @@ public sealed class FleetioAssetStatusResilientController(
     {
         try
         {
-            return await db.IntegrationMappings.AsNoTracking()
-                .Where(item => item.Active && item.Provider == "Fleetio")
-                .ToListAsync(ct);
+            return await db.IntegrationMappings.AsNoTracking().Where(item => item.Active && item.Provider == "Fleetio").ToListAsync(ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogWarning(ex, "IntegrationMappings unavailable during Fleetio status read; using registration/name matching.");
+            logger.LogWarning(ex, "IntegrationMappings unavailable during Fleetio status read; using deterministic registration/SLH-number matching.");
             return [];
         }
     }
 
     private static Guid? MappingTarget(IEnumerable<IntegrationMapping> mappings, string fleetioId, string entityType) =>
-        mappings.FirstOrDefault(item =>
-            string.Equals(item.ExternalKey, fleetioId, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(item.TmsEntityType, entityType, StringComparison.OrdinalIgnoreCase))?.TmsEntityId;
+        mappings.FirstOrDefault(item => string.Equals(item.ExternalKey, fleetioId, StringComparison.OrdinalIgnoreCase) && string.Equals(item.TmsEntityType, entityType, StringComparison.OrdinalIgnoreCase))?.TmsEntityId;
 
     private static bool IsTrailer(FleetioVehicle asset)
     {
@@ -135,10 +133,22 @@ public sealed class FleetioAssetStatusResilientController(
         return !string.IsNullOrWhiteSpace(asset.Registration) && Regex.IsMatch(asset.Registration.Trim(), "^C\\d{5,}$", RegexOptions.IgnoreCase);
     }
 
+    private static string? CanonicalTrailerNumber(string? value)
+    {
+        var text = value?.Trim() ?? string.Empty;
+        var match = Regex.Match(text, "^(?:SLH)?0*(\\d{1,3})$", RegexOptions.IgnoreCase);
+        return match.Success && int.TryParse(match.Groups[1].Value, out var index) && index > 0 ? $"SLH{index}" : null;
+    }
+
+    private static int TrailerSort(string? value)
+    {
+        var canonical = CanonicalTrailerNumber(value);
+        return canonical is not null && int.TryParse(canonical[3..], out var index) ? index : int.MaxValue;
+    }
+
     private static string? BestVehicleRegistration(FleetioVehicle asset)
     {
-        if (!string.IsNullOrWhiteSpace(asset.Registration) && !Regex.IsMatch(asset.Registration.Trim(), "^C\\d{5,}$", RegexOptions.IgnoreCase))
-            return asset.Registration.Trim();
+        if (!string.IsNullOrWhiteSpace(asset.Registration) && !Regex.IsMatch(asset.Registration.Trim(), "^C\\d{5,}$", RegexOptions.IgnoreCase)) return asset.Registration.Trim();
         if (!string.IsNullOrWhiteSpace(asset.Name) && LooksLikeUkRegistration(asset.Name)) return asset.Name.Trim();
         return null;
     }
