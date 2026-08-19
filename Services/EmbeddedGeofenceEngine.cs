@@ -6,11 +6,6 @@ using Slh.Tms.Api.Models.Tracking;
 
 namespace Slh.Tms.Api.Services;
 
-/// <summary>
-/// Production-safe geofence engine that requires no geofence-specific SQL tables.
-/// It derives site visits from the approved embedded SLH/Falcon geofence seed,
-/// existing RoadTech tracking history and the audited planning register.
-/// </summary>
 public static class EmbeddedGeofenceEngine
 {
     private const int DefaultConfirmDwellMinutes = 10;
@@ -23,8 +18,8 @@ public static class EmbeddedGeofenceEngine
         var now = DateTimeOffset.UtcNow;
         var fences = Fences.Value;
         var vehicleIds = loads.Where(x => x.VehicleId is not null).Select(x => x.VehicleId!.Value).Distinct().ToList();
-        var vehicles = vehicleIds.Count == 0
-            ? []
+        List<Vehicle> vehicles = vehicleIds.Count == 0
+            ? new List<Vehicle>()
             : await db.Vehicles.AsNoTracking()
                 .Where(x => vehicleIds.Contains(x.Id))
                 .Select(x => new Vehicle { Id = x.Id, Registration = x.Registration, FleetNumber = x.FleetNumber, Abbreviation = x.Abbreviation, Active = x.Active })
@@ -39,44 +34,34 @@ public static class EmbeddedGeofenceEngine
 
         var allAliases = aliasesByVehicle.Values.SelectMany(x => x).Distinct(StringComparer.OrdinalIgnoreCase).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var (startUtc, endUtc) = OperatingWindow(planningDate);
-        var events = allAliases.Count == 0
-            ? []
+        List<VehicleTrackingEvent> events = allAliases.Count == 0
+            ? new List<VehicleTrackingEvent>()
             : await db.VehicleTrackingEvents.AsNoTracking()
                 .Where(x => x.EventTimeUtc >= startUtc.AddHours(-2) && x.EventTimeUtc < endUtc.AddHours(2))
                 .OrderBy(x => x.EventTimeUtc)
                 .Take(20000)
                 .ToListAsync(ct);
 
-        var matchedEvents = events
-            .Where(x => allAliases.Contains(Normalize(x.VehicleIdentifier)))
-            .ToList();
-
+        var matchedEvents = events.Where(x => allAliases.Contains(Normalize(x.VehicleIdentifier))).ToList();
         var visits = new List<DerivedVisit>();
         foreach (var vehicle in vehicles)
         {
-            var aliases = aliasesByVehicle.GetValueOrDefault(vehicle.Id) ?? [];
+            var aliases = aliasesByVehicle.TryGetValue(vehicle.Id, out var known) ? known : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var vehicleEvents = matchedEvents.Where(x => aliases.Contains(Normalize(x.VehicleIdentifier))).OrderBy(x => x.EventTimeUtc).ToList();
             visits.AddRange(DeriveVisits(vehicle.Id, vehicle.Registration, vehicleEvents, fences));
         }
 
         LinkVisitsToRuns(visits, loads);
-
         var activeVisits = visits.Where(x => x.ExitedAtUtc is null && now - x.LastInsideAtUtc <= TimeSpan.FromMinutes(15)).ToList();
         var confirmed = visits.Where(x => x.ConfirmedAtUtc is not null).ToList();
-        return new EmbeddedGeofenceSnapshot(
-            fences,
-            visits,
-            activeVisits,
-            confirmed,
-            matchedEvents.Count,
-            matchedEvents.OrderByDescending(x => x.EventTimeUtc).FirstOrDefault()?.EventTimeUtc);
+        return new EmbeddedGeofenceSnapshot(fences, visits, activeVisits, confirmed, matchedEvents.Count, matchedEvents.OrderByDescending(x => x.EventTimeUtc).FirstOrDefault()?.EventTimeUtc);
     }
 
     public static async Task<IReadOnlyList<EmbeddedFenceStatus>> FenceStatusesAsync(TmsDbContext db, CancellationToken ct)
     {
         List<Site> sites;
         try { sites = await GeofenceSiteResolver.LoadActiveSitesAsync(db, ct); }
-        catch { sites = []; db.ChangeTracker.Clear(); }
+        catch { sites = new List<Site>(); db.ChangeTracker.Clear(); }
 
         return Fences.Value.Select(fence =>
         {
@@ -92,22 +77,10 @@ public static class EmbeddedGeofenceEngine
         foreach (var record in document.RootElement.EnumerateArray())
         {
             var name = Text(record, "name")?.Trim();
-            if (string.IsNullOrWhiteSpace(name) || !record.TryGetProperty("points", out var points) || points.ValueKind != JsonValueKind.Array)
-                continue;
-
+            if (string.IsNullOrWhiteSpace(name) || !record.TryGetProperty("points", out var points) || points.ValueKind != JsonValueKind.Array) continue;
             var parsedPoints = points.EnumerateArray().Select(ReadPoint).Where(x => x is not null).Select(x => x!.Value).ToList();
             if (parsedPoints.Count < 3) continue;
-
-            result.Add(new EmbeddedFence(
-                StableId(name),
-                name,
-                Text(record, "category"),
-                Int(record, "category_max_wait_time"),
-                Int(record, "max_wait_time"),
-                Int(record, "pending_entry_minutes") ?? 0,
-                Int(record, "pending_exit_minutes") ?? 0,
-                Text(record, "site_no"),
-                parsedPoints));
+            result.Add(new EmbeddedFence(StableId(name), name, Text(record, "category"), Int(record, "category_max_wait_time"), Int(record, "max_wait_time"), Int(record, "pending_entry_minutes") ?? 0, Int(record, "pending_exit_minutes") ?? 0, Text(record, "site_no"), parsedPoints));
         }
         return result;
     }
@@ -123,27 +96,26 @@ public static class EmbeddedGeofenceEngine
             var fence = fences.FirstOrDefault(x => Contains(x.Points, evt.Longitude, evt.Latitude));
             if (fence?.Id == currentFence?.Id)
             {
-                if (current is not null)
-                {
-                    current.LastInsideAtUtc = evt.EventTimeUtc;
-                    current.DwellMinutes = Math.Max(0, (int)Math.Floor((current.LastInsideAtUtc - current.EnteredAtUtc).TotalMinutes));
-                    var confirmMinutes = Math.Max(DefaultConfirmDwellMinutes, current.Fence.PendingEntryMinutes);
-                    if (current.ConfirmedAtUtc is null && current.DwellMinutes >= confirmMinutes)
-                        current.ConfirmedAtUtc = evt.EventTimeUtc;
-                }
+                if (current is not null) UpdateVisit(current, evt.EventTimeUtc);
                 continue;
             }
 
             if (current is not null)
             {
+                var enteringDifferentFence = fence is not null && fence.Id != current.Fence.Id;
                 var exitMinutes = Math.Max(0, current.Fence.PendingExitMinutes);
-                if (evt.EventTimeUtc - current.LastInsideAtUtc >= TimeSpan.FromMinutes(exitMinutes))
+                var exitConfirmed = enteringDifferentFence || evt.EventTimeUtc - current.LastInsideAtUtc >= TimeSpan.FromMinutes(exitMinutes);
+                if (exitConfirmed)
                 {
                     current.ExitedAtUtc = evt.EventTimeUtc;
-                    current.DwellMinutes = Math.Max(0, (int)Math.Floor((current.ExitedAtUtc.Value - current.EnteredAtUtc).TotalMinutes));
+                    current.DwellMinutes = Math.Max(0, (int)Math.Floor((current.LastInsideAtUtc - current.EnteredAtUtc).TotalMinutes));
                     visits.Add(current);
                     current = null;
                     currentFence = null;
+                }
+                else
+                {
+                    continue;
                 }
             }
 
@@ -157,22 +129,25 @@ public static class EmbeddedGeofenceEngine
                     VehicleIdentifier = registration,
                     Fence = fence,
                     EnteredAtUtc = evt.EventTimeUtc,
-                    LastInsideAtUtc = evt.EventTimeUtc,
-                    DwellMinutes = 0
+                    LastInsideAtUtc = evt.EventTimeUtc
                 };
             }
         }
 
         if (current is not null)
         {
-            current.DwellMinutes = Math.Max(0, (int)Math.Floor((current.LastInsideAtUtc - current.EnteredAtUtc).TotalMinutes));
-            var confirmMinutes = Math.Max(DefaultConfirmDwellMinutes, current.Fence.PendingEntryMinutes);
-            if (current.ConfirmedAtUtc is null && current.DwellMinutes >= confirmMinutes)
-                current.ConfirmedAtUtc = current.LastInsideAtUtc;
+            UpdateVisit(current, current.LastInsideAtUtc);
             visits.Add(current);
         }
-
         return visits;
+    }
+
+    private static void UpdateVisit(DerivedVisit visit, DateTimeOffset at)
+    {
+        visit.LastInsideAtUtc = at;
+        visit.DwellMinutes = Math.Max(0, (int)Math.Floor((visit.LastInsideAtUtc - visit.EnteredAtUtc).TotalMinutes));
+        var confirmMinutes = Math.Max(DefaultConfirmDwellMinutes, visit.Fence.PendingEntryMinutes);
+        if (visit.ConfirmedAtUtc is null && visit.DwellMinutes >= confirmMinutes) visit.ConfirmedAtUtc = at;
     }
 
     private static void LinkVisitsToRuns(List<DerivedVisit> visits, IReadOnlyCollection<Load> loads)
@@ -182,18 +157,12 @@ public static class EmbeddedGeofenceEngine
         {
             var candidate = loads
                 .Where(load => load.VehicleId == visit.VehicleId && load.Status != LoadStatus.Cancelled)
-                .SelectMany(load => (load.Stops ?? []).Where(stop => !usedStops.Contains(stop.Id)).Select(stop => new { load, stop }))
-                .Where(x => NamesOverlap(x.stop.Name, visit.Fence.Name) || NamesOverlap(x.stop.Address ?? string.Empty, visit.Fence.Name))
-                .Select(x => new
-                {
-                    x.load,
-                    x.stop,
-                    delta = x.stop.PlannedArrivalUtc is null ? double.MaxValue : Math.Abs((x.stop.PlannedArrivalUtc.Value - visit.EnteredAtUtc).TotalMinutes)
-                })
+                .SelectMany(load => load.Stops.Where(stop => !usedStops.Contains(stop.Id)).Select(stop => new { load, stop }))
+                .Where(x => NamesOverlap(x.stop.Name, visit.Fence.Name) || NamesOverlap(x.stop.Address, visit.Fence.Name))
+                .Select(x => new { x.load, x.stop, delta = x.stop.PlannedArrivalUtc is null ? double.MaxValue : Math.Abs((x.stop.PlannedArrivalUtc.Value - visit.EnteredAtUtc).TotalMinutes) })
                 .OrderBy(x => x.delta)
                 .ThenBy(x => x.stop.Sequence)
                 .FirstOrDefault();
-
             if (candidate is null) continue;
             visit.LoadId = candidate.load.Id;
             visit.LoadStopId = candidate.stop.Id;
@@ -211,8 +180,7 @@ public static class EmbeddedGeofenceEngine
             if (byCode is not null) return byCode;
         }
         var exact = sites.FirstOrDefault(site => Normalize(site.Name) == fenceName || Normalize(site.DriverTextName) == fenceName);
-        if (exact is not null) return exact;
-        return sites.FirstOrDefault(site => NamesOverlap(site.Name, fence.Name) || NamesOverlap(site.DriverTextName ?? string.Empty, fence.Name));
+        return exact ?? sites.FirstOrDefault(site => NamesOverlap(site.Name, fence.Name) || NamesOverlap(site.DriverTextName, fence.Name));
     }
 
     private static (DateTimeOffset StartUtc, DateTimeOffset EndUtc) OperatingWindow(DateOnly date)
@@ -221,7 +189,9 @@ public static class EmbeddedGeofenceEngine
         {
             var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
             var localStart = DateTime.SpecifyKind(date.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
-            return (new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(localStart, zone)), new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(localStart.AddDays(1), zone)));
+            var start = TimeZoneInfo.ConvertTimeToUtc(localStart, zone);
+            var end = TimeZoneInfo.ConvertTimeToUtc(localStart.AddDays(1), zone);
+            return (new DateTimeOffset(start), new DateTimeOffset(end));
         }
         catch (TimeZoneNotFoundException)
         {
@@ -239,16 +209,14 @@ public static class EmbeddedGeofenceEngine
         {
             var pi = points[i];
             var pj = points[j];
-            if (((pi.Latitude > y) != (pj.Latitude > y)) && x < (pj.Longitude - pi.Longitude) * (y - pi.Latitude) / (pj.Latitude - pi.Latitude) + pi.Longitude)
-                inside = !inside;
+            if (((pi.Latitude > y) != (pj.Latitude > y)) && x < (pj.Longitude - pi.Longitude) * (y - pi.Latitude) / (pj.Latitude - pi.Latitude) + pi.Longitude) inside = !inside;
         }
         return inside;
     }
 
     private static GeoPoint? ReadPoint(JsonElement point)
     {
-        if (point.ValueKind == JsonValueKind.Array && point.GetArrayLength() >= 2 && point[0].TryGetDouble(out var x) && point[1].TryGetDouble(out var y))
-            return new GeoPoint(x, y);
+        if (point.ValueKind == JsonValueKind.Array && point.GetArrayLength() >= 2 && point[0].TryGetDouble(out var x) && point[1].TryGetDouble(out var y)) return new GeoPoint(x, y);
         if (point.ValueKind != JsonValueKind.Object) return null;
         var longitude = Double(point, "longitude") ?? Double(point, "lng") ?? Double(point, "lon") ?? Double(point, "x");
         var latitude = Double(point, "latitude") ?? Double(point, "lat") ?? Double(point, "y");
@@ -262,12 +230,7 @@ public static class EmbeddedGeofenceEngine
         return a.Length >= 4 && b.Length >= 4 && (a == b || a.Contains(b, StringComparison.Ordinal) || b.Contains(a, StringComparison.Ordinal));
     }
 
-    private static Guid StableId(string value)
-    {
-        var bytes = System.Security.Cryptography.MD5.HashData(System.Text.Encoding.UTF8.GetBytes(value));
-        return new Guid(bytes);
-    }
-
+    private static Guid StableId(string value) => new(System.Security.Cryptography.MD5.HashData(System.Text.Encoding.UTF8.GetBytes(value)));
     private static string Normalize(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
     private static string? Text(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined ? value.ToString() : null;
     private static int? Int(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.TryGetInt32(out var number) ? number : null;
