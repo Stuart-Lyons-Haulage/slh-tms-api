@@ -136,7 +136,7 @@ public sealed class FleetioAssetStatusResilientController(
     private static string? CanonicalTrailerNumber(string? value)
     {
         var text = value?.Trim() ?? string.Empty;
-        var match = Regex.Match(text, "^(?:SLH)?0*(\\d{1,3})$", RegexOptions.IgnoreCase);
+        var match = Regex.Match(text, "^(?:(?:SLH|TRAILER|TRL)[\\s_-]*)?0*(\\d{1,3})$", RegexOptions.IgnoreCase);
         return match.Success && int.TryParse(match.Groups[1].Value, out var index) && index > 0 ? $"SLH{index}" : null;
     }
 
