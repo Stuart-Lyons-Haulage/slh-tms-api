@@ -39,8 +39,8 @@ public sealed class CustomerEtaEvidenceController(
         {
             "Generated UTC", "Planning date", "Run", "Order reference", "Customer", "Planned driver", "Tacho driver",
             "Driver/Tacho match", "Vehicle", "Tacho sign-on UTC", "First DOT/Falcon movement after sign-on UTC",
-            "Sign-on to movement minutes", "Latest tracking UTC", "Last confirmed site", "Last site arrival UTC",
-            "Last site departure UTC", "Delivery stop", "ETA UTC", "ETA source", "Window end UTC", "Risk",
+            "Sign-on to movement minutes", "Latest tracking UTC", "Geofence execution available", "Last confirmed site",
+            "Last site arrival UTC", "Last site departure UTC", "Delivery stop", "ETA UTC", "ETA source", "Window end UTC", "Risk",
             "Drive available today minutes", "Remaining route driving minutes", "Break included minutes", "Tacho status",
             "Evidence status", "Customer promise ready", "Evidence explanation"
         }.Select(Csv)));
@@ -52,11 +52,12 @@ public sealed class CustomerEtaEvidenceController(
                 snapshot.GeneratedAtUtc.ToString("O"), snapshot.PlanningDate.ToString("yyyy-MM-dd"), record.LoadReference,
                 record.OrderReference, record.CustomerCode, record.PlannedDriverName, record.TachoDriverName,
                 record.DriverEvidenceStatus, record.VehicleRegistration, Iso(record.TachoSignOnUtc), Iso(record.FirstMovementUtc),
-                record.SignOnToMovementMinutes?.ToString(), Iso(record.LatestTrackingUtc), record.LastConfirmedSite,
-                Iso(record.LastSiteArrivalUtc), Iso(record.LastSiteDepartureUtc), record.StopName, Iso(record.EtaUtc), record.EtaSource,
-                Iso(record.DeliveryWindowEndUtc), record.Risk, record.DriveAvailableTodayMinutes?.ToString(),
-                record.RouteDrivingMinutes.ToString(), record.BreakMinutesIncluded.ToString(), record.TachoStatus,
-                record.EvidenceStatus, record.CustomerPromiseReady ? "Yes" : "No", record.EvidenceExplanation
+                record.SignOnToMovementMinutes?.ToString(), Iso(record.LatestTrackingUtc), record.GeofenceEvidenceAvailable ? "Yes" : "No",
+                record.LastConfirmedSite, Iso(record.LastSiteArrivalUtc), Iso(record.LastSiteDepartureUtc), record.StopName,
+                Iso(record.EtaUtc), record.EtaSource, Iso(record.DeliveryWindowEndUtc), record.Risk,
+                record.DriveAvailableTodayMinutes?.ToString(), record.RouteDrivingMinutes.ToString(),
+                record.BreakMinutesIncluded.ToString(), record.TachoStatus, record.EvidenceStatus,
+                record.CustomerPromiseReady ? "Yes" : "No", record.EvidenceExplanation
             }.Select(Csv)));
         }
 
@@ -111,6 +112,7 @@ public sealed class CustomerEtaEvidenceController(
             logger.LogWarning(exception, "Geofence execution evidence was unavailable while building customer ETA evidence.");
             db.ChangeTracker.Clear();
         }
+        var geofenceEvidenceAvailable = geofence is not null;
 
         var records = new List<CustomerEtaEvidenceRecord>();
         foreach (var load in loads)
@@ -130,7 +132,7 @@ public sealed class CustomerEtaEvidenceController(
             var driverEvidenceStatus = ExecutionIdentityResolver.DriverEvidenceStatus(driver, tacho);
             var evidenceStatus = RunExecutionEvidenceRules.EvidenceStatus(tacho, latestTracking, now);
             var evidenceExplanation = RunExecutionEvidenceRules.Explanation(tacho, firstMovement, latestTracking, now) +
-                $" Planned/Tacho driver correlation: {driverEvidenceStatus}.";
+                $" Planned/Tacho driver correlation: {driverEvidenceStatus}. Geofence execution: {(geofenceEvidenceAvailable ? "available" : "unavailable")}.";
 
             var visits = geofence?.Visits.Where(visit => visit.LoadId == load.Id && visit.ConfirmedAtUtc is not null)
                 .OrderBy(visit => visit.EnteredAtUtc).ToList() ?? [];
@@ -150,7 +152,11 @@ public sealed class CustomerEtaEvidenceController(
                 orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
                 var eta = stop.PlannedArrivalUtc;
                 var etaSource = eta is null ? "Unavailable" : "Planned";
-                if (current is not null && stop.Longitude is not null && stop.Latitude is not null && live is not null && now - live.LastEventTimeUtc <= TimeSpan.FromMinutes(30))
+
+                // Fail closed: without the geofence execution result we cannot prove which
+                // earlier legs are complete, so do not manufacture a live customer ETA by
+                // routing through an uncertain sequence.
+                if (geofenceEvidenceAvailable && current is not null && stop.Longitude is not null && stop.Latitude is not null && live is not null && now - live.LastEventTimeUtc <= TimeSpan.FromMinutes(30))
                 {
                     try
                     {
@@ -178,17 +184,19 @@ public sealed class CustomerEtaEvidenceController(
                 var windowEnd = order?.DeliveryWindowEndUtc ?? (IsDeliveryStop(stop) ? stop.PlannedArrivalUtc : null);
                 var tachoAssessment = etaSource == "Live"
                     ? OperationsController.TachoAssessment(tacho, cumulativeDrivingMinutes, breakDelayMinutes)
-                    : (Status: "RouteUnavailable", Explanation: tacho is null
-                        ? "Live route and current TachoMaster duty are unavailable; this ETA must be verified before export."
-                        : "TachoMaster matched the vehicle, but no fresh live route could be calculated; the planned ETA has not been adjusted for a break.");
-                var customerPromiseReady = etaSource == "Live" && evidenceStatus == "VerifiedLive" &&
+                    : (Status: "RouteUnavailable", Explanation: !geofenceEvidenceAvailable
+                        ? "Geofence execution was unavailable, so the remaining route could not be proved and no live customer ETA was issued."
+                        : tacho is null
+                            ? "Live route and current TachoMaster duty are unavailable; this ETA must be verified before export."
+                            : "TachoMaster matched the vehicle, but no fresh live route could be calculated; the planned ETA has not been adjusted for a break.");
+                var customerPromiseReady = geofenceEvidenceAvailable && etaSource == "Live" && evidenceStatus == "VerifiedLive" &&
                     driverEvidenceStatus == "Matched" &&
                     tachoAssessment.Status is "WithinDriveTime" or "BreakIncluded" && eta is not null;
 
                 records.Add(new CustomerEtaEvidenceRecord(
                     load.Id, RunDisplayLabel.For(load), load.Status.ToString(), stop.Id, stop.Sequence, stop.Name, IsDeliveryStop(stop),
                     order?.Reference, order?.CustomerCode, driver?.DisplayName, tacho?.DriverName, driverEvidenceStatus, vehicle?.Registration,
-                    tacho?.DutyStartUtc, firstMovement, signOnToMovementMinutes, latestTracking,
+                    tacho?.DutyStartUtc, firstMovement, signOnToMovementMinutes, latestTracking, geofenceEvidenceAvailable,
                     lastVisit?.Fence.Name, lastVisit?.EnteredAtUtc, lastVisit?.ExitedAtUtc,
                     eta, etaSource, windowStart, windowEnd, Risk(eta, windowStart, windowEnd),
                     tacho?.DriveAvailableTodayMinutes, (int)Math.Ceiling(cumulativeDrivingMinutes), breakDelayMinutes,
@@ -293,6 +301,7 @@ public sealed record CustomerEtaEvidenceRecord(
     DateTimeOffset? FirstMovementUtc,
     int? SignOnToMovementMinutes,
     DateTimeOffset? LatestTrackingUtc,
+    bool GeofenceEvidenceAvailable,
     string? LastConfirmedSite,
     DateTimeOffset? LastSiteArrivalUtc,
     DateTimeOffset? LastSiteDepartureUtc,
