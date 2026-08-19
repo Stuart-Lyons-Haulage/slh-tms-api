@@ -1,6 +1,5 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
@@ -19,250 +18,141 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
 
         try
         {
-            return Ok(await BuildProgressAsync(planningDate, now, ct));
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            logger.LogError(exception, "Live run progress failed safely for {PlanningDate}.", planningDate);
-            db.ChangeTracker.Clear();
+            // Production planning is register-backed. Do not probe the absent legacy
+            // Loads table here: doing so only generates false operational warnings.
+            var loads = (await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct))
+                .Where(x => x.Status != LoadStatus.Cancelled)
+                .OrderBy(x => x.Reference)
+                .ToList();
 
-            var warning = $"Live run progress failed safely: {exception.GetBaseException().Message}";
-            var fallback = await TryLoadRegisterRunsAsync(planningDate, warning, ct);
-            if (fallback is not null) return Ok(fallback);
+            var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, loads, ct);
+            var records = loads.Select(load => BuildRecord(load, snapshot, now)).ToList();
 
             return Ok(new
             {
                 planningDate,
                 calculatedAtUtc = now,
-                count = 0,
-                source = "Unavailable",
-                geofenceAvailable = false,
-                geofenceCount = 0,
+                count = records.Count,
+                source = "PlanningRegister+EmbeddedSLHGeofences",
+                geofenceAvailable = snapshot.Fences.Count > 0,
+                geofenceCount = snapshot.Fences.Count,
+                geofenceVisitCount = snapshot.Visits.Count,
+                geofenceLinkedRuns = snapshot.Visits.Where(x => x.LoadId != null).Select(x => x.LoadId!.Value).Distinct().Count(),
+                trackingEventCount = snapshot.TrackingEventCount,
+                latestTrackingUtc = snapshot.LatestTrackingUtc,
+                warning = (string?)null,
+                records
+            });
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogError(exception, "Embedded geofence run progression failed for {PlanningDate}.", planningDate);
+            db.ChangeTracker.Clear();
+
+            List<Load> loads;
+            try { loads = await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct); }
+            catch { loads = []; db.ChangeTracker.Clear(); }
+
+            var records = loads.OrderBy(x => x.Reference).Select(load =>
+            {
+                var stops = (load.Stops ?? []).OrderBy(x => x.Sequence).ToList();
+                var next = stops.FirstOrDefault();
+                return new
+                {
+                    loadId = load.Id,
+                    loadReference = load.Reference,
+                    loadStatus = load.Status.ToString(),
+                    runState = load.Status.ToString(),
+                    totalStops = stops.Count,
+                    completedStops = 0,
+                    progressPercent = 0m,
+                    nextStop = next is null ? null : new { next.Id, next.Sequence, next.Name, next.Address, next.PlannedArrivalUtc },
+                    currentVisit = (object?)null,
+                    lastDeparture = (object?)null,
+                    calculatedAtUtc = now
+                };
+            }).ToList();
+
+            return Ok(new
+            {
+                planningDate,
+                calculatedAtUtc = now,
+                count = records.Count,
+                source = "PlanningRegisterSafeFallback",
+                geofenceAvailable = EmbeddedGeofenceEngine.ApprovedFences.Count > 0,
+                geofenceCount = EmbeddedGeofenceEngine.ApprovedFences.Count,
                 geofenceVisitCount = 0,
                 geofenceLinkedRuns = 0,
-                warning,
-                records = Array.Empty<object>()
+                warning = "Approved SLH geofences are loaded, but live progression could not be calculated from tracking on this refresh.",
+                records
             });
         }
     }
 
-    private async Task<object> BuildProgressAsync(DateOnly planningDate, DateTimeOffset now, CancellationToken ct)
+    private static object BuildRecord(Load load, EmbeddedGeofenceSnapshot snapshot, DateTimeOffset now)
     {
-        var geofenceAvailable = true;
-        var geofenceCount = 0;
-        string? geofenceWarning = null;
+        var orderedStops = (load.Stops ?? []).OrderBy(x => x.Sequence).ToList();
+        var visits = snapshot.Visits.Where(x => x.LoadId == load.Id).OrderBy(x => x.EnteredAtUtc).ToList();
+        var completedStopIds = visits
+            .Where(x => x.LoadStopId != null && x.ConfirmedAtUtc != null && x.ExitedAtUtc != null)
+            .Select(x => x.LoadStopId!.Value)
+            .ToHashSet();
 
-        try
-        {
-            await GeofenceRunProgression.EnsureSchemaAsync(db, ct);
-            geofenceCount = await db.SiteGeofences.AsNoTracking().CountAsync(x => x.Active, ct);
-            if (geofenceCount == 0)
-            {
-                geofenceAvailable = false;
-                geofenceWarning = "No active geofences are loaded into the live geofence engine.";
-            }
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            db.ChangeTracker.Clear();
-            geofenceAvailable = false;
-            geofenceWarning = $"Geofence progress schema is not available yet: {exception.GetBaseException().Message}";
-            logger.LogWarning(exception, "Live run progress is continuing without geofence visit data.");
-        }
+        var activeVisit = snapshot.ActiveVisits
+            .Where(x => x.LoadId == load.Id)
+            .OrderByDescending(x => x.EnteredAtUtc)
+            .FirstOrDefault();
+        var nextStop = orderedStops.FirstOrDefault(x => !completedStopIds.Contains(x.Id));
+        var lastDeparture = visits
+            .Where(x => x.ExitedAtUtc != null && x.ConfirmedAtUtc != null)
+            .OrderByDescending(x => x.ExitedAtUtc)
+            .FirstOrDefault();
 
-        var (loads, loadSource, loadWarning) = await LoadRunsAsync(planningDate, ct);
-        var loadIds = loads.Select(x => x.Id).ToList();
-
-        List<GeofenceVisit> visits = [];
-        Dictionary<Guid, SiteGeofence> geofences = [];
-        if (geofenceAvailable && loadIds.Count > 0)
-        {
-            try
-            {
-                visits = await db.GeofenceVisits.AsNoTracking()
-                    .Where(x => x.LoadId != null && loadIds.Contains(x.LoadId.Value))
-                    .OrderBy(x => x.EnteredAtUtc)
-                    .ToListAsync(ct);
-
-                var geofenceIds = visits.Select(x => x.GeofenceId).Distinct().ToList();
-                geofences = geofenceIds.Count == 0
-                    ? []
-                    : await db.SiteGeofences.AsNoTracking()
-                        .Where(x => geofenceIds.Contains(x.Id))
-                        .ToDictionaryAsync(x => x.Id, ct);
-            }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            {
-                db.ChangeTracker.Clear();
-                geofenceAvailable = false;
-                geofenceWarning = $"Geofence visit data is not available yet: {exception.GetBaseException().Message}";
-                logger.LogWarning(exception, "Live run progress loaded runs but skipped geofence visit data.");
-                visits = [];
-                geofences = [];
-            }
-        }
-
-        var records = loads.Select(load =>
-        {
-            var orderedStops = (load.Stops ?? []).OrderBy(x => x.Sequence).ToList();
-            var loadVisits = geofenceAvailable
-                ? visits.Where(x => x.LoadId == load.Id).ToList()
-                : [];
-            var completedStopIds = loadVisits
-                .Where(x => x.LoadStopId != null && x.ConfirmedAtUtc != null && x.ExitedAtUtc != null && x.Status == "Departed")
-                .Select(x => x.LoadStopId!.Value)
-                .ToHashSet();
-
-            var activeVisit = loadVisits.Where(x => x.ExitedAtUtc == null).OrderByDescending(x => x.EnteredAtUtc).FirstOrDefault();
-            var nextStop = orderedStops.FirstOrDefault(x => !completedStopIds.Contains(x.Id));
-            var lastDeparture = loadVisits.Where(x => x.ExitedAtUtc != null && x.ConfirmedAtUtc != null)
-                .OrderByDescending(x => x.ExitedAtUtc).FirstOrDefault();
-
-            SiteGeofence? activeFence = null;
-            if (activeVisit is not null) geofences.TryGetValue(activeVisit.GeofenceId, out activeFence);
-            var currentDwellMinutes = activeVisit is null
-                ? (int?)null
-                : Math.Max(activeVisit.DwellMinutes, Math.Max(0, (int)Math.Floor((now - activeVisit.EnteredAtUtc).TotalMinutes)));
-            var waitLimit = activeFence?.MaxWaitMinutes ?? activeFence?.CategoryMaxWaitMinutes;
-            var totalStops = orderedStops.Count;
-            var completedStops = completedStopIds.Count;
-            var progressPercent = totalStops == 0 ? 0m : Math.Round((decimal)completedStops / totalStops * 100m, 1);
-            var runState = totalStops > 0 && completedStops >= totalStops
-                ? "Completed"
-                : activeVisit?.Status ?? (completedStops > 0 ? "BetweenStops" : load.Status.ToString());
-            var delayed = activeVisit is not null && (activeVisit.Status == "SiteDelay" || waitLimit is int limit && currentDwellMinutes.GetValueOrDefault() > limit);
-
-            return new
-            {
-                loadId = load.Id,
-                loadReference = load.Reference,
-                loadStatus = load.Status.ToString(),
-                runState,
-                totalStops,
-                completedStops,
-                progressPercent,
-                nextStop = nextStop is null ? null : new { nextStop.Id, nextStop.Sequence, nextStop.Name, nextStop.Address, nextStop.PlannedArrivalUtc },
-                currentVisit = activeVisit is null ? null : new
-                {
-                    activeVisit.Id,
-                    geofenceId = activeVisit.GeofenceId,
-                    geofenceName = activeFence?.Name,
-                    category = activeFence?.Category,
-                    activeVisit.LoadStopId,
-                    activeVisit.EnteredAtUtc,
-                    activeVisit.ConfirmedAtUtc,
-                    dwellMinutes = currentDwellMinutes,
-                    waitLimitMinutes = waitLimit,
-                    isDelayed = delayed,
-                    activeVisit.Status,
-                    activeVisit.StatusReason
-                },
-                lastDeparture = lastDeparture is null ? null : new { lastDeparture.LoadStopId, lastDeparture.ExitedAtUtc, lastDeparture.DwellMinutes },
-                calculatedAtUtc = now
-            };
-        }).ToList();
+        var totalStops = orderedStops.Count;
+        var completedStops = completedStopIds.Count;
+        var progressPercent = totalStops == 0 ? 0m : Math.Round((decimal)completedStops / totalStops * 100m, 1);
+        var waitLimit = activeVisit?.Fence.MaxWaitMinutes ?? activeVisit?.Fence.CategoryMaxWaitMinutes;
+        var dwell = activeVisit?.DwellMinutes;
+        if (activeVisit is not null && now - activeVisit.LastInsideAtUtc <= TimeSpan.FromMinutes(5))
+            dwell = Math.Max(activeVisit.DwellMinutes, Math.Max(0, (int)Math.Floor((now - activeVisit.EnteredAtUtc).TotalMinutes)));
+        var delayed = activeVisit is not null && waitLimit is int limit && dwell.GetValueOrDefault() > limit;
+        var activeStatus = activeVisit is null ? null : delayed ? "SiteDelay" : activeVisit.ConfirmedAtUtc is not null ? "OnSiteConfirmed" : "Arrived";
+        var runState = totalStops > 0 && completedStops >= totalStops
+            ? "Completed"
+            : activeStatus ?? (completedStops > 0 ? "BetweenStops" : load.Status.ToString());
 
         return new
         {
-            planningDate,
-            calculatedAtUtc = now,
-            count = records.Count,
-            source = loadSource,
-            geofenceAvailable,
-            geofenceCount,
-            geofenceVisitCount = visits.Count,
-            geofenceLinkedRuns = visits.Where(x => x.LoadId != null).Select(x => x.LoadId!.Value).Distinct().Count(),
-            warning = CombineWarnings(loadWarning, geofenceWarning),
-            records
-        };
-    }
-
-    private async Task<(List<Load> Loads, string Source, string? Warning)> LoadRunsAsync(DateOnly planningDate, CancellationToken ct)
-    {
-        try
-        {
-            var loads = await db.Loads.AsNoTracking().Include(x => x.Stops)
-                .Where(x => x.PlanningDate == planningDate && x.Status != LoadStatus.Cancelled)
-                .OrderBy(x => x.Reference)
-                .Take(500)
-                .ToListAsync(ct);
-
-            if (loads.Count > 0) return (loads, "Loads", null);
-
-            var registerLoads = await SafeReadRegisterLoadsAsync(planningDate, ct);
-            if (registerLoads.Count > 0)
-                return (registerLoads, "PlanningRegister", "No dedicated planning loads were returned, so live run progress is using the audited planning register.");
-
-            return (loads, "Loads", null);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            db.ChangeTracker.Clear();
-            var registerLoads = await SafeReadRegisterLoadsAsync(planningDate, ct);
-            return (registerLoads, "PlanningRegister", $"Dedicated planning load tables are unavailable: {exception.GetBaseException().Message}");
-        }
-    }
-
-    private async Task<List<Load>> SafeReadRegisterLoadsAsync(DateOnly planningDate, CancellationToken ct)
-    {
-        try
-        {
-            return await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            db.ChangeTracker.Clear();
-            logger.LogWarning(exception, "Planning register fallback could not be read for {PlanningDate}.", planningDate);
-            return [];
-        }
-    }
-
-    private async Task<object?> TryLoadRegisterRunsAsync(DateOnly planningDate, string warning, CancellationToken ct)
-    {
-        var now = DateTimeOffset.UtcNow;
-        var loads = await SafeReadRegisterLoadsAsync(planningDate, ct);
-        if (loads.Count == 0) return null;
-
-        var records = loads.OrderBy(load => load.Reference).Select(load =>
-        {
-            var stops = (load.Stops ?? []).OrderBy(stop => stop.Sequence).ToList();
-            var nextStop = stops.FirstOrDefault();
-            return new
+            loadId = load.Id,
+            loadReference = load.Reference,
+            loadStatus = load.Status.ToString(),
+            runState,
+            totalStops,
+            completedStops,
+            progressPercent,
+            nextStop = nextStop is null ? null : new { nextStop.Id, nextStop.Sequence, nextStop.Name, nextStop.Address, nextStop.PlannedArrivalUtc },
+            currentVisit = activeVisit is null ? null : new
             {
-                loadId = load.Id,
-                loadReference = load.Reference,
-                loadStatus = load.Status.ToString(),
-                runState = load.Status.ToString(),
-                totalStops = stops.Count,
-                completedStops = 0,
-                progressPercent = 0m,
-                nextStop = nextStop is null ? null : new { nextStop.Id, nextStop.Sequence, nextStop.Name, nextStop.Address, nextStop.PlannedArrivalUtc },
-                currentVisit = (object?)null,
-                lastDeparture = (object?)null,
-                calculatedAtUtc = now
-            };
-        }).ToList();
-
-        return new
-        {
-            planningDate,
-            calculatedAtUtc = now,
-            count = records.Count,
-            source = "PlanningRegisterSafeFallback",
-            geofenceAvailable = false,
-            geofenceCount = 0,
-            geofenceVisitCount = 0,
-            geofenceLinkedRuns = 0,
-            warning,
-            records
+                activeVisit.Id,
+                geofenceId = activeVisit.Fence.Id,
+                geofenceName = activeVisit.Fence.Name,
+                category = activeVisit.Fence.Category,
+                activeVisit.LoadStopId,
+                activeVisit.EnteredAtUtc,
+                activeVisit.ConfirmedAtUtc,
+                dwellMinutes = dwell,
+                waitLimitMinutes = waitLimit,
+                isDelayed = delayed,
+                status = activeStatus,
+                statusReason = delayed
+                    ? $"Dwell is {dwell.GetValueOrDefault()} minutes; site threshold is {waitLimit} minutes."
+                    : activeVisit.ConfirmedAtUtc is not null
+                        ? $"Confirmed after {dwell.GetValueOrDefault()} minutes in {activeVisit.Fence.Name}."
+                        : $"Inside {activeVisit.Fence.Name}; awaiting 10-minute confirmation."
+            },
+            lastDeparture = lastDeparture is null ? null : new { lastDeparture.LoadStopId, lastDeparture.ExitedAtUtc, lastDeparture.DwellMinutes },
+            calculatedAtUtc = now
         };
-    }
-
-    private static string? CombineWarnings(string? first, string? second)
-    {
-        if (string.IsNullOrWhiteSpace(first)) return second;
-        if (string.IsNullOrWhiteSpace(second)) return first;
-        return $"{first} {second}";
     }
 
     private static DateOnly UkOperatingDate(DateTimeOffset value)
