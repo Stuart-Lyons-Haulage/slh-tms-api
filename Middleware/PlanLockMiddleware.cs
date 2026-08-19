@@ -81,6 +81,7 @@ public sealed class PlanLockMiddleware(RequestDelegate next)
         if (request.Method is not ("POST" or "PUT" or "PATCH" or "DELETE")) return false;
         var path = request.Path.Value ?? "";
         if (path.Equals("/api/v1/loads", StringComparison.OrdinalIgnoreCase) && request.Method == "POST") return true;
+        if (path.StartsWith("/api/v1/runs/", StringComparison.OrdinalIgnoreCase) && path.Contains("/allocation", StringComparison.OrdinalIgnoreCase)) return true;
         if (!path.StartsWith("/api/v1/loads/", StringComparison.OrdinalIgnoreCase)) return false;
         return path.Contains("/allocation", StringComparison.OrdinalIgnoreCase) ||
                path.Contains("/stops", StringComparison.OrdinalIgnoreCase) ||
