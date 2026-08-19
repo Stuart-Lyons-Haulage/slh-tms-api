@@ -26,6 +26,35 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<GeofenceVisit> GeofenceVisits => Set<GeofenceVisit>();
     public DbSet<EtaSnapshot> EtaSnapshots => Set<EtaSnapshot>();
 
+    public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await base.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException ex) when (AuditStorageUnavailable(ex) && ChangeTracker.Entries<MasterDataAudit>().Any(entry => entry.State == EntityState.Added))
+        {
+            // Master-data amendments are operationally authoritative. If the audit table is
+            // missing/lagging in Azure SQL, do not roll back the real edit: remove only the
+            // audit insert and retry the same unit of work.
+            foreach (var entry in ChangeTracker.Entries<MasterDataAudit>().Where(entry => entry.State == EntityState.Added).ToList())
+                entry.State = EntityState.Detached;
+
+            return await base.SaveChangesAsync(cancellationToken);
+        }
+    }
+
+    private static bool AuditStorageUnavailable(Exception exception)
+    {
+        var message = exception.GetBaseException().Message;
+        return message.Contains("MasterDataAudits", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("MasterDataAudit", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("does not exist or you do not have permissions", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("permission was denied", StringComparison.OrdinalIgnoreCase);
+    }
+
     protected override void OnModelCreating(ModelBuilder b)
     {
         b.Entity<Customer>().HasIndex(x => x.Code).IsUnique();
