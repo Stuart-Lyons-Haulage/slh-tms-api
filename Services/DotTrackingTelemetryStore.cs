@@ -40,12 +40,15 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
         if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync(ct);
 
         // Geofence progression is deliberately downstream of telemetry persistence.
-        // A geofence failure must never prevent core RoadTech tracking from being stored,
-        // but Live Runs depends on this progression so repair the legacy schema before
-        // every progression batch rather than relying only on startup migration state.
+        // A geofence failure must never prevent core RoadTech tracking from being stored.
+        // If the geofence engine is empty, restore the approved SLH seed automatically
+        // before processing the current telemetry batch.
         try
         {
-            await GeofenceRuntimeRepair.EnsureAsync(db, ct);
+            var seed = await GeofenceAutoSeed.EnsureAsync(db, ct);
+            if (seed.Seeded)
+                logger.LogWarning("Restored {ImportedCount} approved SLH geofences automatically; {SiteMatchedCount} matched to master sites.", seed.Imported, seed.SiteMatched);
+
             await GeofenceRunProgression.ProcessTelemetryAsync(db, batch, ct);
             var repaired = await GeofenceVisitRepair.RepairRecentAsync(db, ct);
             if (repaired > 0)
