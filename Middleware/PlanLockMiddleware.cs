@@ -85,7 +85,10 @@ public sealed class PlanLockMiddleware(RequestDelegate next)
         if (request.Method is not ("POST" or "PUT" or "PATCH" or "DELETE")) return false;
         var path = request.Path.Value ?? "";
         if (path.Equals("/api/v1/loads", StringComparison.OrdinalIgnoreCase) && request.Method == "POST") return true;
-        if (path.StartsWith("/api/v1/runs/", StringComparison.OrdinalIgnoreCase) && path.Contains("/allocation", StringComparison.OrdinalIgnoreCase)) return true;
+        if (path.StartsWith("/api/v1/runs/", StringComparison.OrdinalIgnoreCase))
+            return path.Contains("/allocation", StringComparison.OrdinalIgnoreCase) ||
+                   path.Contains("/stops", StringComparison.OrdinalIgnoreCase) ||
+                   path.Contains("/operational", StringComparison.OrdinalIgnoreCase);
         if (!path.StartsWith("/api/v1/loads/", StringComparison.OrdinalIgnoreCase)) return false;
         return path.Contains("/allocation", StringComparison.OrdinalIgnoreCase) ||
                path.Contains("/stops", StringComparison.OrdinalIgnoreCase) ||
@@ -144,6 +147,7 @@ public sealed class PlanLockMiddleware(RequestDelegate next)
         var value = path.Value ?? "";
         if (value.Equals("/api/v1/loads", StringComparison.OrdinalIgnoreCase)) return "Run added";
         if (value.Contains("/stops", StringComparison.OrdinalIgnoreCase)) return "Route amendment";
+        if (value.Contains("/operational", StringComparison.OrdinalIgnoreCase)) return "Run detail amendment";
         if (value.Contains("/status", StringComparison.OrdinalIgnoreCase)) return "Status change";
         if (value.Contains("/allocation", StringComparison.OrdinalIgnoreCase))
         {
