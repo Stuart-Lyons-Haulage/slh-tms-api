@@ -98,6 +98,53 @@ public sealed class LiveGeofenceProgressionTests
         Assert.Contains(secondRuncton, completed);
     }
 
+    [Fact]
+    public async Task Full_day_reconstruction_does_not_drop_planned_vehicle_after_twenty_thousand_unrelated_events()
+    {
+        var fence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences.Where(x => x.Name.Contains("Runcton", StringComparison.OrdinalIgnoreCase)));
+        var longitude = fence.Points.Average(x => x.Longitude);
+        var latitude = fence.Points.Average(x => x.Latitude);
+        var vehicleId = Guid.NewGuid();
+        var loadId = Guid.NewGuid();
+        var stopId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        var planningDate = UkDate(now);
+
+        var options = new DbContextOptionsBuilder<TmsDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
+        await using var db = new TmsDbContext(options);
+        db.Vehicles.Add(new Vehicle { Id = vehicleId, Registration = "KY71CVP", Active = true });
+
+        var noiseStart = now.AddHours(-12);
+        for (var index = 0; index < 20010; index++)
+        {
+            db.VehicleTrackingEvents.Add(Tracking($"noise-{index}", "ZZ99ZZZ", noiseStart.AddSeconds(index), 0d, 0d));
+        }
+
+        db.VehicleTrackingEvents.AddRange(
+            Tracking("target-entry", "CVP", now.AddMinutes(-35), latitude, longitude),
+            Tracking("target-confirm", "CVP", now.AddMinutes(-20), latitude, longitude),
+            Tracking("target-exit", "CVP", now.AddMinutes(-10), 0d, 0d));
+        await db.SaveChangesAsync();
+
+        var load = new Load
+        {
+            Id = loadId,
+            Reference = "RUN-1-AM-LATE-DAY",
+            PlanningDate = planningDate,
+            Status = LoadStatus.Planned,
+            VehicleId = vehicleId,
+            Stops = [new LoadStop { Id = stopId, LoadId = loadId, Sequence = 1, Name = "NWF-Runcton", PlannedArrivalUtc = now.AddMinutes(-30) }]
+        };
+
+        var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, [GeofencePlanningMatch.PrepareLoad(load)], CancellationToken.None);
+        var visit = Assert.Single(snapshot.Visits);
+        Assert.Equal(loadId, visit.LoadId);
+        Assert.Equal(stopId, visit.LoadStopId);
+        Assert.NotNull(visit.ConfirmedAtUtc);
+        Assert.NotNull(visit.ExitedAtUtc);
+        Assert.Equal(3, snapshot.TrackingEventCount);
+    }
+
     [Theory]
     [InlineData("NWF-Merston", "Merston")]
     [InlineData("NWF-Selsey", "Selsey")]
