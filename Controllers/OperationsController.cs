@@ -15,7 +15,7 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
     [HttpGet("delivery-etas")]
     public async Task<IActionResult> DeliveryEtas([FromQuery] DateOnly? date, CancellationToken ct)
     {
-        var planningDate = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
+        var planningDate = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
         List<Load> loads;
         try
         {
@@ -33,29 +33,51 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
         if (orders.Count == 0 && orderIds.Count > 0) orders = (await PlanningRegisterStore.ReadOrdersAsync(db, null, null, ct)).Where(order => orderIds.Contains(order.Id)).ToDictionary(order => order.Id);
         var vehicleIds = loads.Where(load => load.VehicleId != null).Select(load => load.VehicleId!.Value).Distinct().ToList();
         var vehicles = await SafeDictionary(db.Vehicles.AsNoTracking().Where(vehicle => vehicleIds.Contains(vehicle.Id)), vehicle => vehicle.Id, ct);
+        var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles.Values.ToList(), ct);
         var statuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
         IReadOnlyDictionary<string, TachoVehicleDriverStatus> tachoStatuses = new Dictionary<string, TachoVehicleDriverStatus>();
         try { tachoStatuses = await tachoMaster.GetCurrentDriverStatusesByVehicleAsync(planningDate, ct); }
-        catch (Exception exception) { logger.LogWarning(exception, "TachoMaster data was unavailable for tacho-aware ETA calculations."); }
+        catch (Exception exception) when (exception is not OperationCanceledException) { logger.LogWarning(exception, "TachoMaster data was unavailable for tacho-aware ETA calculations."); }
+
+        EmbeddedGeofenceSnapshot? geofence = null;
+        try
+        {
+            geofence = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, GeofencePlanningMatch.PrepareLoads(loads), ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Geofence progression was unavailable while calculating delivery ETAs; route calculations will continue without completed-stop suppression.");
+            db.ChangeTracker.Clear();
+        }
+
         var now = DateTimeOffset.UtcNow;
         var records = new List<DeliveryEtaResponse>();
 
         foreach (var load in loads)
         {
             var vehicle = load.VehicleId is Guid vehicleId && vehicles.TryGetValue(vehicleId, out var matchedVehicle) ? matchedVehicle : null;
-            var live = vehicle is null ? null : MatchLive(vehicle, statuses);
-            var tacho = vehicle is null ? null : MatchTacho(vehicle, tachoStatuses);
+            var aliases = vehicle is not null && aliasesByVehicle.TryGetValue(vehicle.Id, out var knownAliases)
+                ? knownAliases
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var live = vehicle is null ? null : ExecutionIdentityResolver.MatchLive(aliases, statuses);
+            var tacho = vehicle is null ? null : ExecutionIdentityResolver.MatchTacho(aliases, tachoStatuses);
+            var visits = geofence?.Visits.Where(visit => visit.LoadId == load.Id).OrderBy(visit => visit.EnteredAtUtc).ToList() ?? [];
+            var completedStopIds = geofence is null ? new HashSet<Guid>() : GeofencePlanningMatch.CompletedStopIds(load, visits);
+
             var current = live is null ? ((decimal Longitude, decimal Latitude)?)null : (live.Longitude, live.Latitude);
             var currentEta = now;
             var cumulativeDrivingMinutes = 0d;
             var breakDelayMinutes = 0;
             var initialContinuousDriving = tacho is null ? 0 : tacho.BreakMinutes >= 45 ? tacho.DriveMinutes % 270 : Math.Min(tacho.DriveMinutes, 270);
-            foreach (var stop in load.Stops.OrderBy(stop => stop.Sequence))
+
+            // ETA is a forecast of the remaining journey. A geofence-confirmed and departed
+            // stop must never be routed again, otherwise later customer ETAs are overstated.
+            foreach (var stop in load.Stops.OrderBy(stop => stop.Sequence).Where(stop => !completedStopIds.Contains(stop.Id)))
             {
                 orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
                 var eta = stop.PlannedArrivalUtc;
                 var source = eta is null ? "Unavailable" : "Planned";
-                if (current is not null && stop.Longitude is not null && stop.Latitude is not null && now - live!.LastEventTimeUtc <= TimeSpan.FromMinutes(30))
+                if (current is not null && stop.Longitude is not null && stop.Latitude is not null && live is not null && now - live.LastEventTimeUtc <= TimeSpan.FromMinutes(30))
                 {
                     try
                     {
@@ -69,7 +91,9 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
                             breakDelayMinutes += extraBreakMinutes;
                         }
                         currentEta += travelTime;
-                        eta = currentEta; source = "Live"; current = (stop.Longitude.Value, stop.Latitude.Value);
+                        eta = currentEta;
+                        source = "Live";
+                        current = (stop.Longitude.Value, stop.Latitude.Value);
                     }
                     catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException or Azure.Identity.AuthenticationFailedException)
                     {
@@ -82,8 +106,8 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
                     ? TachoAssessment(tacho, cumulativeDrivingMinutes, breakDelayMinutes)
                     : (Status: "RouteUnavailable", Explanation: tacho is null
                         ? "Live route and current TachoMaster duty are unavailable; this ETA must be verified before export."
-                        : "TachoMaster matched the driver, but no fresh live route could be calculated; the planned ETA has not been adjusted for a break.");
-                records.Add(new DeliveryEtaResponse(load.Id, load.Reference, load.Status.ToString(), stop.Id, stop.Sequence, stop.Name,
+                        : "TachoMaster matched the vehicle, but no fresh live route could be calculated; the planned ETA has not been adjusted for a break.");
+                records.Add(new DeliveryEtaResponse(load.Id, RunDisplayLabel.For(load), load.Status.ToString(), stop.Id, stop.Sequence, stop.Name,
                     order?.Reference, order?.CustomerCode, vehicle?.Registration, eta, source, windowStart, windowEnd,
                     Risk(eta, windowStart, windowEnd), live?.LastEventTimeUtc,
                     tacho?.DriverName, tacho?.DriveAvailableTodayMinutes, (int)Math.Ceiling(cumulativeDrivingMinutes), breakDelayMinutes,
@@ -96,7 +120,7 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
     [HttpGet("forecast")]
     public async Task<IActionResult> Forecast([FromQuery] DateOnly? from, CancellationToken ct)
     {
-        var firstDate = from ?? DateOnly.FromDateTime(DateTime.UtcNow);
+        var firstDate = from ?? UkOperatingDate(DateTimeOffset.UtcNow);
         var lastDate = firstDate.AddDays(6);
         List<Load> loads;
         try
@@ -185,17 +209,6 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
         return exception is InvalidOperationException or DbUpdateException || message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase) || message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static VehicleLiveStatus? MatchLive(Vehicle vehicle, List<VehicleLiveStatus> statuses)
-    {
-        var keys = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => Normalise(value!)).ToList();
-        return statuses.Where(status => keys.Contains(Normalise(status.VehicleIdentifier))).OrderByDescending(status => status.LastEventTimeUtc).FirstOrDefault();
-    }
-    private static TachoVehicleDriverStatus? MatchTacho(Vehicle vehicle, IReadOnlyDictionary<string, TachoVehicleDriverStatus> statuses)
-    {
-        var aliases = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => Normalise(value!));
-        foreach (var alias in aliases) if (statuses.TryGetValue(alias, out var status)) return status;
-        return null;
-    }
     internal static (string Status, string Explanation) TachoAssessment(TachoVehicleDriverStatus? tacho, double routeDrivingMinutes, int breakMinutes)
     {
         if (tacho is null) return ("Unavailable", "No current TachoMaster duty was matched; verify the driver before promising this ETA.");
@@ -204,7 +217,7 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
         if (breakMinutes > 0) return ("BreakIncluded", $"ETA includes {breakMinutes} minutes for a statutory driving break based on current duty and route time.");
         return ("WithinDriveTime", "Current TachoMaster availability covers the calculated route without an additional driving break.");
     }
-    private static string Normalise(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
     private static bool IsDeliveryStop(LoadStop stop) => stop.Name.StartsWith("Deliver", StringComparison.OrdinalIgnoreCase);
     private static string Risk(DateTimeOffset? eta, DateTimeOffset? start, DateTimeOffset? end)
     {
@@ -212,6 +225,12 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
         if (eta > end) return "Late";
         if (end - eta <= TimeSpan.FromMinutes(30) || start is not null && eta < start.Value - TimeSpan.FromMinutes(30)) return "AtRisk";
         return "OnTrack";
+    }
+
+    private static DateOnly UkOperatingDate(DateTimeOffset value)
+    {
+        try { return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime); }
+        catch (TimeZoneNotFoundException) { return DateOnly.FromDateTime(value.UtcDateTime); }
     }
 }
 
