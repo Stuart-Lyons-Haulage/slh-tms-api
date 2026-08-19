@@ -120,6 +120,68 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
         return Ok(await maps.Directions(points, ct));
     }
 
+    [HttpGet("{id:guid}/dispatch")]
+    public async Task<IActionResult> Dispatch(Guid id, CancellationToken ct)
+    {
+        var (load, register) = await FindLoadAsync(id, includeStops: true, tracking: false, ct);
+        if (load is null) return NotFound(new { message = "The run could not be found." });
+
+        var orders = await LoadOrdersAsync(load, register, ct);
+        var driver = load.DriverId is null ? null : await db.Drivers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == load.DriverId, ct);
+        var vehicle = load.VehicleId is null ? null : await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(x => x.Id == load.VehicleId, ct);
+        var trailer = load.TrailerId is null ? null : await db.Trailers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == load.TrailerId, ct);
+
+        return Ok(new
+        {
+            load.Id,
+            load.Reference,
+            load.PlanningDate,
+            load.Status,
+            driver = driver is null ? null : new { driver.DisplayName, driver.EmployeeNumber, driver.MobileNumber },
+            vehicle = vehicle is null ? null : new { vehicle.Registration, vehicle.FleetNumber },
+            trailer = trailer is null ? null : new { trailer.TrailerNumber, trailer.Type },
+            stops = load.Stops.OrderBy(x => x.Sequence).Select(stop => new
+            {
+                stop.Id,
+                stop.Sequence,
+                stop.Name,
+                stop.Address,
+                stop.Latitude,
+                stop.Longitude,
+                stop.PlannedArrivalUtc,
+                order = stop.OrderId is Guid orderId && orders.TryGetValue(orderId, out var order) ? new
+                {
+                    order.Reference,
+                    order.CustomerCode,
+                    order.SellerName,
+                    order.MarketName,
+                    order.StallNumber,
+                    order.DriverInstructions,
+                    order.MapLink
+                } : null
+            })
+        });
+    }
+
+    private async Task<Dictionary<Guid, TransportOrder>> LoadOrdersAsync(Load load, bool register, CancellationToken ct)
+    {
+        var ids = load.Stops.Where(x => x.OrderId is not null).Select(x => x.OrderId!.Value).Distinct().ToList();
+        if (ids.Count == 0) return [];
+        if (!register)
+        {
+            try
+            {
+                return await db.TransportOrders.AsNoTracking().Where(x => ids.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+            }
+            catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex))
+            {
+                db.ChangeTracker.Clear();
+            }
+        }
+        return (await PlanningRegisterStore.ReadOrdersAsync(db, null, null, ct))
+            .Where(x => ids.Contains(x.Id)).ToDictionary(x => x.Id);
+    }
+
     private async Task<(Load? Load, bool Register)> FindLoadAsync(Guid id, bool includeStops, bool tracking, CancellationToken ct)
     {
         try
