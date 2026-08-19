@@ -8,6 +8,22 @@ public static class GeofenceRuntimeRepair
     public static async Task EnsureAsync(TmsDbContext db, CancellationToken ct)
     {
         const string sql = """
+IF OBJECT_ID(N'dbo.Sites', N'U') IS NOT NULL
+BEGIN
+    IF COL_LENGTH('dbo.Sites','ExternalCode') IS NULL ALTER TABLE dbo.Sites ADD ExternalCode nvarchar(40) NULL;
+    IF COL_LENGTH('dbo.Sites','Name') IS NULL ALTER TABLE dbo.Sites ADD Name nvarchar(200) NULL;
+    IF COL_LENGTH('dbo.Sites','DriverTextName') IS NULL ALTER TABLE dbo.Sites ADD DriverTextName nvarchar(200) NULL;
+    IF COL_LENGTH('dbo.Sites','Active') IS NULL ALTER TABLE dbo.Sites ADD Active bit NULL;
+
+    UPDATE dbo.Sites SET Active = COALESCE(Active, 1);
+    UPDATE dbo.Sites
+       SET Active = 0
+     WHERE NULLIF(LTRIM(RTRIM(Name)), '') IS NULL;
+    UPDATE dbo.Sites
+       SET ExternalCode = CONCAT('LEGACY-', LEFT(CONVERT(varchar(36), Id), 8))
+     WHERE NULLIF(LTRIM(RTRIM(ExternalCode)), '') IS NULL;
+END;
+
 IF OBJECT_ID(N'dbo.SiteGeofences', N'U') IS NULL
 BEGIN
     CREATE TABLE dbo.SiteGeofences (
