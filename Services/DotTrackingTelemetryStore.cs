@@ -45,6 +45,9 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
         try
         {
             await GeofenceRunProgression.ProcessTelemetryAsync(db, batch, ct);
+            var repaired = await GeofenceVisitRepair.RepairRecentAsync(db, ct);
+            if (repaired > 0)
+                logger.LogInformation("Re-linked {RepairedCount} recent orphan geofence visit(s) to live planning runs.", repaired);
         }
         catch (Exception exception) when (!ct.IsCancellationRequested)
         {
