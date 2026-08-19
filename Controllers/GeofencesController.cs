@@ -20,6 +20,7 @@ public sealed class GeofencesController(TmsDbContext db) : ControllerBase
             return UnprocessableEntity(new { error = "Expected a Falcon geofence JSON object." });
         try
         {
+            await GeofenceRuntimeRepair.EnsureAsync(db, ct);
             var result = await GeofenceRunProgression.ImportFalconAsync(db, payload, ct);
             var repair = await RepairLinksInternal(ct);
             return Ok(new
@@ -37,108 +38,144 @@ public sealed class GeofencesController(TmsDbContext db) : ControllerBase
         {
             return UnprocessableEntity(new { error = exception.Message });
         }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return MaintenanceUnavailable("import-falcon", exception);
+        }
     }
 
     [HttpPost("import-slh-seed")]
     [Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> ImportSlhSeed(CancellationToken ct)
     {
-        using var document = JsonDocument.Parse(GeofenceSeedPayload.Json);
-        var inserted = 0; var updated = 0; var matched = 0;
-        foreach (var record in document.RootElement.EnumerateArray())
+        try
         {
-            var payload = JsonSerializer.SerializeToElement(new
+            await GeofenceRuntimeRepair.EnsureAsync(db, ct);
+            using var document = JsonDocument.Parse(GeofenceSeedPayload.Json);
+            var inserted = 0; var updated = 0; var matched = 0;
+            foreach (var record in document.RootElement.EnumerateArray())
             {
-                format = "falcon.geofence",
-                version = 1,
-                category = NullableText(record, "category"),
-                category_max_wait_time = NullableInt(record, "category_max_wait_time"),
-                geofences = new[]
+                var payload = JsonSerializer.SerializeToElement(new
                 {
-                    new
+                    format = "falcon.geofence",
+                    version = 1,
+                    category = NullableText(record, "category"),
+                    category_max_wait_time = NullableInt(record, "category_max_wait_time"),
+                    geofences = new[]
                     {
-                        name = NullableText(record, "name"),
-                        max_wait_time = NullableInt(record, "max_wait_time"),
-                        pending_entry_minutes = NullableInt(record, "pending_entry_minutes") ?? 0,
-                        pending_exit_minutes = NullableInt(record, "pending_exit_minutes") ?? 0,
-                        site_no = NullableText(record, "site_no"),
-                        points = record.GetProperty("points")
+                        new
+                        {
+                            name = NullableText(record, "name"),
+                            max_wait_time = NullableInt(record, "max_wait_time"),
+                            pending_entry_minutes = NullableInt(record, "pending_entry_minutes") ?? 0,
+                            pending_exit_minutes = NullableInt(record, "pending_exit_minutes") ?? 0,
+                            site_no = NullableText(record, "site_no"),
+                            points = record.GetProperty("points")
+                        }
                     }
-                }
+                });
+                var result = await GeofenceRunProgression.ImportFalconAsync(db, payload, ct);
+                inserted += result.Inserted; updated += result.Updated; matched += result.SiteMatched;
+            }
+            var repair = await RepairLinksInternal(ct);
+            return Ok(new
+            {
+                supplied = document.RootElement.GetArrayLength(), inserted, updated, siteMatched = matched,
+                relinked = repair.Relinked, remainingUnlinked = repair.Unlinked, invalidPolygons = repair.Invalid,
+                importedAtUtc = DateTimeOffset.UtcNow
             });
-            var result = await GeofenceRunProgression.ImportFalconAsync(db, payload, ct);
-            inserted += result.Inserted; updated += result.Updated; matched += result.SiteMatched;
         }
-        var repair = await RepairLinksInternal(ct);
-        return Ok(new
+        catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            supplied = document.RootElement.GetArrayLength(), inserted, updated, siteMatched = matched,
-            relinked = repair.Relinked, remainingUnlinked = repair.Unlinked, invalidPolygons = repair.Invalid,
-            importedAtUtc = DateTimeOffset.UtcNow
-        });
+            return MaintenanceUnavailable("import-slh-seed", exception);
+        }
     }
 
     [HttpPost("repair-links")]
     [Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> RepairLinks(CancellationToken ct)
     {
-        var repair = await RepairLinksInternal(ct);
-        return Ok(new
+        try
         {
-            total = repair.Total,
-            linked = repair.Linked,
-            relinked = repair.Relinked,
-            unlinked = repair.Unlinked,
-            validPolygons = repair.Valid,
-            invalidPolygons = repair.Invalid,
-            repairedAtUtc = DateTimeOffset.UtcNow
-        });
+            var repair = await RepairLinksInternal(ct);
+            return Ok(new
+            {
+                total = repair.Total,
+                linked = repair.Linked,
+                relinked = repair.Relinked,
+                unlinked = repair.Unlinked,
+                validPolygons = repair.Valid,
+                invalidPolygons = repair.Invalid,
+                repairedAtUtc = DateTimeOffset.UtcNow
+            });
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return MaintenanceUnavailable("repair-links", exception);
+        }
     }
 
     [HttpGet]
     public async Task<IActionResult> List(CancellationToken ct)
     {
-        await GeofenceRunProgression.EnsureSchemaAsync(db, ct);
-        // Relink opportunistically on reads so historical imports recover without requiring a re-upload.
-        await RepairLinksInternal(ct);
-        var rows = await db.SiteGeofences.AsNoTracking().OrderBy(x => x.Category).ThenBy(x => x.Name).ToListAsync(ct);
-        var result = rows.Select(x => new
+        try
         {
-            x.Id,
-            x.Name,
-            x.Category,
-            x.MaxWaitMinutes,
-            x.CategoryMaxWaitMinutes,
-            x.SiteNumber,
-            x.SiteId,
-            x.Active,
-            polygonValid = PolygonIsValid(x.PolygonJson),
-            geofenceAvailable = x.Active && PolygonIsValid(x.PolygonJson),
-            siteLinked = x.SiteId != null,
-            validationStatus = !PolygonIsValid(x.PolygonJson) ? "Invalid" : x.SiteId == null ? "Unlinked" : "Valid"
-        }).ToList();
-        return Ok(new { count = result.Count, records = result });
+            await GeofenceRuntimeRepair.EnsureAsync(db, ct);
+            await GeofenceRunProgression.EnsureSchemaAsync(db, ct);
+            // Relink opportunistically on reads so historical imports recover without requiring a re-upload.
+            await RepairLinksInternal(ct);
+            var rows = await db.SiteGeofences.AsNoTracking().OrderBy(x => x.Category).ThenBy(x => x.Name).ToListAsync(ct);
+            var result = rows.Select(x => new
+            {
+                x.Id,
+                x.Name,
+                x.Category,
+                x.MaxWaitMinutes,
+                x.CategoryMaxWaitMinutes,
+                x.SiteNumber,
+                x.SiteId,
+                x.Active,
+                polygonValid = PolygonIsValid(x.PolygonJson),
+                geofenceAvailable = x.Active && PolygonIsValid(x.PolygonJson),
+                siteLinked = x.SiteId != null,
+                validationStatus = !PolygonIsValid(x.PolygonJson) ? "Invalid" : x.SiteId == null ? "Unlinked" : "Valid"
+            }).ToList();
+            return Ok(new { count = result.Count, records = result });
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return MaintenanceUnavailable("list", exception);
+        }
     }
 
     [HttpGet("visits")]
     public async Task<IActionResult> Visits([FromQuery] DateOnly? date, CancellationToken ct)
     {
-        await GeofenceRunProgression.EnsureSchemaAsync(db, ct);
-        var day = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
-        var start = new DateTimeOffset(day.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
-        var end = start.AddDays(1);
-        var rows = await db.GeofenceVisits.AsNoTracking()
-            .Where(x => x.EnteredAtUtc >= start && x.EnteredAtUtc < end)
-            .OrderByDescending(x => x.EnteredAtUtc).Take(1000)
-            .Select(x => new { x.Id, x.GeofenceId, x.LoadId, x.LoadStopId, x.VehicleId, x.VehicleIdentifier, x.EnteredAtUtc, x.ConfirmedAtUtc, x.ExitedAtUtc, x.DwellMinutes, x.Status, x.StatusReason })
-            .ToListAsync(ct);
-        return Ok(new { date = day, count = rows.Count, records = rows });
+        try
+        {
+            await GeofenceRuntimeRepair.EnsureAsync(db, ct);
+            await GeofenceRunProgression.EnsureSchemaAsync(db, ct);
+            var day = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
+            var start = new DateTimeOffset(day.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+            var end = start.AddDays(1);
+            var rows = await db.GeofenceVisits.AsNoTracking()
+                .Where(x => x.EnteredAtUtc >= start && x.EnteredAtUtc < end)
+                .OrderByDescending(x => x.EnteredAtUtc).Take(1000)
+                .Select(x => new { x.Id, x.GeofenceId, x.LoadId, x.LoadStopId, x.VehicleId, x.VehicleIdentifier, x.EnteredAtUtc, x.ConfirmedAtUtc, x.ExitedAtUtc, x.DwellMinutes, x.Status, x.StatusReason })
+                .ToListAsync(ct);
+            return Ok(new { date = day, count = rows.Count, records = rows });
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return MaintenanceUnavailable("visits", exception);
+        }
     }
 
     private async Task<RepairResult> RepairLinksInternal(CancellationToken ct)
     {
+        await GeofenceRuntimeRepair.EnsureAsync(db, ct);
         await GeofenceRunProgression.EnsureSchemaAsync(db, ct);
-        var sites = await db.Sites.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
+        var sites = await GeofenceSiteResolver.LoadActiveSitesAsync(db, ct);
         var fences = await db.SiteGeofences.Where(x => x.Active).ToListAsync(ct);
         var siteIds = sites.Select(x => x.Id).ToHashSet();
         var relinked = 0;
@@ -202,6 +239,15 @@ public sealed class GeofencesController(TmsDbContext db) : ControllerBase
                 || driver.Length >= 5 && (fenceName.Contains(driver, StringComparison.Ordinal) || driver.Contains(fenceName, StringComparison.Ordinal));
         });
     }
+
+    private ObjectResult MaintenanceUnavailable(string operation, Exception exception) =>
+        StatusCode(StatusCodes.Status503ServiceUnavailable, new
+        {
+            code = "geofence_maintenance_unavailable",
+            operation,
+            message = exception.GetBaseException().Message,
+            traceId = HttpContext.TraceIdentifier
+        });
 
     private static bool PolygonIsValid(string? polygonJson)
     {
