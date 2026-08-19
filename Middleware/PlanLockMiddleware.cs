@@ -70,7 +70,11 @@ public sealed class PlanLockMiddleware(RequestDelegate next)
         {
             await PlanLockStore.RecordChangeAsync(db, target.Date.Value, target.LoadId, type, reason, context.User.Identity?.Name, before, after, context.RequestAborted);
         }
-        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex))
+        catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
         {
             db.ChangeTracker.Clear();
         }
@@ -116,7 +120,8 @@ public sealed class PlanLockMiddleware(RequestDelegate next)
     private static async Task<bool> SafeIsLockedAsync(TmsDbContext db, DateOnly date, CancellationToken ct)
     {
         try { return await PlanLockStore.IsLockedAsync(db, date, ct); }
-        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); return false; }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch { db.ChangeTracker.Clear(); return false; }
     }
 
     private static async Task<LoadBaseline?> SafeSnapshotAsync(TmsDbContext db, Guid id, CancellationToken ct)
@@ -126,7 +131,8 @@ public sealed class PlanLockMiddleware(RequestDelegate next)
             var load = await PlanningResilience.ReadLoadAsync(db, id, ct);
             return load is null ? null : PlanLockStore.Snapshot(load);
         }
-        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex))
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch
         {
             db.ChangeTracker.Clear();
             return null;
