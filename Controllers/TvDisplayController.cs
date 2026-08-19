@@ -22,7 +22,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
         {
             access.Key,
             access.CreatedAtUtc,
-            urlPath = $"/live-runs/tv#key={Uri.EscapeDataString(access.Key)}"
+            urlPath = $"/tv#key={Uri.EscapeDataString(access.Key)}"
         });
     }
 
@@ -34,15 +34,55 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
         {
             access.Key,
             access.CreatedAtUtc,
-            urlPath = $"/live-runs/tv#key={Uri.EscapeDataString(access.Key)}"
+            urlPath = $"/tv#key={Uri.EscapeDataString(access.Key)}"
         });
+    }
+
+    [HttpGet("pairing-code"), Authorize(Policy = "TmsAccess")]
+    public async Task<IActionResult> PairingCode(CancellationToken ct)
+    {
+        var pairing = await TvDisplayPairingStore.GetOrCreateAsync(db, User.Identity?.Name, ct);
+        return Ok(new
+        {
+            pairing.Code,
+            pairing.CreatedAtUtc,
+            pairing.ExpiresAtUtc,
+            tvPath = "/tv"
+        });
+    }
+
+    [HttpPost("pairing-code/refresh"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> RefreshPairingCode(CancellationToken ct)
+    {
+        var pairing = await TvDisplayPairingStore.RefreshAsync(db, User.Identity?.Name, ct);
+        return Ok(new
+        {
+            pairing.Code,
+            pairing.CreatedAtUtc,
+            pairing.ExpiresAtUtc,
+            tvPath = "/tv"
+        });
+    }
+
+    [HttpPost("pair"), AllowAnonymous]
+    public async Task<IActionResult> Pair(TvDisplayPairRequest request, CancellationToken ct)
+    {
+        var client = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        if (!TvDisplayPairingRateLimiter.Allow(client))
+            return StatusCode(StatusCodes.Status429TooManyRequests, new { message = "Too many pairing attempts. Wait one minute and try again." });
+
+        var access = await TvDisplayPairingStore.ExchangeAsync(db, request.Code, ct);
+        if (access is null)
+            return Unauthorized(new { message = "That TV pairing code is invalid or has expired. Generate a fresh code from TV display in the signed-in TMS." });
+
+        return Ok(new { access.Key, pairedAtUtc = DateTimeOffset.UtcNow });
     }
 
     [HttpGet("live-runs"), AllowAnonymous]
     public async Task<IActionResult> LiveRuns([FromHeader(Name = "X-TV-Display-Key")] string? displayKey, [FromQuery] DateOnly? date, CancellationToken ct)
     {
         if (!await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct))
-            return Unauthorized(new { message = "This TV display link is not valid. Generate a fresh link from the signed-in TMS TV display page." });
+            return Unauthorized(new { message = "This TV display is not paired. Open the TV display page in the signed-in TMS to get a new pairing code." });
 
         var day = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
         var now = DateTimeOffset.UtcNow;
@@ -202,9 +242,7 @@ internal static class TvDisplayKeyStore
         if (string.IsNullOrWhiteSpace(supplied)) return false;
         var existing = await ExistingAsync(db, ct);
         if (existing is null) return false;
-        var expectedHash = SHA256.HashData(Encoding.UTF8.GetBytes(existing.Key));
-        var suppliedHash = SHA256.HashData(Encoding.UTF8.GetBytes(supplied.Trim()));
-        return CryptographicOperations.FixedTimeEquals(expectedHash, suppliedHash);
+        return SecureEquals(existing.Key, supplied.Trim());
     }
 
     private static async Task<TvDisplayAccess?> ExistingAsync(TmsDbContext db, CancellationToken ct)
@@ -246,9 +284,117 @@ internal static class TvDisplayKeyStore
         var value = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
         return value.TrimEnd('=').Replace('+', '-').Replace('/', '_');
     }
+
+    internal static bool SecureEquals(string expected, string supplied)
+    {
+        var expectedHash = SHA256.HashData(Encoding.UTF8.GetBytes(expected));
+        var suppliedHash = SHA256.HashData(Encoding.UTF8.GetBytes(supplied));
+        return CryptographicOperations.FixedTimeEquals(expectedHash, suppliedHash);
+    }
 }
 
+internal static class TvDisplayPairingStore
+{
+    private const string EntityType = "tvdisplaypairing";
+    private const string IdempotencyKey = "tvdisplay:pairing:v1";
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    public static async Task<TvDisplayPairing> GetOrCreateAsync(TmsDbContext db, string? user, CancellationToken ct)
+    {
+        var current = await CurrentAsync(db, ct);
+        if (current is not null && current.UsedAtUtc is null && current.ExpiresAtUtc > DateTimeOffset.UtcNow)
+            return current;
+        return await SaveNewAsync(db, user, ct);
+    }
+
+    public static Task<TvDisplayPairing> RefreshAsync(TmsDbContext db, string? user, CancellationToken ct) => SaveNewAsync(db, user, ct);
+
+    public static async Task<TvDisplayAccess?> ExchangeAsync(TmsDbContext db, string? suppliedCode, CancellationToken ct)
+    {
+        var code = (suppliedCode ?? string.Empty).Trim();
+        if (code.Length != 6 || code.Any(character => !char.IsDigit(character))) return null;
+
+        var row = await db.StagedImports.SingleOrDefaultAsync(x => x.EntityType == EntityType && x.IdempotencyKey == IdempotencyKey && x.Status == StagingStatus.Promoted, ct);
+        if (row is null) return null;
+
+        TvDisplayPairing? pairing;
+        try { pairing = JsonSerializer.Deserialize<TvDisplayPairing>(row.PayloadJson, JsonOptions); }
+        catch (JsonException) { return null; }
+        if (pairing is null || pairing.UsedAtUtc is not null || pairing.ExpiresAtUtc <= DateTimeOffset.UtcNow || !TvDisplayKeyStore.SecureEquals(pairing.Code, code))
+            return null;
+
+        var now = DateTimeOffset.UtcNow;
+        pairing = pairing with { UsedAtUtc = now };
+        row.PayloadJson = JsonSerializer.Serialize(pairing, JsonOptions);
+        row.ReviewedAtUtc = now;
+        row.ReviewedBy = "TV pairing";
+        row.ReviewNote = "TV paired successfully using the one-time display code.";
+        await db.SaveChangesAsync(ct);
+
+        return await TvDisplayKeyStore.GetOrCreateAsync(db, "TV pairing", ct);
+    }
+
+    private static async Task<TvDisplayPairing?> CurrentAsync(TmsDbContext db, CancellationToken ct)
+    {
+        var row = await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(x => x.EntityType == EntityType && x.IdempotencyKey == IdempotencyKey && x.Status == StagingStatus.Promoted, ct);
+        if (row is null) return null;
+        try { return JsonSerializer.Deserialize<TvDisplayPairing>(row.PayloadJson, JsonOptions); }
+        catch (JsonException) { return null; }
+    }
+
+    private static async Task<TvDisplayPairing> SaveNewAsync(TmsDbContext db, string? user, CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var pairing = new TvDisplayPairing(RandomNumberGenerator.GetInt32(0, 1_000_000).ToString("D6"), now, now.AddMinutes(10), null);
+        var row = await db.StagedImports.SingleOrDefaultAsync(x => x.IdempotencyKey == IdempotencyKey, ct);
+        if (row is null)
+        {
+            row = new StagedImport
+            {
+                EntityType = EntityType,
+                IdempotencyKey = IdempotencyKey,
+                PayloadJson = "{}",
+                Source = "SLH TV pairing"
+            };
+            db.StagedImports.Add(row);
+        }
+        row.EntityType = EntityType;
+        row.PayloadJson = JsonSerializer.Serialize(pairing, JsonOptions);
+        row.Status = StagingStatus.Promoted;
+        row.ReviewedAtUtc = now;
+        row.ReviewedBy = user;
+        row.ReviewNote = "One-time TV pairing code generated; valid for 10 minutes.";
+        await db.SaveChangesAsync(ct);
+        return pairing;
+    }
+}
+
+internal static class TvDisplayPairingRateLimiter
+{
+    private static readonly object Gate = new();
+    private static readonly Dictionary<string, List<DateTimeOffset>> Attempts = new(StringComparer.OrdinalIgnoreCase);
+
+    public static bool Allow(string client)
+    {
+        lock (Gate)
+        {
+            var now = DateTimeOffset.UtcNow;
+            if (!Attempts.TryGetValue(client, out var attempts))
+            {
+                attempts = [];
+                Attempts[client] = attempts;
+            }
+            attempts.RemoveAll(attempt => now - attempt > TimeSpan.FromMinutes(1));
+            if (attempts.Count >= 10) return false;
+            attempts.Add(now);
+            return true;
+        }
+    }
+}
+
+public sealed record TvDisplayPairRequest(string? Code);
 internal sealed record TvDisplayAccess(string Key, DateTimeOffset CreatedAtUtc);
+internal sealed record TvDisplayPairing(string Code, DateTimeOffset CreatedAtUtc, DateTimeOffset ExpiresAtUtc, DateTimeOffset? UsedAtUtc);
 internal sealed record TvRunDisplayRow(Guid Id, string Reference, string Status, string Driver, string Vehicle, string? Trailer,
     DateTimeOffset? FirstPlannedUtc, DateTimeOffset? FinalPlannedUtc, string? NextStop, DateTimeOffset? EtaUtc, string EtaSource,
     string Tracking, DateTimeOffset? TrackingUpdatedAtUtc, decimal? SpeedKph, string State, string StateDetail, int Priority);
