@@ -19,7 +19,8 @@ public sealed class EmbeddedGeofenceEngineTests
     {
         var compact = new string(EncodedPayload().Where(c => !char.IsWhiteSpace(c)).ToArray());
         var bytes = Convert.FromBase64String(compact + "=");
-        using var input = new MemoryStream(bytes);
+        using var raw = new MemoryStream(bytes);
+        using var input = new ChunkedReadStream(raw, 16);
         using var output = new MemoryStream();
         try
         {
@@ -31,11 +32,26 @@ public sealed class EmbeddedGeofenceEngineTests
                 if (read == 0) break;
                 output.Write(buffer, 0, read);
             }
-            Assert.Fail($"Unexpectedly decompressed full stream. compressedPosition={input.Position}; outputLength={output.Length}");
+            Assert.Fail($"Unexpectedly decompressed full stream. compressedPosition={raw.Position}; outputLength={output.Length}");
         }
         catch (InvalidDataException exception)
         {
-            Assert.Fail($"Corruption: compressedBytes={bytes.Length}; compressedPosition={input.Position}; outputLength={output.Length}; message={exception.Message}");
+            Assert.Fail($"Corruption: compressedBytes={bytes.Length}; compressedPosition={raw.Position}; approxBase64={(raw.Position * 4) / 3}; outputLength={output.Length}; message={exception.Message}");
         }
+    }
+
+    private sealed class ChunkedReadStream(Stream inner, int maxChunk) : Stream
+    {
+        public override bool CanRead => inner.CanRead;
+        public override bool CanSeek => inner.CanSeek;
+        public override bool CanWrite => false;
+        public override long Length => inner.Length;
+        public override long Position { get => inner.Position; set => inner.Position = value; }
+        public override void Flush() => inner.Flush();
+        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, Math.Min(count, maxChunk));
+        public override int Read(Span<byte> buffer) => inner.Read(buffer[..Math.Min(buffer.Length, maxChunk)]);
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 }
