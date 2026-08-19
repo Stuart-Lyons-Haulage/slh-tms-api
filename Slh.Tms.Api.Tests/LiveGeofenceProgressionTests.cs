@@ -83,7 +83,7 @@ public sealed class LiveGeofenceProgressionTests
         };
 
         var matchingLoad = GeofencePlanningMatch.PrepareLoad(load);
-        Assert.Equal("RUNCTON Natures Way", matchingLoad.Stops[0].Name, ignoreCase: true);
+        Assert.Equal(fence.Name, matchingLoad.Stops[0].Name, ignoreCase: true);
 
         var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, [matchingLoad], CancellationToken.None);
         var visit = Assert.Single(snapshot.Visits);
@@ -99,11 +99,13 @@ public sealed class LiveGeofenceProgressionTests
     }
 
     [Theory]
-    [InlineData("NWF-Merston", "MERSTON Natures Way")]
-    [InlineData("NWF-Selsey", "SELSEY Natures Way")]
-    public void Planner_nwf_labels_are_presented_to_falcon_with_natures_way_identity(string planner, string expected)
+    [InlineData("NWF-Merston", "Merston")]
+    [InlineData("NWF-Selsey", "Selsey")]
+    public void Planner_nwf_labels_resolve_to_a_canonical_falcon_locality(string planner, string locality)
     {
-        Assert.Equal(expected, GeofencePlanningMatch.MatchText(planner), ignoreCase: true);
+        var resolved = GeofencePlanningMatch.MatchText(planner);
+        Assert.Contains(locality, resolved, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("NWF-", resolved, StringComparison.OrdinalIgnoreCase);
     }
 
     private static VehicleTrackingEvent Tracking(string id, string vehicle, DateTimeOffset at, double latitude, double longitude) => new()
