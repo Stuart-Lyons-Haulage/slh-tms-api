@@ -1,0 +1,239 @@
+using System.Text.Json;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
+
+namespace Slh.Tms.Api.Controllers;
+
+[ApiController]
+[Route("api/v1/master-data-cleanup")]
+[Authorize]
+public sealed class MasterDataCleanupController(TmsDbContext db) : ControllerBase
+{
+    [HttpPost("{entity}/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
+    public Task<IActionResult> Archive(string entity, Guid id, CancellationToken ct) => SetActive(entity, id, false, ct);
+
+    [HttpPost("{entity}/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
+    public Task<IActionResult> Restore(string entity, Guid id, CancellationToken ct) => SetActive(entity, id, true, ct);
+
+    [HttpDelete("{entity}/{id:guid}"), Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> Delete(string entity, Guid id, CancellationToken ct)
+    {
+        entity = Canonical(entity);
+        if (entity.Length == 0) return Unsupported("deleted");
+
+        var active = await ReadActive(entity, id, ct);
+        if (active is null) return NotFound(new { code = "master_data_not_found", message = "This master-data record no longer exists." });
+        if (active.Value)
+            return Conflict(new { code = "archive_before_delete", message = "Archive this record first. Permanent delete is only available for an archived duplicate or incorrect master record." });
+
+        List<object> usage;
+        try { usage = await Usage(entity, id, ct); }
+        catch (Exception ex)
+        {
+            return Conflict(new
+            {
+                code = "reference_check_unavailable",
+                message = "The TMS could not safely prove that this record is unused, so it was not deleted. Archive it instead until the history check is available.",
+                detail = ex.GetBaseException().Message
+            });
+        }
+
+        if (usage.Count > 0)
+            return Conflict(new
+            {
+                code = "master_data_in_use",
+                message = $"This {Singular(entity)} is referenced by TMS history or live operational data and cannot be deleted. Keep it archived instead.",
+                references = usage
+            });
+
+        var removed = await Remove(entity, id, ct);
+        if (removed is null) return NotFound(new { code = "master_data_not_found", message = "This master-data record no longer exists." });
+
+        var auditRecorded = await TryAudit(Title(Singular(entity)), id, "Deleted", removed.Value.Snapshot, null, ct);
+        return Ok(new
+        {
+            deleted = true,
+            entity,
+            id,
+            integrationMappingsRemoved = removed.Value.MappingsRemoved,
+            auditRecorded,
+            message = $"{Title(Singular(entity))} permanently deleted from the TMS master. Historical operational records were not removed."
+        });
+    }
+
+    private async Task<IActionResult> SetActive(string entity, Guid id, bool active, CancellationToken ct)
+    {
+        entity = Canonical(entity);
+        if (entity.Length == 0) return Unsupported(active ? "restored" : "archived");
+        var item = await Find(entity, id, ct);
+        if (item is null) return NotFound(new { code = "master_data_not_found", message = "This master-data record no longer exists." });
+        if (GetActive(item) == active) return Ok(new { active, unchanged = true });
+
+        var before = Snapshot(item);
+        SetActiveValue(item, active);
+        if (item is SiteGeofence geofence) geofence.UpdatedAtUtc = DateTimeOffset.UtcNow;
+
+        // Operational state is persisted first. Audit history is deliberately best-effort so
+        // a stale optional audit schema can never make Archive/Restore appear to fail.
+        await db.SaveChangesAsync(ct);
+        var auditRecorded = await TryAudit(Title(Singular(entity)), id, active ? "Restored" : "Archived", before, Snapshot(item), ct);
+        return Ok(new { active, entity, id, auditRecorded });
+    }
+
+    private async Task<object?> Find(string entity, Guid id, CancellationToken ct) => entity switch
+    {
+        "drivers" => await db.Drivers.FirstOrDefaultAsync(x => x.Id == id, ct),
+        "vehicles" => await db.Vehicles.FirstOrDefaultAsync(x => x.Id == id, ct),
+        "trailers" => await db.Trailers.FirstOrDefaultAsync(x => x.Id == id, ct),
+        "sites" => await db.Sites.FirstOrDefaultAsync(x => x.Id == id, ct),
+        "customers" => await db.Customers.FirstOrDefaultAsync(x => x.Id == id, ct),
+        "geofences" => await db.SiteGeofences.FirstOrDefaultAsync(x => x.Id == id, ct),
+        _ => null
+    };
+
+    private async Task<bool?> ReadActive(string entity, Guid id, CancellationToken ct) => entity switch
+    {
+        "drivers" => await db.Drivers.AsNoTracking().Where(x => x.Id == id).Select(x => (bool?)x.Active).FirstOrDefaultAsync(ct),
+        "vehicles" => await db.Vehicles.AsNoTracking().Where(x => x.Id == id).Select(x => (bool?)x.Active).FirstOrDefaultAsync(ct),
+        "trailers" => await db.Trailers.AsNoTracking().Where(x => x.Id == id).Select(x => (bool?)x.Active).FirstOrDefaultAsync(ct),
+        "sites" => await db.Sites.AsNoTracking().Where(x => x.Id == id).Select(x => (bool?)x.Active).FirstOrDefaultAsync(ct),
+        "customers" => await db.Customers.AsNoTracking().Where(x => x.Id == id).Select(x => (bool?)x.Active).FirstOrDefaultAsync(ct),
+        "geofences" => await db.SiteGeofences.AsNoTracking().Where(x => x.Id == id).Select(x => (bool?)x.Active).FirstOrDefaultAsync(ct),
+        _ => null
+    };
+
+    private async Task<List<object>> Usage(string entity, Guid id, CancellationToken ct)
+    {
+        var result = new List<object>();
+        void Add(string area, int count) { if (count > 0) result.Add(new { area, count }); }
+
+        switch (entity)
+        {
+            case "vehicles":
+                Add("Runs", await db.Loads.AsNoTracking().CountAsync(x => x.VehicleId == id, ct));
+                Add("Geofence history", await db.GeofenceVisits.AsNoTracking().CountAsync(x => x.VehicleId == id, ct));
+                break;
+            case "drivers":
+                Add("Runs", await db.Loads.AsNoTracking().CountAsync(x => x.DriverId == id, ct));
+                Add("Driver status history", await db.DriverStatusLogs.AsNoTracking().CountAsync(x => x.DriverId == id, ct));
+                break;
+            case "trailers":
+                Add("Runs", await db.Loads.AsNoTracking().CountAsync(x => x.TrailerId == id, ct));
+                break;
+            case "sites":
+                Add("Geofences", await db.SiteGeofences.AsNoTracking().CountAsync(x => x.SiteId == id, ct));
+                break;
+            case "geofences":
+                Add("Geofence visit history", await db.GeofenceVisits.AsNoTracking().CountAsync(x => x.GeofenceId == id, ct));
+                break;
+            case "customers":
+            {
+                var customer = await db.Customers.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, ct);
+                if (customer is null) return result;
+                Add("Orders", await db.TransportOrders.AsNoTracking().CountAsync(x => x.CustomerCode == customer.Code, ct));
+                Add("Customer contacts", await db.CustomerContacts.AsNoTracking().CountAsync(x => x.CustomerCode == customer.Code, ct));
+                Add("Order / planning register", await db.StagedImports.AsNoTracking().CountAsync(x =>
+                    (x.EntityType == "order" || x.EntityType == "register:order") &&
+                    x.Status != StagingStatus.Rejected && x.PayloadJson.Contains(customer.Code), ct));
+                return result;
+            }
+        }
+
+        // Historic recovery-register loads can carry master GUIDs even when dbo.Loads is
+        // unavailable. Ordinary master-import evidence is intentionally not a delete blocker.
+        Add("Planning register", await db.StagedImports.AsNoTracking().CountAsync(x =>
+            x.EntityType.StartsWith("register:") && x.Status != StagingStatus.Rejected && x.PayloadJson.Contains(id.ToString()), ct));
+        return result;
+    }
+
+    private async Task<(int MappingsRemoved, string Snapshot)?> Remove(string entity, Guid id, CancellationToken ct)
+    {
+        var item = await Find(entity, id, ct);
+        if (item is null) return null;
+        var snapshot = Snapshot(item);
+
+        var mappings = await db.IntegrationMappings.Where(x => x.TmsEntityId == id).ToListAsync(ct);
+        if (mappings.Count > 0) db.IntegrationMappings.RemoveRange(mappings);
+
+        switch (item)
+        {
+            case Driver value: db.Drivers.Remove(value); break;
+            case Vehicle value: db.Vehicles.Remove(value); break;
+            case Trailer value: db.Trailers.Remove(value); break;
+            case Site value: db.Sites.Remove(value); break;
+            case Customer value: db.Customers.Remove(value); break;
+            case SiteGeofence value: db.SiteGeofences.Remove(value); break;
+            default: return null;
+        }
+
+        await db.SaveChangesAsync(ct);
+        return (mappings.Count, snapshot);
+    }
+
+    private async Task<bool> TryAudit(string entityType, Guid entityId, string action, string before, string? after, CancellationToken ct)
+    {
+        try
+        {
+            db.MasterDataAudits.Add(BuildAudit(entityType, entityId, action, before, after));
+            await db.SaveChangesAsync(ct);
+            return true;
+        }
+        catch
+        {
+            db.ChangeTracker.Clear();
+            return false;
+        }
+    }
+
+    private MasterDataAudit BuildAudit(string entityType, Guid entityId, string action, string before, string? after)
+    {
+        using var beforeDoc = JsonDocument.Parse(before);
+        using var afterDoc = after is null ? null : JsonDocument.Parse(after);
+        return new MasterDataAudit
+        {
+            EntityType = entityType,
+            EntityId = entityId,
+            Action = action,
+            ChangesJson = JsonSerializer.Serialize(new { before = beforeDoc.RootElement.Clone(), after = afterDoc?.RootElement.Clone() }),
+            ChangedBy = User.Identity?.Name ?? User.FindFirst("preferred_username")?.Value ?? "unknown"
+        };
+    }
+
+    private IActionResult Unsupported(string action) => BadRequest(new
+    {
+        code = "unsupported_master_entity",
+        message = $"This master-data type cannot be {action} from the cleanup screen."
+    });
+
+    private static bool GetActive(object item) => item switch
+    {
+        Driver x => x.Active, Vehicle x => x.Active, Trailer x => x.Active,
+        Site x => x.Active, Customer x => x.Active, SiteGeofence x => x.Active, _ => false
+    };
+
+    private static void SetActiveValue(object item, bool active)
+    {
+        switch (item)
+        {
+            case Driver x: x.Active = active; break;
+            case Vehicle x: x.Active = active; break;
+            case Trailer x: x.Active = active; break;
+            case Site x: x.Active = active; break;
+            case Customer x: x.Active = active; break;
+            case SiteGeofence x: x.Active = active; break;
+        }
+    }
+
+    private static string Canonical(string value) => value.Trim().ToLowerInvariant() switch
+    {
+        "driver" or "drivers" => "drivers", "vehicle" or "vehicles" => "vehicles",
+        "trailer" or "trailers" => "trailers", "site" or "sites" => "sites",
+        "customer" or "customers" => "customers", "geofence" or "geofences" => "geofences", _ => string.Empty
+    };
+    private static string Singular(string entity) => entity.EndsWith('s') ? entity[..^1] : entity;
+    private static string Title(string value) => value.Length == 0 ? value : char.ToUpperInvariant(value[0]) + value[1..];
+    private static string Snapshot<T>(T value) => JsonSerializer.Serialize(value);
+}
