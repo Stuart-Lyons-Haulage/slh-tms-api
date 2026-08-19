@@ -10,7 +10,9 @@ public sealed class RunExecutionEvidenceRulesTests
     public void Fresh_tacho_and_tracking_are_verified_live()
     {
         var now = DateTimeOffset.UtcNow;
-        var tacho = new TachoVehicleDriverStatus("V1", 1, "Driver", null, null, now.AddHours(-2), null, 0, 0, 0, 0, 0);
+        var tacho = new TachoVehicleDriverStatus(
+            "V1", 1, "Driver", null, null, now.AddHours(-2), null,
+            0, 0, 0, 0, 0, null, null, null, 120, null, null, null, null, null, null);
         Assert.Equal("VerifiedLive", RunExecutionEvidenceRules.EvidenceStatus(tacho, now.AddMinutes(-2), now));
     }
 
