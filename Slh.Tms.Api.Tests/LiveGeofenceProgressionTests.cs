@@ -13,7 +13,8 @@ public sealed class LiveGeofenceProgressionTests
     public async Task Fresh_live_status_extends_stationary_inside_dwell_and_links_reordered_site_name()
     {
         var fence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences.Where(x => x.Name.Trim() == "Swindon (Aldi)"));
-        var point = fence.Points[0];
+        var longitude = fence.Points.Average(x => x.Longitude);
+        var latitude = fence.Points.Average(x => x.Latitude);
         var vehicleId = Guid.NewGuid();
         var loadId = Guid.NewGuid();
         var stopId = Guid.NewGuid();
@@ -32,8 +33,8 @@ public sealed class LiveGeofenceProgressionTests
             ProviderEventId = "entry",
             VehicleIdentifier = "AB12CDE",
             EventTimeUtc = now.AddMinutes(-12),
-            Latitude = (decimal)point.Latitude,
-            Longitude = (decimal)point.Longitude,
+            Latitude = (decimal)latitude,
+            Longitude = (decimal)longitude,
             RawPayload = "{}",
             MatchStatus = "Received"
         });
@@ -42,8 +43,8 @@ public sealed class LiveGeofenceProgressionTests
             VehicleIdentifier = "AB12CDE",
             LastEventTimeUtc = now.AddMinutes(-12),
             LastReceivedAtUtc = now,
-            Latitude = (decimal)point.Latitude,
-            Longitude = (decimal)point.Longitude,
+            Latitude = (decimal)latitude,
+            Longitude = (decimal)longitude,
             LastKnownStatus = "Received"
         });
         await db.SaveChangesAsync();
