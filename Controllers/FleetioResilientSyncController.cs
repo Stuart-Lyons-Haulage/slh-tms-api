@@ -51,8 +51,8 @@ public sealed class FleetioResilientSyncController(
             var trailerDuplicatesMerged = 0;
             var skipped = 0;
 
-            // Repair numeric trailer aliases already created by earlier Fleetio syncs.
-            // "1" and "SLH1" are one operational trailer identity; SLH is canonical.
+            // Repair numeric and zero-padded trailer aliases already created by earlier Fleetio syncs.
+            // "02", "2", "TRL 02" and "SLH02" are one operational trailer identity: SLH2.
             foreach (var numeric in trailers.Where(item => item.Active && TryTrailerIndex(item.TrailerNumber, out _) && !item.TrailerNumber.Trim().StartsWith("SLH", StringComparison.OrdinalIgnoreCase)).ToList())
             {
                 if (!TryTrailerIndex(numeric.TrailerNumber, out var index)) continue;
@@ -144,6 +144,8 @@ public sealed class FleetioResilientSyncController(
                     {
                         TrailerNumber = ClipRequired(preferredTrailerNumber, 40),
                         Type = Clip(asset.Type, 80),
+                        StandardCapacity = 26,
+                        EuroCapacity = 33,
                         Active = true
                     };
                     db.Set<Trailer>().Add(trailer);
@@ -155,6 +157,8 @@ public sealed class FleetioResilientSyncController(
                     // Never replace the SLH operational identity with Fleetio's short numeric name or C-number.
                     if (!string.IsNullOrWhiteSpace(canonicalNumber)) trailer.TrailerNumber = canonicalNumber;
                     trailer.Type = Clip(asset.Type, 80) ?? trailer.Type;
+                    trailer.StandardCapacity ??= 26;
+                    trailer.EuroCapacity ??= 33;
                     trailer.Active = true;
                     trailersUpdated++;
                 }
@@ -299,7 +303,7 @@ public sealed class FleetioResilientSyncController(
     {
         index = 0;
         var text = value?.Trim() ?? string.Empty;
-        var match = Regex.Match(text, "^(?:SLH)?0*(\\d{1,3})$", RegexOptions.IgnoreCase);
+        var match = Regex.Match(text, "^(?:(?:SLH|TRAILER|TRL)[\\s_-]*)?0*(\\d{1,3})$", RegexOptions.IgnoreCase);
         return match.Success && int.TryParse(match.Groups[1].Value, out index) && index is >= 1 and <= 999;
     }
 
