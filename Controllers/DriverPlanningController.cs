@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Tracking;
+using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
 
@@ -30,6 +31,7 @@ public sealed class DriverPlanningController(TmsDbContext db) : ControllerBase
         {
             return Ok(Array.Empty<DriverAssignmentResponse>());
         }
+        await LoadCommercialStore.EnrichAsync(db, loads, ct);
         var driverIds = loads.Where(load => load.DriverId != null).Select(load => load.DriverId!.Value).Distinct().ToList();
         var vehicleIds = loads.Where(load => load.VehicleId != null).Select(load => load.VehicleId!.Value).Distinct().ToList();
         var trailerIds = loads.Where(load => load.TrailerId != null).Select(load => load.TrailerId!.Value).Distinct().ToList();
@@ -40,7 +42,7 @@ public sealed class DriverPlanningController(TmsDbContext db) : ControllerBase
         return Ok(loads.Select(load =>
         {
             var finalStop = load.Stops.OrderBy(stop => stop.Sequence).LastOrDefault();
-            return new DriverAssignmentResponse(load.Id, load.PlanningDate, load.Reference, load.Status.ToString(),
+            return new DriverAssignmentResponse(load.Id, load.PlanningDate, RunDisplayLabel.For(load), load.Status.ToString(),
                 load.DriverId is Guid driverId && drivers.TryGetValue(driverId, out var driver) ? new AssignmentDriver(driver.Id, driver.DisplayName, driver.EmployeeNumber) : null,
                 load.VehicleId is Guid vehicleId && vehicles.TryGetValue(vehicleId, out var vehicle) ? new AssignmentVehicle(vehicle.Id, vehicle.Registration, vehicle.FleetNumber) : null,
                 load.TrailerId is Guid trailerId && trailers.TryGetValue(trailerId, out var trailer) ? trailer.TrailerNumber : null,
@@ -68,6 +70,8 @@ public sealed class DriverPlanningController(TmsDbContext db) : ControllerBase
         {
             return Ok(new { planningDate, generatedAtUtc = DateTimeOffset.UtcNow, suggestions = Array.Empty<ReturnLoadSuggestion>() });
         }
+        await LoadCommercialStore.EnrichAsync(db, recentLoads, ct);
+        await LoadCommercialStore.EnrichAsync(db, targetLoads, ct);
         var driverIds = recentLoads.Select(load => load.DriverId!.Value).Distinct().ToList();
         var drivers = await SafeDictionary(db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id) && driver.Active), driver => driver.Id, ct);
 
@@ -103,8 +107,8 @@ public sealed class DriverPlanningController(TmsDbContext db) : ControllerBase
                 : consecutiveDays >= 5
                     ? $"Day {consecutiveDays + 1}: prioritise work that returns the driver toward home."
                     : isNorth ? "Driver finished in the north; consider a southbound return load." : "Driver worked yesterday and is available for continuity planning.";
-            suggestions.Add(new ReturnLoadSuggestion(driver.Id, driver.DisplayName, driver.EmployeeNumber, consecutiveDays, latestLoad.Reference,
-                latestLoad.PlanningDate, location, latitude, longitude, compatible?.Load.Id, compatible?.Load.Reference, priority, reason));
+            suggestions.Add(new ReturnLoadSuggestion(driver.Id, driver.DisplayName, driver.EmployeeNumber, consecutiveDays, RunDisplayLabel.For(latestLoad),
+                latestLoad.PlanningDate, location, latitude, longitude, compatible?.Load.Id, compatible is null ? null : RunDisplayLabel.For(compatible.Load), priority, reason));
         }
 
         return Ok(new { planningDate, generatedAtUtc = DateTimeOffset.UtcNow, suggestions = suggestions.OrderByDescending(item => item.Priority).ThenBy(item => item.DriverName) });
