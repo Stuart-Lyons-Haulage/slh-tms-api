@@ -16,10 +16,11 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
     {
         try
         {
+            await GeofenceRuntimeRepair.EnsureAsync(db, ct);
             await GeofenceRunProgression.EnsureSchemaAsync(db, ct);
 
             var now = DateTimeOffset.UtcNow;
-            var geofences = await db.SiteGeofences.AsNoTracking().OrderBy(x => x.Name).ToListAsync(ct);
+            var geofences = await db.SiteGeofences.AsNoTracking().OrderBy(x => x.Category).ThenBy(x => x.Name).ToListAsync(ct);
             var active = geofences.Where(x => x.Active).ToList();
             var valid = active.Where(x => PolygonIsValid(x.PolygonJson)).ToList();
             var linked = valid.Count(x => x.SiteId != null);
@@ -112,6 +113,24 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
                     unlinked = valid.Count - linked,
                     invalid = active.Count - valid.Count
                 },
+                records = geofences.Select(x => new
+                {
+                    x.Id,
+                    x.Name,
+                    x.Category,
+                    x.CategoryMaxWaitMinutes,
+                    x.MaxWaitMinutes,
+                    x.PendingEntryMinutes,
+                    x.PendingExitMinutes,
+                    x.SiteNumber,
+                    x.SiteId,
+                    x.PolygonJson,
+                    x.Active,
+                    polygonValid = PolygonIsValid(x.PolygonJson),
+                    geofenceAvailable = x.Active && PolygonIsValid(x.PolygonJson),
+                    siteLinked = x.SiteId != null,
+                    validationStatus = !PolygonIsValid(x.PolygonJson) ? "Invalid" : x.SiteId == null ? "Unlinked" : "Valid"
+                }),
                 latestTracking,
                 latestGeofenceHit = latestVisit is null ? null : new
                 {
