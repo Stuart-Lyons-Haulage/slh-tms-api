@@ -7,6 +7,8 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var pollInterval = TimeSpan.FromMinutes(Math.Max(1, options.PollIntervalMinutes));
+        var recoveryInterval = TimeSpan.FromMinutes(Math.Max(options.PollIntervalMinutes, options.RecoveryIntervalMinutes));
+        var nextRecoveryAtUtc = DateTimeOffset.MinValue;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -16,9 +18,13 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
                 var store = scope.ServiceProvider.GetRequiredService<DotTrackingTelemetryStore>();
                 var records = (await client.GetLatestVehicleEventsAsync(stoppingToken)).Select(DotTelemetryRecord.FromProvider);
                 await store.PersistAsync(records, stoppingToken);
-                var recoveryDay = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeBySystemTimeZoneId(DateTimeOffset.UtcNow, "Europe/London").DateTime).AddDays(-1);
-                var recovered = (await client.GetHistoricalVehicleEventsAsync(recoveryDay, stoppingToken)).Select(DotTelemetryRecord.FromProvider);
-                await store.PersistAsync(recovered, stoppingToken);
+                if (DateTimeOffset.UtcNow >= nextRecoveryAtUtc)
+                {
+                    var recoveryDay = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeBySystemTimeZoneId(DateTimeOffset.UtcNow, "Europe/London").DateTime).AddDays(-1);
+                    var recovered = (await client.GetHistoricalVehicleEventsAsync(recoveryDay, stoppingToken)).Select(DotTelemetryRecord.FromProvider);
+                    await store.PersistAsync(recovered, stoppingToken);
+                    nextRecoveryAtUtc = DateTimeOffset.UtcNow.Add(recoveryInterval);
+                }
             }
             catch (InvalidOperationException exception)
             {
@@ -26,7 +32,7 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
             }
             catch (Exception exception) when (!stoppingToken.IsCancellationRequested)
             {
-                logger.LogWarning(exception, "DOT tracking ingestion failed; retrying in {Minutes} minutes.", pollInterval.TotalMinutes);
+                logger.LogWarning(exception, "DOT tracking ingestion failed; retrying in {Minutes} minute(s).", pollInterval.TotalMinutes);
             }
             await Task.Delay(pollInterval, stoppingToken);
         }
