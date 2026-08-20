@@ -16,7 +16,7 @@ public sealed class SystemSyncController(
     IntegrationSyncCoordinator coordinator,
     DotTrackingOptions dot,
     TachoMasterOptions tacho,
-    SageHrOptions sage,
+    SageHrClient sage,
     FleetioOptions fleetio) : ControllerBase
 {
     [HttpGet("state")]
@@ -69,12 +69,6 @@ public sealed class SystemSyncController(
             "all" => Ok(await coordinator.ForceAllAsync(actor, ct)),
             _ => BadRequest(new { message = "Provider must be tacho, sage, fleetio or all." })
         };
-    }
-
-    private static object ProviderState(string name, bool configured, DateTimeOffset? lastUpdatedUtc, TimeSpan threshold, DateTimeOffset now)
-    {
-        var state = !configured ? "not-configured" : lastUpdatedUtc is null ? "pending" : now - lastUpdatedUtc > threshold ? "stale" : "current";
-        return new { name, configured, state, lastUpdatedUtc, ageMinutes = lastUpdatedUtc is null ? (double?)null : Math.Round((now - lastUpdatedUtc.Value).TotalMinutes, 1) };
     }
 
     private static ProviderSnapshot Provider(string name, bool configured, DateTimeOffset? lastUpdatedUtc, TimeSpan threshold, DateTimeOffset now)
