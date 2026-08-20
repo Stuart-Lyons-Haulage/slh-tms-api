@@ -50,27 +50,22 @@ public static class EmbeddedGeofenceEngine
             // later events (including departures/final deliveries) disappeared from
             // reconstruction, making completed runs regress to Upcoming.
             //
-            // First discover the small set of provider identifiers present in the
-            // operating window, resolve those against the planned vehicle aliases,
-            // then read the complete history only for the matched identifiers.
-            var providerIdentifiers = await db.VehicleTrackingEvents.AsNoTracking()
-                .Where(x => x.EventTimeUtc >= windowStartUtc && x.EventTimeUtc < windowEndUtc)
-                .Select(x => x.VehicleIdentifier)
-                .Distinct()
-                .ToListAsync(ct);
-
-            var matchedIdentifiers = providerIdentifiers
-                .Where(identifier => aliasesByVehicle.Values.Any(aliases =>
-                    ExecutionIdentityResolver.MatchesVehicleIdentifier(aliases, identifier)))
+            // Do not rediscover provider identifiers with a fleet-wide DISTINCT scan.
+            // Production can hold a full day's telemetry for every vehicle; scanning
+            // that set before filtering to today's planned vehicles can time out and
+            // force run-progress into its safe fallback. Query the indexed identifier
+            // values derived from the planned vehicle aliases instead.
+            var plannedIdentifiers = aliasesByVehicle.Values
+                .SelectMany(aliases => aliases)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-            events = matchedIdentifiers.Count == 0
+            events = plannedIdentifiers.Count == 0
                 ? []
                 : await db.VehicleTrackingEvents.AsNoTracking()
                     .Where(x => x.EventTimeUtc >= windowStartUtc &&
                                 x.EventTimeUtc < windowEndUtc &&
-                                matchedIdentifiers.Contains(x.VehicleIdentifier))
+                                plannedIdentifiers.Contains(x.VehicleIdentifier))
                     .OrderBy(x => x.EventTimeUtc)
                     .ToListAsync(ct);
         }
