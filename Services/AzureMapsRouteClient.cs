@@ -27,7 +27,7 @@ public sealed class AzureMapsRouteClient(HttpClient client, IConfiguration confi
             var endpoint = configuration["Maps:Endpoint"] ?? "https://atlas.microsoft.com";
             var routeUrl = $"{endpoint.TrimEnd('/')}/route/directions/json?api-version=1.0&routeType=fastest&traffic=true&travelMode=truck&vehicleCommercial=true&query={Uri.EscapeDataString(query)}";
             using var request = new HttpRequestMessage(HttpMethod.Get, routeUrl);
-            request.Headers.Authorization = new("Bearer", token.Token);
+            ApplyEntraHeaders(request, token);
             using var response = await client.SendAsync(request, ct);
             response.EnsureSuccessStatusCode();
             using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(ct));
@@ -55,7 +55,7 @@ public sealed class AzureMapsRouteClient(HttpClient client, IConfiguration confi
             var token = await new DefaultAzureCredential().GetTokenAsync(TokenContext, ct);
             var endpoint = configuration["Maps:Endpoint"] ?? "https://atlas.microsoft.com";
             using var request = new HttpRequestMessage(HttpMethod.Get, $"{endpoint.TrimEnd('/')}/search/address/json?api-version=1.0&limit=1&countrySet=GB&query={Uri.EscapeDataString(address.Trim())}");
-            request.Headers.Authorization = new("Bearer", token.Token);
+            ApplyEntraHeaders(request, token);
             using var response = await client.SendAsync(request, ct);
             response.EnsureSuccessStatusCode();
             using var document = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(ct));
@@ -96,6 +96,15 @@ public sealed class AzureMapsRouteClient(HttpClient client, IConfiguration confi
 
     public async Task<TimeSpan> TravelTime((decimal Longitude, decimal Latitude) from, (decimal Longitude, decimal Latitude) to, CancellationToken ct)
         => (await TravelTimeEstimate(from, to, ct)).TravelTime;
+
+    private void ApplyEntraHeaders(HttpRequestMessage request, AccessToken token)
+    {
+        var mapsClientId = configuration["Maps:ClientId"];
+        if (string.IsNullOrWhiteSpace(mapsClientId))
+            throw new InvalidOperationException("Azure Maps account client ID is not configured.");
+        request.Headers.Authorization = new("Bearer", token.Token);
+        request.Headers.TryAddWithoutValidation("x-ms-client-id", mapsClientId.Trim());
+    }
 
     private async Task<object?> SearchPostcode(string postcode, CancellationToken ct)
     {
