@@ -12,6 +12,8 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize]
 public sealed class SubcontractorResourcesController(TmsDbContext db) : ControllerBase
 {
+    private const string SubcontractorMarker = "Subcontractor:";
+
     [HttpPost("resources")]
     [Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> CreateResources(SubcontractorResourcesRequest request, CancellationToken ct)
@@ -76,7 +78,6 @@ public sealed class SubcontractorResourcesController(TmsDbContext db) : Controll
                 vehicle = new Vehicle
                 {
                     Registration = registration,
-                    FleetNumber = "SUB",
                     Abbreviation = Clip(request.VehicleAbbreviation, 20)?.ToUpperInvariant(),
                     Notes = BuildVehicleNotes(company, request.TrackingProvider, request.TrackingKey),
                     Active = true
@@ -86,12 +87,15 @@ public sealed class SubcontractorResourcesController(TmsDbContext db) : Controll
             }
             else
             {
-                var isSubcontractorVehicle = string.Equals(vehicle.FleetNumber, "SUB", StringComparison.OrdinalIgnoreCase)
-                    || (vehicle.Notes?.Contains("Subcontractor:", StringComparison.OrdinalIgnoreCase) ?? false);
+                var isSubcontractorVehicle = IsSubcontractorVehicle(vehicle);
                 if (!isSubcontractorVehicle)
                     return Conflict(new { message = $"Vehicle {registration} already exists in the SLH vehicle master and is not marked as a subcontractor." });
 
-                vehicle.FleetNumber = "SUB";
+                // Never assign every subcontractor the same fleet number. FleetNumber is one of
+                // the live Falcon correlation aliases, so a shared value such as SUB could cause
+                // one external vehicle's telemetry to be attached to another external run.
+                if (string.Equals(vehicle.FleetNumber, "SUB", StringComparison.OrdinalIgnoreCase))
+                    vehicle.FleetNumber = null;
                 vehicle.Abbreviation = Clip(request.VehicleAbbreviation, 20)?.ToUpperInvariant() ?? vehicle.Abbreviation;
                 vehicle.Notes = BuildVehicleNotes(company, request.TrackingProvider, request.TrackingKey);
                 vehicle.Active = true;
@@ -180,7 +184,6 @@ public sealed class SubcontractorResourcesController(TmsDbContext db) : Controll
             {
                 vehicle.Id,
                 vehicle.Registration,
-                vehicle.FleetNumber,
                 vehicle.Abbreviation,
                 vehicle.Active,
                 created = createdVehicle,
@@ -210,7 +213,7 @@ public sealed class SubcontractorResourcesController(TmsDbContext db) : Controll
             .ToListAsync(ct);
 
         var vehicles = await db.Vehicles.AsNoTracking()
-            .Where(item => item.Active && item.FleetNumber == "SUB")
+            .Where(item => item.Active && ((item.Notes != null && item.Notes.Contains(SubcontractorMarker)) || item.FleetNumber == "SUB"))
             .OrderBy(item => item.Registration)
             .Select(item => new
             {
@@ -278,6 +281,10 @@ public sealed class SubcontractorResourcesController(TmsDbContext db) : Controll
         return true;
     }
 
+    private static bool IsSubcontractorVehicle(Vehicle vehicle) =>
+        string.Equals(vehicle.FleetNumber, "SUB", StringComparison.OrdinalIgnoreCase)
+        || (vehicle.Notes?.Contains(SubcontractorMarker, StringComparison.OrdinalIgnoreCase) ?? false);
+
     private static string TrackingMessage(Vehicle? vehicle, string? provider, bool linked)
     {
         if (vehicle is null) return "Subcontractor driver added to the TMS master.";
@@ -296,7 +303,7 @@ public sealed class SubcontractorResourcesController(TmsDbContext db) : Controll
 
     private static string BuildVehicleNotes(string company, string? provider, string? trackingKey)
     {
-        var parts = new List<string> { $"Subcontractor: {company}" };
+        var parts = new List<string> { $"{SubcontractorMarker} {company}" };
         if (!string.IsNullOrWhiteSpace(provider)) parts.Add($"Tracking provider: {provider.Trim()}");
         if (!string.IsNullOrWhiteSpace(trackingKey)) parts.Add($"Tracking key: {trackingKey.Trim()}");
         var notes = string.Join(" | ", parts);
