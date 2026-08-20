@@ -84,7 +84,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
         if (!await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct))
             return Unauthorized(new { message = "This TV display is not paired. Open the TV display page in the signed-in TMS to get a new pairing code." });
 
-        var day = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
+        var day = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
         var now = DateTimeOffset.UtcNow;
         var loads = (await PlanningResilience.ReadLoadsAsync(db, day, ct))
             .Where(load => load.Status != LoadStatus.Cancelled)
@@ -208,6 +208,18 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
     }
 
     private static string Normalise(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
+    private static DateOnly UkOperatingDate(DateTimeOffset value)
+    {
+        try
+        {
+            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return DateOnly.FromDateTime(value.UtcDateTime);
+        }
+    }
 
     private static async Task<Dictionary<TKey, TValue>> SafeDictionary<TValue, TKey>(IQueryable<TValue> query, Func<TValue, TKey> key, CancellationToken ct) where TKey : notnull
     {
