@@ -87,6 +87,7 @@ public sealed class AssistantSafeFixService(
 
     private async Task RepairSites(List<string> changes, List<string> skipped, CancellationToken ct)
     {
+        await GeofenceRuntimeRepair.EnsureAsync(db, ct);
         var sites = await db.Sites.Where(x => x.Active).ToListAsync(ct);
         await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
         foreach (var site in sites.Where(x => !string.IsNullOrWhiteSpace(x.CollectionAddress) && string.IsNullOrWhiteSpace(x.MapLink)))
@@ -148,19 +149,60 @@ public sealed class AssistantSafeFixService(
     private async Task RepairMarkets(List<string> changes, List<string> skipped, CancellationToken ct)
     {
         var contacts = await db.MarketContacts.Where(x => x.Active).ToListAsync(ct);
-        foreach (var contact in contacts)
+        var identityGroups = contacts
+            .Select(contact => new
+            {
+                Contact = contact,
+                Market = CanonicalMarket(contact.Market),
+                Name = Clean(contact.Name) ?? contact.Name
+            })
+            .Where(item => !string.IsNullOrWhiteSpace(item.Market) && !string.IsNullOrWhiteSpace(item.Name))
+            .GroupBy(item => $"{Normalise(item.Market)}|{Normalise(item.Name)}", StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var group in identityGroups)
         {
-            var originalMarket = contact.Market; var originalName = contact.Name;
-            contact.Market = CanonicalMarket(contact.Market); contact.Name = Clean(contact.Name) ?? contact.Name; contact.StandOrLocation = Clean(contact.StandOrLocation) ?? InferStand(contact.Name); contact.Salesman = Clean(contact.Salesman); contact.Sender = Clean(contact.Sender);
-            if (!string.Equals(originalMarket, contact.Market, StringComparison.Ordinal) || !string.Equals(originalName, contact.Name, StringComparison.Ordinal)) changes.Add($"Normalised market record {originalName} to {contact.Market} / {contact.Name}.");
+            var ordered = group
+                .OrderByDescending(item => string.Equals(item.Contact.Market, item.Market, StringComparison.OrdinalIgnoreCase) && string.Equals(item.Contact.Name, item.Name, StringComparison.OrdinalIgnoreCase))
+                .ThenByDescending(item => MarketCompleteness(item.Contact))
+                .ThenBy(item => item.Contact.Id)
+                .ToList();
+            var canonicalItem = ordered[0];
+            var canonical = canonicalItem.Contact;
+            var originalMarket = canonical.Market;
+            var originalName = canonical.Name;
+            canonical.Market = canonicalItem.Market;
+            canonical.Name = canonicalItem.Name;
+            canonical.StandOrLocation = Clean(canonical.StandOrLocation) ?? InferStand(canonical.Name);
+            canonical.Salesman = Clean(canonical.Salesman);
+            canonical.Sender = Clean(canonical.Sender);
+            if (!string.Equals(originalMarket, canonical.Market, StringComparison.Ordinal) || !string.Equals(originalName, canonical.Name, StringComparison.Ordinal)) changes.Add($"Normalised market record {originalName} to {canonical.Market} / {canonical.Name}.");
+
+            var duplicates = ordered.Skip(1).Select(item => item.Contact).ToList();
+            if (duplicates.Count == 0) continue;
+            canonical.StandOrLocation ??= duplicates.Select(x => Clean(x.StandOrLocation) ?? InferStand(x.Name)).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
+            canonical.Salesman ??= duplicates.Select(x => Clean(x.Salesman)).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
+            canonical.Sender ??= duplicates.Select(x => Clean(x.Sender)).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
+            foreach (var duplicate in duplicates)
+            {
+                duplicate.StandOrLocation = Clean(duplicate.StandOrLocation);
+                duplicate.Salesman = Clean(duplicate.Salesman);
+                duplicate.Sender = Clean(duplicate.Sender);
+                duplicate.Active = false;
+            }
+            changes.Add($"Consolidated {duplicates.Count} duplicate market record{(duplicates.Count == 1 ? "" : "s")} for {canonical.Market} / {canonical.Name}.");
         }
-        var duplicateGroups = contacts.Where(x => !string.IsNullOrWhiteSpace(x.Market) && !string.IsNullOrWhiteSpace(x.Name)).GroupBy(x => $"{Normalise(CanonicalMarket(x.Market))}|{Normalise(x.Name)}|{Normalise(x.StandOrLocation)}", StringComparer.OrdinalIgnoreCase).Where(x => x.Count() > 1).ToList();
-        foreach (var group in duplicateGroups)
+
+        foreach (var contact in contacts.Where(x => x.Active && !identityGroups.SelectMany(group => group).Any(item => item.Contact.Id == x.Id)))
         {
-            var ordered = group.OrderByDescending(MarketCompleteness).ThenBy(x => x.Id).ToList(); var canonical = ordered[0]; var duplicates = ordered.Skip(1).ToList();
-            canonical.StandOrLocation ??= duplicates.Select(x => x.StandOrLocation).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)); canonical.Salesman ??= duplicates.Select(x => x.Salesman).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)); canonical.Sender ??= duplicates.Select(x => x.Sender).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x));
-            foreach (var duplicate in duplicates) duplicate.Active = false;
-            changes.Add($"Consolidated {duplicates.Count} duplicate market record{(duplicates.Count == 1 ? "" : "s")} for {canonical.Market} / {canonical.Name}{(string.IsNullOrWhiteSpace(canonical.StandOrLocation) ? "" : $" / {canonical.StandOrLocation}")}.");
+            var originalMarket = contact.Market;
+            var originalName = contact.Name;
+            contact.Market = CanonicalMarket(contact.Market);
+            contact.Name = Clean(contact.Name) ?? contact.Name;
+            contact.StandOrLocation = Clean(contact.StandOrLocation) ?? InferStand(contact.Name);
+            contact.Salesman = Clean(contact.Salesman);
+            contact.Sender = Clean(contact.Sender);
+            if (!string.Equals(originalMarket, contact.Market, StringComparison.Ordinal) || !string.Equals(originalName, contact.Name, StringComparison.Ordinal)) changes.Add($"Normalised market record {originalName} to {contact.Market} / {contact.Name}.");
         }
         foreach (var contact in contacts.Where(x => x.Active && (string.IsNullOrWhiteSpace(x.Market) || string.IsNullOrWhiteSpace(x.Name)))) skipped.Add($"Market record {contact.Id}: market/name is missing and requires manual review.");
         foreach (var contact in contacts.Where(x => x.Active && !string.Equals(x.Market, "Sender", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(x.StandOrLocation)).Take(30)) skipped.Add($"Market {contact.Market} / {contact.Name}: stand/location still needs enrichment.");
