@@ -319,7 +319,7 @@ public sealed class FleetioResilientSyncController(
     {
         index = 0;
         var text = value?.Trim() ?? string.Empty;
-        var match = Regex.Match(text, "^(?:(?:SLH|TRAILER|TRL)[\\s_-]*)?0*(\\d{1,3})$", RegexOptions.IgnoreCase);
+        var match = Regex.Match(text, "^(?:(?:SLH|TRAILER|TRL)[\\s_-]*)?0*(\\d{1,3})(?:$|[\\s:_-])", RegexOptions.IgnoreCase);
         return match.Success && int.TryParse(match.Groups[1].Value, out index) && index is >= 1 and <= 999;
     }
 
