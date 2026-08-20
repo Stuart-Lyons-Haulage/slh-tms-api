@@ -141,6 +141,8 @@ jobs:
             "Tracking__Dot__Password=secretref:dot-password"
             "Tracking__Dot__PollIntervalMinutes=1"
             "Tracking__Dot__RecoveryIntervalMinutes=60"
+            "Maps__Endpoint=https://atlas.microsoft.com"
+            "Maps__ClientId=58e0a4b4-b8e9-42e9-89cc-361ba0f33a5c"
             "Integrations__TachoMaster__Enabled=true"
             "Integrations__TachoMaster__BaseUrl=secretref:dot-base-url"
             "Integrations__TachoMaster__ApiKey=secretref:dot-api-key"
