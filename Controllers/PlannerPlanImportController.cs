@@ -85,7 +85,7 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
 
             var auditKey = $"planimport:{request.PlanningDate:yyyyMMdd}:{run.RunRef.ToUpperInvariant()}";
             var runJson = JsonSerializer.Serialize(run, JsonOptions);
-            var audit = await db.StagedImports.SingleOrDefaultAsync(x => x.IdempotencyKey == auditKey, ct);
+            var audit = await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(x => x.IdempotencyKey == auditKey, ct);
             var samePayload = audit is not null && string.Equals(audit.PayloadJson, runJson, StringComparison.Ordinal);
 
             if (load is null)
@@ -118,26 +118,25 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
             }
             else
             {
-                if (db.Entry(load).State == EntityState.Detached) db.Loads.Add(load);
-                else
+                if (db.Entry(load).State == EntityState.Detached)
                 {
-                    db.LoadStops.RemoveRange(load.Stops);
-                    load.Stops.Clear();
+                    load.Stops = BuildStops(load.Id, run, orders);
+                    db.Loads.Add(load);
                 }
-                load.Stops = BuildStops(load.Id, run, orders);
+                else if (!samePayload)
+                {
+                    var replacementStops = BuildStops(load.Id, run, orders);
+                    db.LoadStops.RemoveRange(load.Stops.ToList());
+                    db.LoadStops.AddRange(replacementStops);
+                    load.Stops = replacementStops;
+                }
+
                 await db.SaveChangesAsync(ct);
                 await LoadCommercialStore.SaveAsync(db, load, new LoadCommercialValues(null, null, null, null, null, null, null, null,
                     capacity.StandardEquivalentUsed, capacity.StandardEquivalentCapacity, "Mixed Standard/Euro", null, null, load.PlannerNotes), User.Identity?.Name, ct);
             }
 
-            audit ??= new StagedImport { EntityType = "plannerplanrun", IdempotencyKey = auditKey, PayloadJson = runJson, Source = "Planner plan import" };
-            if (db.Entry(audit).State == EntityState.Detached) db.StagedImports.Add(audit);
-            audit.PayloadJson = runJson;
-            audit.Status = StagingStatus.Promoted;
-            audit.ReviewedAtUtc = DateTimeOffset.UtcNow;
-            audit.ReviewedBy = User.Identity?.Name;
-            audit.ReviewNote = $"Imported as {tmsReference}.";
-            await db.SaveChangesAsync(ct);
+            await SaveImportAuditAsync(db, auditKey, runJson, tmsReference, User.Identity?.Name, ct);
 
             results.Add(new PlannerPlanRunResult(run.RunRef, tmsReference, load.Status == LoadStatus.Planned ? "ImportedPlanned" : "ImportedDraft", capacity.Status, capacity.UtilisationPercent, capacity.Message));
         }
@@ -154,6 +153,23 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
             unresolvedVehicles.OrderBy(x => x).ToList(),
             unresolvedTrailers.OrderBy(x => x).ToList(),
             results));
+    }
+
+    private static async Task SaveImportAuditAsync(TmsDbContext db, string auditKey, string runJson, string tmsReference, string? reviewedBy, CancellationToken ct)
+    {
+        var audit = await db.StagedImports.SingleOrDefaultAsync(x => x.IdempotencyKey == auditKey, ct);
+        if (audit is null)
+        {
+            audit = new StagedImport { EntityType = "plannerplanrun", IdempotencyKey = auditKey, PayloadJson = runJson, Source = "Planner plan import" };
+            db.StagedImports.Add(audit);
+        }
+
+        audit.PayloadJson = runJson;
+        audit.Status = StagingStatus.Promoted;
+        audit.ReviewedAtUtc = DateTimeOffset.UtcNow;
+        audit.ReviewedBy = reviewedBy;
+        audit.ReviewNote = $"Imported as {tmsReference}.";
+        await db.SaveChangesAsync(ct);
     }
 
     private static List<LoadStop> BuildStops(Guid loadId, PlannerPlanRunRequest run, IReadOnlyCollection<TransportOrder> orders)
