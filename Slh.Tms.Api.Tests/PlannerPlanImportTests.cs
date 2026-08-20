@@ -76,6 +76,8 @@ public sealed class PlannerPlanImportTests : IClassFixture<CustomWebFactory>
         Assert.Equal(LoadStatus.Planned, load.Status);
         Assert.Equal(2, finalDb.LoadStops.Count());
         Assert.DoesNotContain(finalDb.Loads, x => x.Reference.Contains("S3"));
+        Assert.Equal(1, finalDb.StagedImports.Count(x => x.IdempotencyKey == "planimport:20260818:COL-01" && x.Status == StagingStatus.Promoted));
+        Assert.Equal(0, finalDb.StagedImports.Count(x => x.IdempotencyKey == "planimport:20260818:S3"));
     }
 
     [Fact]
