@@ -60,14 +60,22 @@ public static class EmbeddedGeofenceEngine
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-            events = plannedIdentifiers.Count == 0
-                ? []
-                : await db.VehicleTrackingEvents.AsNoTracking()
-                    .Where(x => x.EventTimeUtc >= windowStartUtc &&
-                                x.EventTimeUtc < windowEndUtc &&
-                                plannedIdentifiers.Contains(x.VehicleIdentifier))
-                    .OrderBy(x => x.EventTimeUtc)
-                    .ToListAsync(ct);
+            try
+            {
+                events = plannedIdentifiers.Count == 0
+                    ? []
+                    : await db.VehicleTrackingEvents.AsNoTracking()
+                        .Where(x => x.EventTimeUtc >= windowStartUtc &&
+                                    x.EventTimeUtc < windowEndUtc &&
+                                    plannedIdentifiers.Contains(x.VehicleIdentifier))
+                        .OrderBy(x => x.EventTimeUtc)
+                        .ToListAsync(ct);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                db.ChangeTracker.Clear();
+                events = [];
+            }
         }
 
         var matchedEvents = events
@@ -84,9 +92,18 @@ public static class EmbeddedGeofenceEngine
         if (vehicles.Count > 0 && planningDate == UkOperatingDate(now))
         {
             var freshnessFloor = now.AddMinutes(-5);
-            var liveStatuses = await db.VehicleLiveStatuses.AsNoTracking()
-                .Where(x => x.LastReceivedAtUtc >= freshnessFloor)
-                .ToListAsync(ct);
+            List<VehicleLiveStatus> liveStatuses;
+            try
+            {
+                liveStatuses = await db.VehicleLiveStatuses.AsNoTracking()
+                    .Where(x => x.LastReceivedAtUtc >= freshnessFloor)
+                    .ToListAsync(ct);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                db.ChangeTracker.Clear();
+                liveStatuses = [];
+            }
             foreach (var live in liveStatuses)
             {
                 foreach (var vehicle in vehicles)
@@ -252,7 +269,7 @@ public static class EmbeddedGeofenceEngine
         {
             var candidate = loads
                 .Where(load => load.VehicleId == visit.VehicleId && load.Status != LoadStatus.Cancelled)
-                .SelectMany(load => load.Stops.Where(stop => !usedStops.Contains(stop.Id)).Select(stop => new { load, stop }))
+                .SelectMany(load => (load.Stops ?? []).Where(stop => !usedStops.Contains(stop.Id)).Select(stop => new { load, stop }))
                 .Where(x => NamesOverlap(x.stop.Name, visit.Fence.Name) || NamesOverlap(x.stop.Address, visit.Fence.Name))
                 .Select(x => new { x.load, x.stop, delta = x.stop.PlannedArrivalUtc is null ? double.MaxValue : Math.Abs((x.stop.PlannedArrivalUtc.Value - visit.EnteredAtUtc).TotalMinutes) })
                 .OrderBy(x => x.delta)
