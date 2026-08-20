@@ -96,8 +96,9 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
             else if (samePayload)
             {
                 unchanged++;
-                results.Add(new PlannerPlanRunResult(run.RunRef, tmsReference, "Unchanged", capacity.Status, capacity.UtilisationPercent, capacity.Message));
-                continue;
+                // Reapply derived fields on an identical import. Earlier imports may
+                // have created the run before pallet capacity persistence was added;
+                // treating the payload as a no-op leaves those run totals blank.
             }
             else updated++;
 
