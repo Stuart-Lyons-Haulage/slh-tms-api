@@ -12,6 +12,7 @@ public sealed class DotTrackingOptions
     public string Password { get; set; } = string.Empty;
     public string CompanyCode { get; set; } = string.Empty;
     public int PollIntervalMinutes { get; set; } = 5;
+    public int RecoveryIntervalMinutes { get; set; } = 60;
     public bool Enabled { get; set; }
     public int StaleAfterMinutes { get; set; } = 10;
 

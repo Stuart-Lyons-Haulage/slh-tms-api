@@ -139,6 +139,8 @@ jobs:
             "Tracking__Dot__CompanyCode=secretref:dot-company-code"
             "Tracking__Dot__Username=secretref:dot-username"
             "Tracking__Dot__Password=secretref:dot-password"
+            "Tracking__Dot__PollIntervalMinutes=1"
+            "Tracking__Dot__RecoveryIntervalMinutes=60"
             "Integrations__TachoMaster__Enabled=true"
             "Integrations__TachoMaster__BaseUrl=secretref:dot-base-url"
             "Integrations__TachoMaster__ApiKey=secretref:dot-api-key"
