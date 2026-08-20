@@ -115,9 +115,12 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
                         : tacho is null
                             ? "Live route and current TachoMaster duty are unavailable; this ETA must be verified before export."
                             : "TachoMaster matched the vehicle, but no fresh live route could be calculated; the planned ETA has not been adjusted for a break.");
+                // Planned/fallback timestamps are evidence only. Only a fresh live route is
+                // allowed to declare a customer-window risk on the operational wallboard.
+                var risk = source == "Live" ? Risk(eta, windowStart, windowEnd) : "Pending";
                 records.Add(new DeliveryEtaResponse(load.Id, RunDisplayLabel.For(load), load.Status.ToString(), stop.Id, stop.Sequence, stop.Name,
                     order?.Reference, order?.CustomerCode, vehicle?.Registration, eta, source, windowStart, windowEnd,
-                    Risk(eta, windowStart, windowEnd), live?.LastEventTimeUtc,
+                    risk, live?.LastEventTimeUtc,
                     tacho?.DriverName, tacho?.DriveAvailableTodayMinutes, (int)Math.Ceiling(cumulativeDrivingMinutes), breakDelayMinutes,
                     tachoAssessment.Status, tachoAssessment.Explanation));
             }
@@ -231,7 +234,7 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
     {
         if (eta is null || end is null) return "Pending";
         if (eta > end) return "Late";
-        if (end - eta <= TimeSpan.FromMinutes(30) || start is not null && eta < start.Value - TimeSpan.FromMinutes(30)) return "AtRisk";
+        if (end - eta <= TimeSpan.FromMinutes(30)) return "AtRisk";
         return "OnTrack";
     }
 
