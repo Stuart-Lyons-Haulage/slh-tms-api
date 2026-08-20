@@ -130,6 +130,36 @@ jobs:
       - name: Deploy image with stable runtime configuration
         run: |
           set -euo pipefail
+          existing_secrets="$(az containerapp secret list \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query '[].name' --output tsv 2>/dev/null || true)"
+          find_secret() {
+            for requested in "$@"; do
+              found="$(printf '%s\n' "$existing_secrets" | awk -v requested="$requested" 'tolower($0) == tolower(requested) { print; exit }')"
+              if test -n "$found"; then
+                printf '%s' "$found"
+                return 0
+              fi
+            done
+            return 1
+          }
+          fleetio_enabled_secret="$(find_secret fleetio-enabled Fleetio--Enabled || true)"
+          fleetio_api_key_secret="$(find_secret Fleetio--ApiKey fleetio-api-key Integrations--Fleetio--ApiKey || true)"
+          fleetio_account_token_secret="$(find_secret fleetio-account-token Fleetio--AccountToken Integrations--Fleetio--AccountToken || true)"
+          fleetio_base_url_secret="$(find_secret Fleetio--BaseUrl fleetio-base-url Integrations--Fleetio--BaseUrl || true)"
+          fleetio_env_args=()
+          if test -n "$fleetio_enabled_secret" && test -n "$fleetio_api_key_secret" && test -n "$fleetio_account_token_secret" && test -n "$fleetio_base_url_secret"; then
+            fleetio_env_args+=(
+              "Integrations__Fleetio__Enabled=secretref:$fleetio_enabled_secret"
+              "Integrations__Fleetio__ApiKey=secretref:$fleetio_api_key_secret"
+              "Integrations__Fleetio__AccountToken=secretref:$fleetio_account_token_secret"
+              "Integrations__Fleetio__BaseUrl=secretref:$fleetio_base_url_secret"
+            )
+            echo "Fleetio secrets found; Fleetio integration will stay enabled."
+          else
+            echo "Fleetio secrets are not all present on the API Container App; deploying without changing Fleetio configuration."
+          fi
           env_vars=(
             "ConnectionStrings__TmsDb=secretref:tms-db-connection"
             "Tracking__Dot__Enabled=true"
@@ -148,6 +178,7 @@ jobs:
             "Integrations__SageHr__ApiKey=secretref:sagehr-api-key"
             "Integrations__SageHr__DriverTeamName=Drivers"
             "Integrations__SageHr__DriverPositionKeyword=Driver"
+            "${fleetio_env_args[@]}"
             "Cors__AllowedOrigins__0=https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io"
             "Deployment__Revision=${{ github.sha }}"
           )
