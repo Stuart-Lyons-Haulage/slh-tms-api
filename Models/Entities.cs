@@ -189,6 +189,9 @@ public sealed class LoadStop
     public decimal? Latitude { get; set; }
     public decimal? Longitude { get; set; }
     public DateTimeOffset? PlannedArrivalUtc { get; set; }
+    // Stored in the audited planning register JSON. Keeping this non-mapped avoids
+    // making the live planner dependent on an immediate database migration.
+    [NotMapped, MaxLength(1000)] public string? PlannerNote { get; set; }
 }
 public sealed class IntegrationMapping
 {
