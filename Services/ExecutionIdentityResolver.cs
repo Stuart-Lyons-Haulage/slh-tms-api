@@ -107,7 +107,11 @@ public static class ExecutionIdentityResolver
                     .DefaultIfEmpty(0)
                     .Max()
             })
-            .Where(item => item.MatchLength > 0)
+            // Falcon-only identity records intentionally carry no compliance metrics.
+            // ETA calculations must only use a Tacho match when remaining-drive evidence
+            // is genuinely available for that same driver, otherwise the ETA remains
+            // unadjusted and explicitly reports Tacho as unavailable.
+            .Where(item => item.MatchLength > 0 && item.Status.DriveAvailableTodayMinutes is not null)
             .OrderByDescending(item => item.MatchLength)
             .ThenByDescending(item => item.Status.DutyStartUtc)
             .Select(item => item.Status)
