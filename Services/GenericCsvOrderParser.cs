@@ -214,7 +214,11 @@ public sealed class GenericCsvOrderParser
     }
     private static string NormaliseKey(string value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
     private static string Normalise(string value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
-    private static string SafeToken(string value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).ToArray()) is { Length: > 0 } clean ? clean[..Math.Min(clean.Length, 30)] : "ORDER";
+    private static string SafeToken(string value)
+    {
+        var clean = new string((value ?? string.Empty).Where(char.IsLetterOrDigit).ToArray());
+        return clean.Length > 0 ? clean[..Math.Min(clean.Length, 30)] : "ORDER";
+    }
     private static string StableEmailReference(string value)
     {
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(value ?? string.Empty));
