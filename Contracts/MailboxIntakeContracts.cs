@@ -25,6 +25,8 @@ public sealed record MailboxEmailIntakeEnvelope
     public string? Importance { get; init; }
     public string? WebLink { get; init; }
     public int? AttachmentCount { get; init; }
+    public string? CorrelationId { get; init; }
+    public string? FlowRunId { get; init; }
     public List<MailboxIntakeAttachmentEnvelope>? Attachments { get; init; }
 
     public MailboxEmailIntakeRequest ToParserRequest() => new(
