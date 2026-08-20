@@ -70,6 +70,7 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
             var currentEta = now;
             var cumulativeDrivingMinutes = 0d;
             var breakDelayMinutes = 0;
+            var routeContainsEstimate = false;
             var initialContinuousDriving = tacho is null ? 0 : tacho.BreakMinutes >= 45 ? tacho.DriveMinutes % 270 : Math.Min(tacho.DriveMinutes, 270);
 
             // ETA is a forecast of the remaining journey. A geofence-confirmed and departed
@@ -80,14 +81,16 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
                 var eta = stop.PlannedArrivalUtc;
                 var source = eta is null ? "Unavailable" : "Planned";
 
-                // Without geofence execution we cannot prove the remaining sequence. Keep
-                // the planned ETA rather than publishing a live route that may include
-                // already-completed collections/deliveries.
-                if (geofence is not null && current is not null && stop.Longitude is not null && stop.Latitude is not null && live is not null && now - live.LastEventTimeUtc <= TimeSpan.FromMinutes(30))
+                // Customer-grade live ETA requires proved run progression and a very fresh
+                // tracker fix. RoadTech/DOT is polled every minute, so five minutes is the
+                // maximum position age allowed to drive a live promise.
+                if (geofence is not null && current is not null && stop.Longitude is not null && stop.Latitude is not null && live is not null && now - live.LastEventTimeUtc <= RunExecutionEvidenceRules.MaximumLiveTrackingAge)
                 {
                     try
                     {
-                        var travelTime = await maps.TravelTime(current.Value, (stop.Longitude.Value, stop.Latitude.Value), ct);
+                        var routeEstimate = await maps.TravelTimeEstimate(current.Value, (stop.Longitude.Value, stop.Latitude.Value), ct);
+                        routeContainsEstimate |= routeEstimate.IsApproximate;
+                        var travelTime = routeEstimate.TravelTime;
                         cumulativeDrivingMinutes += travelTime.TotalMinutes;
                         var requiredBreaks = tacho is null ? 0 : Math.Max(0, (int)Math.Floor((initialContinuousDriving + cumulativeDrivingMinutes - 0.01) / 270d));
                         if (requiredBreaks * 45 > breakDelayMinutes)
@@ -98,7 +101,7 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
                         }
                         currentEta += travelTime;
                         eta = currentEta;
-                        source = "Live";
+                        source = routeContainsEstimate ? "Estimated" : "Live";
                         current = (stop.Longitude.Value, stop.Latitude.Value);
                     }
                     catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException or Azure.Identity.AuthenticationFailedException)
@@ -110,13 +113,17 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
                 var windowEnd = order?.DeliveryWindowEndUtc ?? (IsDeliveryStop(stop) ? stop.PlannedArrivalUtc : null);
                 var tachoAssessment = source == "Live"
                     ? TachoAssessment(tacho, cumulativeDrivingMinutes, breakDelayMinutes)
-                    : (Status: "RouteUnavailable", Explanation: geofence is null
-                        ? "Geofence execution was unavailable, so the remaining route could not be proved and no live ETA was issued."
-                        : tacho is null
-                            ? "Live route and current TachoMaster duty are unavailable; this ETA must be verified before export."
-                            : "TachoMaster matched the vehicle, but no fresh live route could be calculated; the planned ETA has not been adjusted for a break.");
-                // Planned/fallback timestamps are evidence only. Only a fresh live route is
-                // allowed to declare a customer-window risk on the operational wallboard.
+                    : source == "Estimated"
+                        ? (Status: "EstimateOnly", Explanation: "Azure Maps live truck routing was unavailable for at least one remaining leg. The resilient road estimate is advisory and cannot declare customer ETA risk.")
+                        : (Status: "RouteUnavailable", Explanation: geofence is null
+                            ? "Geofence execution was unavailable, so the remaining route could not be proved and no live ETA was issued."
+                            : live is not null && now - live.LastEventTimeUtc > RunExecutionEvidenceRules.MaximumLiveTrackingAge
+                                ? "Tracking is older than five minutes, so the planned ETA is retained until a fresh RoadTech/DOT position arrives."
+                                : tacho is null
+                                    ? "Live route and current TachoMaster duty are unavailable; this ETA must be verified before export."
+                                    : "TachoMaster matched the vehicle, but no fresh live route could be calculated; the planned ETA has not been adjusted for a break.");
+                // Only a fully live Azure Maps route from fresh tracking may declare a
+                // customer-window risk. Estimated or planned values remain visible as evidence.
                 var risk = source == "Live" ? Risk(eta, windowStart, windowEnd) : "Pending";
                 records.Add(new DeliveryEtaResponse(load.Id, RunDisplayLabel.For(load), load.Status.ToString(), stop.Id, stop.Sequence, stop.Name,
                     order?.Reference, order?.CustomerCode, vehicle?.Registration, eta, source, windowStart, windowEnd,
