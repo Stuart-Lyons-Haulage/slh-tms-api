@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Slh.Tms.Api.Contracts;
 using Slh.Tms.Api.Data;
@@ -32,6 +33,22 @@ public sealed class PlannerPlanImportTests : IClassFixture<CustomWebFactory>
         var result = PlannerPlanImportRules.Capacity(run);
         Assert.Equal("Green", result.Status);
         Assert.Equal(98.5m, result.UtilisationPercent);
+    }
+
+    [Theory]
+    [InlineData("02:59:00", "Run 1 PM")]
+    [InlineData("03:00:00", "Run 1 AM")]
+    [InlineData("14:59:00", "Run 1 AM")]
+    [InlineData("15:00:00", "Run 1 PM")]
+    public void Planner_run_label_uses_collection_time_period_boundaries(string collectFrom, string expected)
+    {
+        var date = new DateOnly(2026, 8, 20);
+        var run = new PlannerPlanRunRequest("W1-01", "1", "Wave 1", date, null, null, null, null, true, "Matched",
+            new PlannerPlanSourceRequest("planner.xlsm", "Collection Plan"), [
+                new PlannerPlanStopRequest(1, "Collection", "Delivery", 10, "REF-1", null, collectFrom, null, null, 2)
+            ]);
+
+        Assert.Equal(expected, PlannerPlanImportRules.PlannerRunLabel(run));
     }
 
     [Fact]
@@ -76,6 +93,41 @@ public sealed class PlannerPlanImportTests : IClassFixture<CustomWebFactory>
         Assert.Equal(LoadStatus.Planned, load.Status);
         Assert.Equal(2, finalDb.LoadStops.Count());
         Assert.DoesNotContain(finalDb.Loads, x => x.Reference.Contains("S3"));
+    }
+
+    [Fact]
+    public async Task Import_writes_pallet_control_allocations_for_matched_orders()
+    {
+        var date = new DateOnly(2026, 8, 20);
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.TransportOrders.AddRange(
+                new TransportOrder { Reference = "REF-1", CustomerCode = "NWF", CollectionDate = date, Pallets = 11, SellerName = "NWF-Merston", StallNumber = "Aldi-Darlington" },
+                new TransportOrder { Reference = "REF-2", CustomerCode = "NWF", CollectionDate = date, Pallets = 6, SellerName = "NWF-Merston", StallNumber = "Morrisons-Stockton" });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Access");
+        var request = new PlannerPlanImportRequest("slh-planner-plan-v2", date, [
+            new PlannerPlanRunRequest("W1-01", "1", "Wave 1", date, null, null, null, null, true, "Matched",
+                new PlannerPlanSourceRequest("planner.xlsm", "Collection Plan"), [
+                    new PlannerPlanStopRequest(1, "NWF-Merston", "Aldi-Darlington", 11, "REF-1", null, "04:30:00", "05:00:00", "18:00:00", 4),
+                    new PlannerPlanStopRequest(2, "NWF-Merston", "Morrisons-Stockton", 6, "REF-2", null, "04:30:00", "05:00:00", "18:00:00", 5)
+                ])
+        ]);
+
+        var response = await client.PostAsJsonAsync("/api/v1/planning/import-plan", request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        using var finalScope = _factory.Services.CreateScope();
+        var finalDb = finalScope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var allocations = finalDb.StagedImports.Where(row => row.EntityType == PlanningAllocationStore.EntityType).ToList();
+        Assert.Equal(2, allocations.Count);
+        Assert.Equal(17, allocations.Sum(row => JsonSerializer.Deserialize<AllocationState>(row.PayloadJson, new JsonSerializerOptions(JsonSerializerDefaults.Web))!.Pallets));
+        var load = finalDb.Loads.Single(row => row.Reference == "PLAN-20260820-W1-01");
+        await LoadCommercialStore.EnrichAsync(finalDb, [load], CancellationToken.None);
+        Assert.Contains("Planner run: Run 1 AM", load.PlannerNotes);
     }
 
     [Fact]
@@ -132,4 +184,6 @@ public sealed class PlannerPlanImportTests : IClassFixture<CustomWebFactory>
 
     private static PlannerPlanStopRequest Stop(int sequence, decimal pallets, string palletType) =>
         new(sequence, "Collection", "Delivery", pallets, $"REF-{sequence}", palletType, null, null, null, sequence + 1);
+
+    private sealed record AllocationState(Guid OrderId, Guid LoadId, int Pallets, DateOnly Date, DateTimeOffset UpdatedAtUtc, string? UpdatedBy);
 }

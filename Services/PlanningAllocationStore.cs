@@ -10,6 +10,40 @@ public static class PlanningAllocationStore
     public const string EntityType = "planningpalletallocation";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
 
+    public static async Task<int> SyncPlannerImportAllocationsAsync(
+        TmsDbContext db,
+        Guid loadId,
+        DateOnly date,
+        IEnumerable<(Guid OrderId, int Pallets)> allocations,
+        string? reviewedBy,
+        CancellationToken ct)
+    {
+        var grouped = allocations
+            .Where(allocation => allocation.Pallets > 0)
+            .GroupBy(allocation => allocation.OrderId)
+            .Select(group => (OrderId: group.Key, Pallets: group.Sum(allocation => allocation.Pallets)))
+            .ToList();
+        if (grouped.Count == 0) return 0;
+
+        var stored = await db.StagedImports.AsNoTracking()
+            .Where(row => row.EntityType == EntityType && row.Status == StagingStatus.Promoted)
+            .OrderByDescending(row => row.ReceivedAtUtc)
+            .Take(20000)
+            .ToListAsync(ct);
+
+        var changed = 0;
+        foreach (var allocation in grouped)
+        {
+            var current = LatestFor(stored, allocation.OrderId, loadId, date);
+            if (current?.Pallets == allocation.Pallets) continue;
+            Add(db, allocation.OrderId, loadId, allocation.Pallets, date, reviewedBy, "SLH planner import pallet allocation");
+            changed++;
+        }
+
+        if (changed > 0) await db.SaveChangesAsync(ct);
+        return changed;
+    }
+
     public static async Task<bool> SyncSingleOrderRunAsync(TmsDbContext db, Load load, string? reviewedBy, CancellationToken ct)
     {
         var candidate = await CandidateAsync(db, load, ct);

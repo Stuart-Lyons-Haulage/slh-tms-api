@@ -33,6 +33,7 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
         List<TransportOrder> orders;
         try { orders = await db.TransportOrders.AsNoTracking().ToListAsync(ct); }
         catch (Exception ex) when (IsSchemaUnavailable(ex)) { db.ChangeTracker.Clear(); orders = await PlanningRegisterStore.ReadOrdersAsync(db, request.PlanningDate, request.PlanningDate.AddDays(2), ct); }
+        var orderDetails = await ReadOrderDetails(request.PlanningDate, ct);
 
         var warnings = new List<string>();
         var unresolvedDrivers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -87,6 +88,7 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
             var runJson = JsonSerializer.Serialize(run, JsonOptions);
             var audit = await db.StagedImports.SingleOrDefaultAsync(x => x.IdempotencyKey == auditKey, ct);
             var samePayload = audit is not null && string.Equals(audit.PayloadJson, runJson, StringComparison.Ordinal);
+            var importAllocations = BuildImportAllocations(run, orders, orderDetails);
 
             if (load is null)
             {
@@ -95,6 +97,13 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
             }
             else if (samePayload)
             {
+                var allocationChanges = await PlanningAllocationStore.SyncPlannerImportAllocationsAsync(db, load.Id, request.PlanningDate, importAllocations, User.Identity?.Name, ct);
+                if (allocationChanges > 0)
+                {
+                    updated++;
+                    results.Add(new PlannerPlanRunResult(run.RunRef, tmsReference, "Updated", capacity.Status, capacity.UtilisationPercent, $"{allocationChanges} pallet allocation{(allocationChanges == 1 ? string.Empty : "s")} backfilled for Pallet Control."));
+                    continue;
+                }
                 unchanged++;
                 results.Add(new PlannerPlanRunResult(run.RunRef, tmsReference, "Unchanged", capacity.Status, capacity.UtilisationPercent, capacity.Message));
                 continue;
@@ -112,7 +121,7 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
 
             if (registerFallback)
             {
-                load.Stops = BuildStops(load.Id, run, orders);
+                load.Stops = BuildStops(load.Id, run, orders, orderDetails);
                 await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
             }
             else
@@ -123,11 +132,12 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
                     db.LoadStops.RemoveRange(load.Stops);
                     load.Stops.Clear();
                 }
-                load.Stops = BuildStops(load.Id, run, orders);
+                load.Stops = BuildStops(load.Id, run, orders, orderDetails);
                 await db.SaveChangesAsync(ct);
                 await LoadCommercialStore.SaveAsync(db, load, new LoadCommercialValues(null, null, null, null, null, null, null, null,
                     capacity.StandardEquivalentUsed, capacity.StandardEquivalentCapacity, "Mixed Standard/Euro", null, null, load.PlannerNotes), User.Identity?.Name, ct);
             }
+            var allocationChangesForRun = await PlanningAllocationStore.SyncPlannerImportAllocationsAsync(db, load.Id, request.PlanningDate, importAllocations, User.Identity?.Name, ct);
 
             audit ??= new StagedImport { EntityType = "plannerplanrun", IdempotencyKey = auditKey, PayloadJson = runJson, Source = "Planner plan import" };
             if (db.Entry(audit).State == EntityState.Detached) db.StagedImports.Add(audit);
@@ -138,7 +148,10 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
             audit.ReviewNote = $"Imported as {tmsReference}.";
             await db.SaveChangesAsync(ct);
 
-            results.Add(new PlannerPlanRunResult(run.RunRef, tmsReference, load.Status == LoadStatus.Planned ? "ImportedPlanned" : "ImportedDraft", capacity.Status, capacity.UtilisationPercent, capacity.Message));
+            var detail = allocationChangesForRun > 0
+                ? $"{capacity.Message} {allocationChangesForRun} pallet allocation{(allocationChangesForRun == 1 ? string.Empty : "s")} written for Pallet Control.".Trim()
+                : capacity.Message;
+            results.Add(new PlannerPlanRunResult(run.RunRef, tmsReference, load.Status == LoadStatus.Planned ? "ImportedPlanned" : "ImportedDraft", capacity.Status, capacity.UtilisationPercent, detail));
         }
 
         return Ok(new PlannerPlanImportSummary(
@@ -155,7 +168,7 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
             results));
     }
 
-    private static List<LoadStop> BuildStops(Guid loadId, PlannerPlanRunRequest run, IReadOnlyCollection<TransportOrder> orders)
+    private static List<LoadStop> BuildStops(Guid loadId, PlannerPlanRunRequest run, IReadOnlyCollection<TransportOrder> orders, IReadOnlyDictionary<string, OrderDetail> orderDetails)
     {
         var sourceRows = run.Stops.OrderBy(stop => stop.Sequence).ToList();
         var stops = new List<LoadStop>();
@@ -183,7 +196,7 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
 
         foreach (var group in GroupByDeliveryDeadline(sourceRows))
         {
-            var order = FirstMatchingOrder(group.Rows, orders);
+            var order = FirstMatchingOrder(group.Rows, orders, orderDetails, new HashSet<Guid>(), run.PlanningDate);
             stops.Add(new LoadStop
             {
                 Id = Guid.NewGuid(),
@@ -233,15 +246,68 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
         return groups;
     }
 
-    private static TransportOrder? FirstMatchingOrder(IEnumerable<PlannerPlanStopRequest> rows, IReadOnlyCollection<TransportOrder> orders)
+    private static List<(Guid OrderId, int Pallets)> BuildImportAllocations(
+        PlannerPlanRunRequest run,
+        IReadOnlyCollection<TransportOrder> orders,
+        IReadOnlyDictionary<string, OrderDetail> orderDetails)
+    {
+        var allocations = new List<(Guid OrderId, int Pallets)>();
+        var used = new HashSet<Guid>();
+        foreach (var row in (run.Stops ?? []).OrderBy(stop => stop.Sequence))
+        {
+            if (row.Pallets is null || row.Pallets <= 0 || decimal.Truncate(row.Pallets.Value) != row.Pallets.Value) continue;
+            var order = FirstMatchingOrder([row], orders, orderDetails, used, run.PlanningDate);
+            if (order is null) continue;
+            allocations.Add((order.Id, decimal.ToInt32(row.Pallets.Value)));
+            used.Add(order.Id);
+        }
+        return allocations;
+    }
+
+    private static TransportOrder? FirstMatchingOrder(
+        IEnumerable<PlannerPlanStopRequest> rows,
+        IReadOnlyCollection<TransportOrder> orders,
+        IReadOnlyDictionary<string, OrderDetail> orderDetails,
+        ISet<Guid> usedOrderIds,
+        DateOnly planningDate)
     {
         foreach (var row in rows)
         {
-            if (string.IsNullOrWhiteSpace(row.Reference)) continue;
-            var order = orders.FirstOrDefault(item => string.Equals(item.Reference, row.Reference, StringComparison.OrdinalIgnoreCase));
+            var order = MatchOrder(row, orders, orderDetails, usedOrderIds, planningDate);
             if (order is not null) return order;
         }
         return null;
+    }
+
+    private static TransportOrder? MatchOrder(
+        PlannerPlanStopRequest row,
+        IReadOnlyCollection<TransportOrder> orders,
+        IReadOnlyDictionary<string, OrderDetail> orderDetails,
+        ISet<Guid> usedOrderIds,
+        DateOnly planningDate)
+    {
+        if (!string.IsNullOrWhiteSpace(row.Reference))
+        {
+            var exact = orders.FirstOrDefault(item => !usedOrderIds.Contains(item.Id) && string.Equals(item.Reference, row.Reference, StringComparison.OrdinalIgnoreCase));
+            if (exact is not null) return exact;
+        }
+
+        if (row.Pallets is null || decimal.Truncate(row.Pallets.Value) != row.Pallets.Value) return null;
+        var pallets = decimal.ToInt32(row.Pallets.Value);
+        var collection = Normalize(row.CollectionSite);
+        var destination = Normalize(row.DeliverySite);
+        if (pallets <= 0 || string.IsNullOrWhiteSpace(collection) || string.IsNullOrWhiteSpace(destination)) return null;
+
+        var candidates = orders.Where(order =>
+        {
+            if (usedOrderIds.Contains(order.Id)) return false;
+            if (order.CollectionDate != planningDate) return false;
+            orderDetails.TryGetValue(Normalize(order.Reference), out var detail);
+            return EffectiveOrderedPallets(order, detail) == pallets
+                && Normalize(Collection(detail, order)) == collection
+                && Normalize(Destination(detail, order)) == destination;
+        }).Take(2).ToList();
+        return candidates.Count == 1 ? candidates[0] : null;
     }
 
     private static string BuildGroupedStopDetail(IEnumerable<PlannerPlanStopRequest> rows, bool includeDelivery)
@@ -345,6 +411,74 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
         return text.StartsWith("eta", StringComparison.OrdinalIgnoreCase) ? $"manual ETA {text[3..].Trim()}" : $"note {text}";
     }
 
+    private async Task<Dictionary<string, OrderDetail>> ReadOrderDetails(DateOnly date, CancellationToken ct)
+    {
+        var result = new Dictionary<string, OrderDetail>(StringComparer.OrdinalIgnoreCase);
+        var rows = await db.StagedImports.AsNoTracking()
+            .Where(x => (x.EntityType == "order" || x.EntityType == "register:order") && x.Status != StagingStatus.Rejected)
+            .OrderByDescending(x => x.ReviewedAtUtc ?? x.ReceivedAtUtc).ThenByDescending(x => x.ReceivedAtUtc).Take(8000).ToListAsync(ct);
+        foreach (var row in rows)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(row.PayloadJson);
+                var root = document.RootElement;
+                var reference = Text(root, "poNumber", "reference", "orderReference", "orderRef");
+                if (string.IsNullOrWhiteSpace(reference) || result.ContainsKey(Normalize(reference))) continue;
+                if (DateOnly.TryParse(Text(root, "collectionDate"), out var collectionDate) && collectionDate != date) continue;
+                var collection = Text(root, "collectionLocation", "collectionSite", "collection", "sellerName", "pickupLocation", "pickupSite");
+                var destination = Text(root, "deliveryLocation", "deliverySite", "delivery", "destination", "depot", "stallNumber");
+                var group = Text(root, "planningGroup", "palletOrderGroup", "collectionGroup");
+                var temperature = Text(root, "temperature", "temperatureC", "temp", "temperatureRequirement") ?? Tagged(Text(root, "driverInstructions", "notes"), "Temperature");
+                var pallets = Int(root, "pallets", "palletQty", "palletQuantity", "quantity");
+                var amended = row.ReviewNote?.Contains("Amended from Manage Jobs", StringComparison.OrdinalIgnoreCase) == true;
+                result[Normalize(reference)] = new OrderDetail(reference, collection, destination, group, temperature, pallets, row.Source, row.ReviewedAtUtc ?? row.ReceivedAtUtc, amended);
+            }
+            catch (JsonException) { }
+        }
+        return result;
+    }
+
+    private static int EffectiveOrderedPallets(TransportOrder order, OrderDetail? detail)
+    {
+        var value = detail?.Amended == true ? detail.Pallets ?? order.Pallets : order.Pallets ?? detail?.Pallets;
+        return Math.Max(value ?? 0, 0);
+    }
+
+    private static string Collection(OrderDetail? detail, TransportOrder order) =>
+        !string.IsNullOrWhiteSpace(detail?.Collection) ? detail.Collection! : !string.IsNullOrWhiteSpace(order.SellerName) ? order.SellerName! : "Collection not mapped";
+
+    private static string Destination(OrderDetail? detail, TransportOrder order)
+    {
+        if (!string.IsNullOrWhiteSpace(detail?.Destination)) return detail.Destination!;
+        if (!string.IsNullOrWhiteSpace(order.StallNumber)) return order.StallNumber!;
+        var tagged = Tagged(order.DriverInstructions, "Depot") ?? Tagged(order.DriverInstructions, "Delivery site") ?? Tagged(order.DriverInstructions, "Destination");
+        return string.IsNullOrWhiteSpace(tagged) ? "Destination not mapped" : tagged;
+    }
+
+    private static string? Tagged(string? notes, string label)
+    {
+        if (string.IsNullOrWhiteSpace(notes)) return null;
+        var prefix = $"{label}:";
+        return notes.Split('·', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim())
+            .FirstOrDefault(x => x.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))?[prefix.Length..].Trim();
+    }
+
+    private static string? Text(JsonElement root, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            foreach (var property in root.EnumerateObject())
+            {
+                if (Normalize(property.Name) != Normalize(name)) continue;
+                return property.Value.ValueKind == JsonValueKind.String ? property.Value.GetString()?.Trim() : property.Value.ValueKind is JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False ? property.Value.ToString() : null;
+            }
+        }
+        return null;
+    }
+
+    private static int? Int(JsonElement root, params string[] names) => int.TryParse(Text(root, names), out var value) ? value : null;
+
     private static DateTimeOffset? EarliestPlannerTime(DateOnly date, IEnumerable<string?> values)
     {
         return values
@@ -367,4 +501,6 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
         var message = exception.GetBaseException().Message;
         return exception is InvalidOperationException or DbUpdateException || message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase) || message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
     }
+
+    private sealed record OrderDetail(string Reference, string? Collection, string? Destination, string? Group, string? Temperature, int? Pallets, string? Source, DateTimeOffset UpdatedAtUtc, bool Amended);
 }
