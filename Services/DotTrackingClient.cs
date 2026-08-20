@@ -83,6 +83,22 @@ public sealed class DotTrackingClient
         }
     }
 
+    public async Task<IReadOnlyList<RoadTechTelemetryItem>> GetHistoricalVehicleEventsAsync(DateOnly day, CancellationToken cancellationToken = default)
+    {
+        if (!_options.Enabled) return [];
+        ValidateConfiguration();
+        var sid = await LoginAsync(cancellationToken);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "Falcon/GetHistoricalTelemetry");
+        request.Headers.Add("APIKEY", _options.ApiKey);
+        request.Headers.Add("SID", sid);
+        request.Content = JsonContent.Create(new RoadTechTelemetryRequest(_options.CompanyCode, day.ToString("yyyy-MM-dd"), _options.DataMask, 0, _options.OnlyLive), options: RoadTechJson.Options);
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        if (!response.IsSuccessStatusCode) throw new HttpRequestException(await RoadTechFailureDetail(response, "Falcon/GetHistoricalTelemetry", cancellationToken), null, response.StatusCode);
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        var page = await JsonSerializer.DeserializeAsync<RoadTechTelemetryPage>(stream, RoadTechJson.Options, cancellationToken);
+        return page?.Data ?? [];
+    }
+
     private async Task<string> LoginAsync(CancellationToken cancellationToken)
     {
         var passwordAttempts = LoginPasswordAttempts(_options.Password);
