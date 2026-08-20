@@ -96,6 +96,7 @@ fleetioOptions.ApiVersion = ReadSetting(builder.Configuration, fleetioOptions.Ap
 if (fleetioOptions.BaseUrl.EndsWith("/api/v2", StringComparison.OrdinalIgnoreCase)) fleetioOptions.BaseUrl = fleetioOptions.BaseUrl[..^1] + "1";
 builder.Services.AddSingleton(fleetioOptions);
 builder.Services.AddScoped<AzureSmsDispatchService>();
+builder.Services.AddScoped<IntegrationSyncCoordinator>();
 builder.Services.AddHttpClient<DriverSmsDispatchService>();
 builder.Services.AddHttpClient<SageHrClient>();
 builder.Services.AddHttpClient<DotTrackingClient>();
@@ -103,6 +104,7 @@ builder.Services.AddHttpClient<TachoMasterClient>();
 builder.Services.AddHttpClient<AzureMapsRouteClient>();
 builder.Services.AddHttpClient<FleetioClient>();
 builder.Services.AddHostedService<DotTrackingIngestionService>();
+builder.Services.AddHostedService<IntegrationBackgroundSyncService>();
 
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
 
