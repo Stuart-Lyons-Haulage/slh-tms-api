@@ -31,7 +31,7 @@ public sealed class SubcontractorResourcesController(TmsDbContext db) : Controll
             var driverName = Clean(request.DriverName)!;
             var employeeNumber = !string.IsNullOrWhiteSpace(request.DriverReference)
                 ? Clip(request.DriverReference, 40)!.ToUpperInvariant()
-                : BuildDriverReference(company!, driverName);
+                : BuildDriverReference(company, driverName);
 
             driver = await db.Drivers.FirstOrDefaultAsync(item => item.EmployeeNumber == employeeNumber, ct);
             if (driver is null)
@@ -78,7 +78,7 @@ public sealed class SubcontractorResourcesController(TmsDbContext db) : Controll
                     Registration = registration,
                     FleetNumber = "SUB",
                     Abbreviation = Clip(request.VehicleAbbreviation, 20)?.ToUpperInvariant(),
-                    Notes = BuildVehicleNotes(company!, request.TrackingProvider, request.TrackingKey),
+                    Notes = BuildVehicleNotes(company, request.TrackingProvider, request.TrackingKey),
                     Active = true
                 };
                 db.Vehicles.Add(vehicle);
@@ -93,7 +93,7 @@ public sealed class SubcontractorResourcesController(TmsDbContext db) : Controll
 
                 vehicle.FleetNumber = "SUB";
                 vehicle.Abbreviation = Clip(request.VehicleAbbreviation, 20)?.ToUpperInvariant() ?? vehicle.Abbreviation;
-                vehicle.Notes = BuildVehicleNotes(company!, request.TrackingProvider, request.TrackingKey);
+                vehicle.Notes = BuildVehicleNotes(company, request.TrackingProvider, request.TrackingKey);
                 vehicle.Active = true;
             }
         }
@@ -101,13 +101,22 @@ public sealed class SubcontractorResourcesController(TmsDbContext db) : Controll
         if (driver is null && vehicle is null)
             return BadRequest(new { message = "Enter a subcontractor driver, vehicle, or both." });
 
-        await db.SaveChangesAsync(ct);
-
+        string? dotTrackingKey = null;
         if (vehicle is not null && IsDotProvider(request.TrackingProvider))
         {
-            var externalKey = Clean(request.TrackingKey) ?? vehicle.Registration;
-            trackingLinked = await UpsertVehicleTrackingMapping(vehicle.Id, externalKey, company!, ct);
+            dotTrackingKey = Clip(Clean(request.TrackingKey) ?? vehicle.Registration, 200)!;
+            var existingForKey = await db.IntegrationMappings.AsNoTracking()
+                .FirstOrDefaultAsync(item => item.Provider == "DotTracking" && item.ExternalKey == dotTrackingKey && item.TmsEntityType == "Vehicle" && item.Active, ct);
+            if (existingForKey is not null && existingForKey.TmsEntityId != vehicle.Id)
+                return Conflict(new { message = $"DOT/Falcon tracking identifier {dotTrackingKey} is already linked to another vehicle." });
         }
+
+        // Validate all identity conflicts before this first durable write. A bad tracking alias
+        // must never leave behind a half-created subcontractor vehicle or driver.
+        await db.SaveChangesAsync(ct);
+
+        if (vehicle is not null && dotTrackingKey is not null)
+            trackingLinked = await UpsertVehicleTrackingMapping(vehicle.Id, dotTrackingKey, company, ct);
 
         if (driver is not null)
         {
@@ -144,7 +153,7 @@ public sealed class SubcontractorResourcesController(TmsDbContext db) : Controll
                     vehicle.Registration,
                     vehicle.Abbreviation,
                     trackingProvider = Clean(request.TrackingProvider),
-                    trackingKey = Clean(request.TrackingKey),
+                    trackingKey = dotTrackingKey,
                     trackingLinked
                 })
             });
@@ -176,7 +185,7 @@ public sealed class SubcontractorResourcesController(TmsDbContext db) : Controll
                 vehicle.Active,
                 created = createdVehicle,
                 trackingProvider = Clean(request.TrackingProvider),
-                trackingKey = Clean(request.TrackingKey) ?? (IsDotProvider(request.TrackingProvider) ? vehicle.Registration : null),
+                trackingKey = dotTrackingKey,
                 trackingLinked
             },
             message = TrackingMessage(vehicle, request.TrackingProvider, trackingLinked)
@@ -234,15 +243,10 @@ public sealed class SubcontractorResourcesController(TmsDbContext db) : Controll
 
     private async Task<bool> UpsertVehicleTrackingMapping(Guid vehicleId, string externalKey, string company, CancellationToken ct)
     {
-        externalKey = Clean(externalKey)!;
-        var existingForKey = await db.IntegrationMappings
-            .FirstOrDefaultAsync(item => item.Provider == "DotTracking" && item.ExternalKey == externalKey && item.TmsEntityType == "Vehicle", ct);
-
-        if (existingForKey is not null && existingForKey.TmsEntityId != vehicleId)
-            throw new InvalidOperationException($"DOT/Falcon tracking identifier {externalKey} is already linked to another vehicle.");
-
-        var mapping = existingForKey ?? await db.IntegrationMappings
-            .FirstOrDefaultAsync(item => item.Provider == "DotTracking" && item.TmsEntityType == "Vehicle" && item.TmsEntityId == vehicleId, ct);
+        var mapping = await db.IntegrationMappings
+            .FirstOrDefaultAsync(item => item.Provider == "DotTracking" && item.ExternalKey == externalKey && item.TmsEntityType == "Vehicle", ct)
+            ?? await db.IntegrationMappings
+                .FirstOrDefaultAsync(item => item.Provider == "DotTracking" && item.TmsEntityType == "Vehicle" && item.TmsEntityId == vehicleId, ct);
 
         if (mapping is null)
         {
@@ -286,7 +290,8 @@ public sealed class SubcontractorResourcesController(TmsDbContext db) : Controll
     {
         var companyCode = Slug(company, 8);
         var driverCode = Slug(driverName, 12);
-        return $"SUB-{companyCode}-{driverCode}"[..Math.Min(40, $"SUB-{companyCode}-{driverCode}".Length)];
+        var reference = $"SUB-{companyCode}-{driverCode}";
+        return reference[..Math.Min(40, reference.Length)];
     }
 
     private static string BuildVehicleNotes(string company, string? provider, string? trackingKey)
@@ -294,13 +299,14 @@ public sealed class SubcontractorResourcesController(TmsDbContext db) : Controll
         var parts = new List<string> { $"Subcontractor: {company}" };
         if (!string.IsNullOrWhiteSpace(provider)) parts.Add($"Tracking provider: {provider.Trim()}");
         if (!string.IsNullOrWhiteSpace(trackingKey)) parts.Add($"Tracking key: {trackingKey.Trim()}");
-        return string.Join(" | ", parts)[..Math.Min(500, string.Join(" | ", parts).Length)];
+        var notes = string.Join(" | ", parts);
+        return notes[..Math.Min(500, notes.Length)];
     }
 
     private static bool IsDotProvider(string? value)
     {
         var normal = Slug(value ?? string.Empty, 80);
-        return normal.Contains("dot") || normal.Contains("falcon") || normal.Contains("roadtech");
+        return normal.Contains("DOT") || normal.Contains("FALCON") || normal.Contains("ROADTECH");
     }
 
     private static string NormaliseRegistration(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
