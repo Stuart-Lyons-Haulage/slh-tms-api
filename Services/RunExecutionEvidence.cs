@@ -25,6 +25,10 @@ public sealed record RunExecutionEvidence(
 
 public static class RunExecutionEvidenceRules
 {
+    // RoadTech/DOT is polled every minute. Customer-facing ETAs must therefore
+    // stop being treated as live promptly if tracking stops updating.
+    public static readonly TimeSpan MaximumLiveTrackingAge = TimeSpan.FromMinutes(5);
+
     public static string EvidenceStatus(
         TachoVehicleDriverStatus? tacho,
         DateTimeOffset? latestTrackingUtc,
@@ -33,7 +37,7 @@ public static class RunExecutionEvidenceRules
         if (tacho is null && latestTrackingUtc is null) return "Unverified";
         if (tacho is null) return "TrackingOnly";
         if (latestTrackingUtc is null) return "TachoOnly";
-        return now - latestTrackingUtc <= TimeSpan.FromMinutes(30) ? "VerifiedLive" : "TrackingStale";
+        return now - latestTrackingUtc <= MaximumLiveTrackingAge ? "VerifiedLive" : "TrackingStale";
     }
 
     public static string Explanation(
@@ -48,7 +52,7 @@ public static class RunExecutionEvidenceRules
             return "DOT/Falcon tracking is available, but no current TachoMaster duty was matched to the allocated vehicle.";
         if (latestTrackingUtc is null)
             return "TachoMaster sign-on is available, but no DOT/Falcon movement has been matched to the allocated vehicle.";
-        var freshness = now - latestTrackingUtc <= TimeSpan.FromMinutes(30) ? "fresh" : "stale";
+        var freshness = now - latestTrackingUtc <= MaximumLiveTrackingAge ? "fresh" : "stale";
         var movement = firstMovementUtc is null ? "No movement event has been recorded yet." : $"First vehicle movement was recorded at {firstMovementUtc:O}.";
         return $"TachoMaster sign-on at {tacho.DutyStartUtc:O}; DOT/Falcon tracking is {freshness}. {movement}";
     }
