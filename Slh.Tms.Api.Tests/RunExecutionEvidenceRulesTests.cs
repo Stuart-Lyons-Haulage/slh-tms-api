@@ -17,6 +17,16 @@ public sealed class RunExecutionEvidenceRulesTests
     }
 
     [Fact]
+    public void Tracking_older_than_customer_eta_threshold_is_stale()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var tacho = new TachoVehicleDriverStatus(
+            "V1", 1, "Driver", null, null, now.AddHours(-2), null,
+            0, 0, 0, 0, 0, null, null, null, 120, null, null, null, null, null, null);
+        Assert.Equal("TrackingStale", RunExecutionEvidenceRules.EvidenceStatus(tacho, now.AddMinutes(-6), now));
+    }
+
+    [Fact]
     public void Tracking_without_tacho_is_not_presented_as_fully_verified()
     {
         var now = DateTimeOffset.UtcNow;
