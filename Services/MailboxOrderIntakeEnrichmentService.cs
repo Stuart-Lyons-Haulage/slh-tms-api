@@ -4,112 +4,57 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Contracts;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 
 namespace Slh.Tms.Api.Services;
 
 /// <summary>
-/// Adds source evidence, deterministic matching keys, master-data checks and
-/// structured validation to every Info-mailbox order before it is staged.
-/// The original extracted values are preserved; canonical matches are added as
-/// separate fields so review never loses what the customer actually supplied.
+/// Enriches parsed mailbox orders with complete source evidence, master-data
+/// matches, structured validation, deterministic duplicate keys and review state.
+/// It never replaces a customer's source value with a guessed value.
 /// </summary>
 public sealed class MailboxOrderIntakeEnrichmentService(TmsDbContext db)
 {
-    public async Task<ParsedEmailOrder> EnrichAsync(
-        MailboxEmailIntakeRequest request,
-        ParsedEmailOrder order,
-        CancellationToken ct)
+    public async Task<ParsedEmailOrder> EnrichAsync(MailboxEmailIntakeEnvelope request, ParsedEmailOrder order, CancellationToken ct)
     {
         var payload = JsonNode.Parse(order.Payload.GetRawText()) as JsonObject ?? new JsonObject();
-        var issues = new List<ValidationIssue>();
-        foreach (var warning in order.Warnings.Where(value => !string.IsNullOrWhiteSpace(value)))
-            issues.Add(new("Warning", "PARSER_WARNING", null, warning));
+        var issues = order.Warnings.Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => new ValidationIssue("Warning", "PARSER_WARNING", null, x)).ToList();
 
         var customers = await SafeCustomers(ct);
         var sites = await SafeSites(ct);
+        MatchCustomer(payload, customers, issues);
+        MatchSite(payload, sites, issues, true);
+        MatchSite(payload, sites, issues, false);
+        Validate(payload, request, issues);
+        AddEvidence(payload, request);
 
-        var customerCode = Text(payload, "customerCode") ?? Text(payload, "customer");
-        if (string.IsNullOrWhiteSpace(customerCode))
-        {
-            issues.Add(new("Critical", "MISSING_CUSTOMER", "customerCode", "Customer could not be identified from the source order."));
-        }
-        else
-        {
-            var customer = MatchCustomer(customers, customerCode);
-            if (customer is null)
-            {
-                issues.Add(new("Warning", "UNKNOWN_CUSTOMER", "customerCode", $"Customer '{customerCode}' is not an exact match in TMS Master Data."));
-            }
-            else
-            {
-                payload["masterCustomerId"] = customer.Id.ToString();
-                payload["masterCustomerCode"] = customer.Code;
-                payload["masterCustomerName"] = customer.Name;
-                payload["customerCode"] = customer.Code;
-            }
-        }
-
-        var collection = FirstText(payload, "collectionSite", "collectionLocation", "sellerName");
-        var delivery = FirstText(payload, "deliverySite", "deliveryLocation", "stallNumber");
-        AddSiteMatch(payload, issues, sites, collection, true);
-        AddSiteMatch(payload, issues, sites, delivery, false);
-
-        ValidateDates(payload, issues);
-        ValidatePallets(request, payload, issues);
-        ValidateRequiredLocations(payload, issues);
-
-        var customerPo = FirstText(payload, "customerPo", "purchaseOrder", "purchase_order", "po");
-        var orderReference = FirstText(payload, "poNumber", "orderReference", "order_reference", "customerReference");
-        if (string.IsNullOrWhiteSpace(customerPo) && string.IsNullOrWhiteSpace(orderReference))
-            issues.Add(new("Warning", "MISSING_REFERENCE", "poNumber", "No customer PO or order reference was found. Planner confirmation is required."));
-
-        AddSourceEvidence(request, payload);
+        var hasCritical = issues.Any(x => x.Severity == "Critical");
+        var explicitlyNotReady = Bool(payload, "plannerReady") == false;
         payload["importSource"] = "PowerAutomate/InfoMailbox";
         payload["importBatchId"] = BatchId(request.MessageId);
         payload["importedAt"] = DateTimeOffset.UtcNow.ToString("O");
         payload["reviewStatus"] = "Pending Review";
-        payload["mappingTemplate"] = FirstText(payload, "intakeParser", "mappingTemplate") ?? "Generic mailbox intake";
-
-        var existingReady = Bool(payload, "plannerReady");
-        var hasCritical = issues.Any(issue => issue.Severity == "Critical");
-        payload["plannerReady"] = existingReady == false ? false : !hasCritical;
-        if (Text(payload, "intakeStatus") is null)
-            payload["intakeStatus"] = hasCritical ? "Exception" : "PendingReview";
+        payload["mappingTemplate"] = First(payload, "intakeParser", "mappingTemplate") ?? "Generic mailbox intake";
         payload["validationStatus"] = hasCritical ? "Critical" : issues.Count > 0 ? "Warning" : "Valid";
+        payload["plannerReady"] = !hasCritical && !explicitlyNotReady;
+        if (First(payload, "intakeStatus") is null) payload["intakeStatus"] = hasCritical ? "Exception" : "PendingReview";
+        payload["extractionConfidence"] = First(payload, "intakeConfidence", "extractionConfidence") ?? (hasCritical ? "Low" : issues.Count > 0 ? "Medium" : "High");
         payload["validationIssues"] = JsonSerializer.SerializeToNode(issues);
-        payload["extractionConfidence"] = FirstText(payload, "intakeConfidence", "extractionConfidence") ?? (hasCritical ? "Low" : issues.Count > 0 ? "Medium" : "High");
+        payload["intakeWarnings"] = JsonSerializer.SerializeToNode(issues.Where(x => x.Severity != "Information").Select(x => x.Message).Distinct().ToArray());
+        payload["intakeMatchKeys"] = JsonSerializer.SerializeToNode(MatchKeys(payload, order.NaturalKey));
+        payload["businessFingerprint"] = Fingerprint(payload);
 
-        var matchKeys = BuildMatchKeys(payload, order.NaturalKey);
-        payload["intakeMatchKeys"] = JsonSerializer.SerializeToNode(matchKeys);
-        payload["businessFingerprint"] = BusinessFingerprint(payload);
-
-        var warnings = issues.Where(issue => issue.Severity != "Information").Select(issue => issue.Message).Distinct().ToList();
-        payload["intakeWarnings"] = JsonSerializer.SerializeToNode(warnings);
-        return new ParsedEmailOrder(order.SourceKey, order.NaturalKey, ToElement(payload), warnings);
+        var warnings = issues.Where(x => x.Severity != "Information").Select(x => x.Message).Distinct().ToList();
+        return new ParsedEmailOrder(order.SourceKey, order.NaturalKey, Element(payload), warnings);
     }
 
-    public ParsedEmailOrder BuildReviewException(
-        MailboxEmailIntakeRequest request,
-        string reason,
-        IReadOnlyList<string> parserWarnings)
+    public ParsedEmailOrder BuildReviewException(MailboxEmailIntakeEnvelope request, string reason, IReadOnlyList<string> parserWarnings)
     {
-        var warnings = parserWarnings.Where(value => !string.IsNullOrWhiteSpace(value)).ToList();
-        if (!warnings.Contains(reason, StringComparer.OrdinalIgnoreCase)) warnings.Add(reason);
         var payload = new JsonObject
         {
-            ["sourceMailbox"] = request.Mailbox,
-            ["sourceMessageId"] = request.MessageId,
-            ["sourceInternetMessageId"] = request.InternetMessageId,
-            ["sourceConversationId"] = request.ConversationId,
-            ["sourceSender"] = request.SenderAddress,
-            ["sourceSenderName"] = request.SenderName,
-            ["sourceSubject"] = request.Subject,
-            ["sourceReceivedAtUtc"] = request.ReceivedAtUtc?.ToString("O"),
-            ["sourceWebLink"] = request.WebLink,
-            ["sourceBodyFormat"] = request.BodyFormat,
-            ["sourceImportance"] = request.Importance,
             ["importSource"] = "PowerAutomate/InfoMailbox",
             ["importBatchId"] = BatchId(request.MessageId),
             ["importedAt"] = DateTimeOffset.UtcNow.ToString("O"),
@@ -120,32 +65,24 @@ public sealed class MailboxOrderIntakeEnrichmentService(TmsDbContext db)
             ["extractionConfidence"] = "Low",
             ["mappingTemplate"] = "Unmatched mailbox order"
         };
-        AddSourceEvidence(request, payload);
-        payload["validationIssues"] = JsonSerializer.SerializeToNode(new[]
-        {
-            new ValidationIssue("Critical", "EXTRACTION_REVIEW_REQUIRED", null, reason)
-        });
+        AddEvidence(payload, request);
+        var warnings = parserWarnings.Where(x => !string.IsNullOrWhiteSpace(x)).Append(reason).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        payload["validationIssues"] = JsonSerializer.SerializeToNode(new[] { new ValidationIssue("Critical", "EXTRACTION_REVIEW_REQUIRED", null, reason) });
         payload["intakeWarnings"] = JsonSerializer.SerializeToNode(warnings);
         payload["intakeMatchKeys"] = JsonSerializer.SerializeToNode(new[] { $"MESSAGE|{Normalise(request.MessageId)}" });
-        payload["businessFingerprint"] = BusinessFingerprint(payload);
-        return new ParsedEmailOrder("review-exception", $"MESSAGE|{Normalise(request.MessageId)}", ToElement(payload), warnings);
+        payload["businessFingerprint"] = Fingerprint(payload);
+        return new ParsedEmailOrder("review-exception", $"MESSAGE|{Normalise(request.MessageId)}", Element(payload), warnings);
     }
 
-    public bool ShouldRetainForReview(MailboxEmailIntakeRequest request, string? ignoredReason)
+    public bool ShouldRetainForReview(MailboxEmailIntakeEnvelope request, string? ignoredReason)
     {
         if (string.IsNullOrWhiteSpace(ignoredReason)) return false;
         if (ignoredReason.Contains("Internal Lyons email", StringComparison.OrdinalIgnoreCase) ||
             ignoredReason.Contains("Operational request", StringComparison.OrdinalIgnoreCase) ||
-            ignoredReason.Contains("Cancellation", StringComparison.OrdinalIgnoreCase))
-            return false;
-
+            ignoredReason.Contains("Cancellation", StringComparison.OrdinalIgnoreCase)) return false;
         var source = $"{request.Subject}\n{request.BodyText}\n{request.BodyHtml}";
-        if (Regex.IsMatch(source, @"\b(order|purchase order|\bpo\b|pallet|collection|delivery|booking|manifest|load plan|transport)\b", RegexOptions.IgnoreCase))
-            return true;
-
-        return (request.Attachments ?? []).Any(attachment =>
-            attachment.IsInline != true &&
-            Path.GetExtension(attachment.Name ?? string.Empty).ToLowerInvariant() is ".xls" or ".xlsx" or ".xlsm" or ".csv" or ".pdf");
+        if (Regex.IsMatch(source, @"\b(order|purchase order|\bpo\b|pallet|collection|delivery|booking|manifest|load plan|transport)\b", RegexOptions.IgnoreCase)) return true;
+        return (request.Attachments ?? []).Any(a => a.IsInline != true && Path.GetExtension(a.Name ?? string.Empty).ToLowerInvariant() is ".xls" or ".xlsx" or ".xlsm" or ".csv" or ".pdf");
     }
 
     private async Task<List<Customer>> SafeCustomers(CancellationToken ct)
@@ -160,81 +97,77 @@ public sealed class MailboxOrderIntakeEnrichmentService(TmsDbContext db)
         catch { db.ChangeTracker.Clear(); return []; }
     }
 
-    private static Customer? MatchCustomer(IEnumerable<Customer> customers, string value)
+    private static void MatchCustomer(JsonObject payload, IReadOnlyList<Customer> customers, List<ValidationIssue> issues)
     {
-        var key = Normalise(value);
-        return customers.FirstOrDefault(customer => Normalise(customer.Code) == key || Normalise(customer.Name) == key);
-    }
-
-    private static Site? MatchSite(IEnumerable<Site> sites, string value)
-    {
-        var key = NormaliseSite(value);
-        return sites.FirstOrDefault(site => new[] { site.ExternalCode, site.Name, site.DriverTextName }
-            .Where(candidate => !string.IsNullOrWhiteSpace(candidate))
-            .Any(candidate => NormaliseSite(candidate!) == key));
-    }
-
-    private static void AddSiteMatch(JsonObject payload, List<ValidationIssue> issues, IReadOnlyList<Site> sites, string? value, bool collection)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return;
-        var match = MatchSite(sites, value);
-        var prefix = collection ? "collection" : "delivery";
-        if (match is null)
+        var source = First(payload, "customerCode", "customer");
+        if (string.IsNullOrWhiteSpace(source))
         {
-            issues.Add(new("Warning", collection ? "UNKNOWN_COLLECTION_SITE" : "UNKNOWN_DELIVERY_SITE", prefix + "Site", $"{(collection ? "Collection" : "Delivery")} site '{value}' is not an exact TMS Master Data match."));
+            issues.Add(new("Critical", "MISSING_CUSTOMER", "customerCode", "Customer could not be identified from the source order."));
             return;
         }
+        var key = Normalise(source);
+        var match = customers.FirstOrDefault(x => Normalise(x.Code) == key || Normalise(x.Name) == key);
+        if (match is null)
+        {
+            issues.Add(new("Warning", "UNKNOWN_CUSTOMER", "customerCode", $"Customer '{source}' is not an exact TMS Master Data match."));
+            return;
+        }
+        payload["masterCustomerId"] = match.Id.ToString();
+        payload["masterCustomerCode"] = match.Code;
+        payload["masterCustomerName"] = match.Name;
+        payload["customerCode"] = match.Code;
+    }
+
+    private static void MatchSite(JsonObject payload, IReadOnlyList<Site> sites, List<ValidationIssue> issues, bool collection)
+    {
+        var source = collection ? First(payload, "collectionSite", "collectionLocation", "sellerName") : First(payload, "deliverySite", "deliveryLocation", "stallNumber");
+        if (string.IsNullOrWhiteSpace(source)) return;
+        var key = Normalise(source);
+        var match = sites.FirstOrDefault(site => new[] { site.ExternalCode, site.Name, site.DriverTextName }
+            .Where(x => !string.IsNullOrWhiteSpace(x)).Any(x => Normalise(x!) == key));
+        if (match is null)
+        {
+            issues.Add(new("Warning", collection ? "UNKNOWN_COLLECTION_SITE" : "UNKNOWN_DELIVERY_SITE", collection ? "collectionSite" : "deliverySite", $"{(collection ? "Collection" : "Delivery")} site '{source}' is not an exact TMS Master Data match."));
+            return;
+        }
+        var prefix = collection ? "collection" : "delivery";
+        payload[prefix + "SiteOriginal"] = source;
         payload[prefix + "SiteId"] = match.Id.ToString();
         payload[prefix + "SiteMatchedName"] = match.Name;
-        payload[prefix + "SiteOriginal"] = value;
     }
 
-    private static void ValidateDates(JsonObject payload, List<ValidationIssue> issues)
+    private static void Validate(JsonObject payload, MailboxEmailIntakeEnvelope request, List<ValidationIssue> issues)
     {
-        var collection = FirstText(payload, "collectionDate", "collection_date");
-        var delivery = FirstText(payload, "deliveryDate", "delivery_date");
-        if (string.IsNullOrWhiteSpace(collection))
-            issues.Add(new("Critical", "MISSING_COLLECTION_DATE", "collectionDate", "Collection date is missing and must be confirmed before approval."));
-        else if (!DateOnly.TryParse(collection, out _))
-            issues.Add(new("Critical", "INVALID_COLLECTION_DATE", "collectionDate", $"Collection date '{collection}' is not valid."));
+        var collectionDate = First(payload, "collectionDate", "collection_date");
+        var deliveryDate = First(payload, "deliveryDate", "delivery_date");
+        if (string.IsNullOrWhiteSpace(collectionDate)) issues.Add(new("Critical", "MISSING_COLLECTION_DATE", "collectionDate", "Collection date is missing and must be confirmed before approval."));
+        else if (!DateOnly.TryParse(collectionDate, out _)) issues.Add(new("Critical", "INVALID_COLLECTION_DATE", "collectionDate", $"Collection date '{collectionDate}' is invalid."));
+        if (string.IsNullOrWhiteSpace(deliveryDate)) issues.Add(new("Warning", "MISSING_DELIVERY_DATE", "deliveryDate", "Delivery date is missing and should be checked."));
+        else if (!DateOnly.TryParse(deliveryDate, out _)) issues.Add(new("Critical", "INVALID_DELIVERY_DATE", "deliveryDate", $"Delivery date '{deliveryDate}' is invalid."));
 
-        if (string.IsNullOrWhiteSpace(delivery))
-            issues.Add(new("Warning", "MISSING_DELIVERY_DATE", "deliveryDate", "Delivery date is missing and should be checked."));
-        else if (!DateOnly.TryParse(delivery, out _))
-            issues.Add(new("Critical", "INVALID_DELIVERY_DATE", "deliveryDate", $"Delivery date '{delivery}' is not valid."));
-        else if (DateOnly.TryParse(collection, out var collectionDate) && DateOnly.TryParse(delivery, out var deliveryDate) && deliveryDate < collectionDate)
-            issues.Add(new("Warning", "DATE_SEQUENCE", "deliveryDate", "Delivery date is earlier than collection date."));
-    }
+        var customerPo = First(payload, "customerPo", "purchaseOrder", "purchase_order", "po");
+        var reference = First(payload, "poNumber", "orderReference", "order_reference");
+        if (string.IsNullOrWhiteSpace(customerPo) && string.IsNullOrWhiteSpace(reference)) issues.Add(new("Warning", "MISSING_REFERENCE", "poNumber", "No PO/order reference was found."));
 
-    private static void ValidatePallets(MailboxEmailIntakeRequest request, JsonObject payload, List<ValidationIssue> issues)
-    {
-        var pallets = FirstText(payload, "pallets", "palletQty", "palletQuantity");
+        var jobType = First(payload, "jobType", "job_type") ?? string.Empty;
+        var collection = First(payload, "collectionSite", "collectionLocation", "sellerName");
+        var delivery = First(payload, "deliverySite", "deliveryLocation", "stallNumber");
+        if (string.IsNullOrWhiteSpace(collection)) issues.Add(new("Warning", "MISSING_COLLECTION_SITE", "collectionSite", "Collection location was not identified."));
+        if (string.IsNullOrWhiteSpace(delivery) && !jobType.Contains("tray collection", StringComparison.OrdinalIgnoreCase)) issues.Add(new("Warning", "MISSING_DELIVERY_SITE", "deliverySite", "Delivery location was not identified."));
+
+        var pallets = First(payload, "pallets", "palletQty", "palletQuantity");
         if (string.IsNullOrWhiteSpace(pallets))
         {
             var sourceMentionsPallets = Regex.IsMatch($"{request.Subject} {request.BodyText} {request.BodyHtml}", @"\bpallets?\b", RegexOptions.IgnoreCase)
                 || (request.Attachments ?? []).Any(a => (a.Name ?? string.Empty).Contains("pallet", StringComparison.OrdinalIgnoreCase));
-            issues.Add(new("Warning", sourceMentionsPallets ? "PALLET_EXTRACTION_FAILED" : "MISSING_PALLETS", "pallets",
-                sourceMentionsPallets ? "The source refers to pallets but no pallet quantity reached the staging payload." : "Pallet quantity is absent from the source/extraction."));
-            return;
+            issues.Add(new("Warning", sourceMentionsPallets ? "PALLET_EXTRACTION_FAILED" : "MISSING_PALLETS", "pallets", sourceMentionsPallets
+                ? "The source refers to pallets but no pallet quantity reached staging."
+                : "Pallet quantity is absent from the source/extraction."));
         }
-        if (!decimal.TryParse(pallets, out var value))
-            issues.Add(new("Critical", "INVALID_PALLETS", "pallets", $"Pallet quantity '{pallets}' is invalid."));
-        else if (value <= 0)
-            issues.Add(new("Critical", "INVALID_PALLETS", "pallets", "Pallet quantity must be greater than zero for a transport order."));
+        else if (!decimal.TryParse(pallets, out var qty) || qty <= 0) issues.Add(new("Critical", "INVALID_PALLETS", "pallets", $"Pallet quantity '{pallets}' is invalid."));
     }
 
-    private static void ValidateRequiredLocations(JsonObject payload, List<ValidationIssue> issues)
-    {
-        var jobType = FirstText(payload, "jobType", "job_type") ?? string.Empty;
-        var collection = FirstText(payload, "collectionSite", "collectionLocation", "sellerName");
-        var delivery = FirstText(payload, "deliverySite", "deliveryLocation", "stallNumber");
-        if (string.IsNullOrWhiteSpace(collection))
-            issues.Add(new("Warning", "MISSING_COLLECTION_SITE", "collectionSite", "Collection location was not identified."));
-        if (string.IsNullOrWhiteSpace(delivery) && !jobType.Contains("tray collection", StringComparison.OrdinalIgnoreCase))
-            issues.Add(new("Warning", "MISSING_DELIVERY_SITE", "deliverySite", "Delivery location was not identified."));
-    }
-
-    private static void AddSourceEvidence(MailboxEmailIntakeRequest request, JsonObject payload)
+    private static void AddEvidence(JsonObject payload, MailboxEmailIntakeEnvelope request)
     {
         payload["sourceMailbox"] = request.Mailbox;
         payload["sourceMessageId"] = request.MessageId;
@@ -242,73 +175,76 @@ public sealed class MailboxOrderIntakeEnrichmentService(TmsDbContext db)
         payload["sourceConversationId"] = request.ConversationId;
         payload["sourceSender"] = request.SenderAddress;
         payload["sourceSenderName"] = request.SenderName;
-        payload["sourceSubject"] = request.Subject;
-        payload["sourceReceivedAtUtc"] = request.ReceivedAtUtc?.ToString("O");
-        payload["sourceWebLink"] = request.WebLink;
-        payload["sourceBodyFormat"] = request.BodyFormat;
-        payload["sourceImportance"] = request.Importance;
         payload["sourceToRecipients"] = JsonSerializer.SerializeToNode(request.ToRecipients ?? []);
         payload["sourceCcRecipients"] = JsonSerializer.SerializeToNode(request.CcRecipients ?? []);
+        payload["sourceSubject"] = request.Subject;
+        payload["sourceReceivedAtUtc"] = request.ReceivedAtUtc?.ToString("O");
+        payload["sourceBodyFormat"] = request.BodyFormat;
+        payload["sourceImportance"] = request.Importance;
+        payload["sourceWebLink"] = request.WebLink;
         payload["sourceAttachmentCount"] = request.AttachmentCount ?? request.Attachments?.Count ?? 0;
-
-        var evidence = (request.Attachments ?? []).Select(attachment => new
-        {
-            name = attachment.Name,
-            contentType = attachment.ContentType,
-            attachmentId = attachment.AttachmentId,
-            sizeBytes = attachment.SizeBytes,
-            isInline = attachment.IsInline,
-            sha256 = AttachmentHash(attachment.ContentBase64)
-        }).ToList();
+        var evidence = (request.Attachments ?? []).Select(a => new { a.AttachmentId, a.Name, a.ContentType, a.SizeBytes, a.IsInline, sha256 = HashAttachment(a.ContentBase64) }).ToList();
         payload["sourceAttachments"] = JsonSerializer.SerializeToNode(evidence);
 
-        var sourceAttachmentName = Text(payload, "sourceAttachmentName");
-        if (!string.IsNullOrWhiteSpace(sourceAttachmentName))
+        var sourceName = First(payload, "sourceAttachmentName");
+        if (!string.IsNullOrWhiteSpace(sourceName))
         {
-            var attachment = (request.Attachments ?? []).FirstOrDefault(item => string.Equals(item.Name, sourceAttachmentName, StringComparison.OrdinalIgnoreCase));
+            var attachment = (request.Attachments ?? []).FirstOrDefault(a => string.Equals(a.Name, sourceName, StringComparison.OrdinalIgnoreCase));
             if (attachment is not null)
             {
                 payload["sourceAttachmentType"] = attachment.ContentType;
                 payload["sourceAttachmentReference"] = attachment.AttachmentId;
                 payload["sourceAttachmentSizeBytes"] = attachment.SizeBytes;
-                payload["sourceAttachmentSha256"] = AttachmentHash(attachment.ContentBase64);
+                payload["sourceAttachmentSha256"] = HashAttachment(attachment.ContentBase64);
             }
         }
     }
 
-    private static IReadOnlyList<string> BuildMatchKeys(JsonObject payload, string naturalKey)
+    private static IReadOnlyList<string> MatchKeys(JsonObject payload, string naturalKey)
     {
         var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (!string.IsNullOrWhiteSpace(naturalKey)) keys.Add($"NATURAL|{Normalise(naturalKey)}");
-        var customer = FirstText(payload, "customerCode", "customer") ?? "UNKNOWN";
-        var customerPo = FirstText(payload, "customerPo", "purchaseOrder", "purchase_order", "po");
-        var reference = FirstText(payload, "poNumber", "orderReference", "order_reference");
-        if (!string.IsNullOrWhiteSpace(customerPo)) keys.Add($"PO|{Normalise(customer)}|{Normalise(customerPo)}");
-        else if (!string.IsNullOrWhiteSpace(reference) && !reference.StartsWith("EMAIL-", StringComparison.OrdinalIgnoreCase))
-            keys.Add($"REF|{Normalise(customer)}|{Normalise(reference)}");
-
-        var collectionDate = FirstText(payload, "collectionDate", "collection_date") ?? string.Empty;
-        var deliveryDate = FirstText(payload, "deliveryDate", "delivery_date") ?? string.Empty;
-        var collection = FirstText(payload, "collectionSite", "collectionLocation", "sellerName") ?? string.Empty;
-        var delivery = FirstText(payload, "deliverySite", "deliveryLocation", "stallNumber") ?? string.Empty;
-        if (!string.IsNullOrWhiteSpace(collectionDate) || !string.IsNullOrWhiteSpace(deliveryDate))
-            keys.Add($"ROUTE|{Normalise(customer)}|{collectionDate}|{deliveryDate}|{NormaliseSite(collection)}|{NormaliseSite(delivery)}");
+        var customer = First(payload, "customerCode", "customer") ?? "UNKNOWN";
+        var po = First(payload, "customerPo", "purchaseOrder", "purchase_order", "po");
+        var reference = First(payload, "poNumber", "orderReference", "order_reference");
+        if (!string.IsNullOrWhiteSpace(po)) keys.Add($"PO|{Normalise(customer)}|{Normalise(po)}");
+        else if (!string.IsNullOrWhiteSpace(reference) && !reference.StartsWith("EMAIL-", StringComparison.OrdinalIgnoreCase)) keys.Add($"REF|{Normalise(customer)}|{Normalise(reference)}");
+        var collectionDate = First(payload, "collectionDate", "collection_date") ?? string.Empty;
+        var deliveryDate = First(payload, "deliveryDate", "delivery_date") ?? string.Empty;
+        var collection = First(payload, "collectionSite", "collectionLocation", "sellerName") ?? string.Empty;
+        var delivery = First(payload, "deliverySite", "deliveryLocation", "stallNumber") ?? string.Empty;
+        if (collectionDate.Length > 0 || deliveryDate.Length > 0) keys.Add($"ROUTE|{Normalise(customer)}|{collectionDate}|{deliveryDate}|{Normalise(collection)}|{Normalise(delivery)}");
         return keys.ToList();
     }
 
-    private static string BusinessFingerprint(JsonObject payload)
+    private static string Fingerprint(JsonObject payload)
     {
-        var fields = new[]
-        {
-            "customerCode", "customerPo", "poNumber", "collectionDate", "deliveryDate", "pallets", "cases", "quantity",
-            "sellerName", "stallNumber", "collectionLocation", "deliveryLocation", "requestedTime", "availableTime", "jobType",
-            "temperature", "temperatureRequirement", "trailerType", "trailerNotes"
-        };
-        var canonical = string.Join('|', fields.Select(field => $"{field}={Normalise(FirstText(payload, field) ?? string.Empty)}"));
+        var names = new[] { "customerCode", "customerPo", "poNumber", "collectionDate", "deliveryDate", "pallets", "cases", "quantity", "sellerName", "stallNumber", "collectionLocation", "deliveryLocation", "requestedTime", "availableTime", "jobType", "temperature", "trailerType", "trailerNotes" };
+        var canonical = string.Join('|', names.Select(name => $"{name}={Normalise(First(payload, name) ?? string.Empty)}"));
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
     }
 
-    private static string? AttachmentHash(string? base64)
+    private static string? First(JsonObject payload, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            var pair = payload.FirstOrDefault(x => string.Equals(x.Key, name, StringComparison.OrdinalIgnoreCase));
+            if (pair.Key is null || pair.Value is null) continue;
+            if (pair.Value is JsonValue value && value.TryGetValue<string>(out var text)) { if (!string.IsNullOrWhiteSpace(text)) return text.Trim(); }
+            else { var raw = pair.Value.ToJsonString().Trim('"').Trim(); if (raw.Length > 0 && raw != "null") return raw; }
+        }
+        return null;
+    }
+
+    private static bool? Bool(JsonObject payload, string name)
+    {
+        var pair = payload.FirstOrDefault(x => string.Equals(x.Key, name, StringComparison.OrdinalIgnoreCase));
+        if (pair.Key is null || pair.Value is null) return null;
+        if (pair.Value is JsonValue value && value.TryGetValue<bool>(out var result)) return result;
+        return bool.TryParse(First(payload, name), out var parsed) ? parsed : null;
+    }
+
+    private static string? HashAttachment(string? base64)
     {
         if (string.IsNullOrWhiteSpace(base64)) return null;
         try
@@ -326,41 +262,7 @@ public sealed class MailboxOrderIntakeEnrichmentService(TmsDbContext db)
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(messageId ?? string.Empty))).ToLowerInvariant();
         return $"info-{hash[..20]}";
     }
-
-    private static string? FirstText(JsonObject payload, params string[] names)
-    {
-        foreach (var name in names)
-            if (Text(payload, name) is { Length: > 0 } value) return value;
-        return null;
-    }
-
-    private static string? Text(JsonObject payload, string name)
-    {
-        var pair = payload.FirstOrDefault(property => string.Equals(property.Key, name, StringComparison.OrdinalIgnoreCase));
-        if (pair.Key is null || pair.Value is null) return null;
-        return pair.Value is JsonValue value && value.TryGetValue<string>(out var text)
-            ? text?.Trim()
-            : pair.Value.ToJsonString().Trim('"').Trim();
-    }
-
-    private static bool? Bool(JsonObject payload, string name)
-    {
-        var pair = payload.FirstOrDefault(property => string.Equals(property.Key, name, StringComparison.OrdinalIgnoreCase));
-        if (pair.Key is null || pair.Value is null) return null;
-        if (pair.Value is JsonValue value && value.TryGetValue<bool>(out var result)) return result;
-        return bool.TryParse(Text(payload, name), out var parsed) ? parsed : null;
-    }
-
     private static string Normalise(string value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
-    private static string NormaliseSite(string value) => Normalise(value)
-        .Replace("COOP", "COOP", StringComparison.OrdinalIgnoreCase)
-        .Replace("MORRISONSS", "MORRISONS", StringComparison.OrdinalIgnoreCase);
-
-    private static JsonElement ToElement(JsonObject payload)
-    {
-        using var document = JsonDocument.Parse(payload.ToJsonString());
-        return document.RootElement.Clone();
-    }
-
+    private static JsonElement Element(JsonObject payload) { using var doc = JsonDocument.Parse(payload.ToJsonString()); return doc.RootElement.Clone(); }
     private sealed record ValidationIssue(string Severity, string Code, string? Field, string Message);
 }
