@@ -88,8 +88,11 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
         var now = DateTimeOffset.UtcNow;
         var loads = (await PlanningResilience.ReadLoadsAsync(db, day, ct))
             .Where(load => load.Status != LoadStatus.Cancelled)
-            .OrderBy(load => load.Reference)
             .ToList();
+        var carried = (await PlanningResilience.ReadLoadsAsync(db, day.AddDays(-1), ct))
+            .Where(load => load.Status != LoadStatus.Cancelled && load.Status != LoadStatus.Completed)
+            .ToList();
+        loads.AddRange(carried.Where(load => loads.All(current => current.Id != load.Id)));
         await RunOperationalStore.EnrichAsync(db, loads, ct);
 
         var driverIds = loads.Where(x => x.DriverId is not null).Select(x => x.DriverId!.Value).Distinct().ToList();
@@ -100,6 +103,10 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
         var vehicles = await SafeDictionary(db.Vehicles.AsNoTracking().Where(x => vehicleIds.Contains(x.Id)), x => x.Id, ct);
         var trailers = await SafeDictionary(db.Trailers.AsNoTracking().Where(x => trailerIds.Contains(x.Id)), x => x.Id, ct);
         var liveStatuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
+        loads = loads.Where(load => load.PlanningDate == day ||
+            (load.VehicleId is not null && MatchLive(vehicles.GetValueOrDefault(load.VehicleId.Value), liveStatuses) is { } live && now - live.LastEventTimeUtc <= TimeSpan.FromMinutes(30)) ||
+            load.Status is LoadStatus.Dispatched or LoadStatus.InProgress)
+            .OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).ToList();
 
         var rows = new List<TvRunDisplayRow>();
         foreach (var load in loads)
