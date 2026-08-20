@@ -27,8 +27,16 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
             {
                 db.VehicleLiveStatuses.Add(new VehicleLiveStatus
                 {
-                    VehicleIdentifier = record.VehicleIdentifier, LastEventTimeUtc = record.EventTimeUtc, Latitude = record.Latitude ?? 0,
-                    Longitude = record.Longitude ?? 0, SpeedKph = record.SpeedKph, IgnitionOn = record.IgnitionOn, IsMoving = record.IsMoving, LastKnownStatus = record.Status
+                    VehicleIdentifier = record.VehicleIdentifier,
+                    LastEventTimeUtc = record.EventTimeUtc,
+                    Latitude = record.Latitude ?? 0,
+                    Longitude = record.Longitude ?? 0,
+                    SpeedKph = record.SpeedKph,
+                    IgnitionOn = record.IgnitionOn,
+                    IsMoving = record.IsMoving,
+                    LastKnownStatus = record.Status,
+                    CurrentDriverName = record.DriverName,
+                    CurrentDriverCardNumber = record.DriverCardNumber
                 });
             }
             else if (record.EventTimeUtc >= live.LastEventTimeUtc)
@@ -44,6 +52,8 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
                 live.IgnitionOn = record.IgnitionOn;
                 live.IsMoving = record.IsMoving;
                 live.LastKnownStatus = record.Status;
+                if (!string.IsNullOrWhiteSpace(record.DriverName)) live.CurrentDriverName = record.DriverName;
+                if (!string.IsNullOrWhiteSpace(record.DriverCardNumber)) live.CurrentDriverCardNumber = record.DriverCardNumber;
             }
         }
 
