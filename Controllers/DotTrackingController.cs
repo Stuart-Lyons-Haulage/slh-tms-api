@@ -831,7 +831,9 @@ public sealed class DotTrackingController(
                         driver.Id,
                         driver.EmployeeNumber,
                         driver.DisplayName,
-                        driver.TachoName))
+                        driver.TachoName,
+                        driver.TachoMasterDriverId,
+                        driver.TachoCardNumber))
                 .ToDictionaryAsync(
                     driver => driver.Id,
                     ct);
@@ -856,6 +858,8 @@ public sealed class DotTrackingController(
                             driver.Id,
                             driver.EmployeeNumber,
                             driver.DisplayName,
+                            null,
+                            null,
                             null))
                     .ToDictionaryAsync(
                         driver => driver.Id,
@@ -1285,7 +1289,66 @@ public sealed class DotTrackingController(
             }
         }
 
-        // 2. Explicit mapping by employee number
+        // 2. Master-data Tacho member ID
+        if (tacho.MemberCode > 0)
+        {
+            var memberMatch =
+                drivers.FirstOrDefault(
+                    driver =>
+                        !string.IsNullOrWhiteSpace(
+                            driver.TachoMasterDriverId) &&
+                        string.Equals(
+                            NormaliseIdentifier(
+                                driver.TachoMasterDriverId!),
+                            tacho.MemberCode.ToString(),
+                            StringComparison.OrdinalIgnoreCase));
+
+            if (memberMatch is not null)
+            {
+                return (
+                    memberMatch,
+                    "TachoMember");
+            }
+        }
+
+        // 3. Master-data Tacho card number
+        var tachoCard =
+            NormaliseIdentifier(
+                tacho.CardNumber ?? string.Empty);
+
+        if (tachoCard.Length >= 8)
+        {
+            var cardMatch =
+                drivers.FirstOrDefault(driver =>
+                {
+                    var driverCard =
+                        NormaliseIdentifier(
+                            driver.TachoCardNumber ??
+                            string.Empty);
+
+                    return
+                        driverCard.Length >= 8 &&
+                        (string.Equals(
+                            driverCard,
+                            tachoCard,
+                            StringComparison.OrdinalIgnoreCase) ||
+                         driverCard.EndsWith(
+                            tachoCard,
+                            StringComparison.OrdinalIgnoreCase) ||
+                         tachoCard.EndsWith(
+                            driverCard,
+                            StringComparison.OrdinalIgnoreCase));
+                });
+
+            if (cardMatch is not null)
+            {
+                return (
+                    cardMatch,
+                    "TachoCard");
+            }
+        }
+
+        // 4. Explicit mapping by employee number
         if (
             !string.IsNullOrWhiteSpace(
                 tacho.EmployeeNumber) &&
@@ -1305,7 +1368,7 @@ public sealed class DotTrackingController(
             }
         }
 
-        // 3. Explicit mapping by driver name
+        // 5. Explicit mapping by driver name
         var nameKey =
             NormalisePersonName(
                 tacho.DriverName);
@@ -1327,7 +1390,7 @@ public sealed class DotTrackingController(
             }
         }
 
-        // 4. Employee-number match
+        // 6. Employee-number match
         if (
             !string.IsNullOrWhiteSpace(
                 tacho.EmployeeNumber))
@@ -1350,7 +1413,7 @@ public sealed class DotTrackingController(
             }
         }
 
-        // 5. Tacho name match
+        // 7. Tacho name match
         if (nameKey.Length > 0)
         {
             var tachoNameMatch =
@@ -1368,7 +1431,7 @@ public sealed class DotTrackingController(
             }
         }
 
-        // 6. Display-name match
+        // 8. Display-name match
         if (nameKey.Length > 0)
         {
             var displayMatch =
@@ -1477,4 +1540,6 @@ public sealed record FleetDriverIdentity(
     Guid Id,
     string EmployeeNumber,
     string DisplayName,
-    string? TachoName);
+    string? TachoName,
+    string? TachoMasterDriverId,
+    string? TachoCardNumber);

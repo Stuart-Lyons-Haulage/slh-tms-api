@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
 
@@ -158,7 +159,9 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         q = (q ?? string.Empty).Trim();
         var query = db.Sites.AsNoTracking().Where(x => includeInactive || x.Active);
         if (q.Length > 0) query = query.Where(x => x.Name.Contains(q) || x.ExternalCode.Contains(q) || (x.DriverTextName != null && x.DriverTextName.Contains(q)));
-        return Ok(await query.OrderBy(x => x.Name).Take(100).ToListAsync(ct));
+        var rows = await query.OrderBy(x => x.Name).Take(100).ToListAsync(ct);
+        await MasterDetailStore.EnrichSitesAsync(db, rows, ct);
+        return Ok(rows);
     }
 
     [HttpPut("sites/{id:guid}"), Authorize(Policy = "TmsApprove")]
@@ -166,6 +169,7 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
     {
         var site = await db.Sites.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (site is null) return NotFound();
+        await MasterDetailStore.EnrichSitesAsync(db, new[] { site }, ct);
         var before = Snapshot(site);
         site.ExternalCode = CleanRequired(request.ExternalCode, site.ExternalCode);
         site.Name = CleanRequired(request.Name, site.Name);
@@ -174,6 +178,7 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         site.CollectionInstructions = Clean(request.CollectionInstructions);
         site.MapLink = Clean(request.MapLink);
         await Audit("Site", id, "Updated", before, Snapshot(site), ct);
+        await MasterDetailStore.SaveAsync(db, "site", site.ExternalCode, Snapshot(site), "SLH operational site editor", User.Identity?.Name, ct);
         return Ok(site);
     }
 

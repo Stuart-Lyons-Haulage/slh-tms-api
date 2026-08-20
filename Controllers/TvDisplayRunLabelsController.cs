@@ -20,7 +20,7 @@ public sealed class TvDisplayRunLabelsController(TmsDbContext db) : ControllerBa
         if (!await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct))
             return Unauthorized(new { message = "This TV display is not paired." });
 
-        var day = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
+        var day = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
         var loads = (await PlanningResilience.ReadLoadsAsync(db, day, ct))
             .Where(load => load.Status != LoadStatus.Cancelled)
             .ToList();
@@ -38,6 +38,18 @@ public sealed class TvDisplayRunLabelsController(TmsDbContext db) : ControllerBa
                 displayReference = RunDisplayLabel.For(load)
             }).ToList()
         });
+    }
+
+    private static DateOnly UkOperatingDate(DateTimeOffset value)
+    {
+        try
+        {
+            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return DateOnly.FromDateTime(value.UtcDateTime);
+        }
     }
 }
 

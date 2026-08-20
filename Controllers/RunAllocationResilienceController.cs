@@ -81,6 +81,22 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
         return Ok(load);
     }
 
+    [HttpPut("{id:guid}/status"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> UpdateStatus(Guid id, RunStatusRequest request, CancellationToken ct)
+    {
+        var (load, register) = await FindLoadAsync(id, includeStops: true, tracking: true, ct);
+        if (load is null) return NotFound(new { message = "The run could not be found." });
+        if (!Enum.TryParse<LoadStatus>(request.Status, true, out var next)) return BadRequest(new { message = "The requested run status is not valid." });
+        if (!CanTransition(load.Status, next)) return BadRequest(new { message = $"A run cannot move from {load.Status} to {next}." });
+        if ((next is LoadStatus.Dispatched or LoadStatus.InProgress) && (load.DriverId is null || load.VehicleId is null))
+            return BadRequest(new { message = "Allocate both a driver and vehicle before dispatching a run." });
+
+        load.Status = next;
+        await SaveCoreLoadAsync(load, register, ct);
+        await RunOperationalStore.EnrichAsync(db, [load], ct);
+        return Ok(load);
+    }
+
     [HttpPut("{id:guid}/stops"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> UpdateStops(Guid id, List<RunStopRequest> request, CancellationToken ct)
     {
@@ -236,8 +252,21 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
     }
 
     private static string? Clip(string? value, int length) => string.IsNullOrWhiteSpace(value) ? null : value.Trim()[..Math.Min(value.Trim().Length, length)];
+    private static bool CanTransition(LoadStatus current, LoadStatus next) => current == next || (current, next) switch
+    {
+        (LoadStatus.Draft, LoadStatus.Planned) => true,
+        (LoadStatus.Planned, LoadStatus.Draft) => true,
+        (LoadStatus.Planned, LoadStatus.Dispatched) => true,
+        (LoadStatus.Draft, LoadStatus.Dispatched) => true,
+        (LoadStatus.Dispatched, LoadStatus.InProgress) => true,
+        (LoadStatus.Dispatched, LoadStatus.Cancelled) => true,
+        (LoadStatus.InProgress, LoadStatus.Completed) => true,
+        (LoadStatus.InProgress, LoadStatus.Cancelled) => true,
+        _ => false
+    };
 }
 
 public sealed record RunAllocationRequest(Guid? VehicleId, Guid? DriverId, Guid? TrailerId);
 public sealed record RunOperationalRequest(decimal? PalletSpacesUsed, decimal? TotalPalletSpaces, string? CapacityType, string? DepotSplits, decimal? TemperatureC, string? PlannerNotes);
 public sealed record RunStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc);
+public sealed record RunStatusRequest(string Status);

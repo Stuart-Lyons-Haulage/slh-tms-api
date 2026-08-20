@@ -13,6 +13,30 @@ public static class PlannerPlanImportRules
         return reference[..Math.Min(reference.Length, 80)];
     }
 
+    public static string PlannerRunLabel(PlannerPlanRunRequest run)
+    {
+        var source = string.IsNullOrWhiteSpace(run.PlannerRun) ? run.RunRef : run.PlannerRun;
+        var period = PlannerPeriod(run);
+        var clean = source.Trim();
+        var digits = new string(clean.Where(char.IsDigit).ToArray());
+        var label = digits.Length > 0 && clean.All(ch => char.IsDigit(ch) || char.IsWhiteSpace(ch)) ? $"Run {int.Parse(digits)}" : clean;
+        if (!label.StartsWith("Run ", StringComparison.OrdinalIgnoreCase)) label = $"Run {label}";
+        return string.IsNullOrWhiteSpace(period) || label.Contains(period, StringComparison.OrdinalIgnoreCase) ? label : $"{label} {period}";
+    }
+
+    public static string? PlannerPeriod(PlannerPlanRunRequest run)
+    {
+        var explicitText = $"{run.PlannerRun} {run.RunType}";
+        if (explicitText.Contains("AM", StringComparison.OrdinalIgnoreCase)) return "AM";
+        if (explicitText.Contains("PM", StringComparison.OrdinalIgnoreCase)) return "PM";
+        var first = (run.Stops ?? [])
+            .Where(stop => !string.IsNullOrWhiteSpace(stop.CollectFrom))
+            .OrderBy(stop => stop.Sequence)
+            .Select(stop => stop.CollectFrom)
+            .FirstOrDefault();
+        return TimeOnly.TryParse(first, out var time) ? time.Hour >= 15 || time.Hour < 3 ? "PM" : "AM" : null;
+    }
+
     public static PalletCapacityResult Capacity(PlannerPlanRunRequest run)
     {
         decimal standard = 0m, euro = 0m, unknown = 0m;
@@ -48,7 +72,8 @@ public static class PlannerPlanImportRules
         {
             run.PlannerNote,
             string.IsNullOrWhiteSpace(run.RunType) ? null : $"Run type: {run.RunType}",
-            string.IsNullOrWhiteSpace(run.PlannerRun) ? null : $"Planner run: {run.PlannerRun}",
+            $"Planner run: {PlannerRunLabel(run)}",
+            PlannerPeriod(run) is { } period ? $"Planner period: {period}" : null,
             string.IsNullOrWhiteSpace(run.ReconciliationStatus) ? null : $"Reconciliation: {run.ReconciliationStatus}",
             string.IsNullOrWhiteSpace(source) ? null : $"Source: {source}",
             $"Capacity: {capacity.StandardPallets:0.##} Standard + {capacity.EuroPallets:0.##} Euro + {capacity.UnknownPallets:0.##} unknown = {capacity.UtilisationPercent:0.0}% ({capacity.Status})"

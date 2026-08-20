@@ -146,7 +146,7 @@ public sealed class FleetioAssetSyncController(
 
         try
         {
-            var assets = await fleetioClient.GetVehiclesAsync(100, ct);
+            var assets = await fleetioClient.GetVehiclesAsync(100, includeDueDates: false, ct);
             var trailerAssets = assets.Where(IsTrailer).ToList();
             var vehicleAssets = assets.Where(asset => !IsTrailer(asset)).ToList();
 

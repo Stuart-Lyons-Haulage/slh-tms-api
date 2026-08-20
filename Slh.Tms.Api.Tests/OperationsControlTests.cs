@@ -79,8 +79,8 @@ public sealed class TachoDriverMatchingTests
 
     private static readonly FleetDriverIdentity[] Drivers =
     [
-        new(DriverA, "EMP001", "John Smith", "Smith John"),
-        new(DriverB, "EMP002", "Jane Doe", null),
+        new(DriverA, "EMP001", "John Smith", "Smith John", null, null),
+        new(DriverB, "EMP002", "Jane Doe", null, null, null),
     ];
 
     private static TachoVehicleDriverStatus MakeTacho(string driverName, int memberCode = 999, string? employeeNumber = null) =>
