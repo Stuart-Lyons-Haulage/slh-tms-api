@@ -213,7 +213,8 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
             Address = stop.Address,
             Latitude = stop.Latitude,
             Longitude = stop.Longitude,
-            PlannedArrivalUtc = stop.PlannedArrivalUtc
+            PlannedArrivalUtc = stop.PlannedArrivalUtc,
+            PlannerNote = Clip(stop.PlannerNote, 1000)
         }).ToList();
         await SaveLoadAsync(load, register, ct);
         return Ok(load);
@@ -426,6 +427,6 @@ public sealed record CreateLoadRequest(string Reference, DateOnly PlanningDate, 
 public sealed record CreateLoadStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc);
 public sealed record UpdateLoadAllocationRequest(Guid? VehicleId, Guid? DriverId, Guid? TrailerId);
 public sealed record UpdateLoadStatusRequest(string Status);
-public sealed record UpdateLoadStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc);
+public sealed record UpdateLoadStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc, string? PlannerNote = null);
 public sealed record UpdateLoadCommercialRequest(decimal? RevenueAmount, decimal? FuelSurchargeAmount, decimal? EstimatedCostAmount, decimal? ActualCostAmount, decimal? EstimatedDistanceMiles, decimal? EmptyMiles, string? InvoiceStatus, string? CommercialNotes);
 public sealed record UpdateLoadUtilisationRequest(decimal? PalletSpacesUsed, decimal? TotalPalletSpaces, string? CapacityType, string? DepotSplits, decimal? TemperatureC, string? PlannerNotes);
