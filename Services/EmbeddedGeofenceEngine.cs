@@ -36,7 +36,10 @@ public static class EmbeddedGeofenceEngine
 
         var (startUtc, endUtc) = OperatingWindow(planningDate);
         var windowStartUtc = startUtc.AddHours(-2);
-        var windowEndUtc = endUtc.AddHours(2);
+        // SLH night work regularly crosses midnight. Keep the originating operating
+        // day's tracking window open until midday so the final geofence/stop can prove
+        // completion rather than disappearing when the calendar date changes.
+        var windowEndUtc = endUtc.AddHours(12);
         List<VehicleTrackingEvent> events;
         if (vehicles.Count == 0)
         {
@@ -87,9 +90,14 @@ public static class EmbeddedGeofenceEngine
         // event while a vehicle is stationary. The event is correctly deduplicated in
         // VehicleTrackingEvents, but VehicleLiveStatus.LastReceivedAtUtc still proves that
         // the same position was freshly observed. Resolve those live observations using
-        // the identical alias rules as the historic tracking event stream.
+        // the identical alias rules as the historic tracking event stream. A previous-day
+        // run may continue to use the fresh live observation until its midday carry-over
+        // boundary so overnight duties remain live until completion.
         var freshLiveByVehicle = new Dictionary<Guid, VehicleLiveStatus>();
-        if (vehicles.Count > 0 && planningDate == UkOperatingDate(now))
+        var operatingToday = UkOperatingDate(now);
+        var includeFreshLive = planningDate == operatingToday ||
+            (planningDate == operatingToday.AddDays(-1) && now < windowEndUtc);
+        if (vehicles.Count > 0 && includeFreshLive)
         {
             var freshnessFloor = now.AddMinutes(-5);
             List<VehicleLiveStatus> liveStatuses;
