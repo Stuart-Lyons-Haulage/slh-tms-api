@@ -221,12 +221,18 @@ public sealed class TachoMasterClient
             {
                 mismatches++;
                 logger.LogWarning(
-                    "Live driver identity mismatch for vehicle {Vehicle}: TachoMaster duty={DutyDriver} card={DutyCard}; Falcon={FalconDriver} card={FalconCard}. TachoMaster duty retained for compliance metrics.",
+                    "Live driver identity mismatch for vehicle {Vehicle}: TachoMaster duty={DutyDriver} card={DutyCard}; Falcon={FalconDriver} card={FalconCard}. Falcon identity retained and Tacho compliance figures suppressed until the identities agree.",
                     vehicle,
                     duty.DriverName,
                     duty.CardNumber,
                     falcon.DriverName,
                     falcon.CardNumber);
+
+                // Tracking owns current driver identity. If the live Falcon identity does not
+                // agree with the Tacho duty identity, do not apply another driver's hours/breaks
+                // to the vehicle ETA. The Falcon-only record deliberately carries no compliance
+                // metrics until TachoMaster resolves to the same driver/card.
+                result[vehicle] = falcon;
             }
         }
 
@@ -247,7 +253,7 @@ public sealed class TachoMasterClient
         if (dotTrackingClient is null) return new Dictionary<string, TachoVehicleDriverStatus>();
         try
         {
-            var freshAfter = DateTimeOffset.UtcNow.AddMinutes(-30);
+            var freshAfter = DateTimeOffset.UtcNow.AddMinutes(-5);
             var telemetry = await dotTrackingClient.GetLatestVehicleEventsAsync(cancellationToken);
             var records = telemetry.Select(DotTelemetryRecord.FromProvider)
                 .Where(record => !string.IsNullOrWhiteSpace(record.VehicleIdentifier))
