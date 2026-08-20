@@ -14,7 +14,10 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
         return new FleetioVehicleSummary(true, vehicles.Count);
     }
 
-    public async Task<IReadOnlyList<FleetioVehicle>> GetVehiclesAsync(int perPage, CancellationToken ct)
+    public Task<IReadOnlyList<FleetioVehicle>> GetVehiclesAsync(int perPage, CancellationToken ct) =>
+        GetVehiclesAsync(perPage, includeDueDates: true, ct);
+
+    public async Task<IReadOnlyList<FleetioVehicle>> GetVehiclesAsync(int perPage, bool includeDueDates, CancellationToken ct)
     {
         if (!IsConfigured) throw new InvalidOperationException("Fleetio runtime settings are incomplete.");
 
@@ -76,6 +79,9 @@ public sealed class FleetioClient(HttpClient httpClient, FleetioOptions options,
                 StringComparer.OrdinalIgnoreCase)
             .Select(group => group.First())
             .ToList();
+
+        if (!includeDueDates)
+            return vehiclesById;
 
         try
         {
