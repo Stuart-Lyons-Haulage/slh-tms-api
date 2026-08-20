@@ -32,7 +32,6 @@ public static class PlanningRegisterStore
             .OrderBy(x => x.ReceivedAtUtc).Take(2000).ToListAsync(ct);
         var loads = rows.Select(ParseLoad).Where(x => x is not null && (date is null || x.PlanningDate == date)).Cast<Load>()
             .OrderBy(x => x.PlanningDate).ThenBy(x => x.Reference).Take(500).ToList();
-        await PlanningAllocationStore.ReconcileSingleOrderRunsAsync(db, loads, "SLH automatic reconciliation", ct);
         return loads;
     }
 
