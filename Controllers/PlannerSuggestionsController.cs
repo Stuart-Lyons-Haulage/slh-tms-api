@@ -16,6 +16,7 @@ public sealed class PlannerSuggestionsController(TmsDbContext db, ILogger<Planne
     {
         var planningDate = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
         var previousDate = planningDate.AddDays(-1);
+        var now = DateTimeOffset.UtcNow;
 
         var orders = await ReadOrders(planningDate, ct);
         var loads = await ReadLoads(planningDate, ct);
@@ -27,12 +28,17 @@ public sealed class PlannerSuggestionsController(TmsDbContext db, ILogger<Planne
             .Where(order => order.Status != OrderStatus.Cancelled && order.Status != OrderStatus.Delivered && !plannedOrderIds.Contains(order.Id))
             .ToList();
 
-        var previousLoads = await ReadLoads(previousDate, ct);
-        previousLoads = previousLoads
+        var previousLoads = (await ReadLoads(previousDate, ct))
+            .Where(load => load.Status != LoadStatus.Cancelled && load.DriverId is not null)
+            .ToList();
+        var sameDayLoads = loads
             .Where(load => load.Status != LoadStatus.Cancelled && load.DriverId is not null)
             .ToList();
 
-        var driverIds = previousLoads.Select(load => load.DriverId!.Value).Distinct().ToList();
+        var driverIds = sameDayLoads.Concat(previousLoads)
+            .Select(load => load.DriverId!.Value)
+            .Distinct()
+            .ToList();
         var drivers = await SafeList(db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id) && driver.Active), ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
         var driverById = drivers.ToDictionary(driver => driver.Id);
@@ -44,83 +50,115 @@ public sealed class PlannerSuggestionsController(TmsDbContext db, ILogger<Planne
         var vehicleById = vehicles.ToDictionary(vehicle => vehicle.Id);
         var liveStatuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
 
+        var positions = BuildDriverPositions(
+            sameDayLoads,
+            previousLoads,
+            driverById,
+            vehicleById,
+            liveStatuses,
+            now,
+            planningDate,
+            previousDate);
+
         var candidates = new List<PlannerDaySuggestion>();
-        foreach (var driverLoads in previousLoads.GroupBy(load => load.DriverId!.Value))
+        foreach (var position in positions)
         {
-            if (!driverById.TryGetValue(driverLoads.Key, out var driver)) continue;
-            var latestLoad = driverLoads.OrderByDescending(load => load.CreatedAtUtc).First();
-            var finalStop = (latestLoad.Stops ?? []).OrderBy(stop => stop.Sequence).LastOrDefault();
-
-            decimal? latitude = finalStop?.Latitude;
-            decimal? longitude = finalStop?.Longitude;
-            var lastLocation = finalStop?.Name ?? "Previous final stop";
-
-            if (latestLoad.VehicleId is Guid vehicleId && vehicleById.TryGetValue(vehicleId, out var vehicle))
-            {
-                var keys = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }
-                    .Where(value => !string.IsNullOrWhiteSpace(value))
-                    .Select(Normalise)
-                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                var live = liveStatuses
-                    .Where(status => keys.Contains(Normalise(status.VehicleIdentifier)))
-                    .OrderByDescending(status => status.LastEventTimeUtc)
-                    .FirstOrDefault();
-                if (live is not null && DateTimeOffset.UtcNow - live.LastEventTimeUtc <= TimeSpan.FromHours(18))
-                {
-                    latitude = live.Latitude;
-                    longitude = live.Longitude;
-                    lastLocation = $"Live position · {vehicle.Registration}";
-                }
-            }
-
-            if (latitude is null || longitude is null) continue;
+            var driver = position.Driver;
+            if (position.Latitude is null || position.Longitude is null) continue;
 
             var scored = unplanned.Select(order =>
             {
                 var collectionName = CollectionName(order);
-                var site = FindSite(sites, collectionName);
-                var distance = site?.Latitude is not null && site.Longitude is not null
-                    ? HaversineMiles((double)latitude.Value, (double)longitude.Value, (double)site.Latitude.Value, (double)site.Longitude.Value)
+                var destinationName = Destination(order);
+                var collectionSite = FindSite(sites, collectionName);
+                var destinationSite = FindSite(sites, destinationName);
+                var distance = collectionSite?.Latitude is not null && collectionSite.Longitude is not null
+                    ? HaversineMiles((double)position.Latitude.Value, (double)position.Longitude.Value, (double)collectionSite.Latitude.Value, (double)collectionSite.Longitude.Value)
                     : (double?)null;
                 var orderType = OrderType(order);
-                var crateBonus = string.Equals(orderType, "Crates", StringComparison.OrdinalIgnoreCase) && latitude >= 52.0m ? 30 : 0;
-                var score = distance is null ? -1000 : 100 - Math.Min(distance.Value, 250) + crateBonus;
-                return new { order, collectionName, site, distance, orderType, score };
+                var direction = Direction(collectionSite, destinationSite, order);
+
+                var score = distance is null ? -1000d : 100d - Math.Min(distance.Value, 250d);
+
+                // Same-day continuity is significantly more valuable than yesterday-position reuse.
+                if (position.IsSameDay) score += 55d;
+
+                // A north-positioned vehicle returning south is the preferred candidate for southbound/backhaul work.
+                var southboundContinuation = direction == "Southbound" &&
+                    collectionSite?.Latitude is not null &&
+                    position.Latitude.Value >= collectionSite.Latitude.Value - 0.35m;
+                if (southboundContinuation) score += 75d;
+
+                // Crate/backhaul work receives a smaller bonus when the vehicle is already in the north.
+                if (string.Equals(orderType, "Crates", StringComparison.OrdinalIgnoreCase) && position.Latitude >= 52.0m)
+                    score += 30d;
+
+                // Avoid presenting clearly impractical repositioning as a strong suggestion.
+                if (distance > 120d) score -= 35d;
+                if (distance > 180d) score -= 50d;
+
+                // Tacho is evidence, not the allocator. Penalise low remaining drive but do not auto-block a planner suggestion.
+                if (driver.TachoDriveAvailableTodayMinutes is int available)
+                {
+                    var approximateRepositionMinutes = distance is null ? 0 : (int)Math.Ceiling(distance.Value / 45d * 60d);
+                    if (available < approximateRepositionMinutes + 60) score -= 80d;
+                }
+
+                return new
+                {
+                    order,
+                    collectionName,
+                    destinationName,
+                    collectionSite,
+                    distance,
+                    orderType,
+                    direction,
+                    southboundContinuation,
+                    score
+                };
             })
             .Where(item => item.distance is not null)
             .OrderByDescending(item => item.score)
             .ThenBy(item => item.distance)
-            .Take(2)
+            .Take(3)
             .ToList();
 
             foreach (var item in scored)
             {
-                var destination = Destination(item.order);
-                var crateText = item.orderType == "Crates" ? " Potential southbound crate/backhaul work." : string.Empty;
+                var continuationText = item.southboundContinuation
+                    ? " Same-day southbound continuation: this vehicle/driver is already in the north and naturally returning south."
+                    : position.IsSameDay
+                        ? " Same-day continuation from the driver's current run/position."
+                        : " Previous-day positioning fallback.";
+                var crateText = item.orderType == "Crates" ? " Potential crate/backhaul work." : string.Empty;
                 var tachoText = driver.TachoDriveAvailableTodayMinutes is int minutes
-                    ? $" Tacho availability currently recorded: {minutes / 60}h {minutes % 60:00}."
+                    ? $" Tacho drive available: {minutes / 60}h {minutes % 60:00}; confirm any required statutory break before allocation."
                     : " Tacho hours are not currently available, so legal availability must still be confirmed.";
+                var vehicleText = string.IsNullOrWhiteSpace(position.VehicleRegistration)
+                    ? string.Empty
+                    : $" Keep vehicle {position.VehicleRegistration} with the driver where practical.";
+
                 candidates.Add(new PlannerDaySuggestion(
                     driver.Id,
                     driver.DisplayName,
                     driver.EmployeeNumber,
-                    latestLoad.Id,
-                    latestLoad.Reference,
-                    previousDate,
-                    lastLocation,
-                    latitude,
-                    longitude,
+                    position.Load.Id,
+                    position.Load.Reference,
+                    position.SourceDate,
+                    position.LastLocation,
+                    position.Latitude,
+                    position.Longitude,
                     item.order.Id,
                     item.order.Reference,
                     item.order.CustomerCode,
                     item.collectionName,
-                    destination,
+                    item.destinationName,
                     item.orderType,
                     item.order.Pallets,
                     item.distance is null ? null : Math.Round(item.distance.Value, 1),
                     driver.TachoDriveAvailableTodayMinutes,
                     item.score,
-                    $"{driver.DisplayName} finished yesterday at {lastLocation}. Today's collection at {item.collectionName} is about {item.distance:0.0} miles from that position.{crateText}{tachoText}"));
+                    $"{driver.DisplayName} is positioned at {position.LastLocation}. {item.direction} collection at {item.collectionName} is about {item.distance:0.0} miles away.{continuationText}{vehicleText}{crateText}{tachoText}"));
             }
         }
 
@@ -128,11 +166,77 @@ public sealed class PlannerSuggestionsController(TmsDbContext db, ILogger<Planne
         {
             planningDate,
             previousDate,
-            generatedAtUtc = DateTimeOffset.UtcNow,
+            generatedAtUtc = now,
             unplannedOrders = unplanned.Count,
+            sameDayDrivers = sameDayLoads.Select(load => load.DriverId).Where(id => id is not null).Distinct().Count(),
             previousDayDrivers = previousLoads.Select(load => load.DriverId).Where(id => id is not null).Distinct().Count(),
-            suggestions = candidates.OrderByDescending(item => item.Score).ThenBy(item => item.RepositionMiles).Take(12)
+            suggestions = candidates
+                .OrderByDescending(item => item.Score)
+                .ThenBy(item => item.RepositionMiles)
+                .Take(16)
         });
+    }
+
+    private static List<DriverPosition> BuildDriverPositions(
+        IReadOnlyList<Load> sameDayLoads,
+        IReadOnlyList<Load> previousLoads,
+        IReadOnlyDictionary<Guid, Driver> driverById,
+        IReadOnlyDictionary<Guid, Vehicle> vehicleById,
+        IReadOnlyList<VehicleLiveStatus> liveStatuses,
+        DateTimeOffset now,
+        DateOnly planningDate,
+        DateOnly previousDate)
+    {
+        var result = new List<DriverPosition>();
+        var handledDrivers = new HashSet<Guid>();
+
+        void AddPositions(IEnumerable<IGrouping<Guid, Load>> groups, bool sameDay, DateOnly sourceDate)
+        {
+            foreach (var driverLoads in groups)
+            {
+                if (!handledDrivers.Add(driverLoads.Key)) continue;
+                if (!driverById.TryGetValue(driverLoads.Key, out var driver)) continue;
+
+                var latestLoad = driverLoads
+                    .OrderByDescending(load => LoadOperationalPriority(load.Status))
+                    .ThenByDescending(load => LatestPlannedStop(load))
+                    .ThenByDescending(load => load.CreatedAtUtc)
+                    .First();
+                var finalStop = (latestLoad.Stops ?? []).OrderBy(stop => stop.Sequence).LastOrDefault();
+
+                decimal? latitude = finalStop?.Latitude;
+                decimal? longitude = finalStop?.Longitude;
+                var lastLocation = finalStop?.Name ?? (sameDay ? "Current run final stop" : "Previous final stop");
+                string? vehicleRegistration = null;
+
+                if (latestLoad.VehicleId is Guid vehicleId && vehicleById.TryGetValue(vehicleId, out var vehicle))
+                {
+                    vehicleRegistration = vehicle.Registration;
+                    var keys = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }
+                        .Where(value => !string.IsNullOrWhiteSpace(value))
+                        .Select(Normalise)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    var live = liveStatuses
+                        .Where(status => keys.Contains(Normalise(status.VehicleIdentifier)))
+                        .OrderByDescending(status => status.LastEventTimeUtc)
+                        .FirstOrDefault();
+
+                    var freshness = sameDay ? TimeSpan.FromMinutes(10) : TimeSpan.FromHours(18);
+                    if (live is not null && now - live.LastEventTimeUtc <= freshness)
+                    {
+                        latitude = live.Latitude;
+                        longitude = live.Longitude;
+                        lastLocation = $"Live position · {vehicle.Registration}";
+                    }
+                }
+
+                result.Add(new DriverPosition(driver, latestLoad, sourceDate, sameDay, vehicleRegistration, lastLocation, latitude, longitude));
+            }
+        }
+
+        AddPositions(sameDayLoads.GroupBy(load => load.DriverId!.Value), true, planningDate);
+        AddPositions(previousLoads.GroupBy(load => load.DriverId!.Value), false, previousDate);
+        return result;
     }
 
     private async Task<List<TransportOrder>> ReadOrders(DateOnly date, CancellationToken ct)
@@ -199,6 +303,19 @@ public sealed class PlannerSuggestionsController(TmsDbContext db, ILogger<Planne
         return combined.Contains("crate", StringComparison.OrdinalIgnoreCase) ? "Crates" : "Pallets";
     }
 
+    private static string Direction(Site? collection, Site? destination, TransportOrder order)
+    {
+        var text = $"{order.Reference} {order.DriverInstructions} {order.MarketName} {order.StallNumber}";
+        if (text.Contains("southbound", StringComparison.OrdinalIgnoreCase)) return "Southbound";
+        if (text.Contains("northbound", StringComparison.OrdinalIgnoreCase)) return "Northbound";
+        if (collection?.Latitude is decimal cLat && destination?.Latitude is decimal dLat)
+        {
+            if (dLat <= cLat - 0.25m) return "Southbound";
+            if (dLat >= cLat + 0.25m) return "Northbound";
+        }
+        return "Cross-country/local";
+    }
+
     private static string? Tag(string? notes, string label)
     {
         if (string.IsNullOrWhiteSpace(notes)) return null;
@@ -206,6 +323,19 @@ public sealed class PlannerSuggestionsController(TmsDbContext db, ILogger<Planne
         return notes.Split('·', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
             .FirstOrDefault(part => part.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))?[prefix.Length..].Trim();
     }
+
+    private static DateTimeOffset LatestPlannedStop(Load load) =>
+        (load.Stops ?? []).Where(stop => stop.PlannedArrivalUtc is not null).Select(stop => stop.PlannedArrivalUtc!.Value).DefaultIfEmpty(load.CreatedAtUtc).Max();
+
+    private static int LoadOperationalPriority(LoadStatus status) => status switch
+    {
+        LoadStatus.InProgress => 5,
+        LoadStatus.Dispatched => 4,
+        LoadStatus.Completed => 3,
+        LoadStatus.Planned => 2,
+        LoadStatus.Draft => 1,
+        _ => 0
+    };
 
     private static double HaversineMiles(double lat1, double lon1, double lat2, double lon2)
     {
@@ -230,6 +360,16 @@ public sealed class PlannerSuggestionsController(TmsDbContext db, ILogger<Planne
                message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase) ||
                message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase);
     }
+
+    private sealed record DriverPosition(
+        Driver Driver,
+        Load Load,
+        DateOnly SourceDate,
+        bool IsSameDay,
+        string? VehicleRegistration,
+        string LastLocation,
+        decimal? Latitude,
+        decimal? Longitude);
 }
 
 public sealed record PlannerDaySuggestion(
