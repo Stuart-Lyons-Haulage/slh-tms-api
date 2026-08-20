@@ -8,11 +8,13 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/run-progress")]
 [Authorize]
-public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressController> logger) : ControllerBase
+public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressController> logger, IConfiguration configuration) : ControllerBase
 {
-    [HttpGet]
+    [HttpGet, AllowAnonymous]
     public async Task<IActionResult> Get([FromQuery] DateOnly? date, CancellationToken ct)
     {
+        if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
+
         var planningDate = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
         var now = DateTimeOffset.UtcNow;
 

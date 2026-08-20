@@ -9,7 +9,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1")]
 [Authorize]
-public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient maps, DriverSmsDispatchService sms) : ControllerBase
+public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient maps, DriverSmsDispatchService sms, IConfiguration configuration) : ControllerBase
 {
     [HttpGet("orders")]
     public async Task<IActionResult> Orders([FromQuery] DateOnly? from, [FromQuery] DateOnly? to, CancellationToken ct)
@@ -28,9 +28,11 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         }
     }
 
-    [HttpGet("loads")]
+    [HttpGet("loads"), AllowAnonymous]
     public async Task<IActionResult> Loads([FromQuery] DateOnly? date, CancellationToken ct)
     {
+        if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
+
         try
         {
             var query = db.Loads.AsNoTracking().Include(load => load.Stops).AsQueryable();

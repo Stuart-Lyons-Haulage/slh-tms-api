@@ -10,11 +10,13 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1")]
 [Authorize]
-public sealed class DriverPlanningController(TmsDbContext db) : ControllerBase
+public sealed class DriverPlanningController(TmsDbContext db, IConfiguration configuration) : ControllerBase
 {
-    [HttpGet("driver-assignments")]
+    [HttpGet("driver-assignments"), AllowAnonymous]
     public async Task<IActionResult> Assignments([FromQuery] DateOnly? from, [FromQuery] DateOnly? to, CancellationToken ct)
     {
+        if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
+
         var firstDate = from ?? DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-7);
         var lastDate = to ?? firstDate;
         if (lastDate < firstDate || lastDate.DayNumber - firstDate.DayNumber > 92)
