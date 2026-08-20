@@ -5,6 +5,11 @@ using Azure.Identity;
 
 namespace Slh.Tms.Api.Services;
 
+public sealed record RouteTravelEstimate(TimeSpan TravelTime, bool IsApproximate, string Provider)
+{
+    public string Source => IsApproximate ? "Estimated" : "Live";
+}
+
 public sealed class AzureMapsRouteClient(HttpClient client, IConfiguration configuration, ILogger<AzureMapsRouteClient> logger)
 {
     private static readonly TokenRequestContext TokenContext = new(["https://atlas.microsoft.com/.default"]);
@@ -16,9 +21,12 @@ public sealed class AzureMapsRouteClient(HttpClient client, IConfiguration confi
         try
         {
             var token = await new DefaultAzureCredential().GetTokenAsync(TokenContext, ct);
-            var query = string.Join(':', points.Select(point => $"{point.Longitude.ToString(System.Globalization.CultureInfo.InvariantCulture)},{point.Latitude.ToString(System.Globalization.CultureInfo.InvariantCulture)}"));
+            // Azure Maps Route v1 expects latitude,longitude. The TMS tuple is deliberately
+            // Longitude,Latitude, so reverse it when building the provider query.
+            var query = string.Join(':', points.Select(point => $"{point.Latitude.ToString(System.Globalization.CultureInfo.InvariantCulture)},{point.Longitude.ToString(System.Globalization.CultureInfo.InvariantCulture)}"));
             var endpoint = configuration["Maps:Endpoint"] ?? "https://atlas.microsoft.com";
-            using var request = new HttpRequestMessage(HttpMethod.Get, $"{endpoint.TrimEnd('/')}/route/directions/json?api-version=1.0&query={Uri.EscapeDataString(query)}");
+            var routeUrl = $"{endpoint.TrimEnd('/')}/route/directions/json?api-version=1.0&routeType=fastest&traffic=true&travelMode=truck&vehicleCommercial=true&query={Uri.EscapeDataString(query)}";
+            using var request = new HttpRequestMessage(HttpMethod.Get, routeUrl);
             request.Headers.Authorization = new("Bearer", token.Token);
             using var response = await client.SendAsync(request, ct);
             response.EnsureSuccessStatusCode();
@@ -71,15 +79,23 @@ public sealed class AzureMapsRouteClient(HttpClient client, IConfiguration confi
         return (lat, lon);
     }
 
-    public async Task<TimeSpan> TravelTime((decimal Longitude, decimal Latitude) from, (decimal Longitude, decimal Latitude) to, CancellationToken ct)
+    public async Task<RouteTravelEstimate> TravelTimeEstimate((decimal Longitude, decimal Latitude) from, (decimal Longitude, decimal Latitude) to, CancellationToken ct)
     {
         var result = await Directions([from, to], ct);
         using var document = JsonDocument.Parse(JsonSerializer.Serialize(result));
         if (!document.RootElement.TryGetProperty("routes", out var routes) || routes.GetArrayLength() == 0 ||
             !routes[0].TryGetProperty("summary", out var summary) || !summary.TryGetProperty("travelTimeInSeconds", out var seconds))
             throw new InvalidOperationException("Routing did not return a travel time.");
-        return TimeSpan.FromSeconds(seconds.GetDouble());
+
+        var approximate = document.RootElement.TryGetProperty("approximate", out var approximateValue) && approximateValue.ValueKind == JsonValueKind.True;
+        var provider = document.RootElement.TryGetProperty("source", out var sourceValue) && sourceValue.ValueKind == JsonValueKind.String
+            ? sourceValue.GetString() ?? "Azure Maps"
+            : "Azure Maps live traffic truck route";
+        return new RouteTravelEstimate(TimeSpan.FromSeconds(seconds.GetDouble()), approximate, provider);
     }
+
+    public async Task<TimeSpan> TravelTime((decimal Longitude, decimal Latitude) from, (decimal Longitude, decimal Latitude) to, CancellationToken ct)
+        => (await TravelTimeEstimate(from, to, ct)).TravelTime;
 
     private async Task<object?> SearchPostcode(string postcode, CancellationToken ct)
     {
