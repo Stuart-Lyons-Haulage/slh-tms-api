@@ -1,4 +1,5 @@
 using Xunit;
+using Slh.Tms.Api.Controllers;
 using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Tests;
@@ -16,6 +17,7 @@ public sealed class SchemaResourceTests
         Assert.Contains("Slh.Tms.Api.Database.015_Driver_Existing_Table_Repair.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.023_Planning_Table_Complete_Repair.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.024_Integration_Mappings.sql", resources);
+        Assert.Contains("Slh.Tms.Api.Database.027_Integration_Mappings_Repair.sql", resources);
     }
 
     [Fact]
@@ -27,5 +29,22 @@ public sealed class SchemaResourceTests
             .ToArray();
 
         Assert.Equal(resources, PlanningSchemaInitializer.GetSchemaScripts());
+    }
+
+    [Fact]
+    public void Runtime_integration_mapping_repair_covers_partial_tables()
+    {
+        Assert.Contains("Provider", IntegrationMappingSchemaRepair.RepairSql);
+        Assert.Contains("ExternalKey", IntegrationMappingSchemaRepair.RepairSql);
+        Assert.Contains("TmsEntityType", IntegrationMappingSchemaRepair.RepairSql);
+        Assert.Contains("TmsEntityId", IntegrationMappingSchemaRepair.RepairSql);
+        Assert.Contains("IX_IntegrationMappings_Provider_ExternalKey_Type", IntegrationMappingSchemaRepair.RepairSql);
+    }
+
+    [Fact]
+    public void Fleetio_mapping_fallback_message_does_not_make_tms_sole_authority()
+    {
+        Assert.DoesNotContain("TMS master remains authoritative", FleetioResilientSyncController.MappingUnavailableWarning);
+        Assert.Contains("Fleetio-supplied identity, status and compliance fields were applied", FleetioResilientSyncController.MappingUnavailableWarning);
     }
 }

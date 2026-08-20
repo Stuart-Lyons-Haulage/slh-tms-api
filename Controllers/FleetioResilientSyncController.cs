@@ -16,6 +16,9 @@ public sealed class FleetioResilientSyncController(
     TmsDbContext db,
     ILogger<FleetioResilientSyncController> logger) : ControllerBase
 {
+    internal const string MappingUnavailableWarning =
+        "Integration Mappings is temporarily unavailable. Fleetio assets were still synced using deterministic registration and SLH trailer-number matching; Fleetio-supplied identity, status and compliance fields were applied while TMS-only fields were preserved where Fleetio supplied no value.";
+
     private sealed record DesiredMapping(string ExternalKey, string ExternalLabel, string EntityType, Guid EntityId);
 
     [HttpPost("sync-assets-resilient")]
@@ -188,7 +191,7 @@ public sealed class FleetioResilientSyncController(
             var mappingsUpdated = 0;
             if (!mappingsAvailable)
             {
-                mappingWarning = "Integration Mappings is temporarily unavailable. Fleetio sync still uses deterministic registration and SLH trailer-number matching, so the TMS master remains authoritative.";
+                mappingWarning = MappingUnavailableWarning;
             }
             else
             {
@@ -229,7 +232,7 @@ public sealed class FleetioResilientSyncController(
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     logger.LogWarning(ex, "Fleetio assets synced but IntegrationMappings could not be persisted.");
-                    mappingWarning = "Integration Mappings could not be persisted, but deterministic vehicle registration and SLH trailer-number matching completed successfully.";
+                    mappingWarning = "Integration Mappings could not be persisted, but Fleetio asset data was synced using deterministic registration and SLH trailer-number matching.";
                 }
             }
 
@@ -291,6 +294,8 @@ public sealed class FleetioResilientSyncController(
     {
         try
         {
+            var repaired = await IntegrationMappingSchemaRepair.EnsureAsync(db, logger, ct);
+            if (!repaired) return ([], false);
             return (await db.IntegrationMappings.AsNoTracking().Where(item => item.Active && item.Provider == "Fleetio").ToListAsync(ct), true);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
