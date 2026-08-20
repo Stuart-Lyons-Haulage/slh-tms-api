@@ -10,11 +10,13 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/operations")]
 [Authorize]
-public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient maps, TachoMasterClient tachoMaster, ILogger<OperationsController> logger) : ControllerBase
+public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient maps, TachoMasterClient tachoMaster, ILogger<OperationsController> logger, IConfiguration configuration) : ControllerBase
 {
-    [HttpGet("delivery-etas")]
+    [HttpGet("delivery-etas"), AllowAnonymous]
     public async Task<IActionResult> DeliveryEtas([FromQuery] DateOnly? date, CancellationToken ct)
     {
+        if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
+
         var planningDate = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
         List<Load> loads;
         try
