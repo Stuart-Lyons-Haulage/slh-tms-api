@@ -103,6 +103,7 @@ jobs:
             "dot-username=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-username,identityref:system"
             "sagehr-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-sagehr-api-key,identityref:system"
             "sagehr-base-url=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-sagehr-base-url,identityref:system"
+            "tv-wallboard-access-key=${{ secrets.TV_WALLBOARD_ACCESS_KEY }}"
           )
           for attempt in {1..18}; do
             if az containerapp secret set \
@@ -148,6 +149,7 @@ jobs:
             "Integrations__SageHr__ApiKey=secretref:sagehr-api-key"
             "Integrations__SageHr__DriverTeamName=Drivers"
             "Integrations__SageHr__DriverPositionKeyword=Driver"
+            "TvWallboard__AccessKey=secretref:tv-wallboard-access-key"
             "Cors__AllowedOrigins__0=https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io"
             "Deployment__Revision=${{ github.sha }}"
           )
