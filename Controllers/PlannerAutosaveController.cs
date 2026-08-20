@@ -57,7 +57,8 @@ public sealed class PlannerAutosaveController(TmsDbContext db) : ControllerBase
             Address = stop.Address,
             Latitude = stop.Latitude,
             Longitude = stop.Longitude,
-            PlannedArrivalUtc = stop.PlannedArrivalUtc
+            PlannedArrivalUtc = stop.PlannedArrivalUtc,
+            PlannerNote = string.IsNullOrWhiteSpace(stop.PlannerNote) ? null : stop.PlannerNote.Trim()[..Math.Min(stop.PlannerNote.Trim().Length, 1000)]
         }).ToList();
 
         if (registerBacked)
