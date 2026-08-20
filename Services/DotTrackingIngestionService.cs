@@ -16,6 +16,9 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
                 var store = scope.ServiceProvider.GetRequiredService<DotTrackingTelemetryStore>();
                 var records = (await client.GetLatestVehicleEventsAsync(stoppingToken)).Select(DotTelemetryRecord.FromProvider);
                 await store.PersistAsync(records, stoppingToken);
+                var recoveryDay = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeBySystemTimeZoneId(DateTimeOffset.UtcNow, "Europe/London").DateTime).AddDays(-1);
+                var recovered = (await client.GetHistoricalVehicleEventsAsync(recoveryDay, stoppingToken)).Select(DotTelemetryRecord.FromProvider);
+                await store.PersistAsync(recovered, stoppingToken);
             }
             catch (InvalidOperationException exception)
             {
