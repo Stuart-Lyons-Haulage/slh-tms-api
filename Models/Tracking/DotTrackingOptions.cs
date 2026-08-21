@@ -7,8 +7,38 @@ namespace Slh.Tms.Api.Models.Tracking;
 public sealed class DotTrackingOptions
 {
     private int _dataMask = 0x01;
+    private string _baseUrl = string.Empty;
 
-    public string BaseUrl { get; set; } = string.Empty;
+    public string BaseUrl
+    {
+        get => _baseUrl;
+        set
+        {
+            var candidate = (value ?? string.Empty).Trim();
+            if (candidate.Length == 0)
+            {
+                _baseUrl = string.Empty;
+                BaseUrlConfigurationError = null;
+                return;
+            }
+
+            if (!candidate.Contains("://", StringComparison.Ordinal))
+                candidate = $"https://{candidate.TrimStart('/')}";
+
+            if (!Uri.TryCreate(candidate, UriKind.Absolute, out var uri) ||
+                (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp))
+            {
+                _baseUrl = string.Empty;
+                BaseUrlConfigurationError = "RoadTech base URL is invalid; expected an absolute HTTP(S) URL such as https://api-v1.roadtech.co.uk.";
+                return;
+            }
+
+            _baseUrl = uri.ToString().TrimEnd('/');
+            BaseUrlConfigurationError = null;
+        }
+    }
+
+    public string? BaseUrlConfigurationError { get; private set; }
     public string ApiKey { get; set; } = string.Empty;
     public string Username { get; set; } = string.Empty;
     public string Password { get; set; } = string.Empty;
@@ -35,6 +65,8 @@ public sealed class DotTrackingOptions
     /// <summary>Safety limit for RoadTech Offset pagination.</summary>
     public int MaxPages { get; set; } = 100;
 
-    public bool IsConfigured => Enabled && !string.IsNullOrWhiteSpace(BaseUrl) && !string.IsNullOrWhiteSpace(ApiKey) &&
-        !string.IsNullOrWhiteSpace(Username) && !string.IsNullOrWhiteSpace(Password) && !string.IsNullOrWhiteSpace(CompanyCode);
+    public bool IsConfigured => Enabled && BaseUrlConfigurationError is null &&
+        !string.IsNullOrWhiteSpace(BaseUrl) && !string.IsNullOrWhiteSpace(ApiKey) &&
+        !string.IsNullOrWhiteSpace(Username) && !string.IsNullOrWhiteSpace(Password) &&
+        !string.IsNullOrWhiteSpace(CompanyCode);
 }
