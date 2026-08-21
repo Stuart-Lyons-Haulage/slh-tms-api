@@ -55,6 +55,7 @@ public sealed class DailyComplianceController(
     {
         var loads = await ReadLoads(date, ct);
         var drivers = await db.Drivers.AsNoTracking().Where(x => x.Active).OrderBy(x => x.DisplayName).ToListAsync(ct);
+        await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
         var vehicles = await db.Vehicles.AsNoTracking().Where(x => x.Active).OrderBy(x => x.Registration).ToListAsync(ct);
         var trailers = await db.Trailers.AsNoTracking().Where(x => x.Active).OrderBy(x => x.TrailerNumber).ToListAsync(ct);
         var mappings = await SafeMappings(ct);
@@ -499,10 +500,15 @@ public sealed class DailyComplianceController(
             .Select(item => (DateTimeOffset?)item.EventTimeUtc).FirstOrDefault();
     }
 
-    private static bool DriverMatches(Driver driver, TachoDriverDutyStatus duty)
+    internal static bool DriverMatches(Driver driver, TachoDriverDutyStatus duty)
     {
+        if (!string.IsNullOrWhiteSpace(driver.TachoCardNumber) && !string.IsNullOrWhiteSpace(duty.CardNumber) &&
+            string.Equals(Normalise(driver.TachoCardNumber), Normalise(duty.CardNumber), StringComparison.OrdinalIgnoreCase))
+            return true;
         if (int.TryParse(driver.TachoMasterDriverId, out var memberCode) && memberCode > 0 && memberCode == duty.MemberCode) return true;
-        if (!string.IsNullOrWhiteSpace(driver.EmployeeNumber) && !string.IsNullOrWhiteSpace(duty.EmployeeNumber) && string.Equals(Normalise(driver.EmployeeNumber), Normalise(duty.EmployeeNumber), StringComparison.OrdinalIgnoreCase)) return true;
+        if (!string.IsNullOrWhiteSpace(driver.EmployeeNumber) && !string.IsNullOrWhiteSpace(duty.EmployeeNumber) &&
+            string.Equals(Normalise(driver.EmployeeNumber), Normalise(duty.EmployeeNumber), StringComparison.OrdinalIgnoreCase))
+            return true;
         var names = new[] { driver.DisplayName, driver.TachoName }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => Normalise(value!)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         return names.Contains(Normalise(duty.DriverName));
     }
