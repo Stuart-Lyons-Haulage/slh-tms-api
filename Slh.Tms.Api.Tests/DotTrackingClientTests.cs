@@ -43,7 +43,7 @@ public sealed class DotTrackingClientTests
 
         var telemetryJson = handler.Bodies[1];
         using var payload = JsonDocument.Parse(telemetryJson);
-        Assert.Equal(0, payload.RootElement.GetProperty("DataMask").GetInt32());
+        Assert.Equal(0x01, payload.RootElement.GetProperty("DataMask").GetInt32());
         Assert.True(payload.RootElement.GetProperty("OnlyLive").GetBoolean());
     }
 
@@ -70,7 +70,6 @@ public sealed class DotTrackingClientTests
         Assert.Equal("e5e9fa1ba31ecd1ae84f75caaa474f3a663f05f4", secondLogin.RootElement.GetProperty("Pass").GetString());
     }
 
-
     [Theory]
     [InlineData("01a036dbdb381bd1009ae2d604eeaaca", 2)]
     [InlineData("e5e9fa1ba31ecd1ae84f75caaa474f3a663f05f4", 2)]
@@ -93,7 +92,6 @@ public sealed class DotTrackingClientTests
         using var login = JsonDocument.Parse(handler.Bodies[0]);
         Assert.Equal(password, login.RootElement.GetProperty("Pass").GetString());
     }
-
 
     [Theory]
     [InlineData("{\"Token\":\"sid-123\"}")]

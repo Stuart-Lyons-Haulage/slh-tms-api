@@ -34,26 +34,74 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
                     logger.LogWarning(exception, "RoadTech identifier normalisation was skipped for {VehicleIdentifier}; live ingestion will continue.", rawIdentifier);
                 }
             }
-            if (record.Latitude is not null && record.Longitude is not null)
+
+            var hasGps = record.Latitude is not null && record.Longitude is not null;
+            if (hasGps)
             {
                 var exists = await db.VehicleTrackingEvents.AnyAsync(item => item.ProviderName == "RoadTech Falcon" && item.ProviderEventId == record.ProviderEventId, ct);
-                if (!exists) db.VehicleTrackingEvents.Add(new VehicleTrackingEvent { ProviderName = "RoadTech Falcon", ProviderEventId = record.ProviderEventId, VehicleIdentifier = canonicalIdentifier, EventTimeUtc = record.EventTimeUtc, Latitude = record.Latitude.Value, Longitude = record.Longitude.Value, SpeedKph = record.SpeedKph, IgnitionOn = record.IgnitionOn, IsMoving = record.IsMoving, RawPayload = record.RawPayload, MatchStatus = "Received" });
+                if (!exists) db.VehicleTrackingEvents.Add(new VehicleTrackingEvent
+                {
+                    ProviderName = "RoadTech Falcon",
+                    ProviderEventId = record.ProviderEventId,
+                    VehicleIdentifier = canonicalIdentifier,
+                    EventTimeUtc = record.EventTimeUtc,
+                    Latitude = record.Latitude!.Value,
+                    Longitude = record.Longitude!.Value,
+                    SpeedKph = record.SpeedKph,
+                    IgnitionOn = record.IgnitionOn,
+                    IsMoving = record.IsMoving,
+                    RawPayload = record.RawPayload,
+                    MatchStatus = "Received"
+                });
             }
-            var live = await db.VehicleLiveStatuses.Where(item => item.VehicleIdentifier == canonicalIdentifier || item.VehicleIdentifier == rawIdentifier).OrderByDescending(item => item.LastEventTimeUtc).FirstOrDefaultAsync(ct);
+
+            // Historical recovery is geofence evidence only. It must never create or
+            // refresh a live-status row. Likewise, a current Falcon row without GPS does
+            // not prove that the vehicle position itself is current.
+            if (!markAsLiveReceipt || !hasGps) continue;
+
+            var live = await db.VehicleLiveStatuses
+                .Where(item => item.VehicleIdentifier == canonicalIdentifier || item.VehicleIdentifier == rawIdentifier)
+                .OrderByDescending(item => item.LastEventTimeUtc)
+                .FirstOrDefaultAsync(ct);
+
             if (live is null)
             {
-                db.VehicleLiveStatuses.Add(new VehicleLiveStatus { VehicleIdentifier = canonicalIdentifier, LastEventTimeUtc = record.EventTimeUtc, LastReceivedAtUtc = markAsLiveReceipt ? receivedAt : record.EventTimeUtc, Latitude = record.Latitude ?? 0, Longitude = record.Longitude ?? 0, SpeedKph = record.SpeedKph, IgnitionOn = record.IgnitionOn, IsMoving = record.IsMoving, LastKnownStatus = record.Status, CurrentDriverName = record.DriverName, CurrentDriverCardNumber = record.DriverCardNumber });
+                db.VehicleLiveStatuses.Add(new VehicleLiveStatus
+                {
+                    VehicleIdentifier = canonicalIdentifier,
+                    LastEventTimeUtc = record.EventTimeUtc,
+                    LastReceivedAtUtc = receivedAt,
+                    Latitude = record.Latitude!.Value,
+                    Longitude = record.Longitude!.Value,
+                    SpeedKph = record.SpeedKph,
+                    IgnitionOn = record.IgnitionOn,
+                    IsMoving = record.IsMoving,
+                    LastKnownStatus = record.Status,
+                    CurrentDriverName = record.DriverName,
+                    CurrentDriverCardNumber = record.DriverCardNumber
+                });
             }
             else
             {
                 live.VehicleIdentifier = canonicalIdentifier;
-                // Receipt freshness answers whether the current Falcon poll is alive. Historical replay must never make a vehicle look live.
-                if (markAsLiveReceipt) live.LastReceivedAtUtc = receivedAt;
+
+                // Receipt freshness answers whether GetCurrentTelemetry is actively
+                // confirming this GPS position. Stationary vehicles may keep the same
+                // provider event timestamp throughout a long unload.
+                live.LastReceivedAtUtc = receivedAt;
+
+                // Do not roll the stored position backwards if RoadTech includes an older
+                // event in the current-fleet response.
                 if (record.EventTimeUtc >= live.LastEventTimeUtc)
                 {
                     live.LastEventTimeUtc = record.EventTimeUtc;
-                    if (record.Latitude is not null && record.Longitude is not null) { live.Latitude = record.Latitude.Value; live.Longitude = record.Longitude.Value; }
-                    live.SpeedKph = record.SpeedKph; live.IgnitionOn = record.IgnitionOn; live.IsMoving = record.IsMoving; live.LastKnownStatus = record.Status;
+                    live.Latitude = record.Latitude!.Value;
+                    live.Longitude = record.Longitude!.Value;
+                    live.SpeedKph = record.SpeedKph;
+                    live.IgnitionOn = record.IgnitionOn;
+                    live.IsMoving = record.IsMoving;
+                    live.LastKnownStatus = record.Status;
                     if (!string.IsNullOrWhiteSpace(record.DriverName)) live.CurrentDriverName = record.DriverName;
                     if (!string.IsNullOrWhiteSpace(record.DriverCardNumber)) live.CurrentDriverCardNumber = record.DriverCardNumber;
                 }
