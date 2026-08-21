@@ -71,14 +71,7 @@ public sealed class TachoMasterClient
         }).Where(profile => !string.IsNullOrWhiteSpace(profile.DriverName)).OrderBy(profile => profile.DriverName).ToList();
     }
  
-    /// <summary>
-    /// Returns every TachoMaster duty transaction for the requested date. This is intentionally
-    /// different from GetCurrentDriverStatusesByVehicleAsync, which collapses to the latest driver
-    /// identity for each vehicle and is appropriate only for live operational identity.
-    /// </summary>
-    public async Task<IReadOnlyList<TachoDriverDutyStatus>> GetDriverDutyStatusesAsync(
-        DateOnly date,
-        CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<TachoDriverDutyStatus>> GetDriverDutyStatusesAsync(DateOnly date, CancellationToken cancellationToken = default)
     {
         if (!options.IsConfigured) return [];
  
@@ -88,12 +81,9 @@ public sealed class TachoMasterClient
         var metricsTask = TryGetMemberMetricsAsync(sid, cancellationToken);
         await Task.WhenAll(dutiesTask, membersTask, metricsTask);
  
-        var members = (await membersTask).GroupBy(member => member.MemCode)
-            .ToDictionary(group => group.Key, group => group.First());
-        var metrics = (await metricsTask).GroupBy(metric => metric.MemCode)
-            .ToDictionary(group => group.Key, group => group.OrderByDescending(metric => metric.DateTimeWhenValid).First());
-        var dayStart = new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc));
-        var dayEnd = dayStart.AddDays(1);
+        var members = (await membersTask).GroupBy(member => member.MemCode).ToDictionary(group => group.Key, group => group.First());
+        var metrics = (await metricsTask).GroupBy(metric => metric.MemCode).ToDictionary(group => group.Key, group => group.OrderByDescending(metric => metric.DateTimeWhenValid).First());
+        var (dayStart, dayEnd) = OperatingWindowUtc(date);
         var result = new List<TachoDriverDutyStatus>();
  
         foreach (var duty in (await dutiesTask)
@@ -136,13 +126,11 @@ public sealed class TachoMasterClient
                 metric?.WorkAvaiableWeek));
         }
  
-        logger.LogInformation("TachoMaster returned {DutyCount} complete duty transaction(s) for {Date}.", result.Count, date);
+        logger.LogInformation("TachoMaster returned {DutyCount} complete duty transaction(s) for UK operating date {Date}.", result.Count, date);
         return result;
     }
  
-    public async Task<IReadOnlyDictionary<string, TachoVehicleDriverStatus>> GetCurrentDriverStatusesByVehicleAsync(
-        DateOnly date,
-        CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyDictionary<string, TachoVehicleDriverStatus>> GetCurrentDriverStatusesByVehicleAsync(DateOnly date, CancellationToken cancellationToken = default)
     {
         if (!options.IsConfigured) return new Dictionary<string, TachoVehicleDriverStatus>();
  
@@ -173,43 +161,18 @@ public sealed class TachoMasterClient
                 mismatches++;
                 logger.LogWarning(
                     "Live driver identity mismatch for vehicle {Vehicle}: TachoMaster duty={DutyDriver} card={DutyCard}; Falcon={FalconDriver} card={FalconCard}. Falcon identity retained and Tacho compliance figures suppressed until the identities agree.",
-                    vehicle,
-                    duty.DriverName,
-                    duty.CardNumber,
-                    falcon.DriverName,
-                    falcon.CardNumber);
- 
-                // Tracking owns current driver identity. If the live Falcon identity does not
-                // agree with the Tacho duty identity, do not apply another driver's hours/breaks
-                // to the vehicle ETA. The Falcon-only record deliberately carries no compliance
-                // metrics until TachoMaster resolves to the same driver/card.
+                    vehicle, duty.DriverName, duty.CardNumber, falcon.DriverName, falcon.CardNumber);
                 result[vehicle] = falcon;
             }
         }
  
         logger.LogInformation(
             "Tacho continuous enrichment produced {Total} vehicle identities: {DutyCount} TachoMaster duty record(s), {FalconOnly} Falcon-only identity record(s), {OverlapCount} overlap(s), {MismatchCount} live mismatch(es).",
-            result.Count,
-            currentDuties.Count,
-            falconOnly,
-            overlaps,
-            mismatches);
+            result.Count, currentDuties.Count, falconOnly, overlaps, mismatches);
         return result;
     }
  
-    /// <summary>
-    /// Returns every driver who held a duty on each vehicle for the requested date, not just
-    /// the most recent one. A vehicle that carried two unique tachograph cards in the same day
-    /// (day/night handover, relief driver, trailer swap) appears here with one entry per driver;
-    /// GetCurrentDriverStatusesByVehicleAsync deliberately collapses that same vehicle down to a
-    /// single "who is in it right now" entry, which is correct for live identity but loses the
-    /// earlier driver's compliance figures for anything that needs to report against a specific
-    /// driver or run rather than the vehicle's latest occupant. Use MatchTachoForDriver to pick
-    /// the right entry for a specific planned driver out of this list.
-    /// </summary>
-    public async Task<IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>> GetAllDriverStatusesByVehicleAsync(
-        DateOnly date,
-        CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>> GetAllDriverStatusesByVehicleAsync(DateOnly date, CancellationToken cancellationToken = default)
     {
         if (!options.IsConfigured) return new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
  
@@ -235,12 +198,7 @@ public sealed class TachoMasterClient
                 result[vehicle] = new List<TachoVehicleDriverStatus> { falcon };
                 continue;
             }
- 
-            // Add the live Falcon identity alongside the TachoMaster duty history rather than
-            // overwriting it, so a driver-specific lookup can still find an earlier duty even
-            // when Falcon currently reports a different occupant for the vehicle.
-            if (!existing.Any(status => SameIdentity(status, falcon)))
-                result[vehicle] = existing.Append(falcon).ToList();
+            if (!existing.Any(status => SameIdentity(status, falcon))) result[vehicle] = existing.Append(falcon).ToList();
         }
  
         return result;
@@ -260,8 +218,7 @@ public sealed class TachoMasterClient
  
         var duties = await dutiesTask;
         var memberList = await membersTask;
-        var dayStart = new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc));
-        var dayEnd = dayStart.AddDays(1);
+        var (dayStart, dayEnd) = OperatingWindowUtc(date);
         var dutiesByVehicle = duties
             .Where(duty => !string.IsNullOrWhiteSpace(duty.VehCode) && duty.MemCode > 0)
             .Where(duty => duty.DutyStart < dayEnd && (duty.DutyEnd is null || duty.DutyEnd >= dayStart))
@@ -273,12 +230,7 @@ public sealed class TachoMasterClient
         return (dutiesByVehicle, members, metrics, memberList);
     }
  
-    private static TachoVehicleDriverStatus? BuildStatus(
-        string vehicle,
-        int memberCode,
-        List<TachoDuty> vehicleDuties,
-        Dictionary<int, TachoMember> members,
-        Dictionary<int, TachoMemberMetric> metrics)
+    private static TachoVehicleDriverStatus? BuildStatus(string vehicle, int memberCode, List<TachoDuty> vehicleDuties, Dictionary<int, TachoMember> members, Dictionary<int, TachoMemberMetric> metrics)
     {
         if (!members.TryGetValue(memberCode, out var member)) return null;
         var name = DriverName(member);
@@ -316,18 +268,17 @@ public sealed class TachoMasterClient
             metric?.WorkAvaiableWeek);
     }
  
-    private async Task<IReadOnlyDictionary<string, TachoVehicleDriverStatus>> TryGetFalconDriverStatusesAsync(
-        IReadOnlyList<TachoMember> members,
-        CancellationToken cancellationToken)
+    private async Task<IReadOnlyDictionary<string, TachoVehicleDriverStatus>> TryGetFalconDriverStatusesAsync(IReadOnlyList<TachoMember> members, CancellationToken cancellationToken)
     {
         if (dotTrackingClient is null) return new Dictionary<string, TachoVehicleDriverStatus>();
         try
         {
-            var freshAfter = DateTimeOffset.UtcNow.AddMinutes(-5);
+            // GetCurrentTelemetry itself is the receipt-freshness evidence. Do not discard a
+            // driver merely because the last movement event timestamp has not changed while the
+            // vehicle is stationary at a customer site.
             var telemetry = await dotTrackingClient.GetLatestVehicleEventsAsync(cancellationToken);
             var records = telemetry.Select(DotTelemetryRecord.FromProvider)
                 .Where(record => !string.IsNullOrWhiteSpace(record.VehicleIdentifier))
-                .Where(record => record.EventTimeUtc >= freshAfter)
                 .Where(record => !string.IsNullOrWhiteSpace(record.DriverName) || !string.IsNullOrWhiteSpace(record.DriverCardNumber))
                 .GroupBy(record => NormaliseIdentifier(record.VehicleIdentifier))
                 .Select(group => group.OrderByDescending(record => record.EventTimeUtc).First())
@@ -337,9 +288,7 @@ public sealed class TachoMasterClient
             foreach (var record in records)
             {
                 var member = FindMemberByCard(members, record.DriverCardNumber);
-                var resolvedName = !string.IsNullOrWhiteSpace(record.DriverName)
-                    ? record.DriverName!.Trim()
-                    : member is null ? null : DriverName(member);
+                var resolvedName = !string.IsNullOrWhiteSpace(record.DriverName) ? record.DriverName!.Trim() : member is null ? null : DriverName(member);
                 if (string.IsNullOrWhiteSpace(resolvedName)) continue;
  
                 var vehicle = NormaliseIdentifier(record.VehicleIdentifier);
@@ -351,21 +300,8 @@ public sealed class TachoMasterClient
                     member?.EmployeeNumber,
                     record.EventTimeUtc,
                     null,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null);
+                    0, 0, 0, 0, 0,
+                    null, null, null, null, null, null, null, null, null, null);
             }
  
             return result;
@@ -428,8 +364,7 @@ public sealed class TachoMasterClient
                 return ExtractSessionId(payload);
             }
  
-            if (response.StatusCode is not (HttpStatusCode.InternalServerError or HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden or HttpStatusCode.BadRequest))
-                break;
+            if (response.StatusCode is not (HttpStatusCode.InternalServerError or HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden or HttpStatusCode.BadRequest)) break;
         }
  
         throw new HttpRequestException("TachoMaster login failed.");
@@ -439,16 +374,11 @@ public sealed class TachoMasterClient
     {
         var result = new List<TachoDuty>();
         var offset = 0;
+        var (fromUtc, toUtc) = OperatingWindowUtc(date);
         for (var page = 0; page < options.MaxPages; page++)
         {
             using var request = CreateRequest(HttpMethod.Post, "Duty/GetDutyTransactions", sid);
-            request.Content = JsonContent.Create(new
-            {
-                From = date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc).ToString("O"),
-                To = date.AddDays(1).ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc).ToString("O"),
-                Offset = offset,
-                WithWtd = true
-            });
+            request.Content = JsonContent.Create(new { From = fromUtc.ToString("O"), To = toUtc.ToString("O"), Offset = offset, WithWtd = true });
             using var response = await httpClient.SendAsync(request, cancellationToken);
             response.EnsureSuccessStatusCode();
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
@@ -484,10 +414,7 @@ public sealed class TachoMasterClient
  
     private async Task<List<TachoMemberMetric>> TryGetMemberMetricsAsync(string sid, CancellationToken cancellationToken)
     {
-        try
-        {
-            return await GetMemberMetricsAsync(sid, cancellationToken);
-        }
+        try { return await GetMemberMetricsAsync(sid, cancellationToken); }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             logger.LogWarning(exception, "TachoMaster member metrics were unavailable; returning driver and duty data without remaining-time figures.");
@@ -531,6 +458,22 @@ public sealed class TachoMasterClient
         return string.Join(' ', new[] { given, surname }.Where(value => !string.IsNullOrWhiteSpace(value))).Trim();
     }
  
+    private static (DateTimeOffset StartUtc, DateTimeOffset EndUtc) OperatingWindowUtc(DateOnly date)
+    {
+        try
+        {
+            var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+            var startLocal = DateTime.SpecifyKind(date.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
+            var endLocal = DateTime.SpecifyKind(date.AddDays(1).ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
+            return (new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(startLocal, zone)), new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(endLocal, zone)));
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            var start = new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+            return (start, start.AddDays(1));
+        }
+    }
+ 
     private static string NormaliseCard(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
  
     private static IReadOnlyList<string> PasswordAttempts(string password)
@@ -546,8 +489,7 @@ public sealed class TachoMasterClient
         var root = document.RootElement;
         if (root.ValueKind is JsonValueKind.Number or JsonValueKind.String) return root.ToString();
         foreach (var name in new[] { "sid", "SID", "token", "Token" })
-            if (root.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.String or JsonValueKind.Number)
-                return value.ToString();
+            if (root.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.String or JsonValueKind.Number) return value.ToString();
         throw new InvalidOperationException("TachoMaster login response did not contain a SID.");
     }
  
