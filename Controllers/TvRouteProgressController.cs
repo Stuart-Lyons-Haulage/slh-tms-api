@@ -99,7 +99,7 @@ public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration co
                 };
             }).ToList();
 
-            var freshnessAtUtc = live?.LastReceivedAtUtc ?? live?.LastEventTimeUtc;
+            var freshnessAtUtc = live?.LastReceivedAtUtc;
             rows.Add(new
             {
                 loadId = load.Id,
@@ -152,9 +152,6 @@ public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration co
         if (lastCompletedIndex >= stops.Count - 1) return 100m;
         if (lastCompletedIndex < 0)
         {
-            // There is no completed stop to interpolate from yet. Still show that a
-            // genuinely moving tracked vehicle has left the start rather than pinning
-            // the TV marker underneath the first stop dot until arrival.
             return live is not null && (live.IsMoving == true || (live.SpeedKph ?? 0) > 2) ? 5m : 0m;
         }
 
@@ -207,7 +204,7 @@ public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration co
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         return statuses
             .Where(status => aliases.Contains(Normalise(status.VehicleIdentifier)))
-            .OrderByDescending(status => status.LastReceivedAtUtc ?? status.LastEventTimeUtc)
+            .OrderByDescending(status => status.LastReceivedAtUtc)
             .FirstOrDefault();
     }
 
