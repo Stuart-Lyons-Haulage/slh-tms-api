@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
+using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
 using Xunit;
@@ -46,6 +47,95 @@ public sealed class TachoMasterClientTests
         }, handler.Paths);
         using var dutyRequest = JsonDocument.Parse(handler.BodiesByPath["/api/Duty/GetDutyTransactions"]);
         Assert.True(dutyRequest.RootElement.EnumerateObject().Single(property => string.Equals(property.Name, "WithWtd", StringComparison.OrdinalIgnoreCase)).Value.GetBoolean());
+    }
+
+    [Fact]
+    public async Task Two_drivers_on_one_vehicle_both_surface_via_GetAllDriverStatusesByVehicleAsync()
+    {
+        var handler = new TwoDriverOneVehicleHandler();
+        var client = new TachoMasterClient(new HttpClient(handler), new TachoMasterOptions
+        {
+            Enabled = true,
+            BaseUrl = "https://api-v1-alpha.roadtech.co.uk",
+            ApiKey = "test-key",
+            Username = "planner",
+            Password = "secret"
+        }, NullLogger<TachoMasterClient>.Instance);
+
+        var date = new DateOnly(2026, 8, 14);
+
+        // The existing "current occupant" method must keep collapsing to the latest driver only —
+        // other callers rely on that behaviour and must not change.
+        var current = await client.GetCurrentDriverStatusesByVehicleAsync(date);
+        var currentStatus = Assert.Single(current).Value;
+        Assert.Equal("Night Driver", currentStatus.DriverName);
+
+        // The new method must expose both drivers who used the vehicle that day.
+        var all = await client.GetAllDriverStatusesByVehicleAsync(date);
+        var vehicleStatuses = Assert.Single(all).Value;
+        Assert.Equal(2, vehicleStatuses.Count);
+        Assert.Contains(vehicleStatuses, status => status.DriverName == "Day Driver" && status.DriveMinutes == 200);
+        Assert.Contains(vehicleStatuses, status => status.DriverName == "Night Driver" && status.DriveMinutes == 150);
+
+        // The driver-aware matcher must pick the specific planned driver's own duty, not just
+        // whichever driver most recently used the vehicle.
+        var dayDriver = new Driver { EmployeeNumber = "SLH-1", DisplayName = "Day Driver" };
+        var nightDriver = new Driver { EmployeeNumber = "SLH-2", DisplayName = "Night Driver" };
+        var aliases = new[] { "AB12CDE" };
+
+        var matchedForDay = ExecutionIdentityResolver.MatchTachoForDriver(aliases, dayDriver, all);
+        Assert.NotNull(matchedForDay);
+        Assert.Equal("Day Driver", matchedForDay!.DriverName);
+
+        var matchedForNight = ExecutionIdentityResolver.MatchTachoForDriver(aliases, nightDriver, all);
+        Assert.NotNull(matchedForNight);
+        Assert.Equal("Night Driver", matchedForNight!.DriverName);
+
+        // No driver supplied falls back to the most recent duty, matching MatchTacho's behaviour.
+        var matchedWithNoDriver = ExecutionIdentityResolver.MatchTachoForDriver(aliases, null, all);
+        Assert.NotNull(matchedWithNoDriver);
+        Assert.Equal("Night Driver", matchedWithNoDriver!.DriverName);
+    }
+
+    private sealed class TwoDriverOneVehicleHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var payload = request.RequestUri!.AbsolutePath switch
+            {
+                "/api/auth/login" => "{\"token\":\"sid-123\"}",
+                "/api/Duty/GetDutyTransactions" => """
+                    {"dutyNew":{"moreData":false,"recordOffset":0,"recordCount":2,"data":[
+                      {"memCode":1,"vehCode":"AB12 CDE","dutyStart":"2026-08-14T05:00:00Z","dutyEnd":"2026-08-14T13:00:00Z",
+                       "timeWork":220,"timeRest":20,"timeAvailable":0,"timeDrive":200,"wtd":[]},
+                      {"memCode":2,"vehCode":"AB12 CDE","dutyStart":"2026-08-14T18:00:00Z","dutyEnd":null,
+                       "timeWork":170,"timeRest":20,"timeAvailable":0,"timeDrive":150,"wtd":[]}
+                    ]}}
+                    """,
+                "/api/Member/GetMembersLong" => """
+                    {"moreData":false,"recordOffset":0,"recordCount":2,"data":[
+                      {"memCode":1,"cName":"Day","sName":"Driver","cardNoShort":"DB1","employeeNumber":"SLH-1"},
+                      {"memCode":2,"cName":"Night","sName":"Driver","cardNoShort":"DB2","employeeNumber":"SLH-2"}
+                    ]}
+                    """,
+                "/api/Member/GetMemberMetrics" => """
+                    {"moreData":false,"recordOffset":0,"recordCount":2,"data":[
+                      {"memCode":1,"dateTimeWhenValid":"2026-08-14T13:00:00Z","dailyDriverPeriodsAvaiable":1,
+                       "driveAvailableToday":250,"driveAvailableTomorrow":540,"driveAvailableWeek":1500,
+                       "driveAvailableFortnight":4200,"longDaysWorkedThisWeek":1,"shortDailyRestTakenThisWeek":0,"workAvaiableWeek":2000},
+                      {"memCode":2,"dateTimeWhenValid":"2026-08-14T21:00:00Z","dailyDriverPeriodsAvaiable":1,
+                       "driveAvailableToday":300,"driveAvailableTomorrow":540,"driveAvailableWeek":1500,
+                       "driveAvailableFortnight":4200,"longDaysWorkedThisWeek":1,"shortDailyRestTakenThisWeek":0,"workAvaiableWeek":2000}
+                    ]}
+                    """,
+                _ => throw new InvalidOperationException($"Unexpected test request {request.RequestUri}")
+            };
+            await Task.Yield();
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(payload, Encoding.UTF8, "application/json")
+            };
+        }
     }
 
     private sealed class TachoMasterHandler : HttpMessageHandler
