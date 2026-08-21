@@ -18,11 +18,16 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
                 var store = scope.ServiceProvider.GetRequiredService<DotTrackingTelemetryStore>();
                 var records = (await client.GetLatestVehicleEventsAsync(stoppingToken)).Select(DotTelemetryRecord.FromProvider);
                 await store.PersistAsync(records, stoppingToken, markAsLiveReceipt: true);
+
                 if (DateTimeOffset.UtcNow >= nextRecoveryAtUtc)
                 {
-                    var recoveryDay = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeBySystemTimeZoneId(DateTimeOffset.UtcNow, "Europe/London").DateTime).AddDays(-1);
-                    var recovered = (await client.GetHistoricalVehicleEventsAsync(recoveryDay, stoppingToken)).Select(DotTelemetryRecord.FromProvider);
-                    await store.PersistAsync(recovered, stoppingToken, markAsLiveReceipt: false);
+                    foreach (var recoveryDay in RecoveryDays(DateTimeOffset.UtcNow))
+                    {
+                        var recovered = (await client.GetHistoricalVehicleEventsAsync(recoveryDay, stoppingToken))
+                            .Select(DotTelemetryRecord.FromProvider);
+                        await store.PersistAsync(recovered, stoppingToken, markAsLiveReceipt: false);
+                    }
+
                     nextRecoveryAtUtc = DateTimeOffset.UtcNow.Add(recoveryInterval);
                 }
             }
@@ -30,5 +35,22 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
             catch (Exception exception) when (!stoppingToken.IsCancellationRequested) { logger.LogWarning(exception, "DOT tracking ingestion failed; retrying in {Minutes} minute(s).", pollInterval.TotalMinutes); }
             await Task.Delay(pollInterval, stoppingToken);
         }
+    }
+
+    internal static IReadOnlyList<DateOnly> RecoveryDays(DateTimeOffset utcNow)
+    {
+        DateOnly today;
+        try
+        {
+            today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeBySystemTimeZoneId(utcNow, "Europe/London").DateTime);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            today = DateOnly.FromDateTime(utcNow.UtcDateTime);
+        }
+
+        // Current day repairs any missed polling/persistence before the recovery run;
+        // previous day preserves overnight duties that cross the operating-day boundary.
+        return [today, today.AddDays(-1)];
     }
 }

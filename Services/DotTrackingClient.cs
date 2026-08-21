@@ -83,20 +83,41 @@ public sealed class DotTrackingClient
         }
     }
 
-    public async Task<IReadOnlyList<RoadTechTelemetryItem>> GetHistoricalVehicleEventsAsync(DateOnly day, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Replays a complete Falcon history day. Historical recovery must include
+    /// vehicles that are no longer currently live/signed on and must follow the
+    /// provider offset pagination, otherwise later journeys can silently disappear.
+    /// </summary>
+    public async Task<IReadOnlyList<RoadTechTelemetryItem>> GetHistoricalVehicleEventsAsync(
+        DateOnly day,
+        CancellationToken cancellationToken = default)
     {
         if (!_options.Enabled) return [];
         ValidateConfiguration();
+
         var sid = await LoginAsync(cancellationToken);
-        using var request = new HttpRequestMessage(HttpMethod.Post, "Falcon/GetHistoricalTelemetry");
-        request.Headers.Add("APIKEY", _options.ApiKey);
-        request.Headers.Add("SID", sid);
-        request.Content = JsonContent.Create(new RoadTechTelemetryRequest(_options.CompanyCode, day.ToString("yyyy-MM-dd"), _options.DataMask, 0, _options.OnlyLive), options: RoadTechJson.Options);
-        using var response = await _httpClient.SendAsync(request, cancellationToken);
-        if (!response.IsSuccessStatusCode) throw new HttpRequestException(await RoadTechFailureDetail(response, "Falcon/GetHistoricalTelemetry", cancellationToken), null, response.StatusCode);
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        var page = await JsonSerializer.DeserializeAsync<RoadTechTelemetryPage>(stream, RoadTechJson.Options, cancellationToken);
-        return page?.Data ?? [];
+        var results = new List<RoadTechTelemetryItem>();
+        var offset = 0;
+
+        for (var page = 0; page < _options.MaxPages; page++)
+        {
+            var response = await GetHistoricalTelemetryPageAsync(sid, day, offset, cancellationToken);
+            results.AddRange(response.Data);
+
+            if (!response.MoreData || response.RecordCount == 0)
+            {
+                break;
+            }
+
+            offset += response.RecordCount;
+        }
+
+        _logger.LogInformation(
+            "{Provider} returned {Count} historical telemetry records for {Day}.",
+            ProviderName,
+            results.Count,
+            day);
+        return results;
     }
 
     private async Task<string> LoginAsync(CancellationToken cancellationToken)
@@ -122,7 +143,6 @@ public sealed class DotTrackingClient
 
         throw new HttpRequestException(string.Join(" Then ", failures));
     }
-
 
     private HttpRequestMessage CreateLoginRequest(string password)
     {
@@ -175,6 +195,35 @@ public sealed class DotTrackingClient
             cancellationToken);
 
         return page ?? throw new InvalidOperationException("RoadTech returned an empty telemetry response.");
+    }
+
+    private async Task<RoadTechTelemetryPage> GetHistoricalTelemetryPageAsync(
+        string sid,
+        DateOnly day,
+        int offset,
+        CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "Falcon/GetHistoricalTelemetry");
+        request.Headers.Add("APIKEY", _options.ApiKey);
+        request.Headers.Add("SID", sid);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        request.Content = JsonContent.Create(new RoadTechTelemetryRequest(
+            _options.CompanyCode,
+            day.ToString("yyyy-MM-dd"),
+            _options.DataMask,
+            offset,
+            false), options: RoadTechJson.Options);
+
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        if (!response.IsSuccessStatusCode) throw new HttpRequestException(await RoadTechFailureDetail(response, "Falcon/GetHistoricalTelemetry", cancellationToken), null, response.StatusCode);
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        var page = await JsonSerializer.DeserializeAsync<RoadTechTelemetryPage>(
+            stream,
+            RoadTechJson.Options,
+            cancellationToken);
+
+        return page ?? throw new InvalidOperationException("RoadTech returned an empty historical telemetry response.");
     }
 
     private static string ExtractSessionId(string payload)
