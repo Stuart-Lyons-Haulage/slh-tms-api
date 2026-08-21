@@ -8,6 +8,8 @@ namespace Slh.Tms.Api.Services;
 /// </summary>
 public static class GeofencePlanningMatch
 {
+    private const int CredibleCompletedVisitMinutes = 2;
+
     private static readonly HashSet<string> NoiseTokens = new(StringComparer.OrdinalIgnoreCase)
     {
         "NWF", "NATURES", "WAY", "COLLECT", "COLLECTION", "DELIVER", "DELIVERY", "CUSTOMER", "RDC", "SITE", "DEPOT"
@@ -33,7 +35,7 @@ public static class GeofencePlanningMatch
                 LoadId = stop.LoadId,
                 OrderId = stop.OrderId,
                 Sequence = stop.Sequence,
-                Name = MatchText(stop.Name),
+                Name = MatchStop(stop),
                 Address = MatchText(stop.Address),
                 Latitude = stop.Latitude,
                 Longitude = stop.Longitude,
@@ -75,7 +77,7 @@ public static class GeofencePlanningMatch
         var ordered = (load.Stops ?? []).OrderBy(stop => stop.Sequence).ToList();
         var completed = new HashSet<Guid>();
 
-        foreach (var visit in visits.Where(visit => visit.LoadStopId is not null && visit.ConfirmedAtUtc is not null && visit.ExitedAtUtc is not null))
+        foreach (var visit in visits.Where(IsCompletedVisit))
         {
             var primaryId = visit.LoadStopId!.Value;
             completed.Add(primaryId);
@@ -96,6 +98,8 @@ public static class GeofencePlanningMatch
 
     public static bool SamePhysicalSite(LoadStop stop, EmbeddedFence fence)
     {
+        if (StopInsideFence(stop, fence)) return true;
+
         var left = MeaningfulTokens(MatchText(stop.Name));
         var right = MeaningfulTokens(fence.Name);
         if (left.Count == 0 || right.Count == 0) return false;
@@ -103,6 +107,51 @@ public static class GeofencePlanningMatch
         var common = left.Intersect(right, StringComparer.OrdinalIgnoreCase).ToList();
         if (common.Count >= 2) return true;
         return common.Count == 1 && common[0].Length >= 5 && (left.Count == 1 || right.Count == 1);
+    }
+
+    private static bool IsCompletedVisit(DerivedVisit visit)
+    {
+        if (visit.LoadStopId is null || visit.ExitedAtUtc is null) return false;
+        if (visit.ConfirmedAtUtc is not null) return true;
+
+        // RoadTech can retain the same provider event while a vehicle is stationary.
+        // Once the next observed point proves that the vehicle has exited the fence,
+        // entry-to-exit duration is the authoritative dwell evidence even when the
+        // synthetic live observations used while stationary are no longer in history.
+        return visit.ExitedAtUtc.Value - visit.EnteredAtUtc >= TimeSpan.FromMinutes(CredibleCompletedVisitMinutes);
+    }
+
+    private static string MatchStop(LoadStop stop)
+    {
+        var coordinateFence = FenceContaining(stop.Latitude, stop.Longitude);
+        return coordinateFence?.Name ?? MatchText(stop.Name);
+    }
+
+    private static EmbeddedFence? FenceContaining(decimal? latitude, decimal? longitude)
+    {
+        if (latitude is null || longitude is null) return null;
+        return EmbeddedGeofenceEngine.ApprovedFences.FirstOrDefault(fence => Contains(fence.Points, longitude.Value, latitude.Value));
+    }
+
+    private static bool StopInsideFence(LoadStop stop, EmbeddedFence fence) =>
+        stop.Latitude is not null && stop.Longitude is not null && Contains(fence.Points, stop.Longitude.Value, stop.Latitude.Value);
+
+    private static bool Contains(IReadOnlyList<GeoPoint> points, decimal longitude, decimal latitude)
+    {
+        var x = (double)longitude;
+        var y = (double)latitude;
+        var inside = false;
+        for (int i = 0, j = points.Count - 1; i < points.Count; j = i++)
+        {
+            var pi = points[i];
+            var pj = points[j];
+            if (((pi.Latitude > y) != (pj.Latitude > y)) &&
+                x < (pj.Longitude - pi.Longitude) * (y - pi.Latitude) / (pj.Latitude - pi.Latitude) + pi.Longitude)
+            {
+                inside = !inside;
+            }
+        }
+        return inside;
     }
 
     private static bool ContainsAllWords(string value, IReadOnlyCollection<string> required)
