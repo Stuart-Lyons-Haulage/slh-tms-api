@@ -16,6 +16,8 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController, Route("api/v1/tv-display/route-progress")]
 public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration configuration) : ControllerBase
 {
+    private static readonly TimeSpan LiveTrackingThreshold = TimeSpan.FromMinutes(5);
+
     [HttpGet, AllowAnonymous]
     public async Task<IActionResult> Get(
         [FromHeader(Name = "X-TV-Display-Key")] string? displayKey,
@@ -34,7 +36,11 @@ public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration co
             .OrderBy(load => load.Reference)
             .ToList();
 
-        var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, day, loads, ct);
+        // Use the same planner-to-Falcon naming/coordinate bridge as Live Runs and
+        // customer ETA evidence. The previous TV endpoint bypassed this and therefore
+        // linked fewer geofence visits than the rest of the TMS.
+        var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
+        var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, day, geofenceLoads, ct);
         var vehicleIds = loads.Where(x => x.VehicleId is not null).Select(x => x.VehicleId!.Value).Distinct().ToList();
         var vehicles = vehicleIds.Count == 0
             ? new List<Vehicle>()
@@ -47,10 +53,7 @@ public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration co
         {
             var stops = load.Stops.OrderBy(x => x.Sequence).ToList();
             var visits = snapshot.Visits.Where(x => x.LoadId == load.Id).OrderBy(x => x.EnteredAtUtc).ToList();
-            var completedStopIds = visits
-                .Where(x => x.LoadStopId is not null && x.ConfirmedAtUtc is not null && x.ExitedAtUtc is not null)
-                .Select(x => x.LoadStopId!.Value)
-                .ToHashSet();
+            var completedStopIds = GeofencePlanningMatch.CompletedStopIds(load, visits);
             var activeVisit = snapshot.ActiveVisits
                 .Where(x => x.LoadId == load.Id)
                 .OrderByDescending(x => x.EnteredAtUtc)
@@ -67,17 +70,22 @@ public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration co
             if (load.VehicleId is Guid vehicleId && vehicleById.TryGetValue(vehicleId, out var vehicle))
                 live = MatchLive(vehicle, liveStatuses);
 
-            var truckPosition = TruckPositionPercent(stops, completedStopIds, activeVisit, live);
+            var freshnessAtUtc = live?.LastReceivedAtUtc;
+            var trackingAge = freshnessAtUtc is null ? (TimeSpan?)null : now - freshnessAtUtc.Value;
+            var trackingFresh = trackingAge is not null && trackingAge.Value >= TimeSpan.Zero && trackingAge.Value <= LiveTrackingThreshold;
+            var trackingMoving = trackingFresh && live is not null && (live.IsMoving == true || (live.SpeedKph ?? 0) > 2);
+
+            // Only fresh RoadTech coordinates may influence the visible vehicle marker.
+            // A stale speed/position must never continue looking live on the wallboard.
+            var truckPosition = TruckPositionPercent(stops, completedStopIds, activeVisit, trackingFresh ? live : null);
             var complete = stops.Count > 0 && completedStopIds.Count >= stops.Count;
             var phase = complete
                 ? "Complete"
                 : currentStop is not null
                     ? "On site"
-                    : completedStopIds.Count > 0 || load.Status is LoadStatus.InProgress or LoadStatus.Dispatched
+                    : completedStopIds.Count > 0 || load.Status is LoadStatus.InProgress or LoadStatus.Dispatched || trackingMoving
                         ? "Heading to"
-                        : live is not null && (live.IsMoving == true || (live.SpeedKph ?? 0) > 2)
-                            ? "Heading to"
-                            : "Next job";
+                        : "Next job";
             var focusStop = currentStop ?? nextStop;
 
             var stopRows = stops.Select(stop =>
@@ -99,7 +107,6 @@ public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration co
                 };
             }).ToList();
 
-            var freshnessAtUtc = live?.LastReceivedAtUtc;
             rows.Add(new
             {
                 loadId = load.Id,
@@ -112,9 +119,11 @@ public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration co
                 phase,
                 truckPositionPercent = truckPosition,
                 geofenceOnSite = currentStop is not null,
-                trackingFresh = freshnessAtUtc is not null && now - freshnessAtUtc <= TimeSpan.FromMinutes(15),
-                trackingMoving = live is not null && (live.IsMoving == true || (live.SpeedKph ?? 0) > 2),
-                speedKph = live?.SpeedKph,
+                trackingFresh,
+                trackingMoving,
+                trackingObservedAtUtc = freshnessAtUtc,
+                trackingAgeSeconds = trackingAge is null ? (int?)null : (int)Math.Max(0, Math.Floor(trackingAge.Value.TotalSeconds)),
+                speedKph = trackingFresh ? live?.SpeedKph : null,
                 stops = stopRows
             });
         }
@@ -123,9 +132,11 @@ public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration co
         {
             planningDate = day,
             calculatedAtUtc = now,
+            latestTrackingUtc = snapshot.LatestTrackingUtc,
             geofenceAvailable = snapshot.Fences.Count > 0,
             geofenceCount = snapshot.Fences.Count,
             geofenceVisitCount = snapshot.Visits.Count,
+            geofenceConfirmedVisitCount = snapshot.ConfirmedVisits.Count,
             geofenceLinkedRuns = snapshot.Visits.Where(x => x.LoadId is not null).Select(x => x.LoadId!.Value).Distinct().Count(),
             runs = rows
         });
@@ -137,12 +148,15 @@ public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration co
         DerivedVisit? activeVisit,
         VehicleLiveStatus? live)
     {
-        if (stops.Count <= 1) return 0m;
+        if (stops.Count == 0) return 0m;
 
+        // The TV timeline has an implicit START at 0%; each planned stop then occupies
+        // an equal sequence point through to 100%. This avoids placing a moving vehicle
+        // beyond stop 1 before the first geofence has actually been reached.
         if (activeVisit?.LoadStopId is Guid activeStopId)
         {
             var activeIndex = IndexOf(stops, activeStopId);
-            if (activeIndex >= 0) return PercentAtIndex(activeIndex, stops.Count);
+            if (activeIndex >= 0) return StopPercent(activeIndex, stops.Count);
         }
 
         var lastCompletedIndex = -1;
@@ -150,16 +164,17 @@ public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration co
             if (completedStopIds.Contains(stops[i].Id)) lastCompletedIndex = i;
 
         if (lastCompletedIndex >= stops.Count - 1) return 100m;
-        if (lastCompletedIndex < 0)
-        {
-            return live is not null && (live.IsMoving == true || (live.SpeedKph ?? 0) > 2) ? 5m : 0m;
-        }
+
+        // Before the first geofence there is no trustworthy route-origin coordinate in
+        // the planning model. Do not invent a percentage. The TV still shows fresh speed
+        // and a moving marker at START until the first site arrival proves progression.
+        if (lastCompletedIndex < 0) return 0m;
 
         var nextIndex = lastCompletedIndex + 1;
         while (nextIndex < stops.Count && completedStopIds.Contains(stops[nextIndex].Id)) nextIndex++;
         if (nextIndex >= stops.Count) return 100m;
 
-        var legFraction = 0.42m;
+        var legFraction = 0.5m;
         var previous = stops[lastCompletedIndex];
         var next = stops[nextIndex];
         if (live is not null && previous.Latitude is not null && previous.Longitude is not null && next.Latitude is not null && next.Longitude is not null)
@@ -168,11 +183,12 @@ public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration co
             var toNext = DistanceKm(live.Latitude, live.Longitude, next.Latitude.Value, next.Longitude.Value);
             var total = fromPrevious + toNext;
             if (total > 0.05)
-                legFraction = Math.Clamp((decimal)(fromPrevious / total), 0.05m, 0.95m);
+                legFraction = Math.Clamp((decimal)(fromPrevious / total), 0.02m, 0.98m);
         }
 
-        var indexPosition = lastCompletedIndex + (nextIndex - lastCompletedIndex) * legFraction;
-        return Math.Round(indexPosition / (stops.Count - 1) * 100m, 1);
+        var previousPercent = StopPercent(lastCompletedIndex, stops.Count);
+        var nextPercent = StopPercent(nextIndex, stops.Count);
+        return Math.Round(previousPercent + (nextPercent - previousPercent) * legFraction, 1);
     }
 
     private static int IndexOf(IReadOnlyList<LoadStop> stops, Guid id)
@@ -181,7 +197,8 @@ public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration co
         return -1;
     }
 
-    private static decimal PercentAtIndex(int index, int count) => count <= 1 ? 0m : Math.Round((decimal)index / (count - 1) * 100m, 1);
+    private static decimal StopPercent(int index, int count) =>
+        count <= 0 ? 0m : Math.Round((decimal)(index + 1) / count * 100m, 1);
 
     private static double DistanceKm(decimal latitude1, decimal longitude1, decimal latitude2, decimal longitude2)
     {
