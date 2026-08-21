@@ -24,7 +24,7 @@ public sealed class LiveVehicleDetailsControllerTests
     }
 
     [Fact]
-    public void Detail_contract_keeps_tracking_driver_tacho_and_run_evidence_separate()
+    public void Detail_contract_keeps_tracking_driver_tacho_run_geofence_and_compliance_evidence_separate()
     {
         var vehicleId = Guid.NewGuid();
         var driverId = Guid.NewGuid();
@@ -38,6 +38,8 @@ public sealed class LiveVehicleDetailsControllerTests
             new LiveDriverSummary(driverId, "Edward Peter Morgan", "••••1234", "Confirmed", "Edward Peter Morgan", "Edward Peter Morgan", "1234"),
             new LiveTachoSummary(42, dutyStart, null, 180, 45, 192, 900),
             new LiveRunSummary(runId, "45892", "InProgress"),
+            new LiveGeofenceSummary("Inside", "Chichester RDC", lastSeen.AddMinutes(-8), 8, lastSeen),
+            new LiveComplianceSummary("Matched", "Live tracking, TachoMaster duty and the TMS driver identity are aligned."),
             lastSeen);
 
         Assert.Equal("EK21XFT", response.Vehicle.Registration);
@@ -47,5 +49,7 @@ public sealed class LiveVehicleDetailsControllerTests
         Assert.NotNull(response.Tacho);
         Assert.Equal(dutyStart, response.Tacho!.DutyStartUtc);
         Assert.Equal("45892", response.Run!.Reference);
+        Assert.Equal("Inside", response.Geofence!.State);
+        Assert.Equal("Matched", response.Compliance.Status);
     }
 }
