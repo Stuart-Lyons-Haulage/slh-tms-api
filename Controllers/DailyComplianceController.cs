@@ -107,7 +107,6 @@ public sealed class DailyComplianceController(
             }
         }
 
-        // Capture vehicle use proved by Tacho even if planning did not contain the duty.
         foreach (var duty in duties)
         {
             var vehicle = vehicles.FirstOrDefault(v => VehicleKeys(v).Contains(Normalise(duty.VehicleCode), StringComparer.OrdinalIgnoreCase));
@@ -123,7 +122,6 @@ public sealed class DailyComplianceController(
             rows.Add(BuildRow("Vehicle", vehicle.Id, vehicle.Registration, "Unplanned vehicle use", driver, EmploymentType(driver), duty, firstMovement, preUseMinutes, inspection));
         }
 
-        // One compliance event per driver taking control of an asset. A later driver cannot inherit an earlier driver's check.
         rows = rows
             .GroupBy(x => $"{x.AssetType}|{x.AssetId}|{x.DriverId}|{x.TachoDutyStartUtc:O}", StringComparer.OrdinalIgnoreCase)
             .Select(group => group.OrderBy(row => row.RunReference).First())
@@ -216,7 +214,7 @@ public sealed class DailyComplianceController(
         var windowStart = dutyStartUtc?.AddMinutes(-30) ?? dayStartUtc;
         var windowEnd = firstMovementUtc?.AddMinutes(15) ?? dutyStartUtc?.AddHours(2) ?? dayEndUtc;
         var candidates = inspections.Where(x => x.SubmittedAtUtc >= windowStart && x.SubmittedAtUtc <= windowEnd).OrderBy(x => x.SubmittedAtUtc).ToList();
-        var matched = candidates.FirstOrDefault(x => UserMatches(x.User, driver));
+        var matched = candidates.FirstOrDefault(x => UserMatches(x.User, x.UserEmployeeNumber, driver));
         return matched is not null ? new(matched, true) : new(candidates.FirstOrDefault(), false);
     }
 
@@ -225,36 +223,57 @@ public sealed class DailyComplianceController(
         try
         {
             var http = httpClientFactory.CreateClient();
-            var uri = $"{fleetioOptions.BaseUrl.TrimEnd('/')}/submitted_inspection_forms?filter[vehicle_id][eq]={Uri.EscapeDataString(fleetioId)}&sort=-submitted_at&per_page=100";
-            using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-            request.Headers.TryAddWithoutValidation("Authorization", $"Token {fleetioOptions.ApiKey}");
-            request.Headers.TryAddWithoutValidation("Account-Token", fleetioOptions.AccountToken);
-            request.Headers.TryAddWithoutValidation("X-Api-Version", fleetioOptions.ApiVersion);
-            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-            using var response = await http.SendAsync(request, ct);
-            if (!response.IsSuccessStatusCode)
+            var result = new List<FleetioInspectionEvidence>();
+            string? cursor = null;
+            var seenCursors = new HashSet<string>(StringComparer.Ordinal);
+
+            for (var page = 0; page < 100; page++)
             {
-                logger.LogWarning("Fleetio submitted inspections returned {StatusCode} for asset {FleetioId}.", response.StatusCode, fleetioId);
-                return [];
-            }
+                var uri = $"{fleetioOptions.BaseUrl.TrimEnd('/')}/submitted_inspection_forms?filter[vehicle_id][eq]={Uri.EscapeDataString(fleetioId)}&filter[submitted_at][gte]={Uri.EscapeDataString(fromUtc.ToString("O"))}&filter[submitted_at][lt]={Uri.EscapeDataString(toUtc.ToString("O"))}&sort[submitted_at]=desc&per_page=100";
+                if (!string.IsNullOrWhiteSpace(cursor)) uri += $"&start_cursor={Uri.EscapeDataString(cursor)}";
 
-            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
-            var root = document.RootElement;
-            IEnumerable<JsonElement> records = root.ValueKind == JsonValueKind.Array
-                ? root.EnumerateArray()
-                : Try(root, "records", out var recordsElement) && recordsElement.ValueKind == JsonValueKind.Array
-                    ? recordsElement.EnumerateArray()
-                    : Try(root, "data", out var dataElement) && dataElement.ValueKind == JsonValueKind.Array
-                        ? dataElement.EnumerateArray()
-                        : [];
+                using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+                request.Headers.TryAddWithoutValidation("Authorization", $"Token {fleetioOptions.ApiKey}");
+                request.Headers.TryAddWithoutValidation("Account-Token", fleetioOptions.AccountToken);
+                request.Headers.TryAddWithoutValidation("X-Api-Version", fleetioOptions.ApiVersion);
+                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                using var response = await http.SendAsync(request, ct);
+                if (!response.IsSuccessStatusCode)
+                {
+                    logger.LogWarning("Fleetio submitted inspections returned {StatusCode} for asset {FleetioId}.", response.StatusCode, fleetioId);
+                    break;
+                }
 
-            return records.Select(item => new FleetioInspectionEvidence(
+                using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+                var root = document.RootElement;
+                IEnumerable<JsonElement> records = root.ValueKind == JsonValueKind.Array
+                    ? root.EnumerateArray()
+                    : Try(root, "records", out var recordsElement) && recordsElement.ValueKind == JsonValueKind.Array
+                        ? recordsElement.EnumerateArray()
+                        : Try(root, "data", out var dataElement) && dataElement.ValueKind == JsonValueKind.Array
+                            ? dataElement.EnumerateArray()
+                            : Try(root, "results", out var resultsElement) && resultsElement.ValueKind == JsonValueKind.Array
+                                ? resultsElement.EnumerateArray()
+                                : [];
+
+                result.AddRange(records.Select(item => new FleetioInspectionEvidence(
                     Text(item, "id") ?? string.Empty,
                     NestedText(item, "inspection_form", "title") ?? Text(item, "inspection_form_title") ?? "Pre-use inspection",
                     Date(item, "submitted_at", "created_at") ?? DateTimeOffset.MinValue,
                     NestedText(item, "user", "name") ?? Text(item, "user"),
+                    NestedText(item, "user", "employee_number"),
                     Int(item, "failed_items")))
-                .Where(item => item.SubmittedAtUtc >= fromUtc && item.SubmittedAtUtc < toUtc)
+                    .Where(item => item.SubmittedAtUtc >= fromUtc && item.SubmittedAtUtc < toUtc));
+
+                var nextCursor = root.ValueKind == JsonValueKind.Object ? Text(root, "next_cursor", "nextCursor") : null;
+                if (string.IsNullOrWhiteSpace(nextCursor) || !seenCursors.Add(nextCursor)) break;
+                cursor = nextCursor;
+            }
+
+            return result
+                .GroupBy(item => item.Id, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
+                .OrderBy(item => item.SubmittedAtUtc)
                 .ToList();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -368,11 +387,18 @@ public sealed class DailyComplianceController(
         return names.Contains(Normalise(duty.DriverName));
     }
 
-    private static bool UserMatches(string? fleetioUser, Driver driver)
+    private static bool UserMatches(string? fleetioUser, string? fleetioEmployeeNumber, Driver driver)
     {
+        if (!string.IsNullOrWhiteSpace(fleetioEmployeeNumber) && !string.IsNullOrWhiteSpace(driver.EmployeeNumber) &&
+            string.Equals(Normalise(fleetioEmployeeNumber), Normalise(driver.EmployeeNumber), StringComparison.OrdinalIgnoreCase))
+            return true;
+
         var user = Normalise(fleetioUser ?? string.Empty);
         if (user.Length == 0) return false;
-        return new[] { driver.DisplayName, driver.TachoName }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => Normalise(value!)).Where(value => value.Length > 0)
+        return new[] { driver.DisplayName, driver.TachoName }
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => Normalise(value!))
+            .Where(value => value.Length > 0)
             .Any(name => user == name || user.Contains(name, StringComparison.OrdinalIgnoreCase) || name.Contains(user, StringComparison.OrdinalIgnoreCase));
     }
 
@@ -397,7 +423,7 @@ public sealed class DailyComplianceController(
     private static int? Int(JsonElement element, params string[] names) => int.TryParse(Text(element, names), out var value) ? value : null;
     private static string Csv(string value) => $"\"{value.Replace("\"", "\"\"")}\"";
 
-    private sealed record FleetioInspectionEvidence(string Id, string Form, DateTimeOffset SubmittedAtUtc, string? User, int? FailedItems);
+    private sealed record FleetioInspectionEvidence(string Id, string Form, DateTimeOffset SubmittedAtUtc, string? User, string? UserEmployeeNumber, int? FailedItems);
     private sealed record FleetioInspectionMatch(FleetioInspectionEvidence? Evidence, bool DriverMatched);
     private sealed record ActivitySegment(string Kind, DateTimeOffset? StartUtc, DateTimeOffset? EndUtc);
     private sealed record PreUseEvidence(string VehicleCode, int MemberCode, DateTimeOffset DutyStartUtc, DateTimeOffset? FirstDriveUtc, int PreDriveOtherWorkMinutes);
