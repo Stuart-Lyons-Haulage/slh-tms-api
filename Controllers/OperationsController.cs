@@ -62,6 +62,9 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
                 ? knownAliases
                 : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var live = vehicle is null ? null : ExecutionIdentityResolver.MatchLive(aliases, statuses);
+            var trackingObservedAtUtc = live is null
+                ? (DateTimeOffset?)null
+                : live.LastReceivedAtUtc >= live.LastEventTimeUtc ? live.LastReceivedAtUtc : live.LastEventTimeUtc;
             var tacho = vehicle is null ? null : ExecutionIdentityResolver.MatchTacho(aliases, tachoStatuses);
             var visits = geofence?.Visits.Where(visit => visit.LoadId == load.Id).OrderBy(visit => visit.EnteredAtUtc).ToList() ?? [];
             var completedStopIds = geofence is null ? new HashSet<Guid>() : GeofencePlanningMatch.CompletedStopIds(load, visits);
@@ -82,9 +85,10 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
                 var source = eta is null ? "Unavailable" : "Planned";
 
                 // Customer-grade live ETA requires proved run progression and a very fresh
-                // tracker fix. RoadTech/DOT is polled every minute, so five minutes is the
-                // maximum position age allowed to drive a live promise.
-                if (geofence is not null && current is not null && stop.Longitude is not null && stop.Latitude is not null && live is not null && now - live.LastEventTimeUtc <= RunExecutionEvidenceRules.MaximumLiveTrackingAge)
+                // RoadTech observation. For stationary vehicles the provider event timestamp
+                // may not move, so the most recent successful receipt is the correct freshness
+                // evidence while the persisted provider event time remains available for audit.
+                if (geofence is not null && current is not null && stop.Longitude is not null && stop.Latitude is not null && trackingObservedAtUtc is not null && now - trackingObservedAtUtc.Value <= RunExecutionEvidenceRules.MaximumLiveTrackingAge)
                 {
                     try
                     {
@@ -110,15 +114,15 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
                     }
                 }
                 var windowStart = order?.DeliveryWindowStartUtc;
-                var windowEnd = order?.DeliveryWindowEndUtc ?? (IsDeliveryStop(stop) ? stop.PlannedArrivalUtc : null);
+                var windowEnd = order?.DeliveryWindowEndUtc;
                 var tachoAssessment = source == "Live"
                     ? TachoAssessment(tacho, cumulativeDrivingMinutes, breakDelayMinutes)
                     : source == "Estimated"
                         ? (Status: "EstimateOnly", Explanation: "Azure Maps live truck routing was unavailable for at least one remaining leg. The resilient road estimate is advisory and cannot declare customer ETA risk.")
                         : (Status: "RouteUnavailable", Explanation: geofence is null
                             ? "Geofence execution was unavailable, so the remaining route could not be proved and no live ETA was issued."
-                            : live is not null && now - live.LastEventTimeUtc > RunExecutionEvidenceRules.MaximumLiveTrackingAge
-                                ? "Tracking is older than five minutes, so the planned ETA is retained until a fresh RoadTech/DOT position arrives."
+                            : trackingObservedAtUtc is not null && now - trackingObservedAtUtc.Value > RunExecutionEvidenceRules.MaximumLiveTrackingAge
+                                ? "Tracking has not been received for more than five minutes, so the planned ETA is retained until a fresh RoadTech/DOT observation arrives."
                                 : tacho is null
                                     ? "Live route and current TachoMaster duty are unavailable; this ETA must be verified before export."
                                     : "TachoMaster matched the vehicle, but no fresh live route could be calculated; the planned ETA has not been adjusted for a break.");
@@ -127,7 +131,7 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
                 var risk = source == "Live" ? Risk(eta, windowStart, windowEnd) : "Pending";
                 records.Add(new DeliveryEtaResponse(load.Id, RunDisplayLabel.For(load), load.Status.ToString(), stop.Id, stop.Sequence, stop.Name,
                     order?.Reference, order?.CustomerCode, vehicle?.Registration, eta, source, windowStart, windowEnd,
-                    risk, live?.LastEventTimeUtc,
+                    risk, trackingObservedAtUtc,
                     tacho?.DriverName, tacho?.DriveAvailableTodayMinutes, (int)Math.Ceiling(cumulativeDrivingMinutes), breakDelayMinutes,
                     tachoAssessment.Status, tachoAssessment.Explanation));
             }
@@ -237,6 +241,7 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
     }
 
     private static bool IsDeliveryStop(LoadStop stop) => stop.Name.StartsWith("Deliver", StringComparison.OrdinalIgnoreCase);
+
     private static string Risk(DateTimeOffset? eta, DateTimeOffset? start, DateTimeOffset? end)
     {
         if (eta is null || end is null) return "Pending";
