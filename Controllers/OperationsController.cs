@@ -37,10 +37,9 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
         var driverIds = loads.Where(load => load.DriverId != null).Select(load => load.DriverId!.Value).Distinct().ToList();
         var vehicles = await SafeDictionary(db.Vehicles.AsNoTracking().Where(vehicle => vehicleIds.Contains(vehicle.Id)), vehicle => vehicle.Id, ct);
         var drivers = await SafeDictionary(db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id)), driver => driver.Id, ct);
+        await MasterDetailStore.EnrichDriversAsync(db, drivers.Values.ToList(), ct);
         var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles.Values.ToList(), ct);
         var statuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
-        // Every driver's own duty for the vehicle, not just whoever is currently in the cab —
-        // otherwise an earlier driver on a multi-driver vehicle silently loses their tacho data.
         IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> tachoStatuses = new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
         try { tachoStatuses = await tachoMaster.GetAllDriverStatusesByVehicleAsync(planningDate, ct); }
         catch (Exception exception) when (exception is not OperationCanceledException) { logger.LogWarning(exception, "TachoMaster data was unavailable for tacho-aware ETA calculations."); }
@@ -81,18 +80,12 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
             var routeContainsEstimate = false;
             var initialContinuousDriving = tacho is null ? 0 : tacho.BreakMinutes >= 45 ? tacho.DriveMinutes % 270 : Math.Min(tacho.DriveMinutes, 270);
  
-            // ETA is a forecast of the remaining journey. A geofence-confirmed and departed
-            // stop must never be routed again, otherwise later customer ETAs are overstated.
             foreach (var stop in load.Stops.OrderBy(stop => stop.Sequence).Where(stop => !completedStopIds.Contains(stop.Id)))
             {
                 orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
                 var eta = stop.PlannedArrivalUtc;
                 var source = eta is null ? "Unavailable" : "Planned";
  
-                // Customer-grade live ETA requires proved run progression and a very fresh
-                // RoadTech observation. For stationary vehicles the provider event timestamp
-                // may not move, so the most recent successful receipt is the correct freshness
-                // evidence while the persisted provider event time remains available for audit.
                 if (geofence is not null && current is not null && stop.Longitude is not null && stop.Latitude is not null && trackingObservedAtUtc is not null && now - trackingObservedAtUtc.Value <= RunExecutionEvidenceRules.MaximumLiveTrackingAge)
                 {
                     try
@@ -131,8 +124,6 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
                                 : tacho is null
                                     ? "Live route and current TachoMaster duty are unavailable; this ETA must be verified before export."
                                     : "TachoMaster matched the vehicle, but no fresh live route could be calculated; the planned ETA has not been adjusted for a break.");
-                // Only a fully live Azure Maps route from fresh tracking may declare a
-                // customer-window risk. Estimated or planned values remain visible as evidence.
                 var risk = source == "Live" ? Risk(eta, windowStart, windowEnd) : "Pending";
                 records.Add(new DeliveryEtaResponse(load.Id, RunDisplayLabel.For(load), load.Status.ToString(), stop.Id, stop.Sequence, stop.Name,
                     order?.Reference, order?.CustomerCode, vehicle?.Registration, eta, source, windowStart, windowEnd,
@@ -239,6 +230,8 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
     internal static (string Status, string Explanation) TachoAssessment(TachoVehicleDriverStatus? tacho, double routeDrivingMinutes, int breakMinutes)
     {
         if (tacho is null) return ("Unavailable", "No current TachoMaster duty was matched; verify the driver before promising this ETA.");
+        if (tacho.DriveAvailableTodayMinutes is null)
+            return ("DutyMatchedHoursUnavailable", $"TachoMaster matched {tacho.DriverName}'s duty, but remaining-drive metrics are temporarily unavailable. The duty remains visible, but the ETA is not customer-promise ready until legal-hours availability is confirmed.");
         if (tacho.DriveAvailableTodayMinutes is int remaining && routeDrivingMinutes > remaining)
             return ("InsufficientDriveTime", $"The route needs about {Math.Ceiling(routeDrivingMinutes)} driving minutes but TachoMaster shows {remaining} minutes available today. Re-plan or confirm legal availability.");
         if (breakMinutes > 0) return ("BreakIncluded", $"ETA includes {breakMinutes} minutes for a statutory driving break based on current duty and route time.");
@@ -264,4 +257,3 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
  
 public sealed record DeliveryEtaResponse(Guid LoadId, string LoadReference, string LoadStatus, Guid StopId, int Sequence, string StopName, string? OrderReference, string? CustomerCode, string? VehicleRegistration, DateTimeOffset? EtaUtc, string Source, DateTimeOffset? DeliveryWindowStartUtc, DateTimeOffset? DeliveryWindowEndUtc, string Risk, DateTimeOffset? TrackingUpdatedAtUtc, string? TachoDriverName, int? DriveAvailableTodayMinutes, int RouteDrivingMinutes, int BreakMinutesIncluded, string TachoStatus, string TachoExplanation);
 public sealed record ForecastDay(DateOnly Date, int Loads, int AssignedDrivers, int AvailableDrivers, int AssignedVehicles, int AvailableVehicles, int PlannedPallets, int AvailableTrailerPallets, decimal Revenue, decimal Cost, decimal Margin, decimal? MarginPercent, decimal DistanceMiles, decimal EmptyMiles, decimal? EmptyMilePercent, int UnpricedLoads, int UninvoicedLoads, int Exceptions, decimal? UtilisationPercent, int OverCapacityLoads);
- 
