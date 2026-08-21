@@ -8,8 +8,7 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/v1/health/tracking")]
 public sealed class DotTrackingHealthController(
-    DotTrackingClient trackingClient,
-    DotTrackingTelemetryStore telemetryStore,
+    IServiceProvider services,
     DotTrackingOptions options,
     ILogger<DotTrackingHealthController> logger) : ControllerBase
 {
@@ -25,12 +24,19 @@ public sealed class DotTrackingHealthController(
                 status = "unconfigured",
                 configured = false,
                 dataMask = options.DataMask,
+                baseUrlValid = options.BaseUrlConfigurationError is null,
+                configurationError = options.BaseUrlConfigurationError,
                 checkedAtUtc
             });
         }
 
         try
         {
+            // Resolve inside the guarded block so a malformed runtime setting can never
+            // fail during controller construction and surface as an opaque HTTP 500.
+            var trackingClient = services.GetRequiredService<DotTrackingClient>();
+            var telemetryStore = services.GetRequiredService<DotTrackingTelemetryStore>();
+
             var providerRows = await trackingClient.GetLatestVehicleEventsAsync(cancellationToken);
             var records = providerRows.Select(DotTelemetryRecord.FromProvider).ToList();
             var gpsRecords = records
@@ -75,6 +81,7 @@ public sealed class DotTrackingHealthController(
                 status = "upstream-failure",
                 configured = true,
                 dataMask = options.DataMask,
+                baseUrlValid = options.BaseUrlConfigurationError is null,
                 error = exception.GetType().Name,
                 message = exception.Message,
                 checkedAtUtc = DateTimeOffset.UtcNow
