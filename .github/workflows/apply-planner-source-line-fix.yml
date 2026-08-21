@@ -1,0 +1,214 @@
+name: Apply planner source-line import fix
+
+on:
+  push:
+    branches: [fix/planner-source-line-import]
+    paths: [.github/workflows/apply-planner-source-line-fix.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/planner-source-line-import
+      - name: Patch planner import
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          controller = Path('Controllers/PlannerPlanImportController.cs')
+          text = controller.read_text()
+          replacement = r'''    private static List<LoadStop> BuildStops(Guid loadId, PlannerPlanRunRequest run, IReadOnlyCollection<TransportOrder> orders, IReadOnlyDictionary<string, OrderDetail> orderDetails)
+    {
+        var sourceRows = run.Stops.OrderBy(stop => stop.Sequence).ToList();
+        var stops = new List<LoadStop>();
+
+        // Preserve every source collection line independently. The physical route still
+        // remains collections-first, but two jobs from the same collection site must not
+        // collapse into one stop because the driver/planner needs the pallet provenance.
+        foreach (var row in sourceRows.Where(row => !string.IsNullOrWhiteSpace(row.CollectionSite)))
+        {
+            var detail = BuildGroupedStopDetail([row], includeDelivery: true);
+            if (stops.Count == 0)
+            {
+                var window = FirstCollectionWindow([row]);
+                var instruction = FirstCollectionWalkroundInstruction(window);
+                if (!string.IsNullOrWhiteSpace(instruction)) detail = string.IsNullOrWhiteSpace(detail) ? instruction : $"{instruction} | {detail}";
+            }
+
+            stops.Add(new LoadStop
+            {
+                Id = Guid.NewGuid(),
+                LoadId = loadId,
+                Sequence = stops.Count + 1,
+                Name = Clip($"Collect · {row.CollectionSite}", 200)!,
+                Address = Clip(detail, 500),
+                PlannerNote = Clip(SourceLineProvenance(row), 1000),
+                PlannedArrivalUtc = ParsePlannerTime(run.PlanningDate, row.CollectFrom ?? row.CollectTo)
+            });
+        }
+
+        // Delivery stops stay physically grouped by destination/deadline, but their detail
+        // explicitly carries the source-line split (for example 4 Selsey + 5 Merston +
+        // 5 Runcton = 14 Stockton) so dispatch and redispatch retain the original planner logic.
+        foreach (var group in GroupByDeliveryDeadline(sourceRows))
+        {
+            var order = FirstMatchingOrder(group.Rows, orders, orderDetails, new HashSet<Guid>(), run.PlanningDate);
+            var provenance = DeliveryProvenance(group.Rows);
+            var detail = BuildGroupedStopDetail(group.Rows, includeDelivery: false);
+            if (!string.IsNullOrWhiteSpace(provenance)) detail = string.IsNullOrWhiteSpace(detail) ? provenance : $"{provenance} | {detail}";
+            stops.Add(new LoadStop
+            {
+                Id = Guid.NewGuid(),
+                LoadId = loadId,
+                OrderId = order?.Id,
+                Sequence = stops.Count + 1,
+                Name = Clip($"Deliver · {group.Site}", 200)!,
+                Address = Clip(detail, 500),
+                PlannerNote = Clip(provenance, 1000),
+                PlannedArrivalUtc = EarliestPlannerTime(run.PlanningDate, group.Rows.Select(stop => stop.Deadline))
+            });
+        }
+
+        return stops.Count > 0
+            ? stops
+            : sourceRows.Select((stop, index) => new LoadStop
+            {
+                Id = Guid.NewGuid(),
+                LoadId = loadId,
+                Sequence = index + 1,
+                Name = Clip(PlannerPlanImportRules.StopName(stop), 200)!,
+                Address = Clip(BuildStopDetail(stop), 500),
+                PlannerNote = Clip(SourceLineProvenance(stop), 1000),
+                PlannedArrivalUtc = ParsePlannerTime(run.PlanningDate, stop.CollectFrom ?? stop.Deadline)
+            }).ToList();
+    }
+
+    private static string SourceLineProvenance(PlannerPlanStopRequest row)
+    {
+        var source = row.SourceRow is null ? $"source sequence {row.Sequence}" : $"source row {row.SourceRow}";
+        var parts = new[]
+        {
+            source,
+            row.Pallets is null ? null : $"{row.Pallets:0.##} pallets",
+            string.IsNullOrWhiteSpace(row.CollectionSite) ? null : $"from {row.CollectionSite}",
+            string.IsNullOrWhiteSpace(row.DeliverySite) ? null : $"to {row.DeliverySite}",
+            string.IsNullOrWhiteSpace(row.Reference) ? null : $"Ref {row.Reference}"
+        }.Where(part => !string.IsNullOrWhiteSpace(part));
+        return string.Join(" · ", parts);
+    }
+
+    private static string DeliveryProvenance(IEnumerable<PlannerPlanStopRequest> rows)
+    {
+        var ordered = rows.OrderBy(row => row.Sequence).ToList();
+        var total = ordered.Where(row => row.Pallets is not null).Sum(row => row.Pallets ?? 0m);
+        var split = ordered.Select(row =>
+        {
+            var quantity = row.Pallets is null ? "? pallets" : $"{row.Pallets:0.##} pallets";
+            var collection = string.IsNullOrWhiteSpace(row.CollectionSite) ? "unknown collection" : row.CollectionSite!.Trim();
+            var reference = string.IsNullOrWhiteSpace(row.Reference) ? string.Empty : $" (Ref {row.Reference!.Trim()})";
+            return $"{quantity} from {collection}{reference}";
+        });
+        return $"{total:0.##} pallets total: {string.Join(" · ", split)}";
+    }
+
+    private static IEnumerable<(string Site, string WindowKey, List<PlannerPlanStopRequest> Rows)> GroupByCollectionWindow(IReadOnlyCollection<PlannerPlanStopRequest> rows) =>
+        GroupBySiteAndWindow(rows, stop => stop.CollectionSite, stop => $"{Clean(stop.CollectFrom)}-{Clean(stop.CollectTo)}");
+
+    private static IEnumerable<(string Site, string WindowKey, List<PlannerPlanStopRequest> Rows)> GroupByDeliveryDeadline(IReadOnlyCollection<PlannerPlanStopRequest> rows) =>
+        GroupBySiteAndWindow(rows, stop => stop.DeliverySite, stop => Clean(stop.Deadline));
+
+    private static IEnumerable<(string Site, string WindowKey, List<PlannerPlanStopRequest> Rows)> GroupBySiteAndWindow(
+        IReadOnlyCollection<PlannerPlanStopRequest> rows,
+        Func<PlannerPlanStopRequest, string?> siteSelector,
+        Func<PlannerPlanStopRequest, string> windowSelector)
+    {
+        var groups = new List<(string Site, string WindowKey, List<PlannerPlanStopRequest> Rows)>();
+        foreach (var row in rows)
+        {
+            var site = siteSelector(row)?.Trim();
+            if (string.IsNullOrWhiteSpace(site)) continue;
+            var window = windowSelector(row);
+            var existingIndex = groups.FindIndex(group => string.Equals(Normalize(group.Site), Normalize(site), StringComparison.Ordinal) && string.Equals(group.WindowKey, window, StringComparison.Ordinal));
+            if (existingIndex >= 0) groups[existingIndex].Rows.Add(row);
+            else groups.Add((site, window, [row]));
+        }
+        return groups;
+    }
+
+'''
+          pattern = re.compile(r'    private static List<LoadStop> BuildStops\(Guid loadId, PlannerPlanRunRequest run, IReadOnlyCollection<TransportOrder> orders, IReadOnlyDictionary<string, OrderDetail> orderDetails\)\n    \{.*?(?=    private static List<\(Guid OrderId, int Pallets\)> BuildImportAllocations)', re.S)
+          next_text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit(f'BuildStops replacement count was {count}')
+          controller.write_text(next_text)
+
+          tests = Path('Slh.Tms.Api.Tests/PlannerPlanImportTests.cs')
+          t = tests.read_text()
+          marker = '    private async Task SeedMasterData()\n'
+          test = r'''    [Fact]
+    public async Task Import_preserves_collection_source_lines_and_delivery_pallet_provenance()
+    {
+        var date = new DateOnly(2026, 8, 21);
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.TransportOrders.AddRange(
+                new TransportOrder { Reference = "STK-SEL-4", CustomerCode = "MOR", CollectionDate = date, Pallets = 4, SellerName = "NWF-Selsey", StallNumber = "Morrisons-Stockton" },
+                new TransportOrder { Reference = "STK-MER-5", CustomerCode = "MOR", CollectionDate = date, Pallets = 5, SellerName = "NWF-Merston", StallNumber = "Morrisons-Stockton" },
+                new TransportOrder { Reference = "STK-RUN-5", CustomerCode = "MOR", CollectionDate = date, Pallets = 5, SellerName = "NWF-Runcton", StallNumber = "Morrisons-Stockton" },
+                new TransportOrder { Reference = "WAK-RUN-10", CustomerCode = "MOR", CollectionDate = date, Pallets = 10, SellerName = "NWF-Runcton", StallNumber = "Morrisons-Wakefield" });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Access");
+        var request = new PlannerPlanImportRequest("slh-planner-plan-v3-source-lines", date, [
+            new PlannerPlanRunRequest("3", "3", "Collection", date, null, null, null, null, true, "Matched",
+                new PlannerPlanSourceRequest("Lyons collections 210826.xlsm", "Collection Plan"), [
+                    new PlannerPlanStopRequest(1, "NWF-Selsey", "Morrisons-Stockton", 4, "STK-SEL-4", "Std", "04:30:00", "05:00:00", "18:00:00", 11),
+                    new PlannerPlanStopRequest(2, "NWF-Merston", "Morrisons-Stockton", 5, "STK-MER-5", "Std", "05:00:00", "05:30:00", "18:00:00", 12),
+                    new PlannerPlanStopRequest(3, "NWF-Runcton", "Morrisons-Stockton", 5, "STK-RUN-5", "Std", "05:30:00", "06:15:00", "18:00:00", 13),
+                    new PlannerPlanStopRequest(4, "NWF-Runcton", "Morrisons-Wakefield", 10, "WAK-RUN-10", "Std", "05:30:00", "06:15:00", "18:00:00", 14)
+                ])
+        ]);
+
+        var response = await client.PostAsJsonAsync("/api/v1/planning/import-plan", request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        using var finalScope = _factory.Services.CreateScope();
+        var finalDb = finalScope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var load = finalDb.Loads.Single(row => row.Reference == "PLAN-20260821-3");
+        var stops = finalDb.LoadStops.Where(row => row.LoadId == load.Id).OrderBy(row => row.Sequence).ToList();
+        Assert.Equal(6, stops.Count);
+        Assert.Equal(new[] { "Collect · NWF-Selsey", "Collect · NWF-Merston", "Collect · NWF-Runcton", "Collect · NWF-Runcton", "Deliver · Morrisons-Stockton", "Deliver · Morrisons-Wakefield" }, stops.Select(row => row.Name));
+        Assert.Contains("14 pallets total", stops[4].Address);
+        Assert.Contains("4 pallets from NWF-Selsey", stops[4].Address);
+        Assert.Contains("5 pallets from NWF-Merston", stops[4].Address);
+        Assert.Contains("5 pallets from NWF-Runcton", stops[4].Address);
+        Assert.Contains("10 pallets total", stops[5].Address);
+        Assert.Contains("10 pallets from NWF-Runcton", stops[5].Address);
+        var allocations = finalDb.StagedImports.Where(row => row.EntityType == PlanningAllocationStore.EntityType).ToList();
+        Assert.Equal(24, allocations.Sum(row => JsonSerializer.Deserialize<AllocationState>(row.PayloadJson, new JsonSerializerOptions(JsonSerializerDefaults.Web))!.Pallets));
+    }
+
+'''
+          if marker not in t:
+              raise SystemExit('Test insertion marker not found')
+          tests.write_text(t.replace(marker, test + marker, 1))
+          PY
+      - name: Build and test planner import
+        run: dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --filter PlannerPlanImportTests
+      - name: Commit patched files
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Controllers/PlannerPlanImportController.cs Slh.Tms.Api.Tests/PlannerPlanImportTests.cs
+          git commit -m "Preserve planner source-line pallet provenance"
+          git push origin HEAD:fix/planner-source-line-import
