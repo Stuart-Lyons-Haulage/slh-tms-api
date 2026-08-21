@@ -16,8 +16,12 @@ public sealed class DotTrackingOptions
     public bool Enabled { get; set; }
     public int StaleAfterMinutes { get; set; } = 10;
 
-    /// <summary>RoadTech telemetry data mask. 0 matches RoadTech's documented current telemetry sample.</summary>
-    public int DataMask { get; set; } = 0;
+    /// <summary>
+    /// RoadTech telemetry data mask. GPS is bit 0x01 and is mandatory for the
+    /// operational tracking/geofence feed. Do not default to zero: RoadTech's
+    /// zero-mask examples legitimately return dataGps = null.
+    /// </summary>
+    public int DataMask { get; set; } = 0x01;
 
     /// <summary>RoadTech flag to include active vehicles only.</summary>
     public bool OnlyLive { get; set; } = true;
