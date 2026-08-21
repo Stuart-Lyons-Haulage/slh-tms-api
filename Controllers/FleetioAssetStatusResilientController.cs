@@ -80,7 +80,9 @@ public sealed class FleetioAssetStatusResilientController(
                     fleetioName,
                     fleetioStatus = asset.Status,
                     fleetioVor = asset.Vor == true || IsVorText(asset.Status),
-                    type = asset.Type,
+                    type = match?.Type ?? asset.Type,
+                    standardCapacity = match?.StandardCapacity,
+                    euroCapacity = match?.EuroCapacity,
                     vin = asset.Vin,
                     year = asset.Year,
                     make = asset.Make,
@@ -136,7 +138,7 @@ public sealed class FleetioAssetStatusResilientController(
     private static string? CanonicalTrailerNumber(string? value)
     {
         var text = value?.Trim() ?? string.Empty;
-        var match = Regex.Match(text, "^(?:(?:SLH|TRAILER|TRL)[\\s_-]*)?0*(\\d{1,3})$", RegexOptions.IgnoreCase);
+        var match = Regex.Match(text, "^(?:(?:SLH|TRAILER|TRL)[\\s_-]*)?0*(\\d{1,3})(?:$|[\\s:_-])", RegexOptions.IgnoreCase);
         return match.Success && int.TryParse(match.Groups[1].Value, out var index) && index > 0 ? $"SLH{index}" : null;
     }
 
