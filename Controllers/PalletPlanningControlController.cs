@@ -48,6 +48,8 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
                 .OrderBy(x => loadById.TryGetValue(x.LoadId, out var load) ? load.Reference : x.LoadId.ToString())
                 .ToList();
 
+            // Runs created before quantity allocation existed remain valid. Once any explicit allocation
+            // exists for the order, including a zero, the explicit quantities become authoritative.
             if (!hasExplicitAllocations && allocations.Count == 0)
             {
                 var linkedLoad = loads.FirstOrDefault(load => load.Status != LoadStatus.Cancelled && load.Stops.Any(stop => stop.OrderId == order.Id));
@@ -148,6 +150,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
                 x.Status,
                 x.PalletSpacesUsed,
                 x.TotalPalletSpaces,
+                x.CapacityType,
                 stopCount = x.Stops.Count
             }).ToList()
         });
@@ -188,7 +191,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
         var detailMap = await ReadOrderDetails(request.Date, ct);
         detailMap.TryGetValue(Normalise(order.Reference), out var detail);
         await EnsureOrderOnRun(load, order, detail, ct);
-        await UpdateRunPalletTotal(load.Id, request.Date, ct);
+        var capacity = await UpdateRunPalletTotal(load.Id, request.Date, ct);
 
         var allLatest = await ReadLatestAllocations(request.Date, ct);
         var totalPlanned = allLatest.Values.Where(x => x.OrderId == order.Id).Sum(x => Math.Max(x.Pallets, 0));
@@ -204,6 +207,8 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
             orderedPallets = ordered,
             outstandingPallets = Math.Max(ordered - totalPlanned, 0),
             overplannedPallets = Math.Max(totalPlanned - ordered, 0),
+            runCapacityStatus = capacity?.Status,
+            runUtilisationPercent = capacity?.UtilisationPercent,
             updatedAtUtc = now
         });
     }
@@ -317,28 +322,56 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
         await PlanningRegisterStore.SaveLoadAsync(db, registered, User.Identity?.Name, ct);
     }
 
-    private async Task UpdateRunPalletTotal(Guid loadId, DateOnly date, CancellationToken ct)
+    private async Task<PalletCapacityResult?> UpdateRunPalletTotal(Guid loadId, DateOnly date, CancellationToken ct)
     {
         var loads = await ReadLoads(date, ct);
         var target = loads.SingleOrDefault(x => x.Id == loadId);
-        if (target is null) return;
+        if (target is null) return null;
         var latest = await ReadLatestAllocations(date, ct);
         var orders = await ReadOrders(date, ct);
         var details = await ReadOrderDetails(date, ct);
-        var pallets = 0;
+        decimal standard = 0;
+        decimal euro = 0;
+        decimal unknown = 0;
 
         foreach (var order in orders.Where(x => x.Status != OrderStatus.Cancelled))
         {
+            details.TryGetValue(Normalise(order.Reference), out var detail);
+            int pallets;
             var hasExplicit = latest.Keys.Any(key => key.OrderId == order.Id);
             if (hasExplicit)
             {
-                if (latest.TryGetValue((order.Id, loadId), out var allocation)) pallets += Math.Max(allocation.Pallets, 0);
-                continue;
+                pallets = latest.TryGetValue((order.Id, loadId), out var allocation) ? Math.Max(allocation.Pallets, 0) : 0;
             }
-            if (!target.Stops.Any(stop => stop.OrderId == order.Id)) continue;
-            details.TryGetValue(Normalise(order.Reference), out var detail);
-            pallets += EffectiveOrderedPallets(order, detail);
+            else
+            {
+                if (!target.Stops.Any(stop => stop.OrderId == order.Id)) continue;
+                pallets = EffectiveOrderedPallets(order, detail);
+            }
+            if (pallets <= 0) continue;
+            switch (NormalisePalletType(detail?.PalletType))
+            {
+                case "Standard": standard += pallets; break;
+                case "Euro": euro += pallets; break;
+                default: unknown += pallets; break;
+            }
         }
+
+        decimal standardCapacity = PalletCapacityCalculator.DefaultStandardCapacity;
+        decimal euroCapacity = PalletCapacityCalculator.DefaultEuroCapacity;
+        if (target.TrailerId is not null)
+        {
+            try
+            {
+                var trailer = await db.Trailers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == target.TrailerId.Value, ct);
+                if (trailer?.StandardCapacity is > 0) standardCapacity = trailer.StandardCapacity.Value;
+                if (trailer?.EuroCapacity is > 0) euroCapacity = trailer.EuroCapacity.Value;
+            }
+            catch (Exception ex) when (SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); }
+        }
+
+        var capacity = PalletCapacityCalculator.Calculate(standard, euro, unknown, standardCapacity, euroCapacity);
+        var capacityLabel = $"Standard/Euro · {capacity.Status} · {capacity.UtilisationPercent:0.0}%";
 
         try
         {
@@ -348,20 +381,24 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
                 await LoadCommercialStore.EnrichAsync(db, new[] { load }, ct);
                 await LoadCommercialStore.SaveAsync(db, load, new LoadCommercialValues(load.RevenueAmount, load.FuelSurchargeAmount, load.EstimatedCostAmount,
                     load.ActualCostAmount, load.EstimatedDistanceMiles, load.EmptyMiles, load.InvoiceStatus, load.CommercialNotes,
-                    pallets, load.TotalPalletSpaces ?? 26, load.CapacityType ?? "Standard pallets", load.DepotSplits, load.TemperatureC, load.PlannerNotes), User.Identity?.Name, ct);
-                return;
+                    capacity.StandardEquivalentUsed, capacity.StandardEquivalentCapacity, capacityLabel, load.DepotSplits, load.TemperatureC, load.PlannerNotes), User.Identity?.Name, ct);
+                return capacity;
             }
         }
         catch (Exception ex) when (SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); }
         var registered = await PlanningRegisterStore.GetLoadAsync(db, loadId, ct);
-        if (registered is null) return;
-        registered.PalletSpacesUsed = pallets;
-        if (registered.TotalPalletSpaces is null) registered.TotalPalletSpaces = 26;
+        if (registered is null) return capacity;
+        registered.PalletSpacesUsed = capacity.StandardEquivalentUsed;
+        registered.TotalPalletSpaces = capacity.StandardEquivalentCapacity;
+        registered.CapacityType = capacityLabel;
         await PlanningRegisterStore.SaveLoadAsync(db, registered, User.Identity?.Name, ct);
+        return capacity;
     }
 
     private static int EffectiveOrderedPallets(TransportOrder order, OrderDetail? detail)
     {
+        // A register-backed order amended in Manage Jobs updates its audited staged payload rather than
+        // an older duplicate TransportOrders row. In that case the amended payload must be authoritative.
         var value = detail?.Amended == true ? detail.Pallets ?? order.Pallets : order.Pallets ?? detail?.Pallets;
         return Math.Max(value ?? 0, 0);
     }
