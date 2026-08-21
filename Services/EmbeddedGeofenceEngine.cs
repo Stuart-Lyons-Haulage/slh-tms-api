@@ -9,6 +9,7 @@ namespace Slh.Tms.Api.Services;
 public static class EmbeddedGeofenceEngine
 {
     private const int DefaultConfirmDwellMinutes = 10;
+    private const int CredibleDepartureVisitMinutes = 2;
     private static readonly Lazy<IReadOnlyList<EmbeddedFence>> Fences = new(ParseFences);
     private static readonly HashSet<string> IgnoredNameTokens = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -228,7 +229,17 @@ public static class EmbeddedGeofenceEngine
                 if (exitConfirmed)
                 {
                     current.ExitedAtUtc = evt.EventTimeUtc;
-                    current.DwellMinutes = Math.Max(0, (int)Math.Floor((current.LastInsideAtUtc - current.EnteredAtUtc).TotalMinutes));
+
+                    // The next point outside the fence proves the previous stationary
+                    // period has ended. Use entry-to-exit duration here: LastInsideAtUtc
+                    // can remain equal to EnteredAtUtc when Falcon keeps one provider
+                    // event while the vehicle is stationary. Without this, a genuine
+                    // 30-minute unload can reconstruct as zero dwell after departure.
+                    current.DwellMinutes = Math.Max(0, (int)Math.Floor((evt.EventTimeUtc - current.EnteredAtUtc).TotalMinutes));
+                    var credibleMinutes = Math.Max(CredibleDepartureVisitMinutes, current.Fence.PendingEntryMinutes);
+                    if (current.ConfirmedAtUtc is null && current.DwellMinutes >= credibleMinutes)
+                        current.ConfirmedAtUtc = evt.EventTimeUtc;
+
                     visits.Add(current);
                     current = null;
                     currentFence = null;
