@@ -9,7 +9,7 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
 {
     private static readonly ConcurrentDictionary<string, byte> NormalisedProviderIdentifiers = new(StringComparer.OrdinalIgnoreCase);
 
-    public async Task PersistAsync(IEnumerable<DotTelemetryRecord> records, CancellationToken ct)
+    public async Task PersistAsync(IEnumerable<DotTelemetryRecord> records, CancellationToken ct, bool updateLiveStatus = true)
     {
         var batch = records.ToList();
         var receivedAt = DateTimeOffset.UtcNow;
@@ -52,7 +52,8 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
                 }
             }
 
-            if (record.Latitude is not null && record.Longitude is not null)
+            var hasGps = record.Latitude is not null && record.Longitude is not null;
+            if (hasGps)
             {
                 var exists = await db.VehicleTrackingEvents.AnyAsync(item => item.ProviderName == "RoadTech Falcon" && item.ProviderEventId == record.ProviderEventId, ct);
                 if (!exists) db.VehicleTrackingEvents.Add(new VehicleTrackingEvent
@@ -61,8 +62,8 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
                     ProviderEventId = record.ProviderEventId,
                     VehicleIdentifier = canonicalIdentifier,
                     EventTimeUtc = record.EventTimeUtc,
-                    Latitude = record.Latitude.Value,
-                    Longitude = record.Longitude.Value,
+                    Latitude = record.Latitude!.Value,
+                    Longitude = record.Longitude!.Value,
                     SpeedKph = record.SpeedKph,
                     IgnitionOn = record.IgnitionOn,
                     IsMoving = record.IsMoving,
@@ -70,6 +71,10 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
                     MatchStatus = "Received"
                 });
             }
+
+            // Historical recovery is evidence for geofence reconstruction only. It must
+            // never make yesterday's telemetry look like a current live observation.
+            if (!updateLiveStatus || !hasGps) continue;
 
             var live = await db.VehicleLiveStatuses
                 .Where(item => item.VehicleIdentifier == canonicalIdentifier || item.VehicleIdentifier == rawIdentifier)
@@ -83,8 +88,8 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
                     VehicleIdentifier = canonicalIdentifier,
                     LastEventTimeUtc = record.EventTimeUtc,
                     LastReceivedAtUtc = receivedAt,
-                    Latitude = record.Latitude ?? 0,
-                    Longitude = record.Longitude ?? 0,
+                    Latitude = record.Latitude!.Value,
+                    Longitude = record.Longitude!.Value,
                     SpeedKph = record.SpeedKph,
                     IgnitionOn = record.IgnitionOn,
                     IsMoving = record.IsMoving,
@@ -93,22 +98,29 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
                     CurrentDriverCardNumber = record.DriverCardNumber
                 });
             }
-            else if (record.EventTimeUtc >= live.LastEventTimeUtc)
+            else
             {
                 live.VehicleIdentifier = canonicalIdentifier;
-                live.LastEventTimeUtc = record.EventTimeUtc;
+
+                // GetCurrentTelemetry is RoadTech's current-fleet observation. A stationary
+                // vehicle may retain the same provider event timestamp for a long unload, so
+                // receipt freshness must advance on every valid current GPS observation.
                 live.LastReceivedAtUtc = receivedAt;
-                if (record.Latitude is not null && record.Longitude is not null)
+
+                // Never roll the stored position backwards if a provider page contains an
+                // older event. Only the receipt timestamp is refreshed in that case.
+                if (record.EventTimeUtc >= live.LastEventTimeUtc)
                 {
-                    live.Latitude = record.Latitude.Value;
-                    live.Longitude = record.Longitude.Value;
+                    live.LastEventTimeUtc = record.EventTimeUtc;
+                    live.Latitude = record.Latitude!.Value;
+                    live.Longitude = record.Longitude!.Value;
+                    live.SpeedKph = record.SpeedKph;
+                    live.IgnitionOn = record.IgnitionOn;
+                    live.IsMoving = record.IsMoving;
+                    live.LastKnownStatus = record.Status;
+                    if (!string.IsNullOrWhiteSpace(record.DriverName)) live.CurrentDriverName = record.DriverName;
+                    if (!string.IsNullOrWhiteSpace(record.DriverCardNumber)) live.CurrentDriverCardNumber = record.DriverCardNumber;
                 }
-                live.SpeedKph = record.SpeedKph;
-                live.IgnitionOn = record.IgnitionOn;
-                live.IsMoving = record.IsMoving;
-                live.LastKnownStatus = record.Status;
-                if (!string.IsNullOrWhiteSpace(record.DriverName)) live.CurrentDriverName = record.DriverName;
-                if (!string.IsNullOrWhiteSpace(record.DriverCardNumber)) live.CurrentDriverCardNumber = record.DriverCardNumber;
             }
         }
 
@@ -118,6 +130,6 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
         // embedded SLH geofence set. Ingestion only stores evidence; it does not create or
         // alter geofence schema at runtime.
         if (batch.Count > 0)
-            logger.LogDebug("Stored {RecordCount} RoadTech telemetry record(s) for table-free geofence progression.", batch.Count);
+            logger.LogDebug("Stored {RecordCount} RoadTech telemetry record(s); liveStatus={UpdateLiveStatus}.", batch.Count, updateLiveStatus);
     }
 }
