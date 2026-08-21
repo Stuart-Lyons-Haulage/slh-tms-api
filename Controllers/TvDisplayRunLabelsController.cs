@@ -9,7 +9,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController]
 [Route("api/v1/tv-display/run-labels")]
-public sealed class TvDisplayRunLabelsController(TmsDbContext db) : ControllerBase
+public sealed class TvDisplayRunLabelsController(TmsDbContext db, IConfiguration configuration) : ControllerBase
 {
     [HttpGet, AllowAnonymous]
     public async Task<IActionResult> Get(
@@ -17,8 +17,10 @@ public sealed class TvDisplayRunLabelsController(TmsDbContext db) : ControllerBa
         [FromQuery] DateOnly? date,
         CancellationToken ct)
     {
-        if (!await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct))
-            return Unauthorized(new { message = "This TV display is not paired." });
+        var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct);
+        var legacyKeyAllowed = TvWallboardAccess.IsAllowed(HttpContext, configuration);
+        if (!pairedKeyAllowed && !legacyKeyAllowed)
+            return Unauthorized(new { message = "This TV display is not authorised." });
 
         var day = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
         var loads = (await PlanningResilience.ReadLoadsAsync(db, day, ct))
@@ -35,6 +37,7 @@ public sealed class TvDisplayRunLabelsController(TmsDbContext db) : ControllerBa
             labels = loads.Select(load => new
             {
                 loadId = load.Id,
+                reference = load.Reference,
                 displayReference = RunDisplayLabel.For(load)
             }).ToList()
         });
@@ -133,6 +136,6 @@ internal static partial class RunDisplayLabel
         var first = load.Stops.OrderBy(stop => stop.Sequence).FirstOrDefault(stop => stop.PlannedArrivalUtc is not null)?.PlannedArrivalUtc;
         if (first is null) return null;
         var local = TimeZoneInfo.ConvertTime(first.Value, UkZone);
-        return local.Hour < 12 ? "AM" : "PM";
+        return local.Hour >= 15 || local.Hour < 3 ? "PM" : "AM";
     }
 }
