@@ -14,7 +14,12 @@ namespace Slh.Tms.Api.Controllers;
 /// No geofence-specific SQL tables are required.
 /// </summary>
 [ApiController, Route("api/v1/tv-display/route-progress")]
-public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration configuration) : ControllerBase
+public sealed class TvRouteProgressController(
+    TmsDbContext db,
+    IConfiguration configuration,
+    DotTrackingClient trackingClient,
+    DotTrackingTelemetryStore telemetryStore,
+    ILogger<TvRouteProgressController> logger) : ControllerBase
 {
     private static readonly TimeSpan LiveTrackingThreshold = TimeSpan.FromMinutes(5);
 
@@ -36,16 +41,21 @@ public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration co
             .OrderBy(load => load.Reference)
             .ToList();
 
-        // Use the same planner-to-Falcon naming/coordinate bridge as Live Runs and
-        // customer ETA evidence. The previous TV endpoint bypassed this and therefore
-        // linked fewer geofence visits than the rest of the TMS.
+        // Live Tracking in the TMS asks Falcon directly. The TV must use that same
+        // current source first rather than relying on a SQL live-status row that may
+        // have failed to persist. SQL remains a resilience fallback only.
+        var liveSnapshot = await LoadLiveStatusesAsync(now, ct);
+        var liveStatuses = liveSnapshot.Statuses;
+
+        // Persist is attempted before geofence reconstruction so current Falcon evidence
+        // can advance the shared geofence engine. A persistence fault must not freeze the
+        // visible TV marker because liveStatuses above already contains the provider data.
         var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
         var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, day, geofenceLoads, ct);
         var vehicleIds = loads.Where(x => x.VehicleId is not null).Select(x => x.VehicleId!.Value).Distinct().ToList();
         var vehicles = vehicleIds.Count == 0
             ? new List<Vehicle>()
             : await SafeList(db.Vehicles.AsNoTracking().Where(x => vehicleIds.Contains(x.Id)), ct);
-        var liveStatuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
         var vehicleById = vehicles.ToDictionary(x => x.Id);
 
         var rows = new List<object>();
@@ -132,7 +142,10 @@ public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration co
         {
             planningDate = day,
             calculatedAtUtc = now,
-            latestTrackingUtc = snapshot.LatestTrackingUtc,
+            trackingSource = liveSnapshot.Source,
+            latestTrackingUtc = liveStatuses.Count > 0
+                ? liveStatuses.Max(status => status.LastReceivedAtUtc)
+                : snapshot.LatestTrackingUtc,
             geofenceAvailable = snapshot.Fences.Count > 0,
             geofenceCount = snapshot.Fences.Count,
             geofenceVisitCount = snapshot.Visits.Count,
@@ -140,6 +153,69 @@ public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration co
             geofenceLinkedRuns = snapshot.Visits.Where(x => x.LoadId is not null).Select(x => x.LoadId!.Value).Distinct().Count(),
             runs = rows
         });
+    }
+
+    private async Task<(List<VehicleLiveStatus> Statuses, string Source)> LoadLiveStatusesAsync(
+        DateTimeOffset receivedAtUtc,
+        CancellationToken ct)
+    {
+        try
+        {
+            var providerRows = await trackingClient.GetLatestVehicleEventsAsync(ct);
+            var records = providerRows
+                .Select(DotTelemetryRecord.FromProvider)
+                .Where(record => record.Latitude is not null && record.Longitude is not null)
+                .ToList();
+
+            if (records.Count > 0)
+            {
+                try
+                {
+                    await telemetryStore.PersistAsync(records, ct, markAsLiveReceipt: true);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    db.ChangeTracker.Clear();
+                    logger.LogWarning(
+                        exception,
+                        "Fresh RoadTech telemetry could not be persisted for TV/geofence history; the TV will continue from the direct provider snapshot.");
+                }
+
+                var statuses = records
+                    .Where(record => !string.IsNullOrWhiteSpace(record.VehicleIdentifier))
+                    .GroupBy(
+                        record => Normalise(record.VehicleIdentifier),
+                        StringComparer.OrdinalIgnoreCase)
+                    .Select(group => group.OrderByDescending(record => record.EventTimeUtc).First())
+                    .Select(record => new VehicleLiveStatus
+                    {
+                        VehicleIdentifier = ExecutionIdentityResolver.NormaliseVehicle(record.VehicleIdentifier),
+                        LastEventTimeUtc = record.EventTimeUtc,
+                        LastReceivedAtUtc = receivedAtUtc,
+                        Latitude = record.Latitude!.Value,
+                        Longitude = record.Longitude!.Value,
+                        SpeedKph = record.SpeedKph,
+                        IgnitionOn = record.IgnitionOn,
+                        IsMoving = record.IsMoving,
+                        LastKnownStatus = record.Status,
+                        CurrentDriverName = record.DriverName,
+                        CurrentDriverCardNumber = record.DriverCardNumber,
+                        UpdatedAtUtc = receivedAtUtc
+                    })
+                    .ToList();
+
+                if (statuses.Count > 0)
+                    return (statuses, "RoadTech current");
+            }
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(
+                exception,
+                "RoadTech direct TV snapshot failed; falling back to persisted live status.");
+        }
+
+        return (await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct), "SQL fallback");
     }
 
     private static decimal TruckPositionPercent(
