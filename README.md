@@ -1,146 +1,93 @@
 # Stuart Lyons Haulage TMS API
 
-Backend-first .NET 8 API for authenticated master-data lookups and approval-based import staging. Routes are versioned beneath `/api/v1`. Inbox and form data never writes directly to live tables.
+Production .NET 8 API for the Stuart Lyons Haulage transport management system. The API is hosted in Azure Container Apps, uses Azure SQL for operational and audited fallback storage, Microsoft Entra for authenticated access, and Key Vault/managed identity for integration secrets.
 
-## Architecture
+## Production
 
-Power Automate submits an item to `POST /api/v1/staging`. SQL stores the original JSON and a unique idempotency key as `PendingReview`. An approval flow calls the approve or reject route. Approval promotes supported entities inside the API; rejection retains the audit record. The `order` entity is staged now, but its promotion is intentionally deferred until the final TMS order aggregate is agreed.
+- Portal: `https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io/`
+- API: `https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io`
+- Resource group: `slh-tms-prod-rg`
+- Region: UK South
 
-## Azure components
+The portal proxies API requests through `/tms-api`. Deployment is performed by GitHub Actions using Azure OIDC; do not use publish profiles or long-lived deployment secrets.
 
-1. Resource group: `slh-tms-prod-rg`, UK South.
-2. Linux Azure App Service, .NET 8, HTTPS only, minimum TLS 1.2.
-3. Azure SQL Database for live and staged records.
-4. Application Insights for logs and correlation diagnostics.
-5. Microsoft Entra app registration for the API.
-6. Microsoft Entra client registration used by the Power Automate custom connector.
-7. Key Vault for deployment secrets. Prefer App Service managed identity for SQL in production.
+## Operational architecture
 
-The fixed API host will be `https://<globally-unique-app-name>.azurewebsites.net`. A branded hostname can be added later without changing the routes.
+The current production path is deliberately resilient:
 
-## Entra ID setup
+1. Planner and order data is validated by the API.
+2. Primary SQL tables are used when the operational schema is available.
+3. Audited register/staging storage is used as a fallback so planner pages do not fail because one dedicated table is unavailable.
+4. RoadTech/Falcon supplies live vehicle telemetry and geofence evidence.
+5. TachoMaster supplies driver duty and legal-hours evidence.
+6. Azure Maps is used for live route/ETA calculation where fresh execution evidence is available.
+7. The TV wallboard consumes the same live tracking, geofence progression and ETA evidence as the TMS.
 
-### API registration
+## Planner imports
 
-1. Azure portal > Microsoft Entra ID > App registrations > New registration.
-2. Name: `SLH TMS API`. Select single tenant. No redirect URI.
-3. Copy Tenant ID and Application client ID.
-4. Expose an API > set Application ID URI to `api://<API-CLIENT-ID>`.
-5. Add delegated scope `Tms.Access`, consent for Admins and users.
-6. App roles > create `Tms.Write`, `Tms.Approve`, and `Tms.Admin`; allowed member type `Users/Groups` and `Applications`.
-7. Assign the appropriate roles through Enterprise applications. Planners need `Tms.Write`; approvers need `Tms.Approve`; administrators may use `Tms.Admin`.
+All planner JSON schemas used by the live Planner Import page must post to:
 
-### Connector client registration
+`POST /api/v1/planning/import-plan`
 
-1. Create app registration `SLH Power Automate Connector`, single tenant.
-2. Authentication > Web > add the redirect URL displayed by the custom connector after it is saved.
-3. API permissions > My APIs > SLH TMS API > delegated permission `Tms.Access`; grant admin consent.
-4. Certificates & secrets > create a short-lived client secret. Copy it once and enter it into the connector security page. Rotate it before expiry.
+This includes `slh-planner-plan-v3-source-lines`. Do not add browser rewrites that divert source-line payloads to the older direct-SQL import path. The resilient import endpoint supports idempotent re-imports, audited fallback storage, capacity warnings and allocation reconciliation.
 
-## App Service configuration
+The CI suite contains regression coverage for source-line JSON through the live resilient endpoint so this routing cannot silently regress to the previous 500-prone path.
 
-Set these environment variables:
+### Clean re-import of a planning day
 
-| Name | Value |
-| --- | --- |
-| `Entra__TenantId` | Your tenant GUID |
-| `Entra__Audience` | `api://<API-CLIENT-ID>` |
-| `ConnectionStrings__TmsDb` | Azure SQL connection string; use Key Vault reference or managed identity |
-| `Integrations__SageHr__Enabled` | `true` when Sage HR driver sync should be available |
-| `Integrations__SageHr__BaseUrl` | Sage HR API base URL |
-| `Integrations__SageHr__ApiKey` | Sage HR API token, preferably Key Vault reference |
-| `Integrations__TextBee__Enabled` | `true` when TextBee duty-phone SMS dispatch is ready |
-| `Integrations__TextBee__ApiKey` | TextBee API key, preferably Key Vault reference |
-| `Integrations__TextBee__DeviceId` | TextBee device ID for the duty phone |
-| `Integrations__TextBee__DutyPhoneLabel` | Friendly label shown in Admin, e.g. `SLH duty phone` |
-| `Integrations__Fleetio__Enabled` | `true` when Fleetio service/VOR integration is ready |
-| `Integrations__Fleetio__ApiKey` | Fleetio API key, preferably Key Vault reference |
-| `Integrations__Fleetio__AccountToken` | Fleetio account token, preferably Key Vault reference |
-| `Integrations__OpenAI__Enabled` | `true` when conversational planning advice should use OpenAI; safe rule-based advice works without it |
-| `Integrations__OpenAI__ApiKey` | OpenAI API key, always supplied through Key Vault or a secret reference |
-| `Integrations__OpenAI__Model` | OpenAI model used for advice; defaults to `gpt-5.6-luna` |
+Use the controlled planning-day reset rather than deleting database history:
 
-Deploy the API, run EF Core migrations, then verify `GET https://<host>/health` returns HTTP 200. Do not put SQL passwords or API secrets in source control.
+- Preview: `GET /api/v1/planning-day/{yyyy-MM-dd}/reset-preview`
+- Reset: `DELETE /api/v1/planning-day/{yyyy-MM-dd}?confirm=RESET-{yyyy-MM-dd}`
 
-`GET /api/v1/diagnostics/tables` verifies each operational table without exposing data. Use it when portal pages show a generic request failure.
+The reset is approval-protected. It cancels active work for that planning day, removes active stops and archives matching staged/register rows while retaining source evidence and releasing import keys for a clean re-import.
 
-## Custom connector: exact setup
+## Info mailbox / email attachments
 
-1. Power Automate > More > Discover all > Custom connectors > New custom connector > Import an OpenAPI file.
-2. Import `openapi-power-automate.yaml` after replacing its three placeholders.
-3. General:
-   - Scheme: `HTTPS`
-   - Host: `<app-name>.azurewebsites.net` only, with no `https://` and no trailing slash
-   - Base URL: `/api/v1`
-4. Security:
-   - Authentication type: OAuth 2.0
-   - Identity provider: Azure Active Directory
-   - Client ID: connector client registration ID
-   - Client secret: connector client secret
-   - Authorisation URL: `https://login.microsoftonline.com/<TENANT-ID>/oauth2/v2.0/authorize`
-   - Token URL: `https://login.microsoftonline.com/<TENANT-ID>/oauth2/v2.0/token`
-   - Refresh URL: same as Token URL
-   - Scope: `api://<API-CLIENT-ID>/Tms.Access`
-5. Save connector. Copy its generated redirect URL into the connector client registration under Authentication > Web, then save the connector again.
-6. Definitions should contain `GetCustomers`, `GetVehicles`, `GetDrivers`, `SubmitStagedImport`, `GetStagedImport`, `ApproveStagedImport`, and `RejectStagedImport`.
-7. Test > New connection > sign in > run `SubmitStagedImport`. A successful new item returns HTTP 202 and `PendingReview`.
+Mailbox intake is approval-first. Email-derived orders must be staged with their source evidence and reviewed before promotion; mailbox intake must never create live work silently.
 
-## Power Automate intake flow
+The production-hardening work for multiple customer email/attachment formats is tracked in draft PR #135 (`Productionise Info mailbox order intake`). That branch includes richer Outlook evidence, parsing and duplicate/amendment handling. Rebase/revalidate it against current `main` before production rollout.
 
-1. Trigger: `When a new email arrives in a shared mailbox (V2)`, `When an item is created`, or `Manually trigger a flow`.
-2. Action: `Compose - Idempotency Key`. For email use the message ID; for SharePoint use `concat('sharepoint:', triggerBody()?['ID'])`.
-3. Action: `Compose - Staging Payload`. Create the normalised fields extracted from the source.
-4. Action: `SLH TMS API - Submit a staged import`:
+Power Automate should use the API/custom connector and preserve the source message ID, subject, sender and attachment evidence for idempotency/audit.
 
-```json
-{
-  "entityType": "order",
-  "idempotencyKey": "@{outputs('Compose_-_Idempotency_Key')}",
-  "source": "PowerAutomate/InfoMailbox",
-  "payload": {
-    "customerCode": "@{variables('CustomerCode')}",
-    "poNumber": "@{variables('PoNumber')}",
-    "collectionDate": "@{variables('CollectionDate')}",
-    "deliveryDate": "@{variables('DeliveryDate')}",
-    "pallets": "@{variables('Pallets')}",
-    "sourceEmailId": "@{triggerBody()?['id']}"
-  }
-}
-```
+## Production health checks
 
-5. Action: `Parse JSON - Staging response`, using:
+The repository includes `.github/workflows/full-production-health.yml`. It checks the live production environment for:
 
-```json
-{
-  "type": "object",
-  "properties": {
-    "stagingId": { "type": "string" },
-    "status": { "type": "string" },
-    "receivedAtUtc": { "type": "string" },
-    "reviewUrl": { "type": "string" }
-  },
-  "required": ["stagingId", "status", "receivedAtUtc", "reviewUrl"]
-}
-```
+- core API health;
+- Azure SQL readiness;
+- operational data-readiness/schema;
+- RoadTech current GPS;
+- TachoMaster runtime access;
+- geofence payload health;
+- portal reachability; and
+- protected operational routes failing closed without authentication.
 
-6. Action: `Start and wait for an approval`. Include the staged ID and a human-readable summary. Do not include confidential raw payloads in approval notifications.
-7. Condition: Outcome is `Approve`.
-   - Yes: `SLH TMS API - Approve a staged import`, ID = parsed `stagingId`, note = approval comments.
-   - No: `SLH TMS API - Reject a staged import`, ID = parsed `stagingId`, note = approval comments.
-8. Add failure scopes. Configure `Scope - Handle Failure` to run after failed or timed out. Record the flow run ID, source ID, HTTP status and correlation ID. Do not automatically resubmit a rejected item.
+RoadTech and TachoMaster also have dedicated runtime verification workflows after deployment.
 
-## Fast HTTP prototype
+Useful endpoints include:
 
-Use the premium `HTTP` action with Method `POST`, URI `https://<host>/api/v1/staging`, Authentication `Active Directory OAuth`, tenant ID, audience `api://<API-CLIENT-ID>`, client ID and secret. Header `Content-Type: application/json`; body is the same JSON above. Store the secret in a connection reference or environment variable, never directly in flow actions. Move to the custom connector before production.
+- `GET /health`
+- `GET /health/ready`
+- `GET /api/v1/diagnostics/data-readiness`
+- `GET /api/v1/health/tracking`
+- `GET /api/v1/health/tachomaster`
+- `GET /api/v1/health/geofences`
 
-## Local/deployment commands
+## Security
+
+- Never commit passwords, SQL connection strings, API keys, customer attachments or operational exports.
+- Integration credentials belong in Azure Key Vault or managed configuration.
+- Deployment uses GitHub OIDC.
+- Entra scopes/roles protect read, write, approval and administrative operations.
+- Intake and reset operations retain auditable evidence rather than deleting history.
+
+## Development
 
 ```bash
 dotnet restore
-dotnet tool install --global dotnet-ef
-dotnet ef migrations add InitialCreate
-dotnet ef database update
-dotnet run
+dotnet build Slh.Tms.Api.csproj -c Release
+dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj -c Release
 ```
 
-Deploy infrastructure with the included Bicep template, then publish the API through your controlled CI/CD process. The template starts with a Basic App Service and Basic Azure SQL database; review Azure pricing before deployment.
+Before merging production changes, require the normal build/test and CodeQL checks to pass. After deployment, use the full production health workflow for the final runtime check.
