@@ -25,27 +25,52 @@ public sealed class IntegrationSyncCoordinator(
         var profiles = await tachoMaster.GetDriverProfilesAsync(ct);
         var drivers = await db.Drivers.Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
-        var byName = profiles.GroupBy(profile => NormalisePersonName(profile.DriverName)).ToDictionary(group => group.Key, group => group.First());
-        var byEmployee = profiles.Where(profile => !string.IsNullOrWhiteSpace(profile.EmployeeNumber))
-            .GroupBy(profile => NormalisePersonName(profile.EmployeeNumber)).ToDictionary(group => group.Key, group => group.First());
+
+        var byMemberCode = profiles.GroupBy(profile => profile.MemberCode).ToDictionary(group => group.Key, group => group.First());
+        var byEmployee = UniqueLookup(profiles.Where(profile => !string.IsNullOrWhiteSpace(profile.EmployeeNumber)), profile => Normalise(profile.EmployeeNumber));
+        var byName = UniqueLookup(profiles, profile => NormalisePersonName(profile.DriverName));
         var matched = 0;
+        var matchedMemberCodes = new HashSet<int>();
+
         foreach (var driver in drivers)
         {
             TachoDriverProfile? profile = null;
-            if (!string.IsNullOrWhiteSpace(driver.TachoName)) byName.TryGetValue(NormalisePersonName(driver.TachoName), out profile);
-            if (profile is null && !string.IsNullOrWhiteSpace(driver.EmployeeNumber)) byEmployee.TryGetValue(NormalisePersonName(driver.EmployeeNumber), out profile);
+
+            // Stable identities first. TachoMaster member code and tachograph card must win over
+            // mutable employee/name fields so daily compliance keeps the same driver identity.
+            if (int.TryParse(driver.TachoMasterDriverId, out var memberCode) && memberCode > 0)
+                byMemberCode.TryGetValue(memberCode, out profile);
+
+            if (profile is null && !string.IsNullOrWhiteSpace(driver.TachoCardNumber))
+                profile = profiles.SingleOrDefault(candidate => CardsMatch(driver.TachoCardNumber, candidate.CardNumber));
+
+            if (profile is null && !string.IsNullOrWhiteSpace(driver.EmployeeNumber))
+                byEmployee.TryGetValue(Normalise(driver.EmployeeNumber), out profile);
+
+            if (profile is null && !string.IsNullOrWhiteSpace(driver.TachoName))
+                byName.TryGetValue(NormalisePersonName(driver.TachoName), out profile);
+
+            if (profile is null)
+                byName.TryGetValue(NormalisePersonName(driver.DisplayName), out profile);
+
             if (profile is null) continue;
-            driver.TachoMasterDriverId = profile.MemberCode.ToString();
+
+            driver.TachoMasterDriverId = profile.MemberCode.ToString(System.Globalization.CultureInfo.InvariantCulture);
             driver.TachoCardNumber = profile.CardNumber;
+            driver.TachoName = string.IsNullOrWhiteSpace(driver.TachoName) ? profile.DriverName : driver.TachoName;
             driver.TachoDriveAvailableTodayMinutes = profile.DriveAvailableTodayMinutes;
             driver.TachoDriveAvailableWeekMinutes = profile.DriveAvailableWeekMinutes;
             driver.TachoWorkAvailableWeekMinutes = profile.WorkAvailableWeekMinutes;
             driver.LastTachoSyncUtc = DateTimeOffset.UtcNow;
             await MasterDetailStore.SaveAsync(db, "driver", driver.EmployeeNumber, JsonSerializer.Serialize(driver), "TachoMaster driver directory", actor, ct);
             matched++;
+            matchedMemberCodes.Add(profile.MemberCode);
         }
+
         await db.SaveChangesAsync(ct);
-        return new("TachoMaster", true, DateTimeOffset.UtcNow, $"TachoMaster matched {matched} of {drivers.Count} active drivers.", matched);
+        var unmatchedProfiles = profiles.Select(profile => profile.MemberCode).Distinct().Count(code => !matchedMemberCodes.Contains(code));
+        return new("TachoMaster", true, DateTimeOffset.UtcNow,
+            $"TachoMaster matched {matched} of {drivers.Count} active TMS drivers; {unmatchedProfiles} TachoMaster member profile(s) remain unmatched. Identity order: member code, tacho card, employee number, name.", matched);
     }
 
     public async Task<IntegrationSyncResult> SyncSageHrAsync(string actor, CancellationToken ct)
@@ -113,32 +138,116 @@ public sealed class IntegrationSyncCoordinator(
         if (!fleetioClient.IsConfigured)
             return new("Fleetio", false, DateTimeOffset.UtcNow, $"Fleetio is not configured: {string.Join(", ", fleetioClient.MissingSettings)}.");
 
-        var fleetioVehicles = await fleetioClient.GetVehiclesAsync(100, ct);
-        var tmsVehicles = await db.Vehicles.Where(vehicle => vehicle.Active).ToListAsync(ct);
-        var lookup = BuildFleetioLookup(fleetioVehicles);
-        var updated = 0;
-        foreach (var vehicle in tmsVehicles)
+        var assets = await fleetioClient.GetVehiclesAsync(100, ct);
+        var vehicleAssets = assets.Where(asset => !IsTrailer(asset)).ToList();
+        var trailerAssets = assets.Where(IsTrailer).ToList();
+        var vehicles = await db.Vehicles.ToListAsync(ct);
+        var trailers = await db.Trailers.ToListAsync(ct);
+        var mappings = await SafeFleetioMappings(ct);
+        var matchedVehicleIds = new HashSet<Guid>();
+        var matchedTrailerIds = new HashSet<Guid>();
+        var createdVehicles = 0;
+        var updatedVehicles = 0;
+        var createdTrailers = 0;
+        var updatedTrailers = 0;
+        var quarantinedVehicles = 0;
+        var quarantinedTrailers = 0;
+        var mergedTrailerAliases = 0;
+        var now = DateTimeOffset.UtcNow;
+
+        foreach (var asset in vehicleAssets)
         {
-            if (Regex.IsMatch(vehicle.Registration, "^C\\d{5,}$", RegexOptions.IgnoreCase))
+            var registration = BestVehicleRegistration(asset);
+            if (string.IsNullOrWhiteSpace(registration)) continue;
+
+            var mappedId = MappingTarget(mappings, asset.Id, "Vehicle");
+            var vehicle = mappedId is Guid id ? vehicles.FirstOrDefault(item => item.Id == id) : null;
+            vehicle ??= vehicles.FirstOrDefault(item => VehicleKeys(item.Registration, item.FleetNumber, item.FleetioName).Intersect(VehicleKeys(registration, asset.FleetNumber, asset.Name), StringComparer.OrdinalIgnoreCase).Any());
+
+            if (vehicle is null)
             {
-                vehicle.Active = false;
-                continue;
+                vehicle = new Vehicle { Registration = ClipRequired(registration, 20), Active = true };
+                db.Vehicles.Add(vehicle);
+                vehicles.Add(vehicle);
+                createdVehicles++;
             }
-            var match = VehicleKeys(vehicle.Registration).Select(key => lookup.GetValueOrDefault(key)).FirstOrDefault(item => item is not null);
-            if (match is null) continue;
-            vehicle.FleetioId = match.Id;
-            vehicle.FleetioName = Clip(match.Name, 160);
-            vehicle.FleetioStatus = Clip(match.Status, 80);
-            vehicle.FleetioVor = match.Vor;
-            vehicle.FleetioPmiDueUtc = match.PmiDueUtc;
-            vehicle.FleetioMotDueUtc = match.MotDueUtc;
-            vehicle.FleetioServiceStatus = Clip(match.ServiceStatus, 160);
-            vehicle.FleetioLastSyncedUtc = DateTimeOffset.UtcNow;
-            if (string.IsNullOrWhiteSpace(vehicle.FleetNumber)) vehicle.FleetNumber = Clip(match.FleetNumber, 40);
-            updated++;
+            else updatedVehicles++;
+
+            vehicle.Registration = ClipRequired(registration, 20);
+            vehicle.FleetNumber = Clip(asset.FleetNumber, 40) ?? vehicle.FleetNumber;
+            vehicle.FleetioId = Clip(asset.Id, 80);
+            vehicle.FleetioName = Clip(asset.Name, 160);
+            vehicle.FleetioStatus = Clip(asset.Status, 80);
+            vehicle.FleetioVor = asset.Vor;
+            vehicle.FleetioPmiDueUtc = asset.PmiDueUtc;
+            vehicle.FleetioMotDueUtc = asset.MotDueUtc;
+            vehicle.FleetioServiceStatus = Clip(asset.ServiceStatus, 160);
+            vehicle.FleetioLastSyncedUtc = now;
+            vehicle.Active = true;
+            matchedVehicleIds.Add(vehicle.Id);
+            UpsertMapping(mappings, asset.Id, asset.Name ?? registration, "Vehicle", vehicle.Id, actor);
         }
+
+        foreach (var asset in trailerAssets)
+        {
+            var fleetioName = asset.Name?.Trim();
+            var cNumber = asset.Registration?.Trim();
+            var preferred = !string.IsNullOrWhiteSpace(fleetioName) ? fleetioName : cNumber;
+            if (string.IsNullOrWhiteSpace(preferred)) continue;
+
+            var mappedId = MappingTarget(mappings, asset.Id, "Trailer");
+            var aliases = TrailerKeys(fleetioName, cNumber, preferred).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var matchingTms = trailers.Where(item => TrailerKeys(item.TrailerNumber).Any(aliases.Contains)).ToList();
+            var trailer = mappedId is Guid id ? trailers.FirstOrDefault(item => item.Id == id) : null;
+            trailer ??= matchingTms.FirstOrDefault(item => Normalise(item.TrailerNumber) == Normalise(preferred));
+            trailer ??= matchingTms.FirstOrDefault();
+
+            if (trailer is null)
+            {
+                trailer = new Trailer { TrailerNumber = ClipRequired(preferred, 40), Type = Clip(asset.Type, 80), Active = true };
+                db.Trailers.Add(trailer);
+                trailers.Add(trailer);
+                createdTrailers++;
+            }
+            else updatedTrailers++;
+
+            // Fleetio owns identity/status, but TMS owns capacities. If an old alias contains the
+            // capacity, carry it onto the canonical Fleetio trailer before retiring the alias.
+            trailer.StandardCapacity ??= matchingTms.Select(item => item.StandardCapacity).FirstOrDefault(value => value is not null);
+            trailer.EuroCapacity ??= matchingTms.Select(item => item.EuroCapacity).FirstOrDefault(value => value is not null);
+            trailer.TrailerNumber = ClipRequired(preferred, 40);
+            trailer.Type = Clip(asset.Type, 80) ?? trailer.Type;
+            trailer.Active = true;
+            matchedTrailerIds.Add(trailer.Id);
+            UpsertMapping(mappings, asset.Id, preferred, "Trailer", trailer.Id, actor);
+
+            foreach (var duplicate in matchingTms.Where(item => item.Id != trailer.Id))
+            {
+                await ReassignTrailerLoadsAsync(duplicate.Id, trailer.Id, ct);
+                foreach (var mapping in mappings.Where(item => item.TmsEntityType == "Trailer" && item.TmsEntityId == duplicate.Id))
+                    mapping.TmsEntityId = trailer.Id;
+                duplicate.Active = false;
+                mergedTrailerAliases++;
+            }
+        }
+
+        // Fleetio is authoritative for fleet identity. An active TMS-only asset is quarantined so
+        // it cannot be allocated as if it were current fleet. Records are retained for history.
+        foreach (var vehicle in vehicles.Where(item => item.Active && !matchedVehicleIds.Contains(item.Id)))
+        {
+            vehicle.Active = false;
+            quarantinedVehicles++;
+        }
+        foreach (var trailer in trailers.Where(item => item.Active && !matchedTrailerIds.Contains(item.Id)))
+        {
+            trailer.Active = false;
+            quarantinedTrailers++;
+        }
+
         await db.SaveChangesAsync(ct);
-        return new("Fleetio", true, DateTimeOffset.UtcNow, $"Fleetio enriched {updated} active TMS vehicles.", updated);
+        var changed = createdVehicles + updatedVehicles + createdTrailers + updatedTrailers + quarantinedVehicles + quarantinedTrailers + mergedTrailerAliases;
+        return new("Fleetio", true, now,
+            $"Fleetio canonical sync: {createdVehicles} vehicle(s) created, {updatedVehicles} updated, {createdTrailers} trailer(s) created, {updatedTrailers} updated, {mergedTrailerAliases} trailer alias(es) consolidated, {quarantinedVehicles} TMS-only vehicle(s) and {quarantinedTrailers} TMS-only trailer(s) quarantined. Trailer capacities were retained from TMS.", changed);
     }
 
     public async Task<IReadOnlyList<IntegrationSyncResult>> ForceAllAsync(string actor, CancellationToken ct)
@@ -156,16 +265,80 @@ public sealed class IntegrationSyncCoordinator(
         return results;
     }
 
+    private async Task<List<IntegrationMapping>> SafeFleetioMappings(CancellationToken ct)
+    {
+        try { return await db.IntegrationMappings.Where(item => item.Provider == "Fleetio" && item.Active).ToListAsync(ct); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Fleetio integration mappings are unavailable; canonical sync will use asset identity fallbacks.");
+            db.ChangeTracker.Clear();
+            return [];
+        }
+    }
+
+    private static Guid? MappingTarget(IEnumerable<IntegrationMapping> mappings, string fleetioId, string entityType) => mappings
+        .FirstOrDefault(item => string.Equals(item.ExternalKey, fleetioId, StringComparison.OrdinalIgnoreCase) && string.Equals(item.TmsEntityType, entityType, StringComparison.OrdinalIgnoreCase))?.TmsEntityId;
+
+    private void UpsertMapping(List<IntegrationMapping> mappings, string fleetioId, string label, string entityType, Guid entityId, string actor)
+    {
+        var mapping = mappings.FirstOrDefault(item => string.Equals(item.ExternalKey, fleetioId, StringComparison.OrdinalIgnoreCase) && string.Equals(item.TmsEntityType, entityType, StringComparison.OrdinalIgnoreCase));
+        if (mapping is null)
+        {
+            mapping = new IntegrationMapping
+            {
+                Provider = "Fleetio",
+                ExternalKey = ClipRequired(fleetioId, 200),
+                ExternalLabel = Clip(label, 200),
+                TmsEntityType = entityType,
+                TmsEntityId = entityId,
+                Active = true,
+                UpdatedBy = actor
+            };
+            db.IntegrationMappings.Add(mapping);
+            mappings.Add(mapping);
+        }
+        else
+        {
+            mapping.ExternalLabel = Clip(label, 200);
+            mapping.TmsEntityId = entityId;
+            mapping.Active = true;
+            mapping.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            mapping.UpdatedBy = actor;
+        }
+    }
+
+    private async Task ReassignTrailerLoadsAsync(Guid fromTrailerId, Guid toTrailerId, CancellationToken ct)
+    {
+        try
+        {
+            var loads = await db.Loads.Where(load => load.TrailerId == fromTrailerId).ToListAsync(ct);
+            foreach (var load in loads) load.TrailerId = toTrailerId;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Could not reassign historical loads from trailer alias {FromTrailerId} to canonical trailer {ToTrailerId}.", fromTrailerId, toTrailerId);
+        }
+    }
+
     private bool IsDriver(SageHrEmployee employee) =>
         (!string.IsNullOrWhiteSpace(sageOptions.DriverTeamName) && string.Equals(employee.Team, sageOptions.DriverTeamName, StringComparison.OrdinalIgnoreCase)) ||
         (!string.IsNullOrWhiteSpace(sageOptions.DriverPositionKeyword) && employee.Position?.Contains(sageOptions.DriverPositionKeyword, StringComparison.OrdinalIgnoreCase) == true);
 
-    private static Dictionary<string, FleetioVehicle> BuildFleetioLookup(IReadOnlyList<FleetioVehicle> items)
+    private static bool IsTrailer(FleetioVehicle asset) =>
+        asset.Type?.Contains("Trailer", StringComparison.OrdinalIgnoreCase) == true ||
+        (!string.IsNullOrWhiteSpace(asset.Registration) && Regex.IsMatch(asset.Registration.Trim(), "^C\\d{5,}$", RegexOptions.IgnoreCase));
+
+    private static string? BestVehicleRegistration(FleetioVehicle asset)
     {
-        var lookup = new Dictionary<string, FleetioVehicle>(StringComparer.OrdinalIgnoreCase);
-        foreach (var vehicle in items)
-            foreach (var key in VehicleKeys(vehicle.Registration)) lookup.TryAdd(key, vehicle);
-        return lookup;
+        if (!string.IsNullOrWhiteSpace(asset.Registration) && !Regex.IsMatch(asset.Registration.Trim(), "^C\\d{5,}$", RegexOptions.IgnoreCase)) return asset.Registration.Trim();
+        if (!string.IsNullOrWhiteSpace(asset.Name) && LooksLikeRegistration(asset.Name)) return asset.Name.Trim();
+        return null;
+    }
+
+    private static bool LooksLikeRegistration(string value)
+    {
+        var key = Normalise(value);
+        return key.Length is >= 5 and <= 8 && key.Any(char.IsLetter) && key.Any(char.IsDigit);
     }
 
     private static IReadOnlyList<string> VehicleKeys(params string?[] values)
@@ -173,7 +346,7 @@ public sealed class IntegrationSyncCoordinator(
         var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var value in values.Where(item => !string.IsNullOrWhiteSpace(item)))
         {
-            var key = new string(value!.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+            var key = Normalise(value);
             if (key.Length == 0) continue;
             keys.Add(key);
             if (key.Length > 3) keys.Add(key[^3..]);
@@ -182,6 +355,36 @@ public sealed class IntegrationSyncCoordinator(
         return keys.ToList();
     }
 
+    private static IReadOnlyList<string> TrailerKeys(params string?[] values)
+    {
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var value in values.Where(item => !string.IsNullOrWhiteSpace(item)))
+        {
+            var key = Normalise(value);
+            if (key.Length == 0) continue;
+            keys.Add(key);
+            if (key.StartsWith("SLH", StringComparison.OrdinalIgnoreCase) && int.TryParse(key[3..], out var number)) keys.Add(number.ToString());
+            if (int.TryParse(key, out var numeric)) keys.Add($"SLH{numeric}");
+        }
+        return keys.ToList();
+    }
+
+    private static Dictionary<string, TachoDriverProfile> UniqueLookup(IEnumerable<TachoDriverProfile> profiles, Func<TachoDriverProfile, string> keySelector) => profiles
+        .Select(profile => (Profile: profile, Key: keySelector(profile)))
+        .Where(item => item.Key.Length > 0)
+        .GroupBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
+        .Where(group => group.Select(item => item.Profile.MemberCode).Distinct().Count() == 1)
+        .ToDictionary(group => group.Key, group => group.First().Profile, StringComparer.OrdinalIgnoreCase);
+
+    internal static bool CardsMatch(string? left, string? right)
+    {
+        var a = Normalise(left);
+        var b = Normalise(right);
+        if (a.Length < 8 || b.Length < 8) return false;
+        return string.Equals(a, b, StringComparison.OrdinalIgnoreCase) || a.EndsWith(b, StringComparison.OrdinalIgnoreCase) || b.EndsWith(a, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
     private static string NormalisePersonName(string? value) => string.Join(' ', (value ?? string.Empty)
         .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
         .Select(word => new string(word.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray()))
