@@ -16,13 +16,19 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
                 using var scope = scopeFactory.CreateScope();
                 var client = scope.ServiceProvider.GetRequiredService<DotTrackingClient>();
                 var store = scope.ServiceProvider.GetRequiredService<DotTrackingTelemetryStore>();
-                var records = (await client.GetLatestVehicleEventsAsync(stoppingToken)).Select(DotTelemetryRecord.FromProvider);
-                await store.PersistAsync(records, stoppingToken);
+
+                var records = (await client.GetLatestVehicleEventsAsync(stoppingToken))
+                    .Select(DotTelemetryRecord.FromProvider)
+                    .ToList();
+                await store.PersistAsync(records, stoppingToken, updateLiveStatus: true);
+
                 if (DateTimeOffset.UtcNow >= nextRecoveryAtUtc)
                 {
                     var recoveryDay = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeBySystemTimeZoneId(DateTimeOffset.UtcNow, "Europe/London").DateTime).AddDays(-1);
-                    var recovered = (await client.GetHistoricalVehicleEventsAsync(recoveryDay, stoppingToken)).Select(DotTelemetryRecord.FromProvider);
-                    await store.PersistAsync(recovered, stoppingToken);
+                    var recovered = (await client.GetHistoricalVehicleEventsAsync(recoveryDay, stoppingToken))
+                        .Select(DotTelemetryRecord.FromProvider)
+                        .ToList();
+                    await store.PersistAsync(recovered, stoppingToken, updateLiveStatus: false);
                     nextRecoveryAtUtc = DateTimeOffset.UtcNow.Add(recoveryInterval);
                 }
             }
