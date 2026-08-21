@@ -9,12 +9,12 @@ using Slh.Tms.Api.Services;
 namespace Slh.Tms.Api.Controllers;
 
 /// <summary>
-/// Read-only route progression for the paired office TV. The progression is derived
+/// Read-only route progression for the office TV. The progression is derived
 /// from the embedded approved SLH geofences, RoadTech tracking and the planning register.
 /// No geofence-specific SQL tables are required.
 /// </summary>
 [ApiController, Route("api/v1/tv-display/route-progress")]
-public sealed class TvRouteProgressController(TmsDbContext db) : ControllerBase
+public sealed class TvRouteProgressController(TmsDbContext db, IConfiguration configuration) : ControllerBase
 {
     [HttpGet, AllowAnonymous]
     public async Task<IActionResult> Get(
@@ -22,8 +22,10 @@ public sealed class TvRouteProgressController(TmsDbContext db) : ControllerBase
         [FromQuery] DateOnly? date,
         CancellationToken ct)
     {
-        if (!await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct))
-            return Unauthorized(new { message = "This TV display is not paired." });
+        var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct);
+        var legacyKeyAllowed = TvWallboardAccess.IsAllowed(HttpContext, configuration);
+        if (!pairedKeyAllowed && !legacyKeyAllowed)
+            return Unauthorized(new { message = "This TV display is not authorised." });
 
         var day = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
         var now = DateTimeOffset.UtcNow;
@@ -73,7 +75,9 @@ public sealed class TvRouteProgressController(TmsDbContext db) : ControllerBase
                     ? "On site"
                     : completedStopIds.Count > 0 || load.Status is LoadStatus.InProgress or LoadStatus.Dispatched
                         ? "Heading to"
-                        : "Next job";
+                        : live is not null && (live.IsMoving == true || (live.SpeedKph ?? 0) > 2)
+                            ? "Heading to"
+                            : "Next job";
             var focusStop = currentStop ?? nextStop;
 
             var stopRows = stops.Select(stop =>
@@ -95,6 +99,7 @@ public sealed class TvRouteProgressController(TmsDbContext db) : ControllerBase
                 };
             }).ToList();
 
+            var freshnessAtUtc = live?.LastReceivedAtUtc ?? live?.LastEventTimeUtc;
             rows.Add(new
             {
                 loadId = load.Id,
@@ -107,7 +112,9 @@ public sealed class TvRouteProgressController(TmsDbContext db) : ControllerBase
                 phase,
                 truckPositionPercent = truckPosition,
                 geofenceOnSite = currentStop is not null,
-                trackingFresh = live is not null && now - live.LastEventTimeUtc <= TimeSpan.FromMinutes(15),
+                trackingFresh = freshnessAtUtc is not null && now - freshnessAtUtc <= TimeSpan.FromMinutes(15),
+                trackingMoving = live is not null && (live.IsMoving == true || (live.SpeedKph ?? 0) > 2),
+                speedKph = live?.SpeedKph,
                 stops = stopRows
             });
         }
@@ -143,7 +150,13 @@ public sealed class TvRouteProgressController(TmsDbContext db) : ControllerBase
             if (completedStopIds.Contains(stops[i].Id)) lastCompletedIndex = i;
 
         if (lastCompletedIndex >= stops.Count - 1) return 100m;
-        if (lastCompletedIndex < 0) return 0m;
+        if (lastCompletedIndex < 0)
+        {
+            // There is no completed stop to interpolate from yet. Still show that a
+            // genuinely moving tracked vehicle has left the start rather than pinning
+            // the TV marker underneath the first stop dot until arrival.
+            return live is not null && (live.IsMoving == true || (live.SpeedKph ?? 0) > 2) ? 5m : 0m;
+        }
 
         var nextIndex = lastCompletedIndex + 1;
         while (nextIndex < stops.Count && completedStopIds.Contains(stops[nextIndex].Id)) nextIndex++;
@@ -194,7 +207,7 @@ public sealed class TvRouteProgressController(TmsDbContext db) : ControllerBase
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         return statuses
             .Where(status => aliases.Contains(Normalise(status.VehicleIdentifier)))
-            .OrderByDescending(status => status.LastEventTimeUtc)
+            .OrderByDescending(status => status.LastReceivedAtUtc ?? status.LastEventTimeUtc)
             .FirstOrDefault();
     }
 
