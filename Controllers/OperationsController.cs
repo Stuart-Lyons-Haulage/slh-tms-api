@@ -5,9 +5,9 @@ using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
-
+ 
 namespace Slh.Tms.Api.Controllers;
-
+ 
 [ApiController, Route("api/v1/operations")]
 [Authorize]
 public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient maps, TachoMasterClient tachoMaster, ILogger<OperationsController> logger, IConfiguration configuration) : ControllerBase
@@ -16,7 +16,7 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
     public async Task<IActionResult> DeliveryEtas([FromQuery] DateOnly? date, CancellationToken ct)
     {
         if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
-
+ 
         var planningDate = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
         List<Load> loads;
         try
@@ -34,13 +34,17 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
         var orders = await SafeDictionary(db.TransportOrders.AsNoTracking().Where(order => orderIds.Contains(order.Id)), order => order.Id, ct);
         if (orders.Count == 0 && orderIds.Count > 0) orders = (await PlanningRegisterStore.ReadOrdersAsync(db, null, null, ct)).Where(order => orderIds.Contains(order.Id)).ToDictionary(order => order.Id);
         var vehicleIds = loads.Where(load => load.VehicleId != null).Select(load => load.VehicleId!.Value).Distinct().ToList();
+        var driverIds = loads.Where(load => load.DriverId != null).Select(load => load.DriverId!.Value).Distinct().ToList();
         var vehicles = await SafeDictionary(db.Vehicles.AsNoTracking().Where(vehicle => vehicleIds.Contains(vehicle.Id)), vehicle => vehicle.Id, ct);
+        var drivers = await SafeDictionary(db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id)), driver => driver.Id, ct);
         var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles.Values.ToList(), ct);
         var statuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
-        IReadOnlyDictionary<string, TachoVehicleDriverStatus> tachoStatuses = new Dictionary<string, TachoVehicleDriverStatus>();
-        try { tachoStatuses = await tachoMaster.GetCurrentDriverStatusesByVehicleAsync(planningDate, ct); }
+        // Every driver's own duty for the vehicle, not just whoever is currently in the cab —
+        // otherwise an earlier driver on a multi-driver vehicle silently loses their tacho data.
+        IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> tachoStatuses = new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
+        try { tachoStatuses = await tachoMaster.GetAllDriverStatusesByVehicleAsync(planningDate, ct); }
         catch (Exception exception) when (exception is not OperationCanceledException) { logger.LogWarning(exception, "TachoMaster data was unavailable for tacho-aware ETA calculations."); }
-
+ 
         EmbeddedGeofenceSnapshot? geofence = null;
         try
         {
@@ -51,10 +55,10 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
             logger.LogWarning(exception, "Geofence progression was unavailable while calculating delivery ETAs; live ETAs will fail closed rather than routing completed work again.");
             db.ChangeTracker.Clear();
         }
-
+ 
         var now = DateTimeOffset.UtcNow;
         var records = new List<DeliveryEtaResponse>();
-
+ 
         foreach (var load in loads)
         {
             var vehicle = load.VehicleId is Guid vehicleId && vehicles.TryGetValue(vehicleId, out var matchedVehicle) ? matchedVehicle : null;
@@ -65,17 +69,18 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
             var trackingObservedAtUtc = live is null
                 ? (DateTimeOffset?)null
                 : live.LastReceivedAtUtc >= live.LastEventTimeUtc ? live.LastReceivedAtUtc : live.LastEventTimeUtc;
-            var tacho = vehicle is null ? null : ExecutionIdentityResolver.MatchTacho(aliases, tachoStatuses);
+            var driver = load.DriverId is Guid driverId && drivers.TryGetValue(driverId, out var matchedDriver) ? matchedDriver : null;
+            var tacho = vehicle is null ? null : ExecutionIdentityResolver.MatchTachoForDriver(aliases, driver, tachoStatuses);
             var visits = geofence?.Visits.Where(visit => visit.LoadId == load.Id).OrderBy(visit => visit.EnteredAtUtc).ToList() ?? [];
             var completedStopIds = geofence is null ? new HashSet<Guid>() : GeofencePlanningMatch.CompletedStopIds(load, visits);
-
+ 
             var current = live is null ? ((decimal Longitude, decimal Latitude)?)null : (live.Longitude, live.Latitude);
             var currentEta = now;
             var cumulativeDrivingMinutes = 0d;
             var breakDelayMinutes = 0;
             var routeContainsEstimate = false;
             var initialContinuousDriving = tacho is null ? 0 : tacho.BreakMinutes >= 45 ? tacho.DriveMinutes % 270 : Math.Min(tacho.DriveMinutes, 270);
-
+ 
             // ETA is a forecast of the remaining journey. A geofence-confirmed and departed
             // stop must never be routed again, otherwise later customer ETAs are overstated.
             foreach (var stop in load.Stops.OrderBy(stop => stop.Sequence).Where(stop => !completedStopIds.Contains(stop.Id)))
@@ -83,7 +88,7 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
                 orders.TryGetValue(stop.OrderId ?? Guid.Empty, out var order);
                 var eta = stop.PlannedArrivalUtc;
                 var source = eta is null ? "Unavailable" : "Planned";
-
+ 
                 // Customer-grade live ETA requires proved run progression and a very fresh
                 // RoadTech observation. For stationary vehicles the provider event timestamp
                 // may not move, so the most recent successful receipt is the correct freshness
@@ -138,7 +143,7 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
         }
         return Ok(new { planningDate, calculatedAtUtc = now, records });
     }
-
+ 
     [HttpGet("forecast")]
     public async Task<IActionResult> Forecast([FromQuery] DateOnly? from, CancellationToken ct)
     {
@@ -212,25 +217,25 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
             }
         });
     }
-
+ 
     private static async Task<Dictionary<TKey, T>> SafeDictionary<T, TKey>(IQueryable<T> query, Func<T, TKey> keySelector, CancellationToken ct) where TKey : notnull
     {
         try { return await query.ToDictionaryAsync(keySelector, ct); }
         catch (Exception exception) when (IsSchemaUnavailable(exception)) { return []; }
     }
-
+ 
     private static async Task<List<T>> SafeList<T>(IQueryable<T> query, CancellationToken ct)
     {
         try { return await query.ToListAsync(ct); }
         catch (Exception exception) when (IsSchemaUnavailable(exception)) { return []; }
     }
-
+ 
     private static bool IsSchemaUnavailable(Exception exception)
     {
         var message = exception.GetBaseException().Message;
         return exception is InvalidOperationException or DbUpdateException || message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase) || message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
     }
-
+ 
     internal static (string Status, string Explanation) TachoAssessment(TachoVehicleDriverStatus? tacho, double routeDrivingMinutes, int breakMinutes)
     {
         if (tacho is null) return ("Unavailable", "No current TachoMaster duty was matched; verify the driver before promising this ETA.");
@@ -239,9 +244,9 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
         if (breakMinutes > 0) return ("BreakIncluded", $"ETA includes {breakMinutes} minutes for a statutory driving break based on current duty and route time.");
         return ("WithinDriveTime", "Current TachoMaster availability covers the calculated route without an additional driving break.");
     }
-
+ 
     private static bool IsDeliveryStop(LoadStop stop) => stop.Name.StartsWith("Deliver", StringComparison.OrdinalIgnoreCase);
-
+ 
     private static string Risk(DateTimeOffset? eta, DateTimeOffset? start, DateTimeOffset? end)
     {
         if (eta is null || end is null) return "Pending";
@@ -249,13 +254,14 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
         if (end - eta <= TimeSpan.FromMinutes(30)) return "AtRisk";
         return "OnTrack";
     }
-
+ 
     private static DateOnly UkOperatingDate(DateTimeOffset value)
     {
         try { return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime); }
         catch (TimeZoneNotFoundException) { return DateOnly.FromDateTime(value.UtcDateTime); }
     }
 }
-
+ 
 public sealed record DeliveryEtaResponse(Guid LoadId, string LoadReference, string LoadStatus, Guid StopId, int Sequence, string StopName, string? OrderReference, string? CustomerCode, string? VehicleRegistration, DateTimeOffset? EtaUtc, string Source, DateTimeOffset? DeliveryWindowStartUtc, DateTimeOffset? DeliveryWindowEndUtc, string Risk, DateTimeOffset? TrackingUpdatedAtUtc, string? TachoDriverName, int? DriveAvailableTodayMinutes, int RouteDrivingMinutes, int BreakMinutesIncluded, string TachoStatus, string TachoExplanation);
 public sealed record ForecastDay(DateOnly Date, int Loads, int AssignedDrivers, int AvailableDrivers, int AssignedVehicles, int AvailableVehicles, int PlannedPallets, int AvailableTrailerPallets, decimal Revenue, decimal Cost, decimal Margin, decimal? MarginPercent, decimal DistanceMiles, decimal EmptyMiles, decimal? EmptyMilePercent, int UnpricedLoads, int UninvoicedLoads, int Exceptions, decimal? UtilisationPercent, int OverCapacityLoads);
+ 
