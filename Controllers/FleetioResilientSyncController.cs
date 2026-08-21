@@ -52,6 +52,7 @@ public sealed class FleetioResilientSyncController(
             var vehiclesCreated = 0;
             var trailersUpdated = 0;
             var trailersCreated = 0;
+            var trailersCapacityRequired = 0;
             var trailerAliasesCanonicalised = 0;
             var trailerDuplicatesMerged = 0;
             var skipped = 0;
@@ -166,12 +167,14 @@ public sealed class FleetioResilientSyncController(
 
                 if (trailer is null)
                 {
+                    // Fleetio does not hold operational pallet capacity. Create the linked
+                    // TMS identity, but leave capacity unconfirmed for a planner to enter.
                     trailer = new Trailer
                     {
                         TrailerNumber = ClipRequired(preferredTrailerNumber, 40),
                         Type = Clip(asset.Type, 80),
-                        StandardCapacity = 26,
-                        EuroCapacity = 33,
+                        StandardCapacity = null,
+                        EuroCapacity = null,
                         Active = true
                     };
                     db.Set<Trailer>().Add(trailer);
@@ -194,11 +197,13 @@ public sealed class FleetioResilientSyncController(
 
                     if (!string.IsNullOrWhiteSpace(canonicalNumber)) trailer.TrailerNumber = canonicalNumber;
                     trailer.Type = Clip(asset.Type, 80) ?? trailer.Type;
-                    trailer.StandardCapacity ??= 26;
-                    trailer.EuroCapacity ??= 33;
+                    // Capacity is owned by the TMS. Never invent or overwrite it from Fleetio.
                     trailer.Active = true;
                     trailersUpdated++;
                 }
+
+                if (trailer.StandardCapacity is null || trailer.EuroCapacity is null)
+                    trailersCapacityRequired++;
 
                 desiredMappings.Add(new DesiredMapping(asset.Id, fleetioName ?? cNumber ?? preferredTrailerNumber, "Trailer", trailer.Id));
             }
@@ -255,6 +260,8 @@ public sealed class FleetioResilientSyncController(
             }
 
             var summary = $"Fleetio sync completed: {vehiclesUpdated} vehicle(s) updated, {vehiclesCreated} vehicle(s) created, {trailersUpdated} trailer(s) updated, {trailersCreated} trailer(s) created, {trailerAliasesCanonicalised} trailer alias(es) canonicalised to SLH numbers and {trailerDuplicatesMerged} duplicate trailer record(s) consolidated.";
+            if (trailersCapacityRequired > 0)
+                summary += $" {trailersCapacityRequired} linked trailer(s) still require Standard/Euro capacity confirmation in the TMS master.";
             if (!string.IsNullOrWhiteSpace(mappingWarning)) summary += $" {mappingWarning}";
 
             return Ok(new
@@ -268,6 +275,7 @@ public sealed class FleetioResilientSyncController(
                 vehiclesCreated,
                 trailersUpdated,
                 trailersCreated,
+                trailersCapacityRequired,
                 trailerAliasesCanonicalised,
                 trailerDuplicatesMerged,
                 skipped,
