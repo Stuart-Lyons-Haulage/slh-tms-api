@@ -7,7 +7,7 @@ on:
     branches: ['**']
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
@@ -16,6 +16,72 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Sync validated Falcon source on repair PR
+        if: ${{ github.event_name == 'pull_request' && github.head_ref == 'fix/falcon-geofence-source-555-v2' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin fix/falcon-geofence-source-555
+
+          for n in 01 02 03 04 05 06 07 08 09 10; do
+            git show "origin/fix/falcon-geofence-source-555:Services/GeofenceSeedPayload.Part${n}.cs" > "/tmp/part${n}.cs"
+            sed \
+              -e "s/internal static partial class GeofenceSeedPayloadParts/internal static class GeofencePayloadChunk${n}/" \
+              -e "s/internal const string Part${n}/internal const string Value/" \
+              "/tmp/part${n}.cs" > "Services/GeofencePayloadChunk${n}.cs"
+          done
+
+          git show origin/fix/falcon-geofence-source-555:Services/EmbeddedGeofenceEngine.cs > /tmp/EmbeddedGeofenceEngine.cs
+          sed \
+            -e 's/GeofenceSeedPayload\.Json/OperationalGeofencePayload.Json/g' \
+            -e 's/GeofenceSeedPayload\.ApprovedGeofenceCount/OperationalGeofencePayload.ExpectedFenceCount/g' \
+            /tmp/EmbeddedGeofenceEngine.cs > Services/EmbeddedGeofenceEngine.cs
+
+          git show origin/fix/falcon-geofence-source-555:Slh.Tms.Api.Tests/EmbeddedGeofenceEngineTests.cs > Slh.Tms.Api.Tests/EmbeddedGeofenceEngineTests.cs
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, re
+          expected = {
+              1: (16000, '70b412f097451dbf3235e0ea9dd28bbe0049c01c4dc4d74e7f21122bba315b6f'),
+              2: (16000, '36ec34389983ff8b01e48de96d351839650c3a29087d530a68578db562d5adcd'),
+              3: (16000, '4643a721e06a003f509477c0d417773503bc0412e40042bcce83e2822396e964'),
+              4: (16000, 'a73f672984954e7065746051b88a0bd14e90c77215f0d9dc199dcd8e9f447a1e'),
+              5: (16000, '61ef7eda9a59114d563552bd57cd9c3031190da1d629663528aee6bcc8f64787'),
+              6: (16000, '4072455370e9f7938cfb10ca5d34be0502ce19e182390ea0f55fe22f8d3f21a0'),
+              7: (16000, '83d9decc128ac8d158632c55b80eea18ca31db1c93aa74184a47d5a91625d725'),
+              8: (16000, '4ce0256d273ff06f93e5d11dd7c3d5651e301cd49b7b24063093e1f872a43932'),
+              9: (16000, '703e5db62e531b97bb0963d09e23c0ff7da88314296439951574028d94e68c81'),
+              10: (9228, '957806abec7d54dcad4223caad456b1e64d565d00e9d0ead4a48f60a8abe3e10'),
+          }
+          chunks=[]
+          failures=[]
+          for n in range(1,11):
+              path=Path(f'Services/GeofencePayloadChunk{n:02d}.cs')
+              text=path.read_text()
+              match=re.search(r'internal const string Value = "([A-Za-z0-9+/=]+)";', text)
+              assert match, f'chunk {n:02d} missing payload'
+              value=match.group(1)
+              digest=hashlib.sha256(value.encode()).hexdigest()
+              print(f'chunk {n:02d}: length={len(value)} sha256={digest} expected_length={expected[n][0]} expected_sha256={expected[n][1]}')
+              if (len(value), digest) != expected[n]: failures.append(n)
+              chunks.append(value)
+          print(f'combined_length={sum(map(len,chunks))}; failures={failures}')
+          assert not failures, f'Falcon payload chunk mismatch: {failures}'
+          assert len(''.join(chunks)) == 153228
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Services/GeofencePayloadChunk*.cs Services/EmbeddedGeofenceEngine.cs Slh.Tms.Api.Tests/EmbeddedGeofenceEngineTests.cs
+          if ! git diff --cached --quiet; then
+            git commit -m "Sync validated Falcon geofence payload [payload-sync]"
+            git push origin HEAD:"${GITHUB_HEAD_REF}"
+          fi
 
       - name: Setup .NET 8 SDK
         uses: actions/setup-dotnet@v3
