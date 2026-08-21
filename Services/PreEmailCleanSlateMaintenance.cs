@@ -196,11 +196,20 @@ public static class PreEmailCleanSlateMaintenance
     private static async Task<int> SafeExecuteAsync(Func<Task<int>> action, ILogger logger, string operation)
     {
         try { return await action(); }
-        catch (Exception exception) when (exception is not OperationCanceledException)
+        catch (Exception exception) when (SchemaUnavailable(exception))
         {
-            logger.LogWarning(exception, "Pre-email clean slate could not {Operation}; continuing with the remaining cleanup so diagnostics stay available.", operation);
+            logger.LogInformation("Pre-email clean slate skipped unavailable optional storage while attempting to {Operation}: {Message}", operation, exception.GetBaseException().Message);
             return 0;
         }
+    }
+
+    private static bool SchemaUnavailable(Exception exception)
+    {
+        var message = exception.GetBaseException().Message;
+        return message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("does not exist", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string Normalise(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
