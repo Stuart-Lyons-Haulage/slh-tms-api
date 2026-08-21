@@ -81,6 +81,7 @@ public sealed class TachoMasterClientTests
         // whichever driver most recently used the vehicle.
         var dayDriver = new Driver { EmployeeNumber = "SLH-1", DisplayName = "Day Driver" };
         var nightDriver = new Driver { EmployeeNumber = "SLH-2", DisplayName = "Night Driver" };
+        var unmatchedDriver = new Driver { EmployeeNumber = "SLH-99", DisplayName = "Different Driver" };
         var aliases = new[] { "AB12CDE" };
 
         var matchedForDay = ExecutionIdentityResolver.MatchTachoForDriver(aliases, dayDriver, all);
@@ -90,6 +91,10 @@ public sealed class TachoMasterClientTests
         var matchedForNight = ExecutionIdentityResolver.MatchTachoForDriver(aliases, nightDriver, all);
         Assert.NotNull(matchedForNight);
         Assert.Equal("Night Driver", matchedForNight!.DriverName);
+
+        // A specific planned driver with no matching duty must fail closed. Falling back to the
+        // latest occupant would attach another driver's legal-hours evidence to this load.
+        Assert.Null(ExecutionIdentityResolver.MatchTachoForDriver(aliases, unmatchedDriver, all));
 
         // No driver supplied falls back to the most recent duty, matching MatchTacho's behaviour.
         var matchedWithNoDriver = ExecutionIdentityResolver.MatchTachoForDriver(aliases, null, all);
