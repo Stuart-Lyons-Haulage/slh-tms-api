@@ -17,23 +17,17 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
                 var client = scope.ServiceProvider.GetRequiredService<DotTrackingClient>();
                 var store = scope.ServiceProvider.GetRequiredService<DotTrackingTelemetryStore>();
                 var records = (await client.GetLatestVehicleEventsAsync(stoppingToken)).Select(DotTelemetryRecord.FromProvider);
-                await store.PersistAsync(records, stoppingToken);
+                await store.PersistAsync(records, stoppingToken, markAsLiveReceipt: true);
                 if (DateTimeOffset.UtcNow >= nextRecoveryAtUtc)
                 {
                     var recoveryDay = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeBySystemTimeZoneId(DateTimeOffset.UtcNow, "Europe/London").DateTime).AddDays(-1);
                     var recovered = (await client.GetHistoricalVehicleEventsAsync(recoveryDay, stoppingToken)).Select(DotTelemetryRecord.FromProvider);
-                    await store.PersistAsync(recovered, stoppingToken);
+                    await store.PersistAsync(recovered, stoppingToken, markAsLiveReceipt: false);
                     nextRecoveryAtUtc = DateTimeOffset.UtcNow.Add(recoveryInterval);
                 }
             }
-            catch (InvalidOperationException exception)
-            {
-                logger.LogDebug(exception, "DOT tracking ingestion is not configured.");
-            }
-            catch (Exception exception) when (!stoppingToken.IsCancellationRequested)
-            {
-                logger.LogWarning(exception, "DOT tracking ingestion failed; retrying in {Minutes} minute(s).", pollInterval.TotalMinutes);
-            }
+            catch (InvalidOperationException exception) { logger.LogDebug(exception, "DOT tracking ingestion is not configured."); }
+            catch (Exception exception) when (!stoppingToken.IsCancellationRequested) { logger.LogWarning(exception, "DOT tracking ingestion failed; retrying in {Minutes} minute(s).", pollInterval.TotalMinutes); }
             await Task.Delay(pollInterval, stoppingToken);
         }
     }
