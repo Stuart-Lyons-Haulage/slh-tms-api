@@ -89,8 +89,11 @@ public sealed class CustomerEtaEvidenceController(
         var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles.Values.ToList(), ct);
         var liveStatuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
 
-        IReadOnlyDictionary<string, TachoVehicleDriverStatus> tachoStatuses = new Dictionary<string, TachoVehicleDriverStatus>();
-        try { tachoStatuses = await tachoMaster.GetCurrentDriverStatusesByVehicleAsync(planningDate, ct); }
+        // Every driver's own duty for the vehicle, not just whoever is currently in the cab —
+        // otherwise an earlier driver on a multi-driver vehicle silently loses their tacho data
+        // and this evidence chain reports "Mismatch" instead of matching their actual duty.
+        IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> tachoStatuses = new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
+        try { tachoStatuses = await tachoMaster.GetAllDriverStatusesByVehicleAsync(planningDate, ct); }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             logger.LogWarning(exception, "TachoMaster was unavailable while building customer ETA evidence.");
@@ -123,7 +126,7 @@ public sealed class CustomerEtaEvidenceController(
                 ? knownAliases
                 : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var live = vehicle is null ? null : ExecutionIdentityResolver.MatchLive(aliases, liveStatuses);
-            var tacho = vehicle is null ? null : ExecutionIdentityResolver.MatchTacho(aliases, tachoStatuses);
+            var tacho = vehicle is null ? null : ExecutionIdentityResolver.MatchTachoForDriver(aliases, driver, tachoStatuses);
             var firstMovement = vehicle is null ? null : ExecutionIdentityResolver.FirstMovement(aliases, trackingEvents, tacho?.DutyStartUtc);
             var signOnToMovementMinutes = tacho is not null && firstMovement is not null
                 ? Math.Max(0, (int)Math.Floor((firstMovement.Value - tacho.DutyStartUtc).TotalMinutes))
