@@ -5,16 +5,16 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Slh.Tms.Api.Models.Tracking;
-
+ 
 namespace Slh.Tms.Api.Services;
-
+ 
 public sealed class TachoMasterClient
 {
     private readonly HttpClient httpClient;
     private readonly TachoMasterOptions options;
     private readonly ILogger<TachoMasterClient> logger;
     private readonly DotTrackingClient? dotTrackingClient;
-
+ 
     public TachoMasterClient(HttpClient httpClient, TachoMasterOptions options, ILogger<TachoMasterClient> logger, DotTrackingClient? dotTrackingClient = null)
     {
         this.httpClient = httpClient;
@@ -24,7 +24,7 @@ public sealed class TachoMasterClient
         this.httpClient.Timeout = TimeSpan.FromSeconds(30);
         this.httpClient.BaseAddress = new Uri(NormaliseBaseUrl(options.BaseUrl));
     }
-
+ 
     public bool IsConfigured => options.IsConfigured;
     public bool UsesSharedRoadTechCredentials => options.UsesSharedRoadTechCredentials;
     public IReadOnlyList<string> MissingSettings => new[]
@@ -35,13 +35,13 @@ public sealed class TachoMasterClient
         string.IsNullOrWhiteSpace(options.Username) ? "TachoMaster username" : null,
         string.IsNullOrWhiteSpace(options.Password) ? "TachoMaster password" : null
     }.Where(value => value is not null).Select(value => value!).ToList();
-
+ 
     public async Task<IReadOnlyDictionary<string, string>> GetCurrentDriverNamesByVehicleAsync(DateOnly date, CancellationToken cancellationToken = default)
     {
         var statuses = await GetCurrentDriverStatusesByVehicleAsync(date, cancellationToken);
         return statuses.ToDictionary(item => item.Key, item => item.Value.DriverName);
     }
-
+ 
     public async Task<IReadOnlyList<TachoDriverProfile>> GetDriverProfilesAsync(CancellationToken cancellationToken = default)
     {
         if (!options.IsConfigured) return [];
@@ -70,7 +70,7 @@ public sealed class TachoMasterClient
                 metric?.WorkAvaiableWeek);
         }).Where(profile => !string.IsNullOrWhiteSpace(profile.DriverName)).OrderBy(profile => profile.DriverName).ToList();
     }
-
+ 
     /// <summary>
     /// Returns every TachoMaster duty transaction for the requested date. This is intentionally
     /// different from GetCurrentDriverStatusesByVehicleAsync, which collapses to the latest driver
@@ -81,13 +81,13 @@ public sealed class TachoMasterClient
         CancellationToken cancellationToken = default)
     {
         if (!options.IsConfigured) return [];
-
+ 
         var sid = await LoginAsync(cancellationToken);
         var dutiesTask = GetDutiesAsync(sid, date, cancellationToken);
         var membersTask = GetMembersAsync(sid, cancellationToken);
         var metricsTask = TryGetMemberMetricsAsync(sid, cancellationToken);
         await Task.WhenAll(dutiesTask, membersTask, metricsTask);
-
+ 
         var members = (await membersTask).GroupBy(member => member.MemCode)
             .ToDictionary(group => group.Key, group => group.First());
         var metrics = (await metricsTask).GroupBy(metric => metric.MemCode)
@@ -95,7 +95,7 @@ public sealed class TachoMasterClient
         var dayStart = new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc));
         var dayEnd = dayStart.AddDays(1);
         var result = new List<TachoDriverDutyStatus>();
-
+ 
         foreach (var duty in (await dutiesTask)
             .Where(item => item.MemCode > 0)
             .Where(item => item.DutyStart < dayEnd && (item.DutyEnd is null || item.DutyEnd >= dayStart))
@@ -104,13 +104,13 @@ public sealed class TachoMasterClient
             if (!members.TryGetValue(duty.MemCode, out var member)) continue;
             var name = DriverName(member);
             if (string.IsNullOrWhiteSpace(name)) continue;
-
+ 
             var breaks = (duty.Wtd ?? [])
                 .Where(item => string.Equals(item.WtdEvent, "wtdBreak", StringComparison.OrdinalIgnoreCase))
                 .Where(item => item.TimeEnd >= item.TimeStart)
                 .ToList();
             metrics.TryGetValue(duty.MemCode, out var metric);
-
+ 
             result.Add(new TachoDriverDutyStatus(
                 string.IsNullOrWhiteSpace(duty.VehCode) ? string.Empty : NormaliseIdentifier(duty.VehCode),
                 duty.MemCode,
@@ -135,74 +135,25 @@ public sealed class TachoMasterClient
                 metric?.ShortDailyRestTakenThisWeek,
                 metric?.WorkAvaiableWeek));
         }
-
+ 
         logger.LogInformation("TachoMaster returned {DutyCount} complete duty transaction(s) for {Date}.", result.Count, date);
         return result;
     }
-
+ 
     public async Task<IReadOnlyDictionary<string, TachoVehicleDriverStatus>> GetCurrentDriverStatusesByVehicleAsync(
         DateOnly date,
         CancellationToken cancellationToken = default)
     {
         if (!options.IsConfigured) return new Dictionary<string, TachoVehicleDriverStatus>();
-
-        var sid = await LoginAsync(cancellationToken);
-        var dutiesTask = GetDutiesAsync(sid, date, cancellationToken);
-        var membersTask = GetMembersAsync(sid, cancellationToken);
-        var metricsTask = TryGetMemberMetricsAsync(sid, cancellationToken);
-        await Task.WhenAll(dutiesTask, membersTask, metricsTask);
-
-        var duties = await dutiesTask;
-        var memberList = await membersTask;
-        var dayStart = new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc));
-        var dayEnd = dayStart.AddDays(1);
-        var currentDuties = duties
-            .Where(duty => !string.IsNullOrWhiteSpace(duty.VehCode) && duty.MemCode > 0)
-            .Where(duty => duty.DutyStart < dayEnd && (duty.DutyEnd is null || duty.DutyEnd >= dayStart))
-            .GroupBy(duty => NormaliseIdentifier(duty.VehCode))
-            .ToDictionary(group => group.Key, group => group.OrderByDescending(duty => duty.DutyStart).ToList());
-
-        var members = memberList.GroupBy(member => member.MemCode).ToDictionary(group => group.Key, group => group.First());
-        var metrics = (await metricsTask).GroupBy(metric => metric.MemCode).ToDictionary(group => group.Key, group => group.OrderByDescending(metric => metric.DateTimeWhenValid).First());
+ 
+        var (currentDuties, members, metrics, memberList) = await LoadDutyContextAsync(date, cancellationToken);
         var result = new Dictionary<string, TachoVehicleDriverStatus>();
         foreach (var (vehicle, vehicleDuties) in currentDuties)
         {
-            var latest = vehicleDuties[0];
-            if (!members.TryGetValue(latest.MemCode, out var member)) continue;
-            var name = DriverName(member);
-            if (string.IsNullOrWhiteSpace(name)) continue;
-
-            var driverDuties = vehicleDuties.Where(duty => duty.MemCode == latest.MemCode).ToList();
-            var wtdBreaks = driverDuties.SelectMany(duty => duty.Wtd ?? [])
-                .Where(item => string.Equals(item.WtdEvent, "wtdBreak", StringComparison.OrdinalIgnoreCase))
-                .Where(item => item.TimeEnd >= item.TimeStart)
-                .ToList();
-            metrics.TryGetValue(latest.MemCode, out var metric);
-            result[vehicle] = new TachoVehicleDriverStatus(
-                vehicle,
-                latest.MemCode,
-                name,
-                member.CardNoShort,
-                member.EmployeeNumber,
-                driverDuties.Min(duty => duty.DutyStart),
-                driverDuties.All(duty => duty.DutyEnd is not null) ? driverDuties.Max(duty => duty.DutyEnd) : null,
-                driverDuties.Sum(duty => duty.TimeWork),
-                driverDuties.Sum(duty => duty.TimeRest),
-                driverDuties.Sum(duty => duty.TimeAvailable),
-                driverDuties.Sum(duty => duty.TimeDrive),
-                wtdBreaks.Count,
-                wtdBreaks.Count == 0 ? null : (int)wtdBreaks.Sum(item => (item.TimeEnd - item.TimeStart).TotalMinutes),
-                metric?.DateTimeWhenValid,
-                metric?.DailyDriverPeriodsAvaiable,
-                metric?.DriveAvailableToday,
-                metric?.DriveAvailableTomorrow,
-                metric?.DriveAvailableWeek,
-                metric?.DriveAvailableFortnight,
-                metric?.LongDaysWorkedThisWeek,
-                metric?.ShortDailyRestTakenThisWeek,
-                metric?.WorkAvaiableWeek);
+            var status = BuildStatus(vehicle, vehicleDuties[0].MemCode, vehicleDuties, members, metrics);
+            if (status is not null) result[vehicle] = status;
         }
-
+ 
         var falconDrivers = await TryGetFalconDriverStatusesAsync(memberList, cancellationToken);
         var falconOnly = 0;
         var overlaps = 0;
@@ -215,7 +166,7 @@ public sealed class TachoMasterClient
                 falconOnly++;
                 continue;
             }
-
+ 
             overlaps++;
             if (!SameIdentity(duty, falcon))
             {
@@ -227,7 +178,7 @@ public sealed class TachoMasterClient
                     duty.CardNumber,
                     falcon.DriverName,
                     falcon.CardNumber);
-
+ 
                 // Tracking owns current driver identity. If the live Falcon identity does not
                 // agree with the Tacho duty identity, do not apply another driver's hours/breaks
                 // to the vehicle ETA. The Falcon-only record deliberately carries no compliance
@@ -235,7 +186,7 @@ public sealed class TachoMasterClient
                 result[vehicle] = falcon;
             }
         }
-
+ 
         logger.LogInformation(
             "Tacho continuous enrichment produced {Total} vehicle identities: {DutyCount} TachoMaster duty record(s), {FalconOnly} Falcon-only identity record(s), {OverlapCount} overlap(s), {MismatchCount} live mismatch(es).",
             result.Count,
@@ -245,7 +196,126 @@ public sealed class TachoMasterClient
             mismatches);
         return result;
     }
-
+ 
+    /// <summary>
+    /// Returns every driver who held a duty on each vehicle for the requested date, not just
+    /// the most recent one. A vehicle that carried two unique tachograph cards in the same day
+    /// (day/night handover, relief driver, trailer swap) appears here with one entry per driver;
+    /// GetCurrentDriverStatusesByVehicleAsync deliberately collapses that same vehicle down to a
+    /// single "who is in it right now" entry, which is correct for live identity but loses the
+    /// earlier driver's compliance figures for anything that needs to report against a specific
+    /// driver or run rather than the vehicle's latest occupant. Use MatchTachoForDriver to pick
+    /// the right entry for a specific planned driver out of this list.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>> GetAllDriverStatusesByVehicleAsync(
+        DateOnly date,
+        CancellationToken cancellationToken = default)
+    {
+        if (!options.IsConfigured) return new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
+ 
+        var (currentDuties, members, metrics, memberList) = await LoadDutyContextAsync(date, cancellationToken);
+        var result = new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
+        foreach (var (vehicle, vehicleDuties) in currentDuties)
+        {
+            var statuses = vehicleDuties
+                .Select(duty => duty.MemCode)
+                .Distinct()
+                .Select(memberCode => BuildStatus(vehicle, memberCode, vehicleDuties, members, metrics))
+                .Where(status => status is not null)
+                .Select(status => status!)
+                .ToList();
+            if (statuses.Count > 0) result[vehicle] = statuses;
+        }
+ 
+        var falconDrivers = await TryGetFalconDriverStatusesAsync(memberList, cancellationToken);
+        foreach (var (vehicle, falcon) in falconDrivers)
+        {
+            if (!result.TryGetValue(vehicle, out var existing))
+            {
+                result[vehicle] = new List<TachoVehicleDriverStatus> { falcon };
+                continue;
+            }
+ 
+            // Add the live Falcon identity alongside the TachoMaster duty history rather than
+            // overwriting it, so a driver-specific lookup can still find an earlier duty even
+            // when Falcon currently reports a different occupant for the vehicle.
+            if (!existing.Any(status => SameIdentity(status, falcon)))
+                result[vehicle] = existing.Append(falcon).ToList();
+        }
+ 
+        return result;
+    }
+ 
+    private async Task<(
+        Dictionary<string, List<TachoDuty>> DutiesByVehicle,
+        Dictionary<int, TachoMember> Members,
+        Dictionary<int, TachoMemberMetric> Metrics,
+        IReadOnlyList<TachoMember> MemberList)> LoadDutyContextAsync(DateOnly date, CancellationToken cancellationToken)
+    {
+        var sid = await LoginAsync(cancellationToken);
+        var dutiesTask = GetDutiesAsync(sid, date, cancellationToken);
+        var membersTask = GetMembersAsync(sid, cancellationToken);
+        var metricsTask = TryGetMemberMetricsAsync(sid, cancellationToken);
+        await Task.WhenAll(dutiesTask, membersTask, metricsTask);
+ 
+        var duties = await dutiesTask;
+        var memberList = await membersTask;
+        var dayStart = new DateTimeOffset(date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc));
+        var dayEnd = dayStart.AddDays(1);
+        var dutiesByVehicle = duties
+            .Where(duty => !string.IsNullOrWhiteSpace(duty.VehCode) && duty.MemCode > 0)
+            .Where(duty => duty.DutyStart < dayEnd && (duty.DutyEnd is null || duty.DutyEnd >= dayStart))
+            .GroupBy(duty => NormaliseIdentifier(duty.VehCode))
+            .ToDictionary(group => group.Key, group => group.OrderByDescending(duty => duty.DutyStart).ToList());
+ 
+        var members = memberList.GroupBy(member => member.MemCode).ToDictionary(group => group.Key, group => group.First());
+        var metrics = (await metricsTask).GroupBy(metric => metric.MemCode).ToDictionary(group => group.Key, group => group.OrderByDescending(metric => metric.DateTimeWhenValid).First());
+        return (dutiesByVehicle, members, metrics, memberList);
+    }
+ 
+    private static TachoVehicleDriverStatus? BuildStatus(
+        string vehicle,
+        int memberCode,
+        List<TachoDuty> vehicleDuties,
+        Dictionary<int, TachoMember> members,
+        Dictionary<int, TachoMemberMetric> metrics)
+    {
+        if (!members.TryGetValue(memberCode, out var member)) return null;
+        var name = DriverName(member);
+        if (string.IsNullOrWhiteSpace(name)) return null;
+ 
+        var driverDuties = vehicleDuties.Where(duty => duty.MemCode == memberCode).ToList();
+        if (driverDuties.Count == 0) return null;
+        var wtdBreaks = driverDuties.SelectMany(duty => duty.Wtd ?? [])
+            .Where(item => string.Equals(item.WtdEvent, "wtdBreak", StringComparison.OrdinalIgnoreCase))
+            .Where(item => item.TimeEnd >= item.TimeStart)
+            .ToList();
+        metrics.TryGetValue(memberCode, out var metric);
+        return new TachoVehicleDriverStatus(
+            vehicle,
+            memberCode,
+            name,
+            member.CardNoShort,
+            member.EmployeeNumber,
+            driverDuties.Min(duty => duty.DutyStart),
+            driverDuties.All(duty => duty.DutyEnd is not null) ? driverDuties.Max(duty => duty.DutyEnd) : null,
+            driverDuties.Sum(duty => duty.TimeWork),
+            driverDuties.Sum(duty => duty.TimeRest),
+            driverDuties.Sum(duty => duty.TimeAvailable),
+            driverDuties.Sum(duty => duty.TimeDrive),
+            wtdBreaks.Count,
+            wtdBreaks.Count == 0 ? null : (int)wtdBreaks.Sum(item => (item.TimeEnd - item.TimeStart).TotalMinutes),
+            metric?.DateTimeWhenValid,
+            metric?.DailyDriverPeriodsAvaiable,
+            metric?.DriveAvailableToday,
+            metric?.DriveAvailableTomorrow,
+            metric?.DriveAvailableWeek,
+            metric?.DriveAvailableFortnight,
+            metric?.LongDaysWorkedThisWeek,
+            metric?.ShortDailyRestTakenThisWeek,
+            metric?.WorkAvaiableWeek);
+    }
+ 
     private async Task<IReadOnlyDictionary<string, TachoVehicleDriverStatus>> TryGetFalconDriverStatusesAsync(
         IReadOnlyList<TachoMember> members,
         CancellationToken cancellationToken)
@@ -262,7 +332,7 @@ public sealed class TachoMasterClient
                 .GroupBy(record => NormaliseIdentifier(record.VehicleIdentifier))
                 .Select(group => group.OrderByDescending(record => record.EventTimeUtc).First())
                 .ToList();
-
+ 
             var result = new Dictionary<string, TachoVehicleDriverStatus>();
             foreach (var record in records)
             {
@@ -271,7 +341,7 @@ public sealed class TachoMasterClient
                     ? record.DriverName!.Trim()
                     : member is null ? null : DriverName(member);
                 if (string.IsNullOrWhiteSpace(resolvedName)) continue;
-
+ 
                 var vehicle = NormaliseIdentifier(record.VehicleIdentifier);
                 result[vehicle] = new TachoVehicleDriverStatus(
                     vehicle,
@@ -297,7 +367,7 @@ public sealed class TachoMasterClient
                     null,
                     null);
             }
-
+ 
             return result;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
@@ -306,7 +376,7 @@ public sealed class TachoMasterClient
             return new Dictionary<string, TachoVehicleDriverStatus>();
         }
     }
-
+ 
     private static bool SameIdentity(TachoVehicleDriverStatus duty, TachoVehicleDriverStatus falcon)
     {
         var dutyCard = NormaliseCard(duty.CardNumber);
@@ -315,12 +385,12 @@ public sealed class TachoMasterClient
             return string.Equals(dutyCard, falconCard, StringComparison.OrdinalIgnoreCase)
                 || dutyCard.EndsWith(falconCard, StringComparison.OrdinalIgnoreCase)
                 || falconCard.EndsWith(dutyCard, StringComparison.OrdinalIgnoreCase);
-
+ 
         return string.Equals(NormaliseName(duty.DriverName), NormaliseName(falcon.DriverName), StringComparison.OrdinalIgnoreCase);
     }
-
+ 
     private static string NormaliseName(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
-
+ 
     private static TachoMember? FindMemberByCard(IEnumerable<TachoMember> members, string? cardNumber)
     {
         var liveCard = NormaliseCard(cardNumber);
@@ -334,7 +404,7 @@ public sealed class TachoMasterClient
                 || (liveCard.Length >= 8 && memberCard.EndsWith(liveCard, StringComparison.OrdinalIgnoreCase));
         });
     }
-
+ 
     private async Task<string> LoginAsync(CancellationToken cancellationToken)
     {
         foreach (var password in PasswordAttempts(options.Password))
@@ -357,14 +427,14 @@ public sealed class TachoMasterClient
                 var payload = await response.Content.ReadAsStringAsync(cancellationToken);
                 return ExtractSessionId(payload);
             }
-
+ 
             if (response.StatusCode is not (HttpStatusCode.InternalServerError or HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden or HttpStatusCode.BadRequest))
                 break;
         }
-
+ 
         throw new HttpRequestException("TachoMaster login failed.");
     }
-
+ 
     private async Task<List<TachoDuty>> GetDutiesAsync(string sid, DateOnly date, CancellationToken cancellationToken)
     {
         var result = new List<TachoDuty>();
@@ -388,10 +458,10 @@ public sealed class TachoMasterClient
             if (!pageData.MoreData || pageData.RecordCount == 0) break;
             offset += pageData.RecordCount;
         }
-
+ 
         return result;
     }
-
+ 
     private async Task<List<TachoMemberMetric>> GetMemberMetricsAsync(string sid, CancellationToken cancellationToken)
     {
         var result = new List<TachoMemberMetric>();
@@ -408,10 +478,10 @@ public sealed class TachoMasterClient
             if (!pageData.MoreData || pageData.RecordCount == 0) break;
             offset += pageData.RecordCount;
         }
-
+ 
         return result;
     }
-
+ 
     private async Task<List<TachoMemberMetric>> TryGetMemberMetricsAsync(string sid, CancellationToken cancellationToken)
     {
         try
@@ -424,7 +494,7 @@ public sealed class TachoMasterClient
             return [];
         }
     }
-
+ 
     private async Task<List<TachoMember>> GetMembersAsync(string sid, CancellationToken cancellationToken)
     {
         var result = new List<TachoMember>();
@@ -441,10 +511,10 @@ public sealed class TachoMasterClient
             if (!pageData.MoreData || pageData.RecordCount == 0) break;
             offset += pageData.RecordCount;
         }
-
+ 
         return result;
     }
-
+ 
     private HttpRequestMessage CreateRequest(HttpMethod method, string path, string sid)
     {
         var request = new HttpRequestMessage(method, path);
@@ -453,23 +523,23 @@ public sealed class TachoMasterClient
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         return request;
     }
-
+ 
     private static string DriverName(TachoMember member)
     {
         var given = string.IsNullOrWhiteSpace(member.GivenNames) ? member.CName : member.GivenNames;
         var surname = string.IsNullOrWhiteSpace(member.Surname) ? member.SName : member.Surname;
         return string.Join(' ', new[] { given, surname }.Where(value => !string.IsNullOrWhiteSpace(value))).Trim();
     }
-
+ 
     private static string NormaliseCard(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
-
+ 
     private static IReadOnlyList<string> PasswordAttempts(string password)
     {
         var trimmed = password.Trim();
         if (trimmed.All(Uri.IsHexDigit) && trimmed.Length is 32 or 40 or 64) return [trimmed];
         return [trimmed, Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(trimmed))).ToLowerInvariant()];
     }
-
+ 
     private static string ExtractSessionId(string payload)
     {
         using var document = JsonDocument.Parse(payload);
@@ -480,21 +550,21 @@ public sealed class TachoMasterClient
                 return value.ToString();
         throw new InvalidOperationException("TachoMaster login response did not contain a SID.");
     }
-
+ 
     private static string NormaliseBaseUrl(string value)
     {
         var trimmed = value.Trim().TrimEnd('/');
         return trimmed.EndsWith("/api", StringComparison.OrdinalIgnoreCase) ? $"{trimmed}/" : $"{trimmed}/api/";
     }
-
+ 
     private static string NormaliseIdentifier(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
-
+ 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
         Converters = { new NumberOrStringConverter() }
     };
-
+ 
     private sealed class NumberOrStringConverter : JsonConverter<string>
     {
         public override string? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) => reader.TokenType switch
@@ -504,10 +574,10 @@ public sealed class TachoMasterClient
             JsonTokenType.Null => null,
             _ => throw new JsonException($"Expected text or number, received {reader.TokenType}.")
         };
-
+ 
         public override void Write(Utf8JsonWriter writer, string value, JsonSerializerOptions options) => writer.WriteStringValue(value);
     }
-
+ 
     private sealed class TachoDutyEnvelope { public TachoPage<TachoDuty>? DutyNew { get; set; } }
     private sealed class TachoPage<T> { public bool MoreData { get; set; } public int RecordCount { get; set; } public List<T> Data { get; set; } = []; }
     private sealed class TachoDuty
@@ -547,7 +617,7 @@ public sealed class TachoMasterClient
         public int WorkAvaiableWeek { get; set; }
     }
 }
-
+ 
 public sealed record TachoVehicleDriverStatus(
     string VehicleCode,
     int MemberCode,
@@ -571,7 +641,7 @@ public sealed record TachoVehicleDriverStatus(
     int? LongDaysWorkedThisWeek,
     int? ShortDailyRestTakenThisWeek,
     int? WorkAvailableWeekMinutes);
-
+ 
 public sealed record TachoDriverDutyStatus(
     string VehicleCode,
     int MemberCode,
@@ -595,7 +665,7 @@ public sealed record TachoDriverDutyStatus(
     int? LongDaysWorkedThisWeek,
     int? ShortDailyRestTakenThisWeek,
     int? WorkAvailableWeekMinutes);
-
+ 
 public sealed record TachoDriverProfile(
     int MemberCode,
     string DriverName,
