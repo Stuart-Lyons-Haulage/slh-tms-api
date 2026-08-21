@@ -84,11 +84,11 @@ jobs:
           probe_200 'RoadTech current GPS' "$API_BASE/api/v1/health/tracking"
           probe_tachomaster
           probe_200 'Falcon geofence payload' "$API_BASE/api/v1/health/geofences"
-          # The dedicated planner/import probe is introduced by this change, so it is
-          # required after deployment but intentionally skipped while the PR still tests
-          # the previous production revision.
+          # These probes are introduced by this change, so they are required after
+          # deployment but skipped while the PR still points at the previous production revision.
           if test "$GITHUB_EVENT_NAME" != "pull_request"; then
             probe_200 'Planner and import data path' "$API_BASE/api/v1/health/planner-import"
+            probe_200 'Pre-email clean slate' "$API_BASE/api/v1/health/pre-email-clean-slate"
           fi
           probe_200 'Portal' "$PORTAL_BASE/"
 
