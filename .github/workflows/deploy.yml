@@ -251,6 +251,24 @@ jobs:
           done
           exit 1
 
+      - name: Check operational data and schema readiness
+        run: |
+          set -euo pipefail
+          for attempt in {1..18}; do
+            body_file="$(mktemp)"
+            status="$(curl --silent --output "$body_file" --write-out "%{http_code}" "https://$AZURE_CONTAINER_APP_FQDN/api/v1/diagnostics/data-readiness")"
+            cat "$body_file"
+            if test "$status" = "200"; then
+              rm -f "$body_file"
+              exit 0
+            fi
+            rm -f "$body_file"
+            echo "Operational data/schema readiness returned HTTP $status; retrying..."
+            sleep 10
+          done
+          echo "Operational data/schema readiness did not become healthy."
+          exit 1
+
       - name: Check TachoMaster live integration
         run: |
           set -euo pipefail
