@@ -47,11 +47,42 @@ jobs:
             return 1
           }
 
+          probe_tachomaster() {
+            local body_file
+            body_file="$(mktemp)"
+            for attempt in {1..18}; do
+              status="$(curl --silent --show-error --output "$body_file" --write-out "%{http_code}" "$API_BASE/api/v1/health/tachomaster" || true)"
+              echo "[TachoMaster] HTTP $status"
+              cat "$body_file" || true
+              echo
+              if test "$status" = "200"; then
+                if grep -Eq '"stale"[[:space:]]*:[[:space:]]*true' "$body_file"; then
+                  freshness="$(grep -oE '"sourceFreshness"[[:space:]]*:[[:space:]]*"[^"]+"' "$body_file" | head -1 || true)"
+                  age="$(grep -oE '"sourceAgeMinutes"[[:space:]]*:[[:space:]]*[0-9.]+' "$body_file" | head -1 || true)"
+                  echo "::warning title=TachoMaster source freshness::TachoMaster is reachable and returned data, but its newest provider evidence is stale. ${freshness:-sourceFreshness unknown}; ${age:-sourceAgeMinutes unknown}."
+                  {
+                    echo "### Production health advisory"
+                    echo "- ⚠️ TachoMaster endpoint is reachable, but the newest source evidence is stale (${freshness:-freshness unknown}; ${age:-age unknown})."
+                    echo "- This is an advisory, not a hard outage: duty/event timestamps can remain unchanged when no new tachograph event is produced."
+                  } >> "$GITHUB_STEP_SUMMARY"
+                else
+                  echo "- ✅ TachoMaster source freshness is within the health threshold." >> "$GITHUB_STEP_SUMMARY"
+                fi
+                rm -f "$body_file"
+                return 0
+              fi
+              sleep 10
+            done
+            rm -f "$body_file"
+            echo "TachoMaster did not become reachable."
+            return 1
+          }
+
           probe_200 'Core API' "$API_BASE/api/v1/health"
           probe_200 'Azure SQL' "$API_BASE/api/v1/health/ready"
           probe_200 'Operational data/schema' "$API_BASE/api/v1/diagnostics/data-readiness"
           probe_200 'RoadTech current GPS' "$API_BASE/api/v1/health/tracking"
-          probe_200 'TachoMaster' "$API_BASE/api/v1/health/tachomaster"
+          probe_tachomaster
           probe_200 'Falcon geofence payload' "$API_BASE/api/v1/health/geofences"
           probe_200 'Portal' "$PORTAL_BASE/"
 
