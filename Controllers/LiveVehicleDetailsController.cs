@@ -87,11 +87,43 @@ public sealed class LiveVehicleDetailsController(
 
         var currentLoad = await db.Loads
             .AsNoTracking()
+            .Include(load => load.Stops)
             .Where(load => load.PlanningDate == today && load.VehicleId == vehicle.Id &&
                            load.Status != LoadStatus.Cancelled && load.Status != LoadStatus.Completed)
             .OrderByDescending(load => load.Status == LoadStatus.InProgress)
             .ThenByDescending(load => load.Status == LoadStatus.Dispatched)
             .FirstOrDefaultAsync(cancellationToken);
+
+        LiveGeofenceSummary? geofence = null;
+        if (currentLoad is not null)
+        {
+            try
+            {
+                var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, today, new[] { currentLoad }, cancellationToken);
+                var activeVisit = snapshot.ActiveVisits
+                    .Where(visit => visit.VehicleId == vehicle.Id)
+                    .OrderByDescending(visit => visit.LastInsideAtUtc)
+                    .FirstOrDefault();
+                var latestVisit = snapshot.ConfirmedVisits
+                    .Where(visit => visit.VehicleId == vehicle.Id)
+                    .OrderByDescending(visit => visit.LastInsideAtUtc)
+                    .FirstOrDefault();
+                var evidence = activeVisit ?? latestVisit;
+                geofence = evidence is null
+                    ? new LiveGeofenceSummary("NoVisit", null, null, null, snapshot.LatestTrackingUtc)
+                    : new LiveGeofenceSummary(
+                        activeVisit is not null ? "Inside" : "LastConfirmedVisit",
+                        evidence.Fence.Name,
+                        evidence.EnteredAtUtc,
+                        evidence.DwellMinutes,
+                        snapshot.LatestTrackingUtc);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogWarning(exception, "Geofence live detail enrichment failed for {Vehicle}.", vehicle.Registration);
+                geofence = new LiveGeofenceSummary("Unavailable", null, null, null, null);
+            }
+        }
 
         var now = DateTimeOffset.UtcNow;
         var ageMinutes = live is null ? (int?)null : Math.Max(0, (int)(now - live.LastEventTimeUtc).TotalMinutes);
@@ -105,6 +137,7 @@ public sealed class LiveVehicleDetailsController(
 
         var identityState = IdentityState(liveCard, tachoCard, driver);
         var displayName = driver?.DisplayName ?? tacho?.DriverName ?? live?.CurrentDriverName;
+        var compliance = ComplianceSummary(identityState, tacho, driver, liveCard);
 
         return Ok(new LiveVehicleDetailResponse(
             new LiveVehicleSummary(vehicle.Id, vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation),
@@ -136,7 +169,26 @@ public sealed class LiveVehicleDetailsController(
                 tacho.DriveAvailableTodayMinutes,
                 tacho.WorkAvailableWeekMinutes),
             currentLoad is null ? null : new LiveRunSummary(currentLoad.Id, currentLoad.Reference, currentLoad.Status.ToString()),
+            geofence,
+            compliance,
             DateTimeOffset.UtcNow));
+    }
+
+    private static LiveComplianceSummary ComplianceSummary(
+        string identityState,
+        TachoVehicleDriverStatus? tacho,
+        Driver? driver,
+        string liveCard)
+    {
+        if (identityState == "Mismatch")
+            return new LiveComplianceSummary("IdentityMismatch", "Tracking and TachoMaster identify different cards; tacho duty figures are not trusted for this vehicle.");
+        if (tacho is null && liveCard.Length > 0)
+            return new LiveComplianceSummary("TrackingOnly", "A live driver card is present in tracking, but no matching TachoMaster duty was returned.");
+        if (tacho is null)
+            return new LiveComplianceSummary("NoTachoDuty", "No TachoMaster duty is available for the current live vehicle identity.");
+        if (driver is null)
+            return new LiveComplianceSummary("DriverUnlinked", "TachoMaster returned a duty, but its driver identity is not linked to a TMS driver record.");
+        return new LiveComplianceSummary("Matched", "Live tracking, TachoMaster duty and the TMS driver identity are aligned.");
     }
 
     private static string IdentityState(string liveCard, string tachoCard, Driver? driver)
@@ -173,6 +225,8 @@ public sealed record LiveVehicleDetailResponse(
     LiveDriverSummary Driver,
     LiveTachoSummary? Tacho,
     LiveRunSummary? Run,
+    LiveGeofenceSummary? Geofence,
+    LiveComplianceSummary Compliance,
     DateTimeOffset RetrievedAtUtc);
 
 public sealed record LiveVehicleSummary(Guid Id, string Registration, string? FleetNumber, string? Abbreviation);
@@ -204,3 +258,5 @@ public sealed record LiveTachoSummary(
     int? DriveAvailableTodayMinutes,
     int? WorkAvailableWeekMinutes);
 public sealed record LiveRunSummary(Guid Id, string Reference, string Status);
+public sealed record LiveGeofenceSummary(string State, string? FenceName, DateTimeOffset? EnteredAtUtc, int? DwellMinutes, DateTimeOffset? LatestTrackingUtc);
+public sealed record LiveComplianceSummary(string Status, string Message);
