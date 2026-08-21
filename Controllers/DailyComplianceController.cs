@@ -80,54 +80,150 @@ public sealed class DailyComplianceController(
         var preUse = tachoOptions.IsConfigured ? await ReadTachoPreUseAsync(date, ct) : [];
         var fleetioCache = new Dictionary<string, IReadOnlyList<FleetioInspectionEvidence>>(StringComparer.OrdinalIgnoreCase);
         var rows = new List<ComplianceRow>();
+        var representedVehicleDrivers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var representedTrailerDrivers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // Compliance is evidence-led, not planning-led. Start with every Tacho duty on a known
+        // vehicle so genuine vehicle use remains visible even when no run was allocated in TMS.
+        foreach (var duty in duties.OrderBy(x => x.DutyStartUtc))
+        {
+            var vehicle = vehicles.FirstOrDefault(v => VehicleKeys(v).Contains(Normalise(duty.VehicleCode), StringComparer.OrdinalIgnoreCase));
+            if (vehicle is null) continue;
+            var driver = drivers.FirstOrDefault(d => DriverMatches(d, duty));
+            if (driver is null) continue;
+
+            var firstMovement = FirstMovement(tracking, vehicle, duty.DutyStartUtc, dayEndUtc);
+            var preUseMinutes = FindPreUse(preUse, duty, vehicle)?.PreDriveOtherWorkMinutes;
+            var fleetioId = !string.IsNullOrWhiteSpace(vehicle.FleetioId) ? vehicle.FleetioId : MappingExternalKey(mappings, "Vehicle", vehicle.Id);
+            var inspection = await InspectionFor(fleetioId, driver, duty.DutyStartUtc, firstMovement, dayStartUtc, dayEndUtc, fleetioCache, ct);
+            var runReference = RunReferenceFor(loads, driver.Id, vehicle.Id);
+            rows.Add(BuildRow("Vehicle", vehicle.Id, vehicle.Registration, runReference, driver, EmploymentType(driver), duty, firstMovement, preUseMinutes, inspection));
+            representedVehicleDrivers.Add($"{vehicle.Id}|{driver.Id}");
+        }
+
+        // Fleetio walkrounds are evidence in their own right. Surface them even when there is no
+        // Tacho duty and no planned run, and enrich with run details only when planning has a
+        // matching driver/vehicle allocation.
+        foreach (var vehicle in vehicles)
+        {
+            var fleetioId = !string.IsNullOrWhiteSpace(vehicle.FleetioId) ? vehicle.FleetioId : MappingExternalKey(mappings, "Vehicle", vehicle.Id);
+            if (string.IsNullOrWhiteSpace(fleetioId) || !fleetioOptions.IsConfigured) continue;
+            if (!fleetioCache.TryGetValue(fleetioId, out var inspections))
+            {
+                inspections = await ReadFleetioInspections(fleetioId, dayStartUtc, dayEndUtc, ct);
+                fleetioCache[fleetioId] = inspections;
+            }
+
+            foreach (var inspection in inspections.OrderBy(x => x.SubmittedAtUtc))
+            {
+                if (rows.Any(row => string.Equals(row.FleetioInspectionId, inspection.Id, StringComparison.OrdinalIgnoreCase))) continue;
+                var driver = drivers.FirstOrDefault(candidate => UserMatches(inspection.User, inspection.UserEmployeeNumber, candidate));
+                if (driver is null)
+                {
+                    rows.Add(BuildUnmatchedInspectionRow("Vehicle", vehicle.Id, vehicle.Registration, inspection,
+                        FirstMovement(tracking, vehicle, inspection.SubmittedAtUtc, dayEndUtc)));
+                    continue;
+                }
+
+                var duty = FindDuty(duties, driver, vehicle);
+                var firstMovement = FirstMovement(tracking, vehicle, duty?.DutyStartUtc ?? inspection.SubmittedAtUtc, dayEndUtc);
+                var preUseMinutes = duty is null ? null : FindPreUse(preUse, duty, vehicle)?.PreDriveOtherWorkMinutes;
+                var runReference = RunReferenceFor(loads, driver.Id, vehicle.Id);
+                rows.Add(BuildRow("Vehicle", vehicle.Id, vehicle.Registration, runReference, driver, EmploymentType(driver), duty, firstMovement,
+                    preUseMinutes, new FleetioInspectionMatch(inspection, true)));
+                representedVehicleDrivers.Add($"{vehicle.Id}|{driver.Id}");
+            }
+        }
+
+        // If a vehicle moved on the tracker but there is no Tacho or Fleetio identity at all,
+        // keep the gap visible instead of silently omitting the vehicle from compliance.
+        foreach (var vehicle in vehicles)
+        {
+            var firstMovement = FirstMovement(tracking, vehicle, null, dayEndUtc);
+            if (firstMovement is null) continue;
+            var hasAnyVehicleRow = rows.Any(row => row.AssetType == "Vehicle" && row.AssetId == vehicle.Id);
+            if (!hasAnyVehicleRow)
+                rows.Add(BuildTrackerOnlyRow(vehicle, firstMovement.Value));
+        }
+
+        // Trailer checks can also exist without a run. Fleetio's submitted inspection itself
+        // identifies the driver; planning only contributes a run reference when one is present.
+        foreach (var trailer in trailers)
+        {
+            var trailerFleetioId = MappingExternalKey(mappings, "Trailer", trailer.Id);
+            if (string.IsNullOrWhiteSpace(trailerFleetioId) || !fleetioOptions.IsConfigured) continue;
+            if (!fleetioCache.TryGetValue(trailerFleetioId, out var inspections))
+            {
+                inspections = await ReadFleetioInspections(trailerFleetioId, dayStartUtc, dayEndUtc, ct);
+                fleetioCache[trailerFleetioId] = inspections;
+            }
+
+            foreach (var inspection in inspections.OrderBy(x => x.SubmittedAtUtc))
+            {
+                if (rows.Any(row => string.Equals(row.FleetioInspectionId, inspection.Id, StringComparison.OrdinalIgnoreCase))) continue;
+                var driver = drivers.FirstOrDefault(candidate => UserMatches(inspection.User, inspection.UserEmployeeNumber, candidate));
+                if (driver is null)
+                {
+                    rows.Add(BuildUnmatchedInspectionRow("Trailer", trailer.Id, trailer.TrailerNumber, inspection, null));
+                    continue;
+                }
+
+                var load = loads.FirstOrDefault(candidate => candidate.DriverId == driver.Id && candidate.TrailerId == trailer.Id);
+                var vehicle = load?.VehicleId is Guid vehicleId ? vehicles.FirstOrDefault(v => v.Id == vehicleId) : null;
+                var duty = vehicle is null ? null : FindDuty(duties, driver, vehicle);
+                var firstMovement = vehicle is null ? null : FirstMovement(tracking, vehicle, duty?.DutyStartUtc ?? inspection.SubmittedAtUtc, dayEndUtc);
+                var preUseMinutes = duty is null || vehicle is null ? null : FindPreUse(preUse, duty, vehicle)?.PreDriveOtherWorkMinutes;
+                var runReference = RunReferenceForTrailer(loads, driver.Id, trailer.Id);
+                rows.Add(BuildRow("Trailer", trailer.Id, trailer.TrailerNumber, runReference, driver, EmploymentType(driver), duty, firstMovement,
+                    preUseMinutes, new FleetioInspectionMatch(inspection, true)));
+                representedTrailerDrivers.Add($"{trailer.Id}|{driver.Id}");
+            }
+        }
+
+        // Finally add planned allocations that have no observed evidence yet. This preserves the
+        // useful "expected check" view, but planning is now only an enrichment/expectation source
+        // rather than the gate that decides whether real compliance evidence is visible.
         foreach (var load in loads.Where(x => x.DriverId != null && x.VehicleId != null).OrderBy(x => x.Reference))
         {
             var driver = drivers.FirstOrDefault(x => x.Id == load.DriverId);
             var vehicle = vehicles.FirstOrDefault(x => x.Id == load.VehicleId);
             if (driver is null || vehicle is null) continue;
 
-            var duty = FindDuty(duties, driver, vehicle);
-            var firstMovement = FirstMovement(tracking, vehicle, duty?.DutyStartUtc, dayEndUtc);
-            var preUseMinutes = duty is null ? null : FindPreUse(preUse, duty, vehicle)?.PreDriveOtherWorkMinutes;
-            var employment = EmploymentType(driver);
-            var vehicleFleetioId = !string.IsNullOrWhiteSpace(vehicle.FleetioId) ? vehicle.FleetioId : MappingExternalKey(mappings, "Vehicle", vehicle.Id);
-            var vehicleInspection = await InspectionFor(vehicleFleetioId, driver, duty?.DutyStartUtc, firstMovement, dayStartUtc, dayEndUtc, fleetioCache, ct);
-            rows.Add(BuildRow("Vehicle", vehicle.Id, vehicle.Registration, load.Reference, driver, employment, duty, firstMovement, preUseMinutes, vehicleInspection));
+            var vehicleKey = $"{vehicle.Id}|{driver.Id}";
+            if (!representedVehicleDrivers.Contains(vehicleKey))
+            {
+                var duty = FindDuty(duties, driver, vehicle);
+                var firstMovement = FirstMovement(tracking, vehicle, duty?.DutyStartUtc, dayEndUtc);
+                var preUseMinutes = duty is null ? null : FindPreUse(preUse, duty, vehicle)?.PreDriveOtherWorkMinutes;
+                var vehicleFleetioId = !string.IsNullOrWhiteSpace(vehicle.FleetioId) ? vehicle.FleetioId : MappingExternalKey(mappings, "Vehicle", vehicle.Id);
+                var vehicleInspection = await InspectionFor(vehicleFleetioId, driver, duty?.DutyStartUtc, firstMovement, dayStartUtc, dayEndUtc, fleetioCache, ct);
+                rows.Add(BuildRow("Vehicle", vehicle.Id, vehicle.Registration, load.Reference, driver, EmploymentType(driver), duty, firstMovement, preUseMinutes, vehicleInspection));
+                representedVehicleDrivers.Add(vehicleKey);
+            }
 
             if (load.TrailerId is Guid trailerId)
             {
                 var trailer = trailers.FirstOrDefault(x => x.Id == trailerId);
-                if (trailer is not null)
-                {
-                    var trailerFleetioId = MappingExternalKey(mappings, "Trailer", trailer.Id);
-                    var trailerInspection = await InspectionFor(trailerFleetioId, driver, duty?.DutyStartUtc, firstMovement, dayStartUtc, dayEndUtc, fleetioCache, ct);
-                    rows.Add(BuildRow("Trailer", trailer.Id, trailer.TrailerNumber, load.Reference, driver, employment, duty, firstMovement, preUseMinutes, trailerInspection));
-                }
+                if (trailer is null) continue;
+                var trailerKey = $"{trailer.Id}|{driver.Id}";
+                if (representedTrailerDrivers.Contains(trailerKey)) continue;
+                var duty = FindDuty(duties, driver, vehicle);
+                var firstMovement = FirstMovement(tracking, vehicle, duty?.DutyStartUtc, dayEndUtc);
+                var preUseMinutes = duty is null ? null : FindPreUse(preUse, duty, vehicle)?.PreDriveOtherWorkMinutes;
+                var trailerFleetioId = MappingExternalKey(mappings, "Trailer", trailer.Id);
+                var trailerInspection = await InspectionFor(trailerFleetioId, driver, duty?.DutyStartUtc, firstMovement, dayStartUtc, dayEndUtc, fleetioCache, ct);
+                rows.Add(BuildRow("Trailer", trailer.Id, trailer.TrailerNumber, load.Reference, driver, EmploymentType(driver), duty, firstMovement, preUseMinutes, trailerInspection));
+                representedTrailerDrivers.Add(trailerKey);
             }
         }
 
-        foreach (var duty in duties)
-        {
-            var vehicle = vehicles.FirstOrDefault(v => VehicleKeys(v).Contains(Normalise(duty.VehicleCode), StringComparer.OrdinalIgnoreCase));
-            if (vehicle is null) continue;
-            var driver = drivers.FirstOrDefault(d => DriverMatches(d, duty));
-            if (driver is null) continue;
-            if (rows.Any(row => row.AssetType == "Vehicle" && row.AssetId == vehicle.Id && row.DriverId == driver.Id && row.TachoDutyStartUtc is not null && Math.Abs((row.TachoDutyStartUtc.Value - duty.DutyStartUtc).TotalMinutes) <= 5)) continue;
-
-            var firstMovement = FirstMovement(tracking, vehicle, duty.DutyStartUtc, dayEndUtc);
-            var preUseMinutes = FindPreUse(preUse, duty, vehicle)?.PreDriveOtherWorkMinutes;
-            var fleetioId = !string.IsNullOrWhiteSpace(vehicle.FleetioId) ? vehicle.FleetioId : MappingExternalKey(mappings, "Vehicle", vehicle.Id);
-            var inspection = await InspectionFor(fleetioId, driver, duty.DutyStartUtc, firstMovement, dayStartUtc, dayEndUtc, fleetioCache, ct);
-            rows.Add(BuildRow("Vehicle", vehicle.Id, vehicle.Registration, "Unplanned vehicle use", driver, EmploymentType(driver), duty, firstMovement, preUseMinutes, inspection));
-        }
-
         rows = rows
-            .GroupBy(x => $"{x.AssetType}|{x.AssetId}|{x.DriverId}|{x.TachoDutyStartUtc:O}", StringComparer.OrdinalIgnoreCase)
-            .Select(group => group.OrderBy(row => row.RunReference).First())
+            .GroupBy(x => $"{x.AssetType}|{x.AssetId}|{x.DriverId}|{x.TachoDutyStartUtc:O}|{x.FleetioInspectionId}", StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.OrderByDescending(row => !string.IsNullOrWhiteSpace(row.RunReference)).ThenBy(row => row.RunReference).First())
             .OrderBy(row => row.Status == "Non-compliant" ? 0 : row.Status == "Review" ? 1 : row.Status == "Paper evidence required" ? 2 : 3)
             .ThenBy(row => row.AssetType)
             .ThenBy(row => row.AssetName)
+            .ThenBy(row => row.DriverName)
             .ToList();
 
         return new ComplianceReport(
@@ -139,7 +235,7 @@ public sealed class DailyComplianceController(
                 tachoError is null ? "Available" : $"Partial: {tachoError}",
                 fleetioOptions.IsConfigured ? "Available" : "Not configured",
                 "Available from stored DOT/Falcon movement",
-                "Available from TMS planning register"),
+                "Optional run enrichment from TMS planning register"),
             new ComplianceSummary(
                 rows.Count,
                 rows.Count(x => x.Status == "Compliant"),
@@ -169,7 +265,9 @@ public sealed class DailyComplianceController(
             "Paper evidence required" => "Agency driver has no matching Fleetio walkround. Verify the paper check and keep the driver visible for Fleetio adoption.",
             "Review" when !fleetioOk && inspection.Evidence is not null => "A Fleetio walkround exists in the pre-use window, but it was not submitted by the matched driver.",
             "Review" when !fleetioOk => "Fleetio walkround is missing for this driver/asset handover.",
+            "Review" when duty is null => "Fleetio walkround is confirmed, but no matching Tacho duty was found for this driver and vehicle.",
             "Review" => "Fleetio is confirmed but Tacho does not show 15 minutes of pre-drive other work.",
+            _ when duty is null => "Fleetio walkround is missing and no matching Tacho duty was found for this driver and vehicle.",
             _ => "Fleetio walkround is missing and Tacho pre-drive other work is below the 15 minute SLH standard."
         };
 
@@ -178,6 +276,27 @@ public sealed class DailyComplianceController(
             inspection.Evidence?.SubmittedAtUtc, inspection.Evidence?.User, inspection.DriverMatched,
             inspection.Evidence?.FailedItems, status, reason);
     }
+
+    private static ComplianceRow BuildUnmatchedInspectionRow(string assetType, Guid assetId, string assetName,
+        FleetioInspectionEvidence inspection, DateTimeOffset? firstMovement)
+        => new(assetType, assetId, assetName, string.Empty, Guid.Empty,
+            string.IsNullOrWhiteSpace(inspection.User) ? "Unmatched Fleetio user" : inspection.User!, "Unknown",
+            null, null, firstMovement, inspection.Id, inspection.Form, inspection.SubmittedAtUtc, inspection.User,
+            false, inspection.FailedItems, "Review",
+            "Fleetio walkround is present, but its submitter could not be matched to an active TMS driver. Run allocation is intentionally not inferred.");
+
+    private static ComplianceRow BuildTrackerOnlyRow(Vehicle vehicle, DateTimeOffset firstMovement)
+        => new("Vehicle", vehicle.Id, vehicle.Registration, string.Empty, Guid.Empty,
+            "Driver not identified", "Unknown", null, null, firstMovement, null, null, null, null, null, null,
+            "Review", "DOT/Falcon movement proves this vehicle was used, but no matching Tacho duty or Fleetio walkround identified the driver. Investigate the missing pre-use evidence.");
+
+    private static string RunReferenceFor(IEnumerable<Load> loads, Guid driverId, Guid vehicleId)
+        => string.Join(", ", loads.Where(load => load.DriverId == driverId && load.VehicleId == vehicleId)
+            .OrderBy(load => load.Reference).Select(load => load.Reference).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.OrdinalIgnoreCase));
+
+    private static string RunReferenceForTrailer(IEnumerable<Load> loads, Guid driverId, Guid trailerId)
+        => string.Join(", ", loads.Where(load => load.DriverId == driverId && load.TrailerId == trailerId)
+            .OrderBy(load => load.Reference).Select(load => load.Reference).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.OrdinalIgnoreCase));
 
     private async Task<List<Load>> ReadLoads(DateOnly date, CancellationToken ct)
     {
@@ -361,7 +480,8 @@ public sealed class DailyComplianceController(
     }
 
     private static TachoDriverDutyStatus? FindDuty(IEnumerable<TachoDriverDutyStatus> duties, Driver driver, Vehicle vehicle)
-        => duties.Where(duty => DriverMatches(driver, duty) || VehicleKeys(vehicle).Contains(Normalise(duty.VehicleCode), StringComparer.OrdinalIgnoreCase)).OrderBy(duty => duty.DutyStartUtc).FirstOrDefault();
+        => duties.Where(duty => DriverMatches(driver, duty) && VehicleKeys(vehicle).Contains(Normalise(duty.VehicleCode), StringComparer.OrdinalIgnoreCase))
+            .OrderBy(duty => duty.DutyStartUtc).FirstOrDefault();
 
     private static PreUseEvidence? FindPreUse(IEnumerable<PreUseEvidence> items, TachoDriverDutyStatus duty, Vehicle vehicle)
         => items.Where(item => item.MemberCode == duty.MemberCode)
