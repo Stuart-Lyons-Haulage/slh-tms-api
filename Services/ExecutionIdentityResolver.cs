@@ -2,9 +2,9 @@ using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Tracking;
-
+ 
 namespace Slh.Tms.Api.Services;
-
+ 
 /// <summary>
 /// Canonical identity correlation used by TachoMaster, DOT/Falcon, geofence and ETA execution.
 /// Keeps the same TMS vehicle/driver identity through the operational evidence chain.
@@ -19,7 +19,7 @@ public static class ExecutionIdentityResolver
         var result = vehicles.ToDictionary(
             vehicle => vehicle.Id,
             vehicle => ExpandAliases(new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }));
-
+ 
         if (vehicles.Count == 0) return result;
         var ids = vehicles.Select(vehicle => vehicle.Id).ToList();
         try
@@ -43,7 +43,7 @@ public static class ExecutionIdentityResolver
         }
         return result;
     }
-
+ 
     /// <summary>
     /// Returns the same operational aliases used by the Fleet Status screen. This includes
     /// the complete identifier plus safe UK fleet/registration suffixes. Three-character
@@ -53,11 +53,11 @@ public static class ExecutionIdentityResolver
     {
         var normalised = NormaliseVehicle(value);
         if (normalised.Length == 0) return [];
-
+ 
         var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { normalised };
         for (var length = 3; length <= Math.Min(6, normalised.Length); length++)
             aliases.Add(normalised[^length..]);
-
+ 
         if (normalised.Length == 7 &&
             char.IsLetter(normalised[0]) &&
             char.IsLetter(normalised[1]) &&
@@ -66,13 +66,13 @@ public static class ExecutionIdentityResolver
         {
             aliases.Add(normalised[2..]);
         }
-
+ 
         if (normalised.EndsWith("H", StringComparison.OrdinalIgnoreCase) && normalised.Length > 4)
             aliases.Add(normalised[..^1]);
-
+ 
         return aliases;
     }
-
+ 
     public static bool MatchesVehicleIdentifier(
         IReadOnlyCollection<string> aliases,
         string? providerIdentifier)
@@ -81,7 +81,7 @@ public static class ExecutionIdentityResolver
         var keys = ExpandAliases(aliases);
         return VehicleAliasVariants(providerIdentifier).Any(keys.Contains);
     }
-
+ 
     public static VehicleLiveStatus? MatchLive(
         IReadOnlyCollection<string> aliases,
         IEnumerable<VehicleLiveStatus> statuses)
@@ -91,7 +91,7 @@ public static class ExecutionIdentityResolver
             .OrderByDescending(status => status.LastEventTimeUtc)
             .FirstOrDefault();
     }
-
+ 
     public static TachoVehicleDriverStatus? MatchTacho(
         IReadOnlyCollection<string> aliases,
         IReadOnlyDictionary<string, TachoVehicleDriverStatus> statuses)
@@ -117,7 +117,51 @@ public static class ExecutionIdentityResolver
             .Select(item => item.Status)
             .FirstOrDefault();
     }
-
+ 
+    /// <summary>
+    /// Picks the tacho duty for a specific planned driver on a vehicle, out of every duty that
+    /// vehicle had that day (see TachoMasterClient.GetAllDriverStatusesByVehicleAsync). Falls
+    /// back to the most recent duty on the vehicle — the same behaviour as MatchTacho — when the
+    /// planned driver has no matching duty, so callers that don't have a driver to hand (or whose
+    /// driver genuinely isn't in TachoMaster yet) keep working exactly as before.
+    /// </summary>
+    public static TachoVehicleDriverStatus? MatchTachoForDriver(
+        IReadOnlyCollection<string> aliases,
+        Driver? driver,
+        IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> statusesByVehicle)
+    {
+        var keys = ExpandAliases(aliases);
+        var candidates = statusesByVehicle
+            .Select(pair => new
+            {
+                MatchLength = VehicleAliasVariants(pair.Key).Where(keys.Contains).Select(alias => alias.Length).DefaultIfEmpty(0).Max(),
+                pair.Value
+            })
+            .Where(item => item.MatchLength > 0)
+            .SelectMany(item => item.Value.Select(status => (item.MatchLength, Status: status)))
+            .Where(item => item.Status.DriveAvailableTodayMinutes is not null)
+            .ToList();
+ 
+        if (candidates.Count == 0) return null;
+ 
+        if (driver is not null)
+        {
+            var driverMatch = candidates
+                .Where(item => DriverMatches(driver, item.Status))
+                .OrderByDescending(item => item.MatchLength)
+                .ThenByDescending(item => item.Status.DutyStartUtc)
+                .Select(item => item.Status)
+                .FirstOrDefault();
+            if (driverMatch is not null) return driverMatch;
+        }
+ 
+        return candidates
+            .OrderByDescending(item => item.MatchLength)
+            .ThenByDescending(item => item.Status.DutyStartUtc)
+            .Select(item => item.Status)
+            .First();
+    }
+ 
     public static DateTimeOffset? FirstMovement(
         IReadOnlyCollection<string> aliases,
         IEnumerable<VehicleTrackingEvent> events,
@@ -131,14 +175,14 @@ public static class ExecutionIdentityResolver
             .Select(item => (DateTimeOffset?)item.EventTimeUtc)
             .FirstOrDefault();
     }
-
+ 
     public static bool DriverMatches(Driver? allocatedDriver, TachoVehicleDriverStatus? tacho)
     {
         if (allocatedDriver is null || tacho is null) return false;
         if (!string.IsNullOrWhiteSpace(tacho.EmployeeNumber) &&
             string.Equals(NormaliseVehicle(tacho.EmployeeNumber), NormaliseVehicle(allocatedDriver.EmployeeNumber), StringComparison.OrdinalIgnoreCase))
             return true;
-
+ 
         var tachoName = NormalisePerson(tacho.DriverName);
         if (tachoName.Length == 0) return false;
         var plannedNames = new[] { allocatedDriver.TachoName, allocatedDriver.DisplayName }
@@ -147,24 +191,24 @@ public static class ExecutionIdentityResolver
             .Where(value => value.Length > 0);
         return plannedNames.Any(value => string.Equals(value, tachoName, StringComparison.OrdinalIgnoreCase));
     }
-
+ 
     public static string DriverEvidenceStatus(Driver? allocatedDriver, TachoVehicleDriverStatus? tacho)
     {
         if (allocatedDriver is null) return "NoPlannedDriver";
         if (tacho is null) return "NoTachoDuty";
         return DriverMatches(allocatedDriver, tacho) ? "Matched" : "Mismatch";
     }
-
+ 
     public static string NormaliseVehicle(string? value) =>
         new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
-
+ 
     public static string NormalisePerson(string? value) =>
         string.Join(' ', (value ?? string.Empty)
             .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
             .Select(word => new string(word.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray()))
             .Where(word => word.Length > 0)
             .OrderBy(word => word, StringComparer.Ordinal));
-
+ 
     private static HashSet<string> ExpandAliases(IEnumerable<string?> values)
     {
         var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -173,7 +217,7 @@ public static class ExecutionIdentityResolver
                 aliases.Add(alias);
         return aliases;
     }
-
+ 
     private static bool SchemaUnavailable(Exception exception)
     {
         var message = exception.GetBaseException().Message;
@@ -183,3 +227,4 @@ public static class ExecutionIdentityResolver
                message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase);
     }
 }
+ 
