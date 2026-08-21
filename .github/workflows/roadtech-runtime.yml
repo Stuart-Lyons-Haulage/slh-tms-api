@@ -1,0 +1,33 @@
+name: Verify RoadTech live tracking
+
+on:
+  workflow_run:
+    workflows: ["CD - Deploy TMS to Azure Container Apps"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-roadtech:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check RoadTech current GPS feed
+        run: |
+          set -euo pipefail
+          endpoint="https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io/api/v1/health/tracking"
+          for attempt in {1..18}; do
+            body_file="$(mktemp)"
+            status="$(curl --silent --output "$body_file" --write-out "%{http_code}" "$endpoint" || true)"
+            cat "$body_file" || true
+            if test "$status" = "200"; then
+              rm -f "$body_file"
+              exit 0
+            fi
+            rm -f "$body_file"
+            echo "RoadTech live GPS health returned HTTP $status; retrying ($attempt/18)..."
+            sleep 10
+          done
+          echo "RoadTech live GPS health did not recover after deployment."
+          exit 1
