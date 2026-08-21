@@ -13,46 +13,68 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
     {
         var batch = records.ToList();
         var receivedAt = DateTimeOffset.UtcNow;
+
         foreach (var record in batch)
         {
             var rawIdentifier = (record.VehicleIdentifier ?? string.Empty).Trim();
             var canonicalIdentifier = ExecutionIdentityResolver.NormaliseVehicle(rawIdentifier);
             if (canonicalIdentifier.Length == 0) continue;
-            if (!string.Equals(rawIdentifier, canonicalIdentifier, StringComparison.OrdinalIgnoreCase) && NormalisedProviderIdentifiers.TryAdd(rawIdentifier, 0))
+
+            if (!string.Equals(rawIdentifier, canonicalIdentifier, StringComparison.OrdinalIgnoreCase) &&
+                NormalisedProviderIdentifiers.TryAdd(rawIdentifier, 0))
             {
                 try
                 {
                     var floor = receivedAt.AddHours(-36);
-                    await db.VehicleTrackingEvents.Where(item => item.ProviderName == "RoadTech Falcon" && item.VehicleIdentifier == rawIdentifier && item.EventTimeUtc >= floor)
-                        .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.VehicleIdentifier, canonicalIdentifier), ct);
-                    var rawLiveRows = await db.VehicleLiveStatuses.Where(item => item.VehicleIdentifier == rawIdentifier).ToListAsync(ct);
-                    foreach (var rawLive in rawLiveRows) rawLive.VehicleIdentifier = canonicalIdentifier;
+                    await db.VehicleTrackingEvents
+                        .Where(item =>
+                            item.ProviderName == "RoadTech Falcon" &&
+                            item.VehicleIdentifier == rawIdentifier &&
+                            item.EventTimeUtc >= floor)
+                        .ExecuteUpdateAsync(
+                            setters => setters.SetProperty(item => item.VehicleIdentifier, canonicalIdentifier),
+                            ct);
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     db.ChangeTracker.Clear();
-                    logger.LogWarning(exception, "RoadTech identifier normalisation was skipped for {VehicleIdentifier}; live ingestion will continue.", rawIdentifier);
+                    logger.LogWarning(
+                        exception,
+                        "RoadTech history identifier normalisation was skipped for {VehicleIdentifier}; live ingestion will continue.",
+                        rawIdentifier);
                 }
             }
 
             var hasGps = record.Latitude is not null && record.Longitude is not null;
             if (hasGps)
             {
-                var exists = await db.VehicleTrackingEvents.AnyAsync(item => item.ProviderName == "RoadTech Falcon" && item.ProviderEventId == record.ProviderEventId, ct);
-                if (!exists) db.VehicleTrackingEvents.Add(new VehicleTrackingEvent
+                var existsLocally = db.VehicleTrackingEvents.Local.Any(item =>
+                    item.ProviderName == "RoadTech Falcon" &&
+                    item.ProviderEventId == record.ProviderEventId);
+
+                var exists = existsLocally || await db.VehicleTrackingEvents.AnyAsync(
+                    item =>
+                        item.ProviderName == "RoadTech Falcon" &&
+                        item.ProviderEventId == record.ProviderEventId,
+                    ct);
+
+                if (!exists)
                 {
-                    ProviderName = "RoadTech Falcon",
-                    ProviderEventId = record.ProviderEventId,
-                    VehicleIdentifier = canonicalIdentifier,
-                    EventTimeUtc = record.EventTimeUtc,
-                    Latitude = record.Latitude!.Value,
-                    Longitude = record.Longitude!.Value,
-                    SpeedKph = record.SpeedKph,
-                    IgnitionOn = record.IgnitionOn,
-                    IsMoving = record.IsMoving,
-                    RawPayload = record.RawPayload,
-                    MatchStatus = "Received"
-                });
+                    db.VehicleTrackingEvents.Add(new VehicleTrackingEvent
+                    {
+                        ProviderName = "RoadTech Falcon",
+                        ProviderEventId = record.ProviderEventId,
+                        VehicleIdentifier = canonicalIdentifier,
+                        EventTimeUtc = record.EventTimeUtc,
+                        Latitude = record.Latitude!.Value,
+                        Longitude = record.Longitude!.Value,
+                        SpeedKph = record.SpeedKph,
+                        IgnitionOn = record.IgnitionOn,
+                        IsMoving = record.IsMoving,
+                        RawPayload = record.RawPayload,
+                        MatchStatus = "Received"
+                    });
+                }
             }
 
             // Historical recovery is geofence evidence only. It must never create or
@@ -60,14 +82,11 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
             // not prove that the vehicle position itself is current.
             if (!markAsLiveReceipt || !hasGps) continue;
 
-            var live = await db.VehicleLiveStatuses
-                .Where(item => item.VehicleIdentifier == canonicalIdentifier || item.VehicleIdentifier == rawIdentifier)
-                .OrderByDescending(item => item.LastEventTimeUtc)
-                .FirstOrDefaultAsync(ct);
+            var live = await ResolveLiveStatusAsync(rawIdentifier, canonicalIdentifier, ct);
 
             if (live is null)
             {
-                db.VehicleLiveStatuses.Add(new VehicleLiveStatus
+                live = new VehicleLiveStatus
                 {
                     VehicleIdentifier = canonicalIdentifier,
                     LastEventTimeUtc = record.EventTimeUtc,
@@ -79,8 +98,10 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
                     IsMoving = record.IsMoving,
                     LastKnownStatus = record.Status,
                     CurrentDriverName = record.DriverName,
-                    CurrentDriverCardNumber = record.DriverCardNumber
-                });
+                    CurrentDriverCardNumber = record.DriverCardNumber,
+                    UpdatedAtUtc = receivedAt
+                };
+                db.VehicleLiveStatuses.Add(live);
             }
             else
             {
@@ -90,6 +111,7 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
                 // confirming this GPS position. Stationary vehicles may keep the same
                 // provider event timestamp throughout a long unload.
                 live.LastReceivedAtUtc = receivedAt;
+                live.UpdatedAtUtc = receivedAt;
 
                 // Do not roll the stored position backwards if RoadTech includes an older
                 // event in the current-fleet response.
@@ -107,7 +129,86 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
                 }
             }
         }
+
         if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync(ct);
-        if (batch.Count > 0) logger.LogDebug("Stored {RecordCount} RoadTech telemetry record(s) for table-free geofence progression.", batch.Count);
+        if (batch.Count > 0)
+            logger.LogDebug("Stored {RecordCount} RoadTech telemetry record(s) for table-free geofence progression.", batch.Count);
     }
+
+    private async Task<VehicleLiveStatus?> ResolveLiveStatusAsync(
+        string rawIdentifier,
+        string canonicalIdentifier,
+        CancellationToken ct)
+    {
+        var localCandidates = db.VehicleLiveStatuses.Local
+            .Where(item =>
+                SameCanonical(item.VehicleIdentifier, canonicalIdentifier) ||
+                string.Equals(item.VehicleIdentifier, rawIdentifier, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        var databaseCandidates = await db.VehicleLiveStatuses
+            .Where(item =>
+                item.VehicleIdentifier == canonicalIdentifier ||
+                item.VehicleIdentifier == rawIdentifier)
+            .ToListAsync(ct);
+
+        var candidates = localCandidates
+            .Concat(databaseCandidates)
+            .GroupBy(item => item.Id)
+            .Select(group => group.First())
+            .ToList();
+
+        if (candidates.Count == 0) return null;
+
+        // Prefer an already-persisted canonical row. If historical/raw aliases have
+        // created more than one logical live row, collapse them before renaming so the
+        // unique VehicleIdentifier index cannot fail during SaveChanges.
+        var keeper = candidates
+            .OrderByDescending(item => db.Entry(item).State != EntityState.Added)
+            .ThenByDescending(item => string.Equals(item.VehicleIdentifier, canonicalIdentifier, StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(item => item.LastReceivedAtUtc)
+            .ThenByDescending(item => item.LastEventTimeUtc)
+            .First();
+
+        var duplicates = candidates.Where(item => item.Id != keeper.Id).ToList();
+        var hasPersistedDuplicates = duplicates.Any(item => db.Entry(item).State != EntityState.Added);
+
+        foreach (var duplicate in duplicates)
+        {
+            if (duplicate.LastReceivedAtUtc > keeper.LastReceivedAtUtc)
+            {
+                keeper.LastReceivedAtUtc = duplicate.LastReceivedAtUtc;
+                keeper.UpdatedAtUtc = duplicate.UpdatedAtUtc;
+            }
+
+            if (duplicate.LastEventTimeUtc > keeper.LastEventTimeUtc)
+            {
+                keeper.LastEventTimeUtc = duplicate.LastEventTimeUtc;
+                keeper.Latitude = duplicate.Latitude;
+                keeper.Longitude = duplicate.Longitude;
+                keeper.SpeedKph = duplicate.SpeedKph;
+                keeper.IgnitionOn = duplicate.IgnitionOn;
+                keeper.IsMoving = duplicate.IsMoving;
+                keeper.LastKnownStatus = duplicate.LastKnownStatus;
+            }
+
+            db.VehicleLiveStatuses.Remove(duplicate);
+        }
+
+        if (hasPersistedDuplicates)
+        {
+            // Delete aliases before changing the keeper to the canonical identifier.
+            // This avoids a transient unique-key collision in SQL Server.
+            await db.SaveChangesAsync(ct);
+        }
+
+        keeper.VehicleIdentifier = canonicalIdentifier;
+        return keeper;
+    }
+
+    private static bool SameCanonical(string value, string canonicalIdentifier) =>
+        string.Equals(
+            ExecutionIdentityResolver.NormaliseVehicle(value),
+            canonicalIdentifier,
+            StringComparison.OrdinalIgnoreCase);
 }

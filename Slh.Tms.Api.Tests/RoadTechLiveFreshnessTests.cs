@@ -126,4 +126,101 @@ public sealed class RoadTechLiveFreshnessTests
         var live = await db.VehicleLiveStatuses.SingleAsync();
         Assert.Equal(originalReceived, live.LastReceivedAtUtc);
     }
+
+    [Fact]
+    public async Task Raw_and_canonical_live_aliases_are_consolidated_before_refresh()
+    {
+        var options = new DbContextOptionsBuilder<TmsDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using var db = new TmsDbContext(options);
+
+        var old = DateTimeOffset.UtcNow.AddHours(-4);
+        db.VehicleLiveStatuses.AddRange(
+            new VehicleLiveStatus
+            {
+                VehicleIdentifier = "AB 12 CDE",
+                LastEventTimeUtc = old,
+                LastReceivedAtUtc = old,
+                Latitude = 50.1m,
+                Longitude = -1.0m,
+                LastKnownStatus = "Old raw alias"
+            },
+            new VehicleLiveStatus
+            {
+                VehicleIdentifier = "AB12CDE",
+                LastEventTimeUtc = old.AddMinutes(5),
+                LastReceivedAtUtc = old.AddMinutes(5),
+                Latitude = 50.2m,
+                Longitude = -1.1m,
+                LastKnownStatus = "Old canonical"
+            });
+        await db.SaveChangesAsync();
+
+        var store = new DotTrackingTelemetryStore(db, NullLogger<DotTrackingTelemetryStore>.Instance);
+        var current = new DotTelemetryRecord(
+            "alias-refresh",
+            "AB 12 CDE",
+            DateTimeOffset.UtcNow,
+            50.9m,
+            -1.3m,
+            72,
+            true,
+            true,
+            "Received",
+            "{}");
+
+        await store.PersistAsync([current], CancellationToken.None, markAsLiveReceipt: true);
+
+        var live = await db.VehicleLiveStatuses.SingleAsync();
+        Assert.Equal("AB12CDE", live.VehicleIdentifier);
+        Assert.Equal(50.9m, live.Latitude);
+        Assert.Equal(-1.3m, live.Longitude);
+        Assert.Equal(72, live.SpeedKph);
+    }
+
+    [Fact]
+    public async Task Same_batch_aliases_share_one_live_status_row()
+    {
+        var options = new DbContextOptionsBuilder<TmsDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using var db = new TmsDbContext(options);
+
+        var now = DateTimeOffset.UtcNow;
+        var records = new[]
+        {
+            new DotTelemetryRecord(
+                "batch-alias-1",
+                "AB 12 CDE",
+                now.AddSeconds(-10),
+                50.8m,
+                -1.2m,
+                40,
+                true,
+                true,
+                "Received",
+                "{}"),
+            new DotTelemetryRecord(
+                "batch-alias-2",
+                "AB12CDE",
+                now,
+                50.9m,
+                -1.3m,
+                50,
+                true,
+                true,
+                "Received",
+                "{}")
+        };
+
+        var store = new DotTrackingTelemetryStore(db, NullLogger<DotTrackingTelemetryStore>.Instance);
+        await store.PersistAsync(records, CancellationToken.None, markAsLiveReceipt: true);
+
+        var live = await db.VehicleLiveStatuses.SingleAsync();
+        Assert.Equal("AB12CDE", live.VehicleIdentifier);
+        Assert.Equal(50.9m, live.Latitude);
+        Assert.Equal(50, live.SpeedKph);
+        Assert.Equal(2, await db.VehicleTrackingEvents.CountAsync());
+    }
 }
