@@ -37,7 +37,9 @@ public sealed class FleetioResilientSyncController(
 
         try
         {
-            var assets = await fleetioClient.GetVehiclesAsync(100, includeDueDates: false, ct);
+            // Pull due-date enrichment as part of the same master sync so Fleetio is the
+            // authoritative source for the compliance fields displayed against vehicles.
+            var assets = await fleetioClient.GetVehiclesAsync(100, includeDueDates: true, ct);
             var trailerAssets = assets.Where(IsTrailer).ToList();
             var vehicleAssets = assets.Where(asset => !IsTrailer(asset)).ToList();
             var vehicles = await db.Set<Vehicle>().ToListAsync(ct);
@@ -77,15 +79,8 @@ public sealed class FleetioResilientSyncController(
 
                 foreach (var duplicate in candidates.Where(item => item.Id != keeper.Id))
                 {
-                    keeper.Type ??= duplicate.Type;
-                    keeper.StandardCapacity ??= duplicate.StandardCapacity;
-                    keeper.EuroCapacity ??= duplicate.EuroCapacity;
-                    await ReassignTrailerLoads(duplicate.Id, keeper.Id, ct);
-                    duplicate.Active = false;
+                    await MergeTrailerInto(duplicate, keeper, matchingMappings, ct);
                     trailerDuplicatesMerged++;
-
-                    foreach (var mapping in matchingMappings.Where(item => item.Active && string.Equals(item.TmsEntityType, "Trailer", StringComparison.OrdinalIgnoreCase) && item.TmsEntityId == duplicate.Id))
-                        mapping.TmsEntityId = keeper.Id;
                 }
             }
 
@@ -113,6 +108,11 @@ public sealed class FleetioResilientSyncController(
                         FleetioId = Clip(asset.Id, 80),
                         FleetioName = Clip(asset.Name, 160),
                         FleetioStatus = Clip(asset.Status, 80),
+                        FleetioVor = asset.Vor,
+                        FleetioPmiDueUtc = asset.PmiDueUtc,
+                        FleetioMotDueUtc = asset.MotDueUtc,
+                        FleetioServiceStatus = Clip(asset.ServiceStatus, 80),
+                        FleetioLastSyncedUtc = DateTimeOffset.UtcNow,
                         Active = true
                     };
                     db.Set<Vehicle>().Add(vehicle);
@@ -125,6 +125,11 @@ public sealed class FleetioResilientSyncController(
                     vehicle.FleetioId = Clip(asset.Id, 80);
                     vehicle.FleetioName = Clip(asset.Name, 160);
                     vehicle.FleetioStatus = Clip(asset.Status, 80);
+                    vehicle.FleetioVor = asset.Vor;
+                    vehicle.FleetioPmiDueUtc = asset.PmiDueUtc;
+                    vehicle.FleetioMotDueUtc = asset.MotDueUtc;
+                    vehicle.FleetioServiceStatus = Clip(asset.ServiceStatus, 80);
+                    vehicle.FleetioLastSyncedUtc = DateTimeOffset.UtcNow;
                     if (!string.IsNullOrWhiteSpace(asset.FleetNumber)) vehicle.FleetNumber = Clip(asset.FleetNumber, 40);
                     vehicle.Active = true;
                     vehiclesUpdated++;
@@ -146,16 +151,18 @@ public sealed class FleetioResilientSyncController(
                 }
 
                 var mappedId = MappingTarget(matchingMappings, asset.Id, "Trailer");
-                var trailer = mappedId is not null ? trailers.FirstOrDefault(item => item.Id == mappedId.Value && item.Active) : null;
-                trailer ??= !string.IsNullOrWhiteSpace(canonicalNumber)
+                var mappedMatch = mappedId is not null ? trailers.FirstOrDefault(item => item.Id == mappedId.Value && item.Active) : null;
+                var canonicalMatch = !string.IsNullOrWhiteSpace(canonicalNumber)
                     ? trailers.FirstOrDefault(item => item.Active && string.Equals(CanonicalTrailerNumber(item.TrailerNumber), canonicalNumber, StringComparison.OrdinalIgnoreCase))
                     : null;
-                trailer ??= !string.IsNullOrWhiteSpace(fleetioName)
+                var nameMatch = !string.IsNullOrWhiteSpace(fleetioName)
                     ? trailers.FirstOrDefault(item => item.Active && Normalise(item.TrailerNumber) == Normalise(fleetioName))
                     : null;
-                trailer ??= !string.IsNullOrWhiteSpace(cNumber)
+                var cNumberMatch = !string.IsNullOrWhiteSpace(cNumber)
                     ? trailers.FirstOrDefault(item => item.Active && Normalise(item.TrailerNumber) == Normalise(cNumber))
                     : null;
+
+                var trailer = mappedMatch ?? canonicalMatch ?? nameMatch ?? cNumberMatch;
 
                 if (trailer is null)
                 {
@@ -173,7 +180,18 @@ public sealed class FleetioResilientSyncController(
                 }
                 else
                 {
-                    // Never replace the SLH operational identity with Fleetio's short numeric name or C-number.
+                    // Fleetio can identify the same trailer by both the SLH number/name and
+                    // a C-number registration. Merge every matching legacy row into one keeper
+                    // so original capacities and load history are retained on the linked record.
+                    foreach (var duplicate in new[] { mappedMatch, canonicalMatch, nameMatch, cNumberMatch }
+                                 .Where(item => item is not null && item.Id != trailer.Id)
+                                 .Cast<Trailer>()
+                                 .DistinctBy(item => item.Id))
+                    {
+                        await MergeTrailerInto(duplicate, trailer, matchingMappings, ct);
+                        trailerDuplicatesMerged++;
+                    }
+
                     if (!string.IsNullOrWhiteSpace(canonicalNumber)) trailer.TrailerNumber = canonicalNumber;
                     trailer.Type = Clip(asset.Type, 80) ?? trailer.Type;
                     trailer.StandardCapacity ??= 26;
@@ -269,6 +287,19 @@ public sealed class FleetioResilientSyncController(
                 message = $"Fleetio asset sync failed before the TMS master could be saved: {exception.GetBaseException().Message}"
             });
         }
+    }
+
+    private async Task MergeTrailerInto(Trailer duplicate, Trailer keeper, List<IntegrationMapping> mappings, CancellationToken ct)
+    {
+        keeper.Type ??= duplicate.Type;
+        keeper.StandardCapacity ??= duplicate.StandardCapacity;
+        keeper.EuroCapacity ??= duplicate.EuroCapacity;
+        keeper.Notes ??= duplicate.Notes;
+        await ReassignTrailerLoads(duplicate.Id, keeper.Id, ct);
+        duplicate.Active = false;
+
+        foreach (var mapping in mappings.Where(item => item.Active && string.Equals(item.TmsEntityType, "Trailer", StringComparison.OrdinalIgnoreCase) && item.TmsEntityId == duplicate.Id))
+            mapping.TmsEntityId = keeper.Id;
     }
 
     private async Task ReassignTrailerLoads(Guid fromTrailerId, Guid toTrailerId, CancellationToken ct)
