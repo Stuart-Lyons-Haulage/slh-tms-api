@@ -120,10 +120,10 @@ public static class ExecutionIdentityResolver
  
     /// <summary>
     /// Picks the tacho duty for a specific planned driver on a vehicle, out of every duty that
-    /// vehicle had that day (see TachoMasterClient.GetAllDriverStatusesByVehicleAsync). Falls
-    /// back to the most recent duty on the vehicle — the same behaviour as MatchTacho — when the
-    /// planned driver has no matching duty, so callers that don't have a driver to hand (or whose
-    /// driver genuinely isn't in TachoMaster yet) keep working exactly as before.
+    /// vehicle had that day (see TachoMasterClient.GetAllDriverStatusesByVehicleAsync). When a
+    /// planned driver is supplied this deliberately fails closed if that driver has no matching
+    /// Tacho duty: another driver's hours must never be attached to the load. Callers with no
+    /// planned driver fall back to the most recent duty on the vehicle, matching MatchTacho.
     /// </summary>
     public static TachoVehicleDriverStatus? MatchTachoForDriver(
         IReadOnlyCollection<string> aliases,
@@ -146,13 +146,12 @@ public static class ExecutionIdentityResolver
  
         if (driver is not null)
         {
-            var driverMatch = candidates
+            return candidates
                 .Where(item => DriverMatches(driver, item.Status))
                 .OrderByDescending(item => item.MatchLength)
                 .ThenByDescending(item => item.Status.DutyStartUtc)
                 .Select(item => item.Status)
                 .FirstOrDefault();
-            if (driverMatch is not null) return driverMatch;
         }
  
         return candidates
@@ -227,4 +226,3 @@ public static class ExecutionIdentityResolver
                message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase);
     }
 }
- 
