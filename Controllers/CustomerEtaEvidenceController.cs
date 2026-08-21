@@ -128,7 +128,9 @@ public sealed class CustomerEtaEvidenceController(
             var signOnToMovementMinutes = tacho is not null && firstMovement is not null
                 ? Math.Max(0, (int)Math.Floor((firstMovement.Value - tacho.DutyStartUtc).TotalMinutes))
                 : (int?)null;
-            var latestTracking = live?.LastEventTimeUtc;
+            var latestTracking = live is null
+                ? (DateTimeOffset?)null
+                : live.LastReceivedAtUtc >= live.LastEventTimeUtc ? live.LastReceivedAtUtc : live.LastEventTimeUtc;
             var driverEvidenceStatus = ExecutionIdentityResolver.DriverEvidenceStatus(driver, tacho);
             var evidenceStatus = RunExecutionEvidenceRules.EvidenceStatus(tacho, latestTracking, now);
             var evidenceExplanation = RunExecutionEvidenceRules.Explanation(tacho, firstMovement, latestTracking, now) +
@@ -154,10 +156,11 @@ public sealed class CustomerEtaEvidenceController(
                 var eta = stop.PlannedArrivalUtc;
                 var etaSource = eta is null ? "Unavailable" : "Planned";
 
-                // Customer promises require a proved remaining sequence and a tracker fix
-                // no older than five minutes. Anything weaker remains visible but cannot be
-                // labelled as a customer-ready live ETA.
-                if (geofenceEvidenceAvailable && current is not null && stop.Longitude is not null && stop.Latitude is not null && live is not null && now - live.LastEventTimeUtc <= RunExecutionEvidenceRules.MaximumLiveTrackingAge)
+                // Customer promises require a proved remaining sequence and a tracker
+                // observation received no older than five minutes. A stationary vehicle can
+                // legitimately keep the same provider event timestamp while Falcon continues
+                // to confirm the same current position on each poll.
+                if (geofenceEvidenceAvailable && current is not null && stop.Longitude is not null && stop.Latitude is not null && latestTracking is not null && now - latestTracking.Value <= RunExecutionEvidenceRules.MaximumLiveTrackingAge)
                 {
                     try
                     {
@@ -184,15 +187,15 @@ public sealed class CustomerEtaEvidenceController(
                 }
 
                 var windowStart = order?.DeliveryWindowStartUtc;
-                var windowEnd = order?.DeliveryWindowEndUtc ?? (IsDeliveryStop(stop) ? stop.PlannedArrivalUtc : null);
+                var windowEnd = order?.DeliveryWindowEndUtc;
                 var tachoAssessment = etaSource == "Live"
                     ? OperationsController.TachoAssessment(tacho, cumulativeDrivingMinutes, breakDelayMinutes)
                     : etaSource == "Estimated"
                         ? (Status: "EstimateOnly", Explanation: "Azure Maps live truck routing was unavailable for at least one remaining leg. The resilient road estimate is advisory and is not customer-promise ready.")
                         : (Status: "RouteUnavailable", Explanation: !geofenceEvidenceAvailable
                             ? "Geofence execution was unavailable, so the remaining route could not be proved and no live customer ETA was issued."
-                            : live is not null && now - live.LastEventTimeUtc > RunExecutionEvidenceRules.MaximumLiveTrackingAge
-                                ? "Tracking is older than five minutes, so no live customer ETA is issued until a fresh RoadTech/DOT position arrives."
+                            : latestTracking is not null && now - latestTracking.Value > RunExecutionEvidenceRules.MaximumLiveTrackingAge
+                                ? "Tracking has not been received for more than five minutes, so no live customer ETA is issued until a fresh RoadTech/DOT observation arrives."
                                 : tacho is null
                                     ? "Live route and current TachoMaster duty are unavailable; this ETA must be verified before export."
                                     : "TachoMaster matched the vehicle, but no fresh live route could be calculated; the planned ETA has not been adjusted for a break.");
