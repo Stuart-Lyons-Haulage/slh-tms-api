@@ -178,6 +178,11 @@ public static class ExecutionIdentityResolver
     public static bool DriverMatches(Driver? allocatedDriver, TachoVehicleDriverStatus? tacho)
     {
         if (allocatedDriver is null || tacho is null) return false;
+        if (!string.IsNullOrWhiteSpace(allocatedDriver.TachoCardNumber) && !string.IsNullOrWhiteSpace(tacho.CardNumber) &&
+            string.Equals(NormaliseVehicle(allocatedDriver.TachoCardNumber), NormaliseVehicle(tacho.CardNumber), StringComparison.OrdinalIgnoreCase))
+            return true;
+        if (int.TryParse(allocatedDriver.TachoMasterDriverId, out var memberCode) && memberCode > 0 && memberCode == tacho.MemberCode)
+            return true;
         if (!string.IsNullOrWhiteSpace(tacho.EmployeeNumber) &&
             string.Equals(NormaliseVehicle(tacho.EmployeeNumber), NormaliseVehicle(allocatedDriver.EmployeeNumber), StringComparison.OrdinalIgnoreCase))
             return true;
