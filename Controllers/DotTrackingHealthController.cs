@@ -35,7 +35,6 @@ public sealed class DotTrackingHealthController(
             // Resolve inside the guarded block so a malformed runtime setting can never
             // fail during controller construction and surface as an opaque HTTP 500.
             var trackingClient = services.GetRequiredService<DotTrackingClient>();
-            var telemetryStore = services.GetRequiredService<DotTrackingTelemetryStore>();
 
             var providerRows = await trackingClient.GetLatestVehicleEventsAsync(cancellationToken);
             var records = providerRows.Select(DotTelemetryRecord.FromProvider).ToList();
@@ -57,10 +56,10 @@ public sealed class DotTrackingHealthController(
                 });
             }
 
-            // A successful current-telemetry health probe is also a valid live observation,
-            // so seed the same cache used by the TV rather than waiting for the next poll.
-            await telemetryStore.PersistAsync(records, cancellationToken, markAsLiveReceipt: true);
-
+            // Health probes must be read-only. The one-minute ingestion service owns SQL
+            // persistence and live-status freshness. Writing the same current telemetry here
+            // can race that worker on the provider-event unique key and create a false 503
+            // even though Falcon is healthy. Azure SQL readiness is checked independently.
             return Ok(new
             {
                 status = "healthy",
