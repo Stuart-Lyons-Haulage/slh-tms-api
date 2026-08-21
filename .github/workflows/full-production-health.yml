@@ -1,0 +1,79 @@
+name: Full Production Health
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/full-production-health.yml'
+  workflow_run:
+    workflows:
+      - 'CD - Deploy TMS to Azure Container Apps'
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  production-health:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    env:
+      API_BASE: https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+      PORTAL_BASE: https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+    steps:
+      - name: Verify API, SQL, schema and live integrations
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          probe_200() {
+            local label="$1"
+            local url="$2"
+            local body_file
+            body_file="$(mktemp)"
+            for attempt in {1..18}; do
+              status="$(curl --silent --show-error --output "$body_file" --write-out "%{http_code}" "$url" || true)"
+              echo "[$label] HTTP $status"
+              cat "$body_file" || true
+              echo
+              if test "$status" = "200"; then
+                rm -f "$body_file"
+                return 0
+              fi
+              sleep 10
+            done
+            rm -f "$body_file"
+            echo "$label did not become healthy."
+            return 1
+          }
+
+          probe_200 'Core API' "$API_BASE/api/v1/health"
+          probe_200 'Azure SQL' "$API_BASE/api/v1/health/ready"
+          probe_200 'Operational data/schema' "$API_BASE/api/v1/diagnostics/data-readiness"
+          probe_200 'RoadTech current GPS' "$API_BASE/api/v1/health/tracking"
+          probe_200 'TachoMaster' "$API_BASE/api/v1/health/tachomaster"
+          probe_200 'Falcon geofence payload' "$API_BASE/api/v1/health/geofences"
+          probe_200 'Portal' "$PORTAL_BASE/"
+
+      - name: Verify protected operational routes fail closed
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          expect_auth() {
+            local label="$1"
+            local method="$2"
+            local url="$3"
+            local data="${4:-}"
+            if test "$method" = "POST"; then
+              status="$(curl --silent --output /dev/null --write-out "%{http_code}" -X POST -H 'Content-Type: application/json' --data "$data" "$url")"
+            else
+              status="$(curl --silent --output /dev/null --write-out "%{http_code}" "$url")"
+            fi
+            echo "[$label] HTTP $status"
+            test "$status" = "401" -o "$status" = "403"
+          }
+
+          expect_auth 'Customers' GET "$API_BASE/api/v1/customers"
+          expect_auth 'Planner import' POST "$API_BASE/api/v1/planning/import-plan" '{}'
+          expect_auth 'Info mailbox preview' POST "$API_BASE/api/v1/order-intake/email/preview" '{}'
