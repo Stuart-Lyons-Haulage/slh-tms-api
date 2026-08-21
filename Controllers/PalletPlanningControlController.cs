@@ -48,8 +48,6 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
                 .OrderBy(x => loadById.TryGetValue(x.LoadId, out var load) ? load.Reference : x.LoadId.ToString())
                 .ToList();
 
-            // Runs created before quantity allocation existed remain valid. Once any explicit allocation
-            // exists for the order, including a zero, the explicit quantities become authoritative.
             if (!hasExplicitAllocations && allocations.Count == 0)
             {
                 var linkedLoad = loads.FirstOrDefault(load => load.Status != LoadStatus.Cancelled && load.Stops.Any(stop => stop.OrderId == order.Id));
@@ -64,6 +62,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
             var group = collection;
             var destination = Destination(detail, order);
             var temperature = detail?.Temperature;
+            var palletType = NormalisePalletType(detail?.PalletType);
             var late = firstRunCreated is not null && order.CreatedAtUtc > firstRunCreated.Value.AddMinutes(15);
             if (late) lateCount++;
 
@@ -97,6 +96,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
                 destination,
                 planningGroup = group,
                 temperature,
+                palletType,
                 source = detail?.Source,
                 receivedAtUtc = detail?.UpdatedAtUtc ?? order.CreatedAtUtc,
                 lateAddition = late,
@@ -260,9 +260,10 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
                 var destination = Text(root, "deliveryLocation", "deliverySite", "delivery", "destination", "depot", "stallNumber");
                 var group = Text(root, "planningGroup", "palletOrderGroup", "collectionGroup");
                 var temperature = Text(root, "temperature", "temperatureC", "temp", "temperatureRequirement") ?? Tagged(Text(root, "driverInstructions", "notes"), "Temperature");
+                var palletType = Text(root, "palletType", "palletName", "palletFormat", "pallet");
                 var pallets = Int(root, "pallets", "palletQty", "palletQuantity", "quantity");
                 var amended = row.ReviewNote?.Contains("Amended from Manage Jobs", StringComparison.OrdinalIgnoreCase) == true;
-                result[Normalise(reference)] = new OrderDetail(reference, collection, destination, group, temperature, pallets, row.Source, row.ReviewedAtUtc ?? row.ReceivedAtUtc, amended);
+                result[Normalise(reference)] = new OrderDetail(reference, collection, destination, group, temperature, palletType, pallets, row.Source, row.ReviewedAtUtc ?? row.ReceivedAtUtc, amended);
             }
             catch (JsonException) { }
         }
@@ -361,8 +362,6 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
 
     private static int EffectiveOrderedPallets(TransportOrder order, OrderDetail? detail)
     {
-        // A register-backed order amended in Manage Jobs updates its audited staged payload rather than
-        // an older duplicate TransportOrders row. In that case the amended payload must be authoritative.
         var value = detail?.Amended == true ? detail.Pallets ?? order.Pallets : order.Pallets ?? detail?.Pallets;
         return Math.Max(value ?? 0, 0);
     }
@@ -387,6 +386,15 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
         if (!string.IsNullOrWhiteSpace(order.StallNumber)) return order.StallNumber!;
         var tagged = Tagged(order.DriverInstructions, "Depot") ?? Tagged(order.DriverInstructions, "Delivery site") ?? Tagged(order.DriverInstructions, "Destination");
         return string.IsNullOrWhiteSpace(tagged) ? "Destination not mapped" : tagged;
+    }
+
+    private static string? NormalisePalletType(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var clean = value.Trim();
+        if (clean.Contains("euro", StringComparison.OrdinalIgnoreCase)) return "Euro";
+        if (clean.Contains("std", StringComparison.OrdinalIgnoreCase) || clean.Contains("standard", StringComparison.OrdinalIgnoreCase)) return "Standard";
+        return clean;
     }
 
     private static string? Tagged(string? notes, string label)
@@ -414,7 +422,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
     private static bool SchemaUnavailable(Exception ex) => ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || ex.GetBaseException().Message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
 
-    private sealed record OrderDetail(string Reference, string? Collection, string? Destination, string? Group, string? Temperature, int? Pallets, string? Source, DateTimeOffset UpdatedAtUtc, bool Amended);
+    private sealed record OrderDetail(string Reference, string? Collection, string? Destination, string? Group, string? Temperature, string? PalletType, int? Pallets, string? Source, DateTimeOffset UpdatedAtUtc, bool Amended);
     private sealed record AllocationState(Guid OrderId, Guid LoadId, int Pallets, DateOnly Date, DateTimeOffset UpdatedAtUtc, string? UpdatedBy);
     public sealed record PalletAllocationRequest(Guid OrderId, Guid LoadId, DateOnly Date, int Pallets, string? Note);
 
