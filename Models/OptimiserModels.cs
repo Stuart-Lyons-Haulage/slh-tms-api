@@ -34,3 +34,14 @@ public sealed record PlanProposalResult(
     string? CreatedBy,
     IReadOnlyList<PlanProposalWarning> Warnings,
     IReadOnlyList<PlanProposalRunResult> Runs);
+
+public sealed record PlanningDriverEvidence(
+    Guid DriverId,
+    int RequiredDriveMinutes,
+    int? DriveAvailableTodayMinutes,
+    DateTimeOffset? TachoObservedAtUtc,
+    DateTimeOffset EvidenceCapturedAtUtc,
+    int ConsecutiveDays,
+    bool AlternatingSixthDayAllowed);
+public sealed record PlanningConstraintResult(string Code, bool Passed, string Severity, string Explanation);
+public sealed record PlanningConstraintEvaluation(string Classification, IReadOnlyList<PlanningConstraintResult> Results);
