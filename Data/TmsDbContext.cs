@@ -17,6 +17,8 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<OrderMovement> OrderMovements => Set<OrderMovement>();
     public DbSet<OrderRevision> OrderRevisions => Set<OrderRevision>();
     public DbSet<OrderSourceLine> OrderSourceLines => Set<OrderSourceLine>();
+    public DbSet<OrderReferenceIssue> OrderReferenceIssues => Set<OrderReferenceIssue>();
+    public DbSet<ReferenceChaseEvent> ReferenceChaseEvents => Set<ReferenceChaseEvent>();
     public DbSet<TransportOrder> TransportOrders => Set<TransportOrder>();
     public DbSet<Load> Loads => Set<Load>();
     public DbSet<LoadStop> LoadStops => Set<LoadStop>();
@@ -106,6 +108,10 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<OrderRevision>().HasOne<StagedImport>().WithMany().HasForeignKey(x => x.StagedImportId).OnDelete(DeleteBehavior.Restrict);
         b.Entity<OrderSourceLine>().HasIndex(x => new { x.RevisionId, x.SourceRowKey }).IsUnique();
         b.Entity<OrderSourceLine>().HasOne<OrderRevision>().WithMany().HasForeignKey(x => x.RevisionId).OnDelete(DeleteBehavior.Restrict);
+        b.Entity<OrderReferenceIssue>().HasIndex(x => new { x.MovementId, x.ReferenceType, x.Status });
+        b.Entity<OrderReferenceIssue>().HasOne<OrderMovement>().WithMany().HasForeignKey(x => x.MovementId).OnDelete(DeleteBehavior.Restrict);
+        b.Entity<ReferenceChaseEvent>().HasIndex(x => new { x.ReferenceIssueId, x.OccurredAtUtc });
+        b.Entity<ReferenceChaseEvent>().HasOne<OrderReferenceIssue>().WithMany().HasForeignKey(x => x.ReferenceIssueId).OnDelete(DeleteBehavior.Restrict);
         b.Entity<TransportOrder>().HasIndex(x => x.Reference).IsUnique();
         b.Entity<TransportOrder>().HasIndex(x => x.CollectionDate);
         b.Entity<TransportOrder>().HasIndex(x => x.SourceStagedImportId);

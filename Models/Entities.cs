@@ -184,6 +184,32 @@ public sealed class OrderSourceLine
     [MaxLength(120)] public string? LoadReference { get; set; }
     public required string PayloadJson { get; set; }
 }
+public enum ReferenceIssueStatus { Open, Resolved }
+public sealed class OrderReferenceIssue
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid MovementId { get; set; }
+    public Guid? TransportOrderId { get; set; }
+    [MaxLength(40)] public required string ReferenceType { get; set; }
+    public ReferenceIssueStatus Status { get; set; } = ReferenceIssueStatus.Open;
+    [MaxLength(200)] public string? Owner { get; set; }
+    [MaxLength(1000)] public string? Notes { get; set; }
+    public DateTimeOffset DetectedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? ResolvedAtUtc { get; set; }
+    [MaxLength(200)] public string? ResolvedBy { get; set; }
+}
+public sealed class ReferenceChaseEvent
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ReferenceIssueId { get; set; }
+    [MaxLength(40)] public required string EventType { get; set; }
+    [MaxLength(320)] public string? Recipient { get; set; }
+    [MaxLength(500)] public string? ProviderMessageId { get; set; }
+    [MaxLength(500)] public string? ProviderThreadId { get; set; }
+    [MaxLength(1000)] public string? Note { get; set; }
+    [MaxLength(200)] public string? Actor { get; set; }
+    public DateTimeOffset OccurredAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
 public enum OrderStatus { Draft, ReadyToPlan, Planned, InTransit, Delivered, Cancelled }
 public sealed class TransportOrder
 {
