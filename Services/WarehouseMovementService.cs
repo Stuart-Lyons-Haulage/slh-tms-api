@@ -23,10 +23,13 @@ public sealed class WarehouseMovementService(TmsDbContext db)
         var revisionIds = lines.Values.Select(x => x.RevisionId).Distinct().ToList();
         var revisions = await db.OrderRevisions.AsNoTracking().Where(x => revisionIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
         var movementIds = revisions.Values.Select(x => x.MovementId).Distinct().ToList();
-        var orders = await db.TransportOrders.AsNoTracking().Where(x => x.SourceMovementId != null && movementIds.Contains(x.SourceMovementId.Value)).ToListAsync(ct);
+        var linkedOrders = await db.TransportOrders.AsNoTracking().Where(x => x.SourceMovementId != null).ToListAsync(ct);
+        var orders = linkedOrders.Where(x => movementIds.Contains(x.SourceMovementId!.Value)).ToList();
         var orderByMovement = orders.GroupBy(x => x.SourceMovementId!.Value).ToDictionary(x => x.Key, x => x.First());
-        var vehicles = await db.Vehicles.AsNoTracking().Where(x => loads.Where(l => l.VehicleId != null).Select(l => l.VehicleId!.Value).Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
-        var trailers = await db.Trailers.AsNoTracking().Where(x => loads.Where(l => l.TrailerId != null).Select(l => l.TrailerId!.Value).Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        var vehicleIds = loads.Where(x => x.VehicleId is not null).Select(x => x.VehicleId!.Value).Distinct().ToList();
+        var trailerIds = loads.Where(x => x.TrailerId is not null).Select(x => x.TrailerId!.Value).Distinct().ToList();
+        var vehicles = await db.Vehicles.AsNoTracking().Where(x => vehicleIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        var trailers = await db.Trailers.AsNoTracking().Where(x => trailerIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
 
         var inbound = new List<WarehouseMovementRow>();
         var outbound = new List<WarehouseMovementRow>();
