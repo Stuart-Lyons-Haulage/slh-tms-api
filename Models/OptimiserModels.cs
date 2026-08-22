@@ -45,3 +45,22 @@ public sealed record PlanningDriverEvidence(
     bool AlternatingSixthDayAllowed);
 public sealed record PlanningConstraintResult(string Code, bool Passed, string Severity, string Explanation);
 public sealed record PlanningConstraintEvaluation(string Classification, IReadOnlyList<PlanningConstraintResult> Results);
+public sealed record PlanningCandidateEvidence(
+    Guid VehicleId,
+    Guid DriverId,
+    decimal? CollectionLatitude,
+    decimal? DeliveryLatitude,
+    decimal? LiveLatitude,
+    DateTimeOffset? LiveObservedAtUtc,
+    decimal? PreviousEndLatitude,
+    DateTimeOffset? PreviousEndObservedAtUtc,
+    int ConsecutiveDays,
+    DateTimeOffset EvidenceCapturedAtUtc,
+    decimal UtilisationPercent);
+public sealed record PlanningScoreComponent(string Code, decimal Value, string Explanation);
+public sealed record PlanningCandidateScore(
+    decimal Total,
+    string PositionSource,
+    decimal? StartLatitude,
+    IReadOnlyList<PlanningScoreComponent> Components,
+    IReadOnlyList<string> Explanations);
