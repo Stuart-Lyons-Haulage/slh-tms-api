@@ -32,13 +32,13 @@ public sealed class RunProgressController(
                 // Keep Operations progression on the same current Falcon evidence as
                 // the Hisense route board. SQL remains the resilience fallback when
                 // RoadTech is temporarily unavailable.
-                var records = (await trackingClient.GetLatestVehicleEventsAsync(ct))
+                var trackingRecords = (await trackingClient.GetLatestVehicleEventsAsync(ct))
                     .Select(DotTelemetryRecord.FromProvider)
                     .Where(record => record.Latitude is not null && record.Longitude is not null)
                     .ToList();
 
-                if (records.Count > 0)
-                    await telemetryStore.PersistAsync(records, ct, markAsLiveReceipt: true);
+                if (trackingRecords.Count > 0)
+                    await telemetryStore.PersistAsync(trackingRecords, ct, markAsLiveReceipt: true);
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
