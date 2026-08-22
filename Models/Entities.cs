@@ -207,9 +207,13 @@ public sealed class PlanProposalRun
     public int Sequence { get; set; }
     [MaxLength(80)] public required string Reference { get; set; }
     [MaxLength(40)] public required string Classification { get; set; }
+    public Guid? DriverId { get; set; }
+    public Guid? VehicleId { get; set; }
+    [MaxLength(40)] public string? PositionSource { get; set; }
     public int CapacityPallets { get; set; }
     public int PlannedPallets { get; set; }
     public decimal Score { get; set; }
+    public required string ScoreComponentsJson { get; set; }
     public required string ExplanationJson { get; set; }
     public List<PlanProposalAllocation> Allocations { get; set; } = [];
 }

@@ -28,11 +28,17 @@ BEGIN
         Sequence int NOT NULL,
         Reference nvarchar(80) NOT NULL,
         Classification nvarchar(40) NOT NULL,
+        DriverId uniqueidentifier NULL,
+        VehicleId uniqueidentifier NULL,
+        PositionSource nvarchar(40) NULL,
         CapacityPallets int NOT NULL,
         PlannedPallets int NOT NULL,
         Score decimal(10,2) NOT NULL,
+        ScoreComponentsJson nvarchar(max) NOT NULL,
         ExplanationJson nvarchar(max) NOT NULL,
-        CONSTRAINT FK_PlanProposalRuns_PlanProposals_ProposalId FOREIGN KEY(ProposalId) REFERENCES dbo.PlanProposals(Id) ON DELETE CASCADE
+        CONSTRAINT FK_PlanProposalRuns_PlanProposals_ProposalId FOREIGN KEY(ProposalId) REFERENCES dbo.PlanProposals(Id) ON DELETE CASCADE,
+        CONSTRAINT FK_PlanProposalRuns_Drivers_DriverId FOREIGN KEY(DriverId) REFERENCES dbo.Drivers(Id),
+        CONSTRAINT FK_PlanProposalRuns_Vehicles_VehicleId FOREIGN KEY(VehicleId) REFERENCES dbo.Vehicles(Id)
     );
     CREATE UNIQUE INDEX IX_PlanProposalRuns_ProposalId_Sequence ON dbo.PlanProposalRuns(ProposalId, Sequence);
 END;

@@ -16,9 +16,13 @@ public sealed record PlanProposalRunResult(
     int Sequence,
     string Reference,
     string Classification,
+    Guid? DriverId,
+    Guid? VehicleId,
+    string? PositionSource,
     int CapacityPallets,
     int PlannedPallets,
     decimal Score,
+    IReadOnlyList<PlanningScoreComponent> ScoreComponents,
     IReadOnlyList<string> Explanations,
     IReadOnlyList<PlanProposalAllocationResult> Allocations);
 public sealed record PlanProposalResult(
