@@ -184,12 +184,16 @@ if (!app.Environment.IsEnvironment("Testing"))
             logger.LogWarning(
                 "Canonicalised trailer register: {Renamed} numeric trailers renamed, {Merged} duplicate aliases merged, {LoadsReassigned} loads, {MappingsReassigned} mappings and {AuditEntriesReassigned} audit entries reassigned.",
                 trailerMerge.Renamed, trailerMerge.Merged, trailerMerge.LoadsReassigned, trailerMerge.MappingsReassigned, trailerMerge.AuditEntriesReassigned);
+
+        var tachoMaster = scope.ServiceProvider.GetRequiredService<TachoMasterClient>();
+        await PreEmailCleanSlateMaintenance.ApplyOnceAsync(db, tachoMaster, logger, CancellationToken.None);
+
         var register = scope.ServiceProvider.GetRequiredService<StagingService>();
         await register.LinkRegistered(25, CancellationToken.None);
     }
     catch (Exception ex)
     {
-        logger.LogError(ex, "TMS schema repair failed during startup; continuing so health and diagnostics remain available.");
+        logger.LogError(ex, "TMS schema repair or startup maintenance failed; continuing so health and diagnostics remain available.");
     }
 }
 
