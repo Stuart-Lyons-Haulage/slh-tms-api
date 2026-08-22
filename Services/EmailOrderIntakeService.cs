@@ -51,8 +51,8 @@ public sealed class EmailOrderIntakeService
         if (string.IsNullOrWhiteSpace(request.MessageId))
             return EmailIntakeParseResult.Ignored("MessageId is required for idempotent mailbox intake.");
 
-        if (sender.EndsWith("@lyonshaulage.com", StringComparison.OrdinalIgnoreCase))
-            return EmailIntakeParseResult.Ignored("Internal Lyons email ignored so planner outputs cannot loop back into Orders.");
+        if (LooksTmsLoopback(subject, sender, body))
+            return EmailIntakeParseResult.Ignored("Internal TMS intake/test notification ignored so system outputs cannot loop back into Orders.");
 
         if (LooksOperationalOnly(subject, body))
             return EmailIntakeParseResult.Ignored("Operational request detected; it was not converted into a transport order automatically.");
@@ -534,7 +534,23 @@ public sealed class EmailOrderIntakeService
         return value.Contains("night shunting", StringComparison.OrdinalIgnoreCase)
             || value.Contains("current stock levels", StringComparison.OrdinalIgnoreCase)
             || value.Contains("ETA for tonight", StringComparison.OrdinalIgnoreCase)
-            || value.Contains("missing PO request log", StringComparison.OrdinalIgnoreCase);
+            || value.Contains("missing PO request log", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("fleetio.com", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("notifications@fleetio.com", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("failed inspection", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("walk round check", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("walkround check", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("drivers unit walk round", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool LooksTmsLoopback(string subject, string sender, string body)
+    {
+        if (!sender.EndsWith("@lyonshaulage.com", StringComparison.OrdinalIgnoreCase)) return false;
+        var value = $"{subject} {body}";
+        return value.Contains("SLH TMS Intake Queue", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("TMS Intake Queue", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("Live Trigger Check", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("Order Capture", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string NormaliseKey(string? value) =>
