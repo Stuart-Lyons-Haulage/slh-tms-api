@@ -184,6 +184,47 @@ public sealed class OrderSourceLine
     [MaxLength(120)] public string? LoadReference { get; set; }
     public required string PayloadJson { get; set; }
 }
+public sealed class PlanProposal
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public DateOnly PlanningDate { get; set; }
+    [MaxLength(10)] public required string Period { get; set; }
+    public int Version { get; set; } = 1;
+    [MaxLength(40)] public required string Status { get; set; }
+    [MaxLength(40)] public required string Classification { get; set; }
+    [MaxLength(128)] public required string InputHash { get; set; }
+    public required string EvidenceJson { get; set; }
+    public required string WarningsJson { get; set; }
+    public DateTimeOffset EvidenceCapturedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    [MaxLength(200)] public string? CreatedBy { get; set; }
+    public List<PlanProposalRun> Runs { get; set; } = [];
+}
+public sealed class PlanProposalRun
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ProposalId { get; set; }
+    public int Sequence { get; set; }
+    [MaxLength(80)] public required string Reference { get; set; }
+    [MaxLength(40)] public required string Classification { get; set; }
+    public int CapacityPallets { get; set; }
+    public int PlannedPallets { get; set; }
+    public decimal Score { get; set; }
+    public required string ExplanationJson { get; set; }
+    public List<PlanProposalAllocation> Allocations { get; set; } = [];
+}
+public sealed class PlanProposalAllocation
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ProposalRunId { get; set; }
+    public Guid SourceLineId { get; set; }
+    public int Pallets { get; set; }
+    [MaxLength(40)] public string? PalletType { get; set; }
+    [MaxLength(200)] public string? CollectionSite { get; set; }
+    [MaxLength(200)] public string? DeliverySite { get; set; }
+    public int CollectionSequence { get; set; }
+    public int DeliverySequence { get; set; }
+}
 public enum ReferenceIssueStatus { Open, Resolved }
 public sealed class OrderReferenceIssue
 {
