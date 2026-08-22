@@ -10,6 +10,47 @@ namespace Slh.Tms.Api.Tests;
 public sealed class PlanningOptimiserTests
 {
     [Fact]
+    public void Candidate_ranking_prefers_fresh_position_then_previous_end_and_explains_southbound_return_home()
+    {
+        // Defect protected: stale tracking overrides yesterday's known end location,
+        // or Southbound/return-home preferences alter ranking without an explanation.
+        var now = new DateTimeOffset(2026, 8, 23, 12, 0, 0, TimeSpan.Zero);
+        var ranker = new PlanningCandidateRanker();
+
+        var fresh = ranker.Score(new PlanningCandidateEvidence(
+            VehicleId: Guid.NewGuid(),
+            DriverId: Guid.NewGuid(),
+            CollectionLatitude: 54.0m,
+            DeliveryLatitude: 51.5m,
+            LiveLatitude: 54.2m,
+            LiveObservedAtUtc: now.AddMinutes(-8),
+            PreviousEndLatitude: 52.0m,
+            PreviousEndObservedAtUtc: now.AddDays(-1),
+            ConsecutiveDays: 5,
+            EvidenceCapturedAtUtc: now,
+            UtilisationPercent: 90m));
+        var stale = ranker.Score(new PlanningCandidateEvidence(
+            VehicleId: Guid.NewGuid(),
+            DriverId: Guid.NewGuid(),
+            CollectionLatitude: 54.0m,
+            DeliveryLatitude: 51.5m,
+            LiveLatitude: 55.0m,
+            LiveObservedAtUtc: now.AddHours(-7),
+            PreviousEndLatitude: 53.8m,
+            PreviousEndObservedAtUtc: now.AddDays(-1),
+            ConsecutiveDays: 5,
+            EvidenceCapturedAtUtc: now,
+            UtilisationPercent: 90m));
+
+        Assert.Equal("LiveTracking", fresh.PositionSource);
+        Assert.Equal("PreviousRunEnd", stale.PositionSource);
+        Assert.Contains(fresh.Components, component => component.Code == "SouthboundPositioning" && component.Value > 0);
+        Assert.Contains(fresh.Components, component => component.Code == "ReturnHome" && component.Value > 0);
+        Assert.Contains(fresh.Explanations, explanation => explanation.Contains("southbound", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(fresh.Explanations, explanation => explanation.Contains("home", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void Constraint_evidence_blocks_known_hours_breach_and_marks_stale_evidence_unverified()
     {
         // Defect protected: a known legal hours breach or stale Tacho snapshot is
