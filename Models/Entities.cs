@@ -114,7 +114,7 @@ public sealed class FuelPrice
     [MaxLength(500)] public string? Notes { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
 }
-public enum StagingStatus { PendingReview, Approved, Rejected, Promoted, Failed }
+public enum StagingStatus { PendingReview, Approved, Rejected, Promoted, Failed, Archived }
 public sealed class StagedImport
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -129,10 +129,23 @@ public sealed class StagedImport
     [MaxLength(1000)] public string? ReviewNote { get; set; }
     public byte[] RowVersion { get; set; } = [];
 }
+public sealed class StagedImportEvent
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid StagedImportId { get; set; }
+    [MaxLength(40)] public required string EventType { get; set; }
+    public StagingStatus? PreviousStatus { get; set; }
+    public StagingStatus NewStatus { get; set; }
+    public required string PayloadJson { get; set; }
+    [MaxLength(1000)] public string? Note { get; set; }
+    [MaxLength(200)] public string? Actor { get; set; }
+    public DateTimeOffset OccurredAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
 public enum OrderStatus { Draft, ReadyToPlan, Planned, InTransit, Delivered, Cancelled }
 public sealed class TransportOrder
 {
     public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? SourceStagedImportId { get; set; }
     [MaxLength(80)] public required string Reference { get; set; }
     [MaxLength(40)] public required string CustomerCode { get; set; }
     public DateOnly CollectionDate { get; set; }

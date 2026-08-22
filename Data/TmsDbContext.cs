@@ -13,6 +13,7 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<Site> Sites => Set<Site>();
     public DbSet<MarketContact> MarketContacts => Set<MarketContact>();
     public DbSet<StagedImport> StagedImports => Set<StagedImport>();
+    public DbSet<StagedImportEvent> StagedImportEvents => Set<StagedImportEvent>();
     public DbSet<TransportOrder> TransportOrders => Set<TransportOrder>();
     public DbSet<Load> Loads => Set<Load>();
     public DbSet<LoadStop> LoadStops => Set<LoadStop>();
@@ -92,8 +93,12 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
 
         b.Entity<StagedImport>().HasIndex(x => x.IdempotencyKey).IsUnique();
         b.Entity<StagedImport>().Property(x => x.RowVersion).IsRowVersion();
+        b.Entity<StagedImportEvent>().HasIndex(x => new { x.StagedImportId, x.OccurredAtUtc });
+        b.Entity<StagedImportEvent>().HasOne<StagedImport>().WithMany().HasForeignKey(x => x.StagedImportId).OnDelete(DeleteBehavior.Restrict);
         b.Entity<TransportOrder>().HasIndex(x => x.Reference).IsUnique();
         b.Entity<TransportOrder>().HasIndex(x => x.CollectionDate);
+        b.Entity<TransportOrder>().HasIndex(x => x.SourceStagedImportId);
+        b.Entity<TransportOrder>().HasOne<StagedImport>().WithMany().HasForeignKey(x => x.SourceStagedImportId).OnDelete(DeleteBehavior.Restrict);
         b.Entity<Load>().HasIndex(x => x.Reference).IsUnique();
         b.Entity<Load>().HasIndex(x => x.PlanningDate);
         b.Entity<LoadStop>().HasIndex(x => new { x.LoadId, x.Sequence }).IsUnique();

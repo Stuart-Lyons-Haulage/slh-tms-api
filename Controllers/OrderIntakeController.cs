@@ -95,6 +95,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 stagedPayload,
                 $"Info mailbox / {(request.SenderAddress ?? "unknown sender").Trim()}"));
             db.StagedImports.Add(item);
+            db.StagedImportEvents.Add(StagingAudit.Create(item, "Received"));
             await db.SaveChangesAsync(ct);
             staged++;
 
@@ -156,10 +157,12 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var now = DateTimeOffset.UtcNow;
         foreach (var candidate in matching)
         {
+            var previous = candidate.Status;
             candidate.Status = StagingStatus.Rejected;
             candidate.ReviewedAtUtc = now;
             candidate.ReviewedBy = "Mailbox snapshot supersession";
             candidate.ReviewNote = $"Superseded by a newer NWF/Info mailbox snapshot ({currentMessageId}). Original evidence retained.";
+            db.StagedImportEvents.Add(StagingAudit.Create(candidate, "Superseded", previous, candidate.ReviewNote, candidate.ReviewedBy));
         }
         await db.SaveChangesAsync(ct);
         return matching.Count;
@@ -186,10 +189,12 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             }
             catch (JsonException) { }
 
+            var previous = candidate.Status;
             candidate.Status = StagingStatus.Rejected;
             candidate.ReviewedAtUtc = now;
             candidate.ReviewedBy = "Mailbox supersession";
             candidate.ReviewNote = $"Superseded automatically by a newer Info mailbox message ({currentMessageId}). Original evidence retained.";
+            db.StagedImportEvents.Add(StagingAudit.Create(candidate, "Superseded", previous, candidate.ReviewNote, candidate.ReviewedBy));
             count++;
         }
         if (count > 0) await db.SaveChangesAsync(ct);

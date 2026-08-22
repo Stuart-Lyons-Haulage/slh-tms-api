@@ -82,11 +82,19 @@ public sealed class StagingService(TmsDbContext db)
     {
         var item = await db.StagedImports.SingleOrDefaultAsync(x => x.Id == id, ct) ?? throw new KeyNotFoundException("Staged item not found");
         if (item.Status != StagingStatus.PendingReview) throw new InvalidOperationException("Only PendingReview items can be reviewed");
-        item.ReviewedAtUtc = DateTimeOffset.UtcNow; item.ReviewedBy = user.Identity?.Name ?? user.FindFirstValue("oid"); item.ReviewNote = note;
-        if (!approve) item.Status = StagingStatus.Rejected;
+        var actor = user.Identity?.Name ?? user.FindFirstValue("oid");
+        item.ReviewedAtUtc = DateTimeOffset.UtcNow; item.ReviewedBy = actor; item.ReviewNote = note;
+        if (!approve)
+        {
+            var previous = item.Status;
+            item.Status = StagingStatus.Rejected;
+            db.StagedImportEvents.Add(StagingAudit.Create(item, "Rejected", previous, note, actor));
+        }
         else
         {
+            var previous = item.Status;
             item.Status = StagingStatus.Approved;
+            db.StagedImportEvents.Add(StagingAudit.Create(item, "Approved", previous, note, actor));
             try
             {
                 await Promote(item, ct);
@@ -94,12 +102,16 @@ public sealed class StagingService(TmsDbContext db)
                 var detailKey = DetailKey(item.EntityType, document.RootElement);
                 if (!string.IsNullOrWhiteSpace(detailKey))
                     await MasterDetailStore.SaveAsync(db, item.EntityType, detailKey, item.PayloadJson, "Approved SLH master-data edit", user.Identity?.Name, ct);
+                previous = item.Status;
                 item.Status = StagingStatus.Promoted;
+                db.StagedImportEvents.Add(StagingAudit.Create(item, "Promoted", previous, note, actor));
             }
             catch (Exception ex) when (ex is JsonException or DbUpdateException or InvalidOperationException)
             {
+                previous = item.Status;
                 item.Status = StagingStatus.Failed;
                 item.ReviewNote = string.Join(" | ", new[] { note, $"Promotion failed: {ex.GetBaseException().Message}" }.Where(value => !string.IsNullOrWhiteSpace(value)));
+                db.StagedImportEvents.Add(StagingAudit.Create(item, "Failed", previous, item.ReviewNote, actor));
                 await db.SaveChangesAsync(ct);
                 throw new InvalidOperationException($"Staged {item.EntityType} record could not be promoted: {ex.GetBaseException().Message}", ex);
             }
@@ -120,7 +132,7 @@ public sealed class StagingService(TmsDbContext db)
             case "site": await PromoteSite(payload, ct); break;
             case "marketcontact": await PromoteMarketContact(payload, ct); break;
             case "fuelprice": await PromoteFuelPrice(payload, ct); break;
-            case "order": await PromoteOrder(payload, ct); break;
+            case "order": await PromoteOrder(item, payload, ct); break;
             default: throw new JsonException($"Unsupported registered entity type '{item.EntityType}'.");
         }
         await db.SaveChangesAsync(ct);
@@ -277,19 +289,19 @@ public sealed class StagingService(TmsDbContext db)
         else { fuelPrice.PricePencePerLitre = pricePencePerLitre; fuelPrice.IsPricingMaximum = Bool(payload, "isPricingMaximum", false); fuelPrice.Source = Clip(Text(payload, "source"), 200); fuelPrice.Notes = Clip(Text(payload, "notes"), 500); }
     }
 
-    private async Task PromoteOrder(JsonElement payload, CancellationToken ct)
+    private async Task PromoteOrder(StagedImport item, JsonElement payload, CancellationToken ct)
     {
         var reference = Required(payload, "poNumber"); var customerCode = Required(payload, "customerCode"); var collectionDateText = Required(payload, "collectionDate");
         if (!DateOnly.TryParse(collectionDateText, out var collectionDate)) throw new JsonException("Order payload requires a valid collectionDate.");
-        bool exists;
-        try { exists = await db.TransportOrders.AnyAsync(order => order.Reference == reference, ct); }
+        TransportOrder? existing;
+        try { existing = await db.TransportOrders.SingleOrDefaultAsync(order => order.Reference == reference, ct); }
         catch (Exception ex) when (ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase))
         {
             // The approved staged row is itself the durable order register on
             // legacy production databases where DDL permissions are unavailable.
             return;
         }
-        if (!exists)
+        if (existing is null)
         {
             DateOnly? deliveryDate = null;
             if (DateOnly.TryParse(Text(payload, "deliveryDate"), out var parsedDelivery)) deliveryDate = parsedDelivery;
@@ -297,8 +309,10 @@ public sealed class StagingService(TmsDbContext db)
             if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowStartUtc"), out var parsedWindowStart)) deliveryWindowStartUtc = parsedWindowStart;
             DateTimeOffset? deliveryWindowEndUtc = null;
             if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowEndUtc"), out var parsedWindowEnd)) deliveryWindowEndUtc = parsedWindowEnd;
-            db.TransportOrders.Add(new TransportOrder { Reference = ClipRequired(reference, 80), CustomerCode = ClipRequired(customerCode, 40), CollectionDate = collectionDate, DeliveryDate = deliveryDate, DeliveryWindowStartUtc = deliveryWindowStartUtc, DeliveryWindowEndUtc = deliveryWindowEndUtc, Pallets = IntOrNull(payload, "pallets"), SellerName = Clip(Text(payload, "sellerName"), 200), MarketName = Clip(Text(payload, "marketName"), 80), StallNumber = Clip(Text(payload, "stallNumber"), 200), DriverInstructions = Clip(Text(payload, "driverInstructions"), 1000), MapLink = Clip(Text(payload, "mapLink"), 1000) });
+            var sourceStagedImportId = db.Entry(item).State == EntityState.Detached ? null : item.Id;
+            db.TransportOrders.Add(new TransportOrder { SourceStagedImportId = sourceStagedImportId, Reference = ClipRequired(reference, 80), CustomerCode = ClipRequired(customerCode, 40), CollectionDate = collectionDate, DeliveryDate = deliveryDate, DeliveryWindowStartUtc = deliveryWindowStartUtc, DeliveryWindowEndUtc = deliveryWindowEndUtc, Pallets = IntOrNull(payload, "pallets"), SellerName = Clip(Text(payload, "sellerName"), 200), MarketName = Clip(Text(payload, "marketName"), 80), StallNumber = Clip(Text(payload, "stallNumber"), 200), DriverInstructions = Clip(Text(payload, "driverInstructions"), 1000), MapLink = Clip(Text(payload, "mapLink"), 1000) });
         }
+        else if (existing.SourceStagedImportId is null) existing.SourceStagedImportId = item.Id;
     }
 
     private static string Required(JsonElement payload, string name) => Text(payload, name) ?? throw new JsonException($"Payload requires {name}.");
