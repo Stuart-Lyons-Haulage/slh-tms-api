@@ -27,6 +27,8 @@ BEGIN
         ProposalId uniqueidentifier NOT NULL,
         Sequence int NOT NULL,
         Reference nvarchar(80) NOT NULL,
+        IsLocked bit NOT NULL CONSTRAINT DF_PlanProposalRuns_IsLocked DEFAULT(0),
+        LiveLoadId uniqueidentifier NULL,
         Classification nvarchar(40) NOT NULL,
         DriverId uniqueidentifier NULL,
         VehicleId uniqueidentifier NULL,

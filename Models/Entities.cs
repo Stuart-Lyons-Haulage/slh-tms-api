@@ -206,6 +206,8 @@ public sealed class PlanProposalRun
     public Guid ProposalId { get; set; }
     public int Sequence { get; set; }
     [MaxLength(80)] public required string Reference { get; set; }
+    public bool IsLocked { get; set; }
+    public Guid? LiveLoadId { get; set; }
     [MaxLength(40)] public required string Classification { get; set; }
     public Guid? DriverId { get; set; }
     public Guid? VehicleId { get; set; }

@@ -79,6 +79,8 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
             WarningsJson = JsonSerializer.Serialize(warnings, JsonOptions)
         };
 
+        var lockedRuns = await PlanLockStore.BaselineAsync(db, request.PlanningDate, ct);
+        AddLockedRuns(proposal, lockedRuns);
         BuildRuns(proposal, balances, classification, request.PlanningDate, period);
         AssignCandidateEvidence(proposal, drivers, vehicles, sites, liveStatuses, recentLoads, evidenceAt);
         proposal.Classification = WorstClassification(proposal.Runs.Select(run => run.Classification).Append(proposal.Classification));
@@ -101,7 +103,7 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
 
     private static void BuildRuns(PlanProposal proposal, IReadOnlyList<Balance> balances, string classification, DateOnly date, string period)
     {
-        var runSequence = 0;
+        var runSequence = proposal.Runs.Count;
         PlanProposalRun? current = null;
         foreach (var balance in balances)
         {
@@ -116,6 +118,7 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
                     {
                         Sequence = runSequence,
                         Reference = $"OPT-{date:yyyyMMdd}-{period}-{runSequence:00}",
+                        IsLocked = false,
                         Classification = classification,
                         CapacityPallets = capacity,
                         PlannedPallets = 0,
@@ -145,6 +148,7 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
 
         foreach (var run in proposal.Runs)
         {
+            if (run.IsLocked) continue;
             var collectionCount = run.Allocations.Count;
             for (var index = 0; index < collectionCount; index++)
                 run.Allocations[index].DeliverySequence = collectionCount + index + 1;
@@ -196,6 +200,7 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
     {
         foreach (var run in proposal.Runs)
         {
+            if (run.IsLocked) continue;
             var first = run.Allocations.OrderBy(item => item.CollectionSequence).FirstOrDefault();
             var last = run.Allocations.OrderByDescending(item => item.DeliverySequence).FirstOrDefault();
             var collection = MatchSite(sites, first?.CollectionSite);
@@ -285,6 +290,8 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
                 run.Id,
                 run.Sequence,
                 run.Reference,
+                run.IsLocked,
+                run.LiveLoadId,
                 run.Classification,
                 run.DriverId,
                 run.VehicleId,
@@ -339,6 +346,28 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
     private static string NormalisePeriod(string? value) => string.Equals(value?.Trim(), "PM", StringComparison.OrdinalIgnoreCase) ? "PM" : "AM";
     private static string Period(TimeOnly? value) => value is not null && value.Value >= new TimeOnly(17, 0) ? "PM" : "AM";
     private static int Capacity(string? palletType) => palletType?.Contains("euro", StringComparison.OrdinalIgnoreCase) == true ? 33 : 26;
+    private static void AddLockedRuns(PlanProposal proposal, IReadOnlyList<LoadBaseline> lockedRuns)
+    {
+        foreach (var baseline in lockedRuns.OrderBy(run => run.Reference, StringComparer.OrdinalIgnoreCase))
+        {
+            proposal.Runs.Add(new PlanProposalRun
+            {
+                Sequence = proposal.Runs.Count + 1,
+                Reference = baseline.Reference,
+                IsLocked = true,
+                LiveLoadId = baseline.Id,
+                DriverId = baseline.DriverId,
+                VehicleId = baseline.VehicleId,
+                Classification = "Recommended",
+                PositionSource = "LockedPlan",
+                CapacityPallets = 0,
+                PlannedPallets = 0,
+                Score = 0m,
+                ScoreComponentsJson = "[]",
+                ExplanationJson = JsonSerializer.Serialize(new[] { "Existing locked run retained unchanged as a fixed planning constraint." }, JsonOptions)
+            });
+        }
+    }
     private static Site? MatchSite(IEnumerable<Site> sites, string? name) => string.IsNullOrWhiteSpace(name) ? null : sites
         .OrderBy(site => string.Equals(site.Name, name, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
         .FirstOrDefault(site => string.Equals(site.Name, name, StringComparison.OrdinalIgnoreCase) ||

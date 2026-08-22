@@ -15,6 +15,8 @@ public sealed record PlanProposalRunResult(
     Guid Id,
     int Sequence,
     string Reference,
+    bool IsLocked,
+    Guid? LiveLoadId,
     string Classification,
     Guid? DriverId,
     Guid? VehicleId,
