@@ -220,6 +220,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
             ReviewNote = $"Run pallet allocation changed from {previousPallets} to {request.Pallets}. {request.Note}".Trim()
         });
         await db.SaveChangesAsync(ct);
+        db.ChangeTracker.Clear();
 
         await EnsureOrderOnRun(load, order, detail, ct);
         var capacity = await UpdateRunPalletTotal(load.Id, request.Date, ct);
