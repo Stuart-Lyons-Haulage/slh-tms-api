@@ -293,6 +293,8 @@ public sealed class StagingService(TmsDbContext db)
     {
         var reference = Required(payload, "poNumber"); var customerCode = Required(payload, "customerCode"); var collectionDateText = Required(payload, "collectionDate");
         if (!DateOnly.TryParse(collectionDateText, out var collectionDate)) throw new JsonException("Order payload requires a valid collectionDate.");
+        var (movement, plannerReady) = await RecordOrderRevision(item, payload, reference, customerCode, ct);
+        if (!plannerReady) return;
         TransportOrder? existing;
         try { existing = await db.TransportOrders.SingleOrDefaultAsync(order => order.Reference == reference, ct); }
         catch (Exception ex) when (ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase))
@@ -310,9 +312,97 @@ public sealed class StagingService(TmsDbContext db)
             DateTimeOffset? deliveryWindowEndUtc = null;
             if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowEndUtc"), out var parsedWindowEnd)) deliveryWindowEndUtc = parsedWindowEnd;
             Guid? sourceStagedImportId = db.Entry(item).State == EntityState.Detached ? null : item.Id;
-            db.TransportOrders.Add(new TransportOrder { SourceStagedImportId = sourceStagedImportId, Reference = ClipRequired(reference, 80), CustomerCode = ClipRequired(customerCode, 40), CollectionDate = collectionDate, DeliveryDate = deliveryDate, DeliveryWindowStartUtc = deliveryWindowStartUtc, DeliveryWindowEndUtc = deliveryWindowEndUtc, Pallets = IntOrNull(payload, "pallets"), SellerName = Clip(Text(payload, "sellerName"), 200), MarketName = Clip(Text(payload, "marketName"), 80), StallNumber = Clip(Text(payload, "stallNumber"), 200), DriverInstructions = Clip(Text(payload, "driverInstructions"), 1000), MapLink = Clip(Text(payload, "mapLink"), 1000) });
+            db.TransportOrders.Add(new TransportOrder { SourceStagedImportId = sourceStagedImportId, SourceMovementId = movement.Id, Reference = ClipRequired(reference, 80), CustomerCode = ClipRequired(customerCode, 40), CollectionDate = collectionDate, DeliveryDate = deliveryDate, DeliveryWindowStartUtc = deliveryWindowStartUtc, DeliveryWindowEndUtc = deliveryWindowEndUtc, Pallets = IntOrNull(payload, "pallets"), SellerName = Clip(Text(payload, "sellerName"), 200), MarketName = Clip(Text(payload, "marketName"), 80), StallNumber = Clip(Text(payload, "stallNumber"), 200), DriverInstructions = Clip(Text(payload, "driverInstructions"), 1000), MapLink = Clip(Text(payload, "mapLink"), 1000) });
         }
-        else if (existing.SourceStagedImportId is null) existing.SourceStagedImportId = item.Id;
+        else
+        {
+            if (existing.SourceStagedImportId is null) existing.SourceStagedImportId = item.Id;
+            existing.SourceMovementId ??= movement.Id;
+        }
+    }
+
+    private async Task<(OrderMovement Movement, bool PlannerReady)> RecordOrderRevision(
+        StagedImport item, JsonElement payload, string reference, string customerCode, CancellationToken ct)
+    {
+        var normalCustomer = ClipRequired(customerCode.Trim().ToUpperInvariant(), 40);
+        var normalReference = new string(reference.Trim().ToUpperInvariant().Where(char.IsLetterOrDigit).ToArray());
+        var stableKey = ClipRequired($"{normalCustomer}:{normalReference}", 240);
+        var movement = await db.OrderMovements.SingleOrDefaultAsync(
+            x => x.CustomerCode == normalCustomer && x.StableMovementKey == stableKey, ct);
+        if (movement is null)
+        {
+            movement = new OrderMovement { CustomerCode = normalCustomer, StableMovementKey = stableKey };
+            db.OrderMovements.Add(movement);
+        }
+
+        var existingRevision = await db.OrderRevisions.SingleOrDefaultAsync(x => x.StagedImportId == item.Id, ct);
+        if (existingRevision is not null)
+        {
+            movement.CurrentRevisionId = existingRevision.Id;
+            return (movement, movement.LifecycleStatus == OrderMovementStatus.PlannerReady);
+        }
+
+        var previous = await db.OrderRevisions.Where(x => x.MovementId == movement.Id)
+            .OrderByDescending(x => x.RevisionNumber).FirstOrDefaultAsync(ct);
+        var revision = new OrderRevision
+        {
+            MovementId = movement.Id,
+            StagedImportId = item.Id,
+            RevisionNumber = (previous?.RevisionNumber ?? 0) + 1,
+            MessageId = Clip(Text(payload, "messageId") ?? Text(payload, "internetMessageId"), 500),
+            AttachmentIdentity = Clip(Text(payload, "attachmentIdentity") ?? Text(payload, "sourceAttachmentReference") ?? Text(payload, "sourceAttachmentName"), 500),
+            ParserTemplate = Clip(Text(payload, "parserTemplate") ?? Text(payload, "mappingTemplate"), 120),
+            ParserVersion = Clip(Text(payload, "parserVersion") ?? Text(payload, "sourceTemplateVersion"), 40),
+            PayloadJson = payload.GetRawText(),
+            ReceivedAtUtc = item.ReceivedAtUtc,
+            SupersedesRevisionId = previous?.Id
+        };
+        db.OrderRevisions.Add(revision);
+
+        var sourceLines = new List<JsonElement>();
+        var hasExplicitSourceLines = TryGetProperty(payload, "sourceLines", out var sourceArray) && sourceArray.ValueKind == JsonValueKind.Array;
+        if (hasExplicitSourceLines)
+            sourceLines.AddRange(sourceArray.EnumerateArray().Select(x => x.Clone()));
+        if (sourceLines.Count == 0) sourceLines.Add(payload.Clone());
+
+        var plannerReady = false;
+        for (var index = 0; index < sourceLines.Count; index++)
+        {
+            var line = sourceLines[index];
+            var collectionSite = Text(line, "collectionSite") ?? Text(line, "collectionLocation") ?? Text(payload, "collectionSite") ?? Text(payload, "collectionLocation");
+            var deliverySite = Text(line, "deliverySite") ?? Text(line, "deliveryLocation") ?? Text(payload, "deliverySite") ?? Text(payload, "deliveryLocation");
+            var lineCollectionDate = DateOnlyOrNull(line, "collectionDate") ?? DateOnlyOrNull(payload, "collectionDate");
+            var lineDeliveryDate = DateOnlyOrNull(line, "deliveryDate") ?? DateOnlyOrNull(payload, "deliveryDate");
+            var pallets = IntOrNull(line, "pallets") ?? IntOrNull(line, "palletQuantity") ?? (sourceLines.Count == 1 ? IntOrNull(payload, "pallets") : null);
+            plannerReady |= !string.IsNullOrWhiteSpace(collectionSite) && !string.IsNullOrWhiteSpace(deliverySite)
+                && lineCollectionDate is not null && lineDeliveryDate is not null && pallets is > 0;
+            db.OrderSourceLines.Add(new OrderSourceLine
+            {
+                RevisionId = revision.Id,
+                SourceRowKey = ClipRequired(Text(line, "sourceRowKey") ?? Text(line, "sourceRowId") ?? $"row-{index + 1}", 160),
+                CollectionSite = Clip(collectionSite, 200),
+                DeliverySite = Clip(deliverySite, 200),
+                CollectionDate = lineCollectionDate,
+                DeliveryDate = lineDeliveryDate,
+                CollectionTimeFrom = TimeOnlyOrNull(line, "collectionTimeFrom") ?? TimeOnlyOrNull(payload, "collectionTimeFrom"),
+                CollectionTimeTo = TimeOnlyOrNull(line, "collectionTimeTo") ?? TimeOnlyOrNull(payload, "collectionTimeTo"),
+                PalletType = Clip(Text(line, "palletType") ?? Text(payload, "palletType"), 40),
+                Pallets = pallets,
+                TemperatureRequirement = Clip(Text(line, "temperatureRequirement") ?? Text(line, "temperature") ?? Text(payload, "temperatureRequirement") ?? Text(payload, "temperature"), 80),
+                LoadReference = Clip(Text(line, "loadReference") ?? Text(payload, "loadReference"), 120),
+                PayloadJson = line.GetRawText()
+            });
+        }
+
+        var declaredLifecycle = Text(payload, "lifecycleStatus") ?? Text(payload, "reviewStatus");
+        if (!hasExplicitSourceLines && DateOnlyOrNull(payload, "collectionDate") is not null && IntOrNull(payload, "pallets") is > 0)
+            plannerReady = true; // Existing single-row staging payloads remain promotable.
+        if (declaredLifecycle?.Contains("awaiting", StringComparison.OrdinalIgnoreCase) == true)
+            plannerReady = false;
+        movement.CurrentRevisionId = revision.Id;
+        movement.LifecycleStatus = plannerReady ? OrderMovementStatus.PlannerReady : OrderMovementStatus.AwaitingDetails;
+        movement.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        return (movement, plannerReady);
     }
 
     private static string Required(JsonElement payload, string name) => Text(payload, name) ?? throw new JsonException($"Payload requires {name}.");
@@ -340,6 +430,7 @@ public sealed class StagingService(TmsDbContext db)
     private static bool Bool(JsonElement payload, string name, bool fallback) => bool.TryParse(Text(payload, name), out var value) ? value : fallback;
     private static bool? BoolOrNull(JsonElement payload, string name) => bool.TryParse(Text(payload, name), out var value) ? value : null;
     private static DateOnly? DateOnlyOrNull(JsonElement payload, string name) => DateOnly.TryParse(Text(payload, name), out var value) ? value : null;
+    private static TimeOnly? TimeOnlyOrNull(JsonElement payload, string name) => TimeOnly.TryParse(Text(payload, name), out var value) ? value : null;
     private static string CanonicalMarket(string value)
     {
         var normal = NormaliseKey(value);
