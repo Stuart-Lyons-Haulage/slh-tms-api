@@ -205,8 +205,12 @@ public sealed class TachoMasterClientTests
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var path = request.RequestUri!.AbsolutePath;
-            Paths.Add(path);
-            BodiesByPath[path] = request.Content is null ? string.Empty : await request.Content.ReadAsStringAsync(cancellationToken);
+            var body = request.Content is null ? string.Empty : await request.Content.ReadAsStringAsync(cancellationToken);
+            lock (Paths)
+            {
+                Paths.Add(path);
+                BodiesByPath[path] = body;
+            }
             var payload = request.RequestUri.AbsolutePath switch
             {
                 "/api/auth/login" => "{\"token\":\"sid-123\"}",

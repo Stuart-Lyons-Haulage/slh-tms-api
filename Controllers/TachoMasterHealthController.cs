@@ -30,27 +30,28 @@ public sealed class TachoMasterHealthController(
             var now = DateTimeOffset.UtcNow;
             var today = DateOnly.FromDateTime(now.UtcDateTime);
             var profilesTask = tachoMasterClient.GetDriverProfilesAsync(cancellationToken);
-            var dutiesTask = tachoMasterClient.GetCurrentDriverStatusesByVehicleAsync(today, cancellationToken);
+            var dutiesTask = tachoMasterClient.GetOpenDriverStatusesByVehicleAsync(today, cancellationToken);
             await Task.WhenAll(profilesTask, dutiesTask);
             var profiles = await profilesTask;
             var duties = await dutiesTask;
+            var lastSuccessfulPollUtc = DateTimeOffset.UtcNow;
+            var openDuties = duties.Values.SelectMany(items => items).ToList();
 
-            var newest = profiles.Select(item => item.MetricsValidAtUtc)
-                .Concat(duties.Values.Select(item => item.MetricsValidAtUtc))
-                .Concat(duties.Values.Select(item => item.DutyEndUtc))
-                .Concat(duties.Values.Select(item => (DateTimeOffset?)item.DutyStartUtc))
+            var newestMetric = profiles.Select(item => item.MetricsValidAtUtc)
+                .Concat(openDuties.Select(item => item.MetricsValidAtUtc))
                 .Where(item => item is not null)
                 .Select(item => item!.Value)
                 .DefaultIfEmpty()
                 .Max();
-            var ageMinutes = newest == default ? (double?)null : Math.Max(0, Math.Round((now - newest).TotalMinutes, 1));
-            var freshness = ageMinutes switch
+            var metricsAgeMinutes = newestMetric == default ? (double?)null : Math.Max(0, Math.Round((lastSuccessfulPollUtc - newestMetric).TotalMinutes, 1));
+            var metricsFreshness = metricsAgeMinutes switch
             {
                 null => "unknown",
                 <= 15 => "live",
                 <= 60 => "delayed",
                 _ => "stale"
             };
+            var metricsStale = metricsAgeMinutes is null || metricsAgeMinutes > 60;
 
             return Ok(new
             {
@@ -58,12 +59,19 @@ public sealed class TachoMasterHealthController(
                 configured = true,
                 usesSharedRoadTechCredentials = tachoMasterClient.UsesSharedRoadTechCredentials,
                 driverProfiles = profiles.Count,
-                currentVehicleDuties = duties.Count,
-                sourceFreshness = freshness,
-                newestSourceTimestampUtc = newest == default ? (DateTimeOffset?)null : newest,
-                sourceAgeMinutes = ageMinutes,
-                stale = ageMinutes is null || ageMinutes > 60,
-                checkedAtUtc = now
+                currentVehicleDuties = openDuties.Count,
+                openVehicleDuties = openDuties.Count,
+                connectionFreshness = "live",
+                lastSuccessfulPollUtc,
+                metricsFreshness,
+                newestMetricsTimestampUtc = newestMetric == default ? (DateTimeOffset?)null : newestMetric,
+                metricsAgeMinutes,
+                metricsStale,
+                sourceFreshness = metricsFreshness,
+                newestSourceTimestampUtc = newestMetric == default ? (DateTimeOffset?)null : newestMetric,
+                sourceAgeMinutes = metricsAgeMinutes,
+                stale = metricsStale,
+                checkedAtUtc = lastSuccessfulPollUtc
             });
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
