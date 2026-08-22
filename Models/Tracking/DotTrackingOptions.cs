@@ -6,7 +6,7 @@ namespace Slh.Tms.Api.Models.Tracking;
 /// </summary>
 public sealed class DotTrackingOptions
 {
-    private int _dataMask = 0x01;
+    private int _dataMask = 0x01 | 0x04;
     private string _baseUrl = string.Empty;
 
     public string BaseUrl
@@ -49,14 +49,15 @@ public sealed class DotTrackingOptions
     public int StaleAfterMinutes { get; set; } = 10;
 
     /// <summary>
-    /// RoadTech telemetry data mask. GPS is bit 0x01 and is mandatory for the
-    /// operational tracking/geofence feed. Preserve that bit even if an older
-    /// Azure environment setting still supplies DataMask=0.
+    /// RoadTech telemetry data mask. GPS is bit 0x01 and CAN is bit 0x04.
+    /// Preserve both bits even if an older Azure environment setting still
+    /// supplies DataMask=0, because live dispatch needs position, ETA and
+    /// movement evidence.
     /// </summary>
     public int DataMask
     {
         get => _dataMask;
-        set => _dataMask = value | 0x01;
+        set => _dataMask = value | 0x01 | 0x04;
     }
 
     /// <summary>RoadTech flag to include active vehicles only.</summary>

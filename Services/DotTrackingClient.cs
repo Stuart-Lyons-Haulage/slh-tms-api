@@ -183,7 +183,7 @@ public sealed class DotTrackingClient
             DateOnly.FromDateTime(DateTime.UtcNow).ToString("yyyy-MM-dd"),
             _options.DataMask,
             offset,
-            _options.OnlyLive), options: RoadTechJson.Options);
+            _options.OnlyLive ? 1 : 0), options: RoadTechJson.Options);
 
         using var response = await _httpClient.SendAsync(request, cancellationToken);
         if (!response.IsSuccessStatusCode) throw new HttpRequestException(await RoadTechFailureDetail(response, "Falcon/GetCurrentTelemetry", cancellationToken), null, response.StatusCode);
@@ -212,7 +212,7 @@ public sealed class DotTrackingClient
             day.ToString("yyyy-MM-dd"),
             _options.DataMask,
             offset,
-            false), options: RoadTechJson.Options);
+            0), options: RoadTechJson.Options);
 
         using var response = await _httpClient.SendAsync(request, cancellationToken);
         if (!response.IsSuccessStatusCode) throw new HttpRequestException(await RoadTechFailureDetail(response, "Falcon/GetHistoricalTelemetry", cancellationToken), null, response.StatusCode);
@@ -311,7 +311,7 @@ public sealed class DotTrackingClient
         string T,
         int DataMask,
         int Offset,
-        bool OnlyLive);
+        int OnlyLive);
 
     public static string NormaliseBaseUrl(string baseUrl)
     {
