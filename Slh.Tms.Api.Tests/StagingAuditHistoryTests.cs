@@ -86,9 +86,21 @@ public sealed class StagingAuditHistoryTests : IClassFixture<CustomWebFactory>
     private static async Task<Guid> StageOrder(HttpClient client, string key, int pallets)
     {
         var reference = $"PO-{key.ToUpperInvariant()}";
-        var response = await client.PostAsync("/api/v1/staging", Json($$"""
-            {"entityType":"order","idempotencyKey":"{{key}}","source":"PowerAutomate/InfoMailbox","payload":{"poNumber":"{{reference}}","customerCode":"COOP","collectionDate":"2026-08-24","deliveryDate":"2026-08-24","pallets":{{pallets}}}}
-            """));
+        var request = JsonSerializer.Serialize(new
+        {
+            entityType = "order",
+            idempotencyKey = key,
+            source = "PowerAutomate/InfoMailbox",
+            payload = new
+            {
+                poNumber = reference,
+                customerCode = "COOP",
+                collectionDate = "2026-08-24",
+                deliveryDate = "2026-08-24",
+                pallets
+            }
+        });
+        var response = await client.PostAsync("/api/v1/staging", Json(request));
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         return body.RootElement.GetProperty("stagingId").GetGuid();
