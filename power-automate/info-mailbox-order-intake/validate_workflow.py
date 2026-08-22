@@ -35,6 +35,9 @@ def validate(workflow):
     serialized = json.dumps(workflow, separators=(",", ":"))
     if "/api/v1/orders" in serialized or '"operationId":"CreateOrder"' in serialized:
         errors.append("live-order endpoint/action is forbidden")
+    forbidden_external_stores = ("shared_sharepoint", "CreateItem", "Microsoft List", "SharePoint")
+    if any(value.lower() in serialized.lower() for value in forbidden_external_stores):
+        errors.append("Microsoft Lists/SharePoint storage is forbidden; TMS SQL is authoritative")
     if "IntakeInfoMailboxEmail" not in serialized:
         errors.append("Pending Review intake operation IntakeInfoMailboxEmail is missing")
 
@@ -63,6 +66,9 @@ def validate(workflow):
         errors.append("attachment content retrieval is missing")
     if "secureData" not in serialized:
         errors.append("secure input/output protection is missing")
+    connection_names = set(properties.get("connectionReferences", {}))
+    if connection_names != {"shared_office365", "shared_slhtms"}:
+        errors.append("flow must use only the Outlook and existing TMS connection references")
     return errors
 
 

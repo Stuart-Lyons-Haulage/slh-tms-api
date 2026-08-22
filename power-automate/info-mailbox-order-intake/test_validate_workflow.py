@@ -32,6 +32,12 @@ class WorkflowValidationTests(unittest.TestCase):
         self.assertTrue(any("live-order" in item for item in errors))
         self.assertTrue(any("bounded exponential" in item for item in errors))
 
+    def test_rejects_microsoft_list_or_sharepoint_storage(self):
+        workflow = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
+        workflow["properties"]["connectionReferences"]["shared_sharepoint"] = {}
+        errors = validate(workflow)
+        self.assertTrue(any("Lists/SharePoint" in item for item in errors))
+
 
 if __name__ == "__main__":
     unittest.main()

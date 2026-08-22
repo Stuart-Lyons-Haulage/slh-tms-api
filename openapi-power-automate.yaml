@@ -106,6 +106,22 @@ paths:
           required: true
           schema: { $ref: '#/definitions/StagedPayloadAmendment' }
       responses: { '200': { description: Updated pending staged order } }
+  /staging/{id}/history:
+    get:
+      operationId: GetStagedImportHistory
+      summary: Get append-only SQL payload and review history for a staged import
+      parameters: [{ name: id, in: path, required: true, type: string, format: uuid }]
+      responses:
+        '200':
+          description: Ordered staging history
+          schema: { type: array, items: { $ref: '#/definitions/StagedImportHistoryEvent' } }
+  /staging/pending/archive:
+    post:
+      operationId: ArchivePendingStagedImports
+      summary: Archive pending staging rows without deleting their SQL history
+      parameters:
+        - { name: body, in: body, required: true, schema: { $ref: '#/definitions/ArchivePendingRequest' } }
+      responses: { '200': { description: Pending rows archived and retained } }
   /order-intake/email/preview:
     post:
       operationId: PreviewInfoMailboxEmail
@@ -189,6 +205,23 @@ definitions:
     properties:
       note: { type: string }
       payload: { type: object, additionalProperties: true }
+  ArchivePendingRequest:
+    type: object
+    required: [reason]
+    properties:
+      reason: { type: string }
+  StagedImportHistoryEvent:
+    type: object
+    properties:
+      id: { type: string, format: uuid }
+      stagedImportId: { type: string, format: uuid }
+      eventType: { type: string, enum: [Received, Amended, Approved, Rejected, Promoted, Failed, Superseded, Archived] }
+      previousStatus: { type: string, enum: [PendingReview, Approved, Rejected, Promoted, Failed, Archived] }
+      newStatus: { type: string, enum: [PendingReview, Approved, Rejected, Promoted, Failed, Archived] }
+      payload: { type: object, additionalProperties: true }
+      note: { type: string }
+      actor: { type: string }
+      occurredAtUtc: { type: string, format: date-time }
   MailboxAttachmentRequest:
     type: object
     properties:
