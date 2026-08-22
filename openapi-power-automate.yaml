@@ -196,12 +196,15 @@ definitions:
       contentType: { type: string }
       contentBase64: { type: string, description: Base64 content returned by Get attachment content }
       isInline: { type: boolean, default: false }
+      contentId: { type: string }
+      size: { type: integer, format: int64 }
   MailboxEmailIntakeRequest:
     type: object
     required: [messageId]
     properties:
       messageId: { type: string }
       internetMessageId: { type: string }
+      conversationId: { type: string }
       mailbox: { type: string, example: info@lyonshaulage.com }
       senderAddress: { type: string }
       senderName: { type: string }
@@ -209,7 +212,12 @@ definitions:
       receivedAtUtc: { type: string, format: date-time }
       bodyText: { type: string }
       bodyHtml: { type: string }
+      bodyFormat: { type: string }
+      importance: { type: string }
       webLink: { type: string }
+      correlationId: { type: string }
+      toRecipients: { type: array, items: { type: object, additionalProperties: true } }
+      ccRecipients: { type: array, items: { type: object, additionalProperties: true } }
       attachments:
         type: array
         items: { $ref: '#/definitions/MailboxAttachmentRequest' }
