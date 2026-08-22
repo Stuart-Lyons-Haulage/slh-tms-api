@@ -91,6 +91,7 @@ public sealed class Site
     [NotMapped, MaxLength(200)] public string? CustomField1 { get; set; }
     [NotMapped, MaxLength(200)] public string? CustomField2 { get; set; }
     [NotMapped, MaxLength(200)] public string? CustomField3 { get; set; }
+    [MaxLength(80)] public string? OperationalRegion { get; set; }
     public bool Active { get; set; } = true;
 }
 public sealed class MarketContact
@@ -262,6 +263,14 @@ public sealed class IntegrationMapping
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     [MaxLength(200)] public string? UpdatedBy { get; set; }
+    [MaxLength(40)] public string? MappingKind { get; set; }
+    [MaxLength(300)] public string? NormalizedExternalValue { get; set; }
+    [MaxLength(320)] public string? SenderPattern { get; set; }
+    [MaxLength(120)] public string? TemplateName { get; set; }
+    [MaxLength(40)] public string? TemplateVersion { get; set; }
+    public decimal? ConfidenceThreshold { get; set; }
+    public DateTimeOffset? EffectiveFromUtc { get; set; }
+    public DateTimeOffset? EffectiveToUtc { get; set; }
 }
 public enum DriverDispatchStatus { Dispatched, Accepted, ArrivedCollection, Loaded, ArrivedDelivery, Delivered, IssueReported }
 public sealed class DriverStatusLog

@@ -33,6 +33,7 @@ builder.Services.AddCors(options => options.AddPolicy("Portal", policy => policy
 builder.Services.AddDbContext<TmsDbContext>(o => o.UseSqlServer(builder.Configuration.GetConnectionString("TmsDb")));
 builder.Services.AddScoped<StagingService>();
 builder.Services.AddScoped<OrderIntakeLedgerService>();
+builder.Services.AddScoped<IntakeMappingService>();
 builder.Services.AddScoped<DotTrackingTelemetryStore>();
 var assistantOptions = new AssistantOptions();
 builder.Configuration.GetSection("Integrations:OpenAI").Bind(assistantOptions);

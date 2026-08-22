@@ -79,6 +79,7 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<IntegrationMapping>()
             .HasIndex(x => x.TmsEntityId)
             .HasDatabaseName("IX_IntegrationMappings_TmsEntityId");
+        b.Entity<IntegrationMapping>().Property(x => x.ConfidenceThreshold).HasPrecision(5, 4);
 
         b.Entity<DriverStatusLog>()
             .HasIndex(x => x.LoadId)
