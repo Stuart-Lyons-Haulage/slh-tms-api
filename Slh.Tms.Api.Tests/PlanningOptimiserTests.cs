@@ -11,6 +11,83 @@ namespace Slh.Tms.Api.Tests;
 public sealed class PlanningOptimiserTests
 {
     [Fact]
+    public async Task Generate_carries_locked_live_runs_as_fixed_without_mutating_them()
+    {
+        // Defect protected: generating a whole-day proposal omits locked work or
+        // silently treats it as movable/new work.
+        var date = new DateOnly(2026, 8, 25);
+        var loadId = Guid.NewGuid();
+        var movementId = Guid.NewGuid();
+        var revisionId = Guid.NewGuid();
+        var sourceLineId = Guid.NewGuid();
+        var stagedId = Guid.NewGuid();
+        var options = new DbContextOptionsBuilder<TmsDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using var db = new TmsDbContext(options);
+        db.Loads.Add(new Load
+        {
+            Id = loadId,
+            Reference = "LOCKED-01",
+            PlanningDate = date,
+            Status = LoadStatus.Planned,
+            Stops = [new LoadStop { LoadId = loadId, Sequence = 1, Name = "Locked collection" }]
+        });
+        db.StagedImports.Add(new StagedImport
+        {
+            Id = stagedId,
+            EntityType = "order",
+            IdempotencyKey = "optimiser-locked-order",
+            PayloadJson = "{}",
+            Status = StagingStatus.Approved
+        });
+        db.OrderMovements.Add(new OrderMovement
+        {
+            Id = movementId,
+            CustomerCode = "ALDI",
+            StableMovementKey = "ALDI:PO-LOCK",
+            CurrentRevisionId = revisionId,
+            LifecycleStatus = OrderMovementStatus.PlannerReady
+        });
+        db.OrderRevisions.Add(new OrderRevision
+        {
+            Id = revisionId,
+            MovementId = movementId,
+            StagedImportId = stagedId,
+            RevisionNumber = 1,
+            PayloadJson = "{}"
+        });
+        db.OrderSourceLines.Add(new OrderSourceLine
+        {
+            Id = sourceLineId,
+            RevisionId = revisionId,
+            SourceRowKey = "Sheet1!2",
+            CollectionSite = "Collection B",
+            DeliverySite = "Delivery B",
+            CollectionDate = date,
+            DeliveryDate = date,
+            CollectionTimeFrom = new TimeOnly(3, 0),
+            PalletType = "Standard",
+            Pallets = 12,
+            PayloadJson = "{}"
+        });
+        await db.SaveChangesAsync();
+        await PlanLockStore.LockAsync(db, date, "planner", CancellationToken.None);
+
+        var service = new PlanningOptimiserService(db, NullLogger<PlanningOptimiserService>.Instance);
+        var proposal = await service.GenerateAsync(new GeneratePlanProposalRequest(date, "AM"), "planner", CancellationToken.None);
+
+        var locked = Assert.Single(proposal.Runs.Where(run => run.IsLocked));
+        Assert.Equal(loadId, locked.LiveLoadId);
+        Assert.Equal("LOCKED-01", locked.Reference);
+        var generated = Assert.Single(proposal.Runs.Where(run => !run.IsLocked));
+        Assert.Equal(12, Assert.Single(generated.Allocations).Pallets);
+        var live = Assert.Single(await db.Loads.Include(load => load.Stops).ToListAsync());
+        Assert.Equal("LOCKED-01", live.Reference);
+        Assert.Single(live.Stops);
+    }
+
+    [Fact]
     public async Task Generate_persists_selected_live_position_driver_vehicle_and_score_evidence()
     {
         // Defect protected: the ranker exists in isolation but generated proposals
