@@ -89,11 +89,11 @@ public sealed class CustomerEtaEvidenceController(
         var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles.Values.ToList(), ct);
         var liveStatuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
 
-        // Every driver's own duty for the vehicle, not just whoever is currently in the cab —
-        // otherwise an earlier driver on a multi-driver vehicle silently loses their tacho data
-        // and this evidence chain reports "Mismatch" instead of matching their actual duty.
+        // Every open driver's own duty for the vehicle, not just whoever most recently signed on.
+        // Completed duties remain available through the daily-history method for reconciliation,
+        // but cannot provide current legal-hours authority for a live customer ETA.
         IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> tachoStatuses = new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
-        try { tachoStatuses = await tachoMaster.GetAllDriverStatusesByVehicleAsync(planningDate, ct); }
+        try { tachoStatuses = await tachoMaster.GetOpenDriverStatusesByVehicleAsync(planningDate, ct); }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             logger.LogWarning(exception, "TachoMaster was unavailable while building customer ETA evidence.");

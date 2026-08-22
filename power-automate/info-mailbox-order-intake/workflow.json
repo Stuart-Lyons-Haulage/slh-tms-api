@@ -1,0 +1,201 @@
+{
+  "properties": {
+    "displayName": "SLH-TMS | Info Mailbox | Order Intake | PROD",
+    "state": "Stopped",
+    "connectionReferences": {
+      "shared_office365": {
+        "runtimeSource": "embedded",
+        "connection": { "connectionReferenceLogicalName": "slh_sharedoffice365_info" },
+        "api": { "name": "shared_office365" }
+      },
+      "shared_slhtms": {
+        "runtimeSource": "embedded",
+        "connection": { "connectionReferenceLogicalName": "slh_sharedslhtms_prod" },
+        "api": { "name": "shared_slhtms" }
+      }
+    },
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections": { "defaultValue": {}, "type": "Object" },
+        "SLH_InfoMailboxUPN": { "defaultValue": "info@lyonshaulage.com", "type": "String" }
+      },
+      "triggers": {
+        "When_New_Email_Arrives_Info_Shared_Mailbox": {
+          "type": "OpenApiConnectionNotification",
+          "inputs": {
+            "host": {
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365",
+              "connectionName": "shared_office365",
+              "operationId": "SharedMailboxOnNewEmailV2"
+            },
+            "parameters": {
+              "mailboxAddress": "@parameters('SLH_InfoMailboxUPN')",
+              "folderId": "Inbox",
+              "importance": "Any",
+              "hasAttachments": false,
+              "includeAttachments": false
+            }
+          },
+          "runtimeConfiguration": { "concurrency": { "runs": 4 } }
+        }
+      },
+      "actions": {
+        "Scope_Receive_Source": {
+          "type": "Scope",
+          "runAfter": {},
+          "actions": {
+            "Initialise_Correlation_Id": {
+              "type": "InitializeVariable",
+              "inputs": { "variables": [{ "name": "varCorrelationId", "type": "string", "value": "@guid()" }] }
+            },
+            "Initialise_Attachment_Array": {
+              "type": "InitializeVariable",
+              "runAfter": { "Initialise_Correlation_Id": ["Succeeded"] },
+              "inputs": { "variables": [{ "name": "varAttachments", "type": "array", "value": [] }] }
+            },
+            "Get_Attachment_List": {
+              "type": "OpenApiConnection",
+              "runAfter": { "Initialise_Attachment_Array": ["Succeeded"] },
+              "inputs": {
+                "host": {
+                  "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365",
+                  "connectionName": "shared_office365",
+                  "operationId": "GetAttachments_V2"
+                },
+                "parameters": {
+                  "messageId": "@triggerOutputs()?['body/id']",
+                  "mailboxAddress": "@parameters('SLH_InfoMailboxUPN')"
+                }
+              },
+              "runtimeConfiguration": { "retryPolicy": { "type": "exponential", "count": 4, "interval": "PT10S", "minimumInterval": "PT10S", "maximumInterval": "PT2M" } }
+            },
+            "For_Each_Source_Attachment": {
+              "type": "Foreach",
+              "runAfter": { "Get_Attachment_List": ["Succeeded"] },
+              "foreach": "@coalesce(outputs('Get_Attachment_List')?['body/value'],json('[]'))",
+              "runtimeConfiguration": { "concurrency": { "repetitions": 1 } },
+              "actions": {
+                "Get_Attachment_Content": {
+                  "type": "OpenApiConnection",
+                  "inputs": {
+                    "host": {
+                      "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365",
+                      "connectionName": "shared_office365",
+                      "operationId": "GetAttachment_V2"
+                    },
+                    "parameters": {
+                      "messageId": "@triggerOutputs()?['body/id']",
+                      "attachmentId": "@items('For_Each_Source_Attachment')?['id']",
+                      "mailboxAddress": "@parameters('SLH_InfoMailboxUPN')"
+                    }
+                  },
+                  "runtimeConfiguration": {
+                    "retryPolicy": { "type": "exponential", "count": 4, "interval": "PT10S", "minimumInterval": "PT10S", "maximumInterval": "PT2M" },
+                    "secureData": { "properties": ["outputs"] }
+                  }
+                },
+                "Append_Original_Attachment": {
+                  "type": "AppendToArrayVariable",
+                  "runAfter": { "Get_Attachment_Content": ["Succeeded"] },
+                  "inputs": {
+                    "name": "varAttachments",
+                    "value": {
+                      "name": "@items('For_Each_Source_Attachment')?['name']",
+                      "contentType": "@coalesce(items('For_Each_Source_Attachment')?['contentType'],'application/octet-stream')",
+                      "contentBase64": "@outputs('Get_Attachment_Content')?['body/contentBytes']",
+                      "isInline": "@coalesce(items('For_Each_Source_Attachment')?['isInline'],false)",
+                      "contentId": "@items('For_Each_Source_Attachment')?['contentId']",
+                      "size": "@items('For_Each_Source_Attachment')?['size']"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "Scope_Submit_To_TMS": {
+          "type": "Scope",
+          "runAfter": { "Scope_Receive_Source": ["Succeeded"] },
+          "actions": {
+            "POST_To_TMS_Staging": {
+              "type": "OpenApiConnection",
+              "inputs": {
+                "host": {
+                  "apiId": "/providers/Microsoft.PowerApps/apis/shared_slhtms",
+                  "connectionName": "shared_slhtms",
+                  "operationId": "IntakeInfoMailboxEmail"
+                },
+                "body": {
+                  "messageId": "@triggerOutputs()?['body/id']",
+                  "internetMessageId": "@triggerOutputs()?['body/internetMessageId']",
+                  "conversationId": "@triggerOutputs()?['body/conversationId']",
+                  "mailbox": "@parameters('SLH_InfoMailboxUPN')",
+                  "senderAddress": "@triggerOutputs()?['body/from']",
+                  "senderName": "@triggerOutputs()?['body/fromName']",
+                  "toRecipients": "@triggerOutputs()?['body/toRecipients']",
+                  "ccRecipients": "@triggerOutputs()?['body/ccRecipients']",
+                  "subject": "@triggerOutputs()?['body/subject']",
+                  "receivedAtUtc": "@triggerOutputs()?['body/receivedDateTime']",
+                  "bodyText": "@triggerOutputs()?['body/bodyPreview']",
+                  "bodyHtml": "@triggerOutputs()?['body/body']",
+                  "bodyFormat": "html",
+                  "importance": "@triggerOutputs()?['body/importance']",
+                  "webLink": "@triggerOutputs()?['body/webLink']",
+                  "correlationId": "@variables('varCorrelationId')",
+                  "attachments": "@variables('varAttachments')"
+                }
+              },
+              "trackedProperties": {
+                "correlationId": "@variables('varCorrelationId')",
+                "sourceMessageId": "@triggerOutputs()?['body/id']",
+                "internetMessageId": "@triggerOutputs()?['body/internetMessageId']"
+              },
+              "runtimeConfiguration": {
+                "retryPolicy": { "type": "exponential", "count": 4, "interval": "PT10S", "minimumInterval": "PT10S", "maximumInterval": "PT2M" },
+                "secureData": { "properties": ["inputs", "outputs"] }
+              }
+            },
+            "Record_Import_Result": {
+              "type": "Compose",
+              "runAfter": { "POST_To_TMS_Staging": ["Succeeded"] },
+              "inputs": {
+                "correlationId": "@variables('varCorrelationId')",
+                "messageId": "@triggerOutputs()?['body/id']",
+                "httpStatus": "@outputs('POST_To_TMS_Staging')?['statusCode']",
+                "result": "@body('POST_To_TMS_Staging')"
+              }
+            }
+          }
+        },
+        "Scope_Error_Handler": {
+          "type": "Scope",
+          "runAfter": {
+            "Scope_Submit_To_TMS": ["Failed", "TimedOut", "Skipped"]
+          },
+          "actions": {
+            "Handle_Import_Exception": {
+              "type": "Compose",
+              "inputs": {
+                "correlationId": "@variables('varCorrelationId')",
+                "messageId": "@triggerOutputs()?['body/id']",
+                "internetMessageId": "@triggerOutputs()?['body/internetMessageId']",
+                "mailbox": "@parameters('SLH_InfoMailboxUPN')",
+                "subject": "@triggerOutputs()?['body/subject']",
+                "failure": "The flow failed after bounded retries. The source email is unchanged and can be replayed safely because the API uses message/order idempotency keys."
+              }
+            },
+            "Terminate_Failed_Import": {
+              "type": "Terminate",
+              "runAfter": { "Handle_Import_Exception": ["Succeeded"] },
+              "inputs": { "runStatus": "Failed", "runError": { "code": "SLH_INFO_MAILBOX_IMPORT_FAILED", "message": "@string(outputs('Handle_Import_Exception'))" } }
+            }
+          }
+        }
+      },
+      "outputs": {}
+    }
+  },
+  "schemaVersion": "1.0.0.0"
+}

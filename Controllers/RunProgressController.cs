@@ -2,13 +2,19 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/run-progress")]
 [Authorize]
-public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressController> logger, IConfiguration configuration) : ControllerBase
+public sealed class RunProgressController(
+    TmsDbContext db,
+    DotTrackingClient trackingClient,
+    DotTrackingTelemetryStore telemetryStore,
+    ILogger<RunProgressController> logger,
+    IConfiguration configuration) : ControllerBase
 {
     [HttpGet, AllowAnonymous]
     public async Task<IActionResult> Get([FromQuery] DateOnly? date, CancellationToken ct)
@@ -20,6 +26,30 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
 
         try
         {
+            string? refreshWarning = null;
+            try
+            {
+                // Keep Operations progression on the same current Falcon evidence as
+                // the Hisense route board. SQL remains the resilience fallback when
+                // RoadTech is temporarily unavailable.
+                var trackingRecords = (await trackingClient.GetLatestVehicleEventsAsync(ct))
+                    .Select(DotTelemetryRecord.FromProvider)
+                    .Where(record => record.Latitude is not null && record.Longitude is not null)
+                    .ToList();
+
+                if (trackingRecords.Count > 0)
+                    await telemetryStore.PersistAsync(trackingRecords, ct, markAsLiveReceipt: true);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                db.ChangeTracker.Clear();
+                logger.LogWarning(
+                    exception,
+                    "RoadTech live refresh failed for Operations progression on {PlanningDate}; using stored tracking evidence.",
+                    planningDate);
+                refreshWarning = "Live Falcon refresh was unavailable; progression is using the latest stored tracking evidence.";
+            }
+
             // Production planning is register-backed. Do not probe the absent legacy
             // Loads table here: doing so only generates false operational warnings.
             var loads = (await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct))
@@ -46,7 +76,7 @@ public sealed class RunProgressController(TmsDbContext db, ILogger<RunProgressCo
                 geofenceLinkedRuns = snapshot.Visits.Where(x => x.LoadId != null).Select(x => x.LoadId!.Value).Distinct().Count(),
                 trackingEventCount = snapshot.TrackingEventCount,
                 latestTrackingUtc = snapshot.LatestTrackingUtc,
-                warning = (string?)null,
+                warning = refreshWarning,
                 records
             });
         }

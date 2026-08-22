@@ -43,8 +43,8 @@ public sealed class DotTrackingClientTests
 
         var telemetryJson = handler.Bodies[1];
         using var payload = JsonDocument.Parse(telemetryJson);
-        Assert.Equal(0x01, payload.RootElement.GetProperty("DataMask").GetInt32());
-        Assert.True(payload.RootElement.GetProperty("OnlyLive").GetBoolean());
+        Assert.Equal(0x05, payload.RootElement.GetProperty("DataMask").GetInt32());
+        Assert.Equal(1, payload.RootElement.GetProperty("OnlyLive").GetInt32());
     }
 
     [Fact]

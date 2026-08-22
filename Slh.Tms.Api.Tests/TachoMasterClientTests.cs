@@ -1,7 +1,9 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging.Abstractions;
+using Slh.Tms.Api.Controllers;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
@@ -102,6 +104,58 @@ public sealed class TachoMasterClientTests
         Assert.Equal("Night Driver", matchedWithNoDriver!.DriverName);
     }
 
+    [Fact]
+    public async Task Open_vehicle_statuses_exclude_completed_duties_but_daily_history_keeps_them()
+    {
+        // Regression: a completed day-driver duty must not be treated as the live driver
+        // merely because it overlaps the same operating day as the current run.
+        var handler = new TwoDriverOneVehicleHandler();
+        var client = Client(handler);
+        var date = new DateOnly(2026, 8, 14);
+
+        var open = await client.GetOpenDriverStatusesByVehicleAsync(date);
+        var openStatuses = Assert.Single(open).Value;
+        var live = Assert.Single(openStatuses);
+        Assert.Equal("Night Driver", live.DriverName);
+        Assert.Null(live.DutyEndUtc);
+
+        var history = await client.GetAllDriverStatusesByVehicleAsync(date);
+        Assert.Equal(2, Assert.Single(history).Value.Count);
+    }
+
+    [Fact]
+    public async Task Health_reports_successful_poll_separately_from_stale_legal_hours_metrics()
+    {
+        // Regression: a four-hour-old open duty start must not make a successful live API
+        // response look disconnected; legal-hours metric age is a separate readiness signal.
+        var controller = new TachoMasterHealthController(
+            Client(new TachoMasterHandler()),
+            NullLogger<TachoMasterHealthController>.Instance);
+
+        var response = Assert.IsType<OkObjectResult>(await controller.Get(CancellationToken.None));
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(response.Value));
+        var root = json.RootElement;
+
+        Assert.Equal("healthy", root.GetProperty("status").GetString());
+        Assert.Equal("live", root.GetProperty("connectionFreshness").GetString());
+        Assert.True(root.GetProperty("lastSuccessfulPollUtc").GetDateTimeOffset() <= DateTimeOffset.UtcNow);
+        Assert.Equal(1, root.GetProperty("openVehicleDuties").GetInt32());
+        Assert.Equal("stale", root.GetProperty("metricsFreshness").GetString());
+        Assert.True(root.GetProperty("metricsStale").GetBoolean());
+    }
+
+    private static TachoMasterClient Client(HttpMessageHandler handler) => new(
+        new HttpClient(handler),
+        new TachoMasterOptions
+        {
+            Enabled = true,
+            BaseUrl = "https://api-v1-alpha.roadtech.co.uk",
+            ApiKey = "test-key",
+            Username = "planner",
+            Password = "secret"
+        },
+        NullLogger<TachoMasterClient>.Instance);
+
     private sealed class TwoDriverOneVehicleHandler : HttpMessageHandler
     {
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -151,8 +205,12 @@ public sealed class TachoMasterClientTests
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var path = request.RequestUri!.AbsolutePath;
-            Paths.Add(path);
-            BodiesByPath[path] = request.Content is null ? string.Empty : await request.Content.ReadAsStringAsync(cancellationToken);
+            var body = request.Content is null ? string.Empty : await request.Content.ReadAsStringAsync(cancellationToken);
+            lock (Paths)
+            {
+                Paths.Add(path);
+                BodiesByPath[path] = body;
+            }
             var payload = request.RequestUri.AbsolutePath switch
             {
                 "/api/auth/login" => "{\"token\":\"sid-123\"}",

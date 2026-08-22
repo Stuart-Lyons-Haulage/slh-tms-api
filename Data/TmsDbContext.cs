@@ -13,6 +13,12 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<Site> Sites => Set<Site>();
     public DbSet<MarketContact> MarketContacts => Set<MarketContact>();
     public DbSet<StagedImport> StagedImports => Set<StagedImport>();
+    public DbSet<StagedImportEvent> StagedImportEvents => Set<StagedImportEvent>();
+    public DbSet<OrderMovement> OrderMovements => Set<OrderMovement>();
+    public DbSet<OrderRevision> OrderRevisions => Set<OrderRevision>();
+    public DbSet<OrderSourceLine> OrderSourceLines => Set<OrderSourceLine>();
+    public DbSet<OrderReferenceIssue> OrderReferenceIssues => Set<OrderReferenceIssue>();
+    public DbSet<ReferenceChaseEvent> ReferenceChaseEvents => Set<ReferenceChaseEvent>();
     public DbSet<TransportOrder> TransportOrders => Set<TransportOrder>();
     public DbSet<Load> Loads => Set<Load>();
     public DbSet<LoadStop> LoadStops => Set<LoadStop>();
@@ -75,6 +81,7 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<IntegrationMapping>()
             .HasIndex(x => x.TmsEntityId)
             .HasDatabaseName("IX_IntegrationMappings_TmsEntityId");
+        b.Entity<IntegrationMapping>().Property(x => x.ConfidenceThreshold).HasPrecision(5, 4);
 
         b.Entity<DriverStatusLog>()
             .HasIndex(x => x.LoadId)
@@ -92,8 +99,25 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
 
         b.Entity<StagedImport>().HasIndex(x => x.IdempotencyKey).IsUnique();
         b.Entity<StagedImport>().Property(x => x.RowVersion).IsRowVersion();
+        b.Entity<StagedImportEvent>().HasIndex(x => new { x.StagedImportId, x.OccurredAtUtc });
+        b.Entity<StagedImportEvent>().HasOne<StagedImport>().WithMany().HasForeignKey(x => x.StagedImportId).OnDelete(DeleteBehavior.Restrict);
+        b.Entity<OrderMovement>().HasIndex(x => new { x.CustomerCode, x.StableMovementKey }).IsUnique();
+        b.Entity<OrderRevision>().HasIndex(x => new { x.MovementId, x.RevisionNumber }).IsUnique();
+        b.Entity<OrderRevision>().HasIndex(x => x.StagedImportId).IsUnique();
+        b.Entity<OrderRevision>().HasOne<OrderMovement>().WithMany().HasForeignKey(x => x.MovementId).OnDelete(DeleteBehavior.Restrict);
+        b.Entity<OrderRevision>().HasOne<StagedImport>().WithMany().HasForeignKey(x => x.StagedImportId).OnDelete(DeleteBehavior.Restrict);
+        b.Entity<OrderSourceLine>().HasIndex(x => new { x.RevisionId, x.SourceRowKey }).IsUnique();
+        b.Entity<OrderSourceLine>().HasOne<OrderRevision>().WithMany().HasForeignKey(x => x.RevisionId).OnDelete(DeleteBehavior.Restrict);
+        b.Entity<OrderReferenceIssue>().HasIndex(x => new { x.MovementId, x.ReferenceType, x.Status });
+        b.Entity<OrderReferenceIssue>().HasOne<OrderMovement>().WithMany().HasForeignKey(x => x.MovementId).OnDelete(DeleteBehavior.Restrict);
+        b.Entity<ReferenceChaseEvent>().HasIndex(x => new { x.ReferenceIssueId, x.OccurredAtUtc });
+        b.Entity<ReferenceChaseEvent>().HasOne<OrderReferenceIssue>().WithMany().HasForeignKey(x => x.ReferenceIssueId).OnDelete(DeleteBehavior.Restrict);
         b.Entity<TransportOrder>().HasIndex(x => x.Reference).IsUnique();
         b.Entity<TransportOrder>().HasIndex(x => x.CollectionDate);
+        b.Entity<TransportOrder>().HasIndex(x => x.SourceStagedImportId);
+        b.Entity<TransportOrder>().HasOne<StagedImport>().WithMany().HasForeignKey(x => x.SourceStagedImportId).OnDelete(DeleteBehavior.Restrict);
+        b.Entity<TransportOrder>().HasIndex(x => x.SourceMovementId);
+        b.Entity<TransportOrder>().HasOne<OrderMovement>().WithMany().HasForeignKey(x => x.SourceMovementId).OnDelete(DeleteBehavior.Restrict);
         b.Entity<Load>().HasIndex(x => x.Reference).IsUnique();
         b.Entity<Load>().HasIndex(x => x.PlanningDate);
         b.Entity<LoadStop>().HasIndex(x => new { x.LoadId, x.Sequence }).IsUnique();

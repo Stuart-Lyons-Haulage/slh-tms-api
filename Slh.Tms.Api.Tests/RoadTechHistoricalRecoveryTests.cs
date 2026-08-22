@@ -33,8 +33,8 @@ public sealed class RoadTechHistoricalRecoveryTests
 
         using var firstPage = JsonDocument.Parse(handler.Bodies[1]);
         using var secondPage = JsonDocument.Parse(handler.Bodies[2]);
-        Assert.False(firstPage.RootElement.GetProperty("OnlyLive").GetBoolean());
-        Assert.False(secondPage.RootElement.GetProperty("OnlyLive").GetBoolean());
+        Assert.Equal(0, firstPage.RootElement.GetProperty("OnlyLive").GetInt32());
+        Assert.Equal(0, secondPage.RootElement.GetProperty("OnlyLive").GetInt32());
         Assert.Equal(0, firstPage.RootElement.GetProperty("Offset").GetInt32());
         Assert.Equal(2, secondPage.RootElement.GetProperty("Offset").GetInt32());
         Assert.Equal("2026-08-21", firstPage.RootElement.GetProperty("T").GetString());
