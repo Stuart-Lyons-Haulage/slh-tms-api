@@ -10,6 +10,38 @@ namespace Slh.Tms.Api.Tests;
 public sealed class PlanningOptimiserTests
 {
     [Fact]
+    public void Constraint_evidence_blocks_known_hours_breach_and_marks_stale_evidence_unverified()
+    {
+        // Defect protected: a known legal hours breach or stale Tacho snapshot is
+        // ranked as a feasible recommendation merely because a driver is available.
+        var now = new DateTimeOffset(2026, 8, 23, 10, 0, 0, TimeSpan.Zero);
+        var evaluator = new PlanningConstraintEvaluator();
+
+        var blocked = evaluator.EvaluateDriver(new PlanningDriverEvidence(
+            DriverId: Guid.NewGuid(),
+            RequiredDriveMinutes: 240,
+            DriveAvailableTodayMinutes: 180,
+            TachoObservedAtUtc: now.AddMinutes(-10),
+            EvidenceCapturedAtUtc: now,
+            ConsecutiveDays: 4,
+            AlternatingSixthDayAllowed: false));
+        var stale = evaluator.EvaluateDriver(new PlanningDriverEvidence(
+            DriverId: Guid.NewGuid(),
+            RequiredDriveMinutes: 120,
+            DriveAvailableTodayMinutes: 300,
+            TachoObservedAtUtc: now.AddHours(-7),
+            EvidenceCapturedAtUtc: now,
+            ConsecutiveDays: 5,
+            AlternatingSixthDayAllowed: true));
+
+        Assert.Equal("Blocked", blocked.Classification);
+        Assert.Contains(blocked.Results, result => result.Code == "InsufficientDriveTime" && !result.Passed);
+        Assert.Equal("Unverified", stale.Classification);
+        Assert.Contains(stale.Results, result => result.Code == "TachoEvidenceStale" && !result.Passed);
+        Assert.Contains(stale.Results, result => result.Code == "AlternatingSixthDay" && result.Passed);
+    }
+
+    [Fact]
     public async Task Generate_persists_an_immutable_proposal_without_creating_live_runs()
     {
         // Defect protected: proposal generation accidentally writes an optimiser
