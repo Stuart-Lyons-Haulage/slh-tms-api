@@ -309,7 +309,7 @@ public sealed class StagingService(TmsDbContext db)
             if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowStartUtc"), out var parsedWindowStart)) deliveryWindowStartUtc = parsedWindowStart;
             DateTimeOffset? deliveryWindowEndUtc = null;
             if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowEndUtc"), out var parsedWindowEnd)) deliveryWindowEndUtc = parsedWindowEnd;
-            var sourceStagedImportId = db.Entry(item).State == EntityState.Detached ? null : item.Id;
+            Guid? sourceStagedImportId = db.Entry(item).State == EntityState.Detached ? null : item.Id;
             db.TransportOrders.Add(new TransportOrder { SourceStagedImportId = sourceStagedImportId, Reference = ClipRequired(reference, 80), CustomerCode = ClipRequired(customerCode, 40), CollectionDate = collectionDate, DeliveryDate = deliveryDate, DeliveryWindowStartUtc = deliveryWindowStartUtc, DeliveryWindowEndUtc = deliveryWindowEndUtc, Pallets = IntOrNull(payload, "pallets"), SellerName = Clip(Text(payload, "sellerName"), 200), MarketName = Clip(Text(payload, "marketName"), 80), StallNumber = Clip(Text(payload, "stallNumber"), 200), DriverInstructions = Clip(Text(payload, "driverInstructions"), 1000), MapLink = Clip(Text(payload, "mapLink"), 1000) });
         }
         else if (existing.SourceStagedImportId is null) existing.SourceStagedImportId = item.Id;
