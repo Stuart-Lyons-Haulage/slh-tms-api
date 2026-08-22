@@ -335,12 +335,13 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
 
         try
         {
-            var tracked = await db.Loads.Include(x => x.Stops).SingleOrDefaultAsync(x => x.Id == load.Id, ct);
-            if (tracked is not null)
+            if (await db.Loads.AsNoTracking().AnyAsync(x => x.Id == load.Id, ct))
             {
-                if (!string.IsNullOrWhiteSpace(collection) && collection != "Collection not mapped" && !tracked.Stops.Any(x => x.Name.Contains(collection, StringComparison.OrdinalIgnoreCase)))
-                    tracked.Stops.Add(new LoadStop { LoadId = tracked.Id, Sequence = tracked.Stops.Count + 1, Name = $"Collect · {collection}" });
-                tracked.Stops.Add(new LoadStop { LoadId = tracked.Id, OrderId = order.Id, Sequence = tracked.Stops.Count + 1, Name = $"Deliver · {order.CustomerCode} · {destination}" });
+                var existingStops = await db.LoadStops.AsNoTracking().Where(x => x.LoadId == load.Id).OrderBy(x => x.Sequence).ToListAsync(ct);
+                var sequence = existingStops.Count == 0 ? 1 : existingStops.Max(x => x.Sequence) + 1;
+                if (!string.IsNullOrWhiteSpace(collection) && collection != "Collection not mapped" && !existingStops.Any(x => x.Name.Contains(collection, StringComparison.OrdinalIgnoreCase)))
+                    db.LoadStops.Add(new LoadStop { LoadId = load.Id, Sequence = sequence++, Name = $"Collect · {collection}" });
+                db.LoadStops.Add(new LoadStop { LoadId = load.Id, OrderId = order.Id, Sequence = sequence, Name = $"Deliver · {order.CustomerCode} · {destination}" });
                 await db.SaveChangesAsync(ct);
                 return;
             }
