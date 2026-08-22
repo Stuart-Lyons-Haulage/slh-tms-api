@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Slh.Tms.Api.Data;
@@ -9,6 +10,116 @@ namespace Slh.Tms.Api.Tests;
 
 public sealed class PlanningOptimiserTests
 {
+    [Fact]
+    public async Task Generate_persists_selected_live_position_driver_vehicle_and_score_evidence()
+    {
+        // Defect protected: the ranker exists in isolation but generated proposals
+        // discard its selected driver/vehicle, position source and score explanation.
+        var now = DateTimeOffset.UtcNow;
+        var date = DateOnly.FromDateTime(now.UtcDateTime).AddDays(1);
+        var movementId = Guid.NewGuid();
+        var revisionId = Guid.NewGuid();
+        var sourceLineId = Guid.NewGuid();
+        var stagedId = Guid.NewGuid();
+        var driverId = Guid.NewGuid();
+        var vehicleId = Guid.NewGuid();
+        var options = new DbContextOptionsBuilder<TmsDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using var db = new TmsDbContext(options);
+        db.Drivers.Add(new Driver { Id = driverId, EmployeeNumber = "D-001", DisplayName = "Driver One", Active = true });
+        db.Vehicles.Add(new Vehicle { Id = vehicleId, Registration = "AB12CDE", Active = true });
+        db.VehicleLiveStatuses.Add(new Slh.Tms.Api.Models.Tracking.VehicleLiveStatus
+        {
+            VehicleIdentifier = "AB12CDE",
+            LastEventTimeUtc = now.AddMinutes(-5),
+            LastReceivedAtUtc = now.AddMinutes(-5),
+            Latitude = 54.2m,
+            Longitude = -1.5m
+        });
+        db.Sites.AddRange(
+            new Site { ExternalCode = "COLL", Name = "Northern Collection", Active = true },
+            new Site { ExternalCode = "DEL", Name = "Southern Delivery", Active = true });
+        db.StagedImports.AddRange(
+            new StagedImport
+            {
+                Id = stagedId,
+                EntityType = "order",
+                IdempotencyKey = "optimiser-ranked-order",
+                PayloadJson = "{}",
+                Status = StagingStatus.Approved
+            },
+            new StagedImport
+            {
+                EntityType = "masterdetail:driver",
+                IdempotencyKey = "masterdetail:driver:d001",
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    employeeNumber = "D-001",
+                    tachoDriveAvailableTodayMinutes = 500,
+                    lastTachoSyncUtc = now.AddMinutes(-10)
+                }),
+                Status = StagingStatus.Promoted
+            },
+            new StagedImport
+            {
+                EntityType = "masterdetail:site",
+                IdempotencyKey = "masterdetail:site:coll",
+                PayloadJson = "{\"externalCode\":\"COLL\",\"latitude\":54.0,\"longitude\":-1.5}",
+                Status = StagingStatus.Promoted
+            },
+            new StagedImport
+            {
+                EntityType = "masterdetail:site",
+                IdempotencyKey = "masterdetail:site:del",
+                PayloadJson = "{\"externalCode\":\"DEL\",\"latitude\":51.5,\"longitude\":-0.1}",
+                Status = StagingStatus.Promoted
+            });
+        db.OrderMovements.Add(new OrderMovement
+        {
+            Id = movementId,
+            CustomerCode = "ALDI",
+            StableMovementKey = "ALDI:PO-RANK",
+            CurrentRevisionId = revisionId,
+            LifecycleStatus = OrderMovementStatus.PlannerReady
+        });
+        db.OrderRevisions.Add(new OrderRevision
+        {
+            Id = revisionId,
+            MovementId = movementId,
+            StagedImportId = stagedId,
+            RevisionNumber = 1,
+            PayloadJson = "{}"
+        });
+        db.OrderSourceLines.Add(new OrderSourceLine
+        {
+            Id = sourceLineId,
+            RevisionId = revisionId,
+            SourceRowKey = "Sheet1!2",
+            CollectionSite = "Northern Collection",
+            DeliverySite = "Southern Delivery",
+            CollectionDate = date,
+            DeliveryDate = date,
+            CollectionTimeFrom = new TimeOnly(3, 0),
+            PalletType = "Standard",
+            Pallets = 20,
+            PayloadJson = "{}"
+        });
+        await db.SaveChangesAsync();
+
+        var service = new PlanningOptimiserService(db, NullLogger<PlanningOptimiserService>.Instance);
+        var proposal = await service.GenerateAsync(new GeneratePlanProposalRequest(date, "AM"), "planner", CancellationToken.None);
+
+        Assert.Equal("Recommended", proposal.Classification);
+        var run = Assert.Single(proposal.Runs);
+        Assert.Equal(driverId, run.DriverId);
+        Assert.Equal(vehicleId, run.VehicleId);
+        Assert.Equal("LiveTracking", run.PositionSource);
+        Assert.Contains(run.ScoreComponents, component => component.Code == "SouthboundPositioning" && component.Value > 0);
+        Assert.Contains(run.Explanations, explanation => explanation.Contains("southbound", StringComparison.OrdinalIgnoreCase));
+        Assert.Empty(await db.Loads.ToListAsync());
+    }
+
     [Fact]
     public void Candidate_ranking_prefers_fresh_position_then_previous_end_and_explains_southbound_return_home()
     {
