@@ -36,11 +36,11 @@ public sealed class OrderIntakeDuplicateCheckController(
                 {
                     using var document = JsonDocument.Parse(item.PayloadJson);
                     var existing = OrderSnapshot.FromPayload(document.RootElement);
-                    if (Classify(candidate, existing) is { } classification)
+                    if (Classify(candidate, existing) is { } matchClassification)
                     {
                         matches.Add(new DuplicateMatch(
-                            classification,
-                            classification == "Possible duplicate" ? "Medium" : "High",
+                            matchClassification,
+                            matchClassification == "Possible duplicate" ? "Medium" : "High",
                             "staging",
                             item.Id.ToString(),
                             existing.OrderReference ?? existing.Po,
@@ -80,11 +80,11 @@ public sealed class OrderIntakeDuplicateCheckController(
             foreach (var order in live)
             {
                 var existing = OrderSnapshot.FromLive(order);
-                if (Classify(candidate, existing) is { } classification)
+                if (Classify(candidate, existing) is { } matchClassification)
                 {
                     matches.Add(new DuplicateMatch(
-                        classification,
-                        classification == "Possible duplicate" ? "Medium" : "High",
+                        matchClassification,
+                        matchClassification == "Possible duplicate" ? "Medium" : "High",
                         "live-order",
                         order.Id.ToString(),
                         order.Reference,
