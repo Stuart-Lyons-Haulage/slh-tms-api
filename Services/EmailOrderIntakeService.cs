@@ -561,7 +561,9 @@ public sealed record MailboxAttachmentRequest(
     string? Name,
     string? ContentType,
     string? ContentBase64,
-    bool? IsInline = false);
+    bool? IsInline = false,
+    string? ContentId = null,
+    long? Size = null);
 
 public sealed record MailboxEmailIntakeRequest(
     string MessageId,
@@ -574,7 +576,13 @@ public sealed record MailboxEmailIntakeRequest(
     string? BodyText,
     string? BodyHtml,
     string? WebLink,
-    List<MailboxAttachmentRequest>? Attachments);
+    List<MailboxAttachmentRequest>? Attachments,
+    string? ConversationId = null,
+    JsonElement? ToRecipients = null,
+    JsonElement? CcRecipients = null,
+    string? BodyFormat = null,
+    string? Importance = null,
+    string? CorrelationId = null);
 
 public sealed record ParsedEmailOrder(
     string SourceKey,

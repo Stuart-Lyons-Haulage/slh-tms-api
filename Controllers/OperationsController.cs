@@ -41,7 +41,7 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
         var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles.Values.ToList(), ct);
         var statuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
         IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> tachoStatuses = new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
-        try { tachoStatuses = await tachoMaster.GetAllDriverStatusesByVehicleAsync(planningDate, ct); }
+        try { tachoStatuses = await tachoMaster.GetOpenDriverStatusesByVehicleAsync(planningDate, ct); }
         catch (Exception exception) when (exception is not OperationCanceledException) { logger.LogWarning(exception, "TachoMaster data was unavailable for tacho-aware ETA calculations."); }
  
         EmbeddedGeofenceSnapshot? geofence = null;

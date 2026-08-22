@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -87,12 +88,14 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             }
 
             superseded += await SupersedeOlderPending(order.NaturalKey, request.MessageId, ct);
+            var stagedPayload = EnrichSourceEvidence(order.Payload, request);
             var item = stagingService.Create(new StageImportRequest(
                 "order",
                 idempotencyKey,
-                order.Payload,
+                stagedPayload,
                 $"Info mailbox / {(request.SenderAddress ?? "unknown sender").Trim()}"));
             db.StagedImports.Add(item);
+            db.StagedImportEvents.Add(StagingAudit.Create(item, "Received"));
             await db.SaveChangesAsync(ct);
             staged++;
 
@@ -154,10 +157,12 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var now = DateTimeOffset.UtcNow;
         foreach (var candidate in matching)
         {
+            var previous = candidate.Status;
             candidate.Status = StagingStatus.Rejected;
             candidate.ReviewedAtUtc = now;
             candidate.ReviewedBy = "Mailbox snapshot supersession";
             candidate.ReviewNote = $"Superseded by a newer NWF/Info mailbox snapshot ({currentMessageId}). Original evidence retained.";
+            db.StagedImportEvents.Add(StagingAudit.Create(candidate, "Superseded", previous, candidate.ReviewNote, candidate.ReviewedBy));
         }
         await db.SaveChangesAsync(ct);
         return matching.Count;
@@ -184,10 +189,12 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             }
             catch (JsonException) { }
 
+            var previous = candidate.Status;
             candidate.Status = StagingStatus.Rejected;
             candidate.ReviewedAtUtc = now;
             candidate.ReviewedBy = "Mailbox supersession";
             candidate.ReviewNote = $"Superseded automatically by a newer Info mailbox message ({currentMessageId}). Original evidence retained.";
+            db.StagedImportEvents.Add(StagingAudit.Create(candidate, "Superseded", previous, candidate.ReviewNote, candidate.ReviewedBy));
             count++;
         }
         if (count > 0) await db.SaveChangesAsync(ct);
@@ -264,4 +271,40 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
     private static string EscapeForContains(string value) =>
         value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal);
+
+    internal static JsonElement EnrichSourceEvidence(JsonElement payload, MailboxEmailIntakeRequest request)
+    {
+        var root = JsonNode.Parse(payload.GetRawText())?.AsObject() ?? new JsonObject();
+        root["sourceMailbox"] = request.Mailbox;
+        root["sourceSender"] = request.SenderAddress;
+        root["sourceSenderName"] = request.SenderName;
+        root["sourceEmailSubject"] = request.Subject;
+        root["sourceEmailReceivedAt"] = request.ReceivedAtUtc;
+        root["sourceEmailMessageId"] = request.MessageId;
+        root["sourceInternetMessageId"] = request.InternetMessageId;
+        root["sourceConversationId"] = request.ConversationId;
+        root["sourceEmailWebLink"] = request.WebLink;
+        root["sourceBodyFormat"] = request.BodyFormat;
+        root["sourceImportance"] = request.Importance;
+        root["importCorrelationId"] = request.CorrelationId;
+        root["sourceToRecipients"] = request.ToRecipients is { } to ? JsonNode.Parse(to.GetRawText()) : null;
+        root["sourceCcRecipients"] = request.CcRecipients is { } cc ? JsonNode.Parse(cc.GetRawText()) : null;
+
+        var attachments = new JsonArray();
+        foreach (var attachment in request.Attachments ?? [])
+        {
+            attachments.Add(new JsonObject
+            {
+                ["name"] = attachment.Name,
+                ["contentType"] = attachment.ContentType,
+                ["contentId"] = attachment.ContentId,
+                ["size"] = attachment.Size,
+                ["isInline"] = attachment.IsInline
+            });
+        }
+        root["sourceAttachments"] = attachments;
+        root["importSource"] = "PowerAutomate/InfoMailbox";
+        root["reviewStatus"] = "Pending Review";
+        return JsonSerializer.SerializeToElement(root);
+    }
 }

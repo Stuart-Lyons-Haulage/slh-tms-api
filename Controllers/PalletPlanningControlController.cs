@@ -24,6 +24,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
         var loads = await ReadLoads(date, ct);
         var details = await ReadOrderDetails(date, ct);
         var explicitAllocations = await ReadLatestAllocations(date, ct);
+        var sourceLines = await ReadCurrentSourceLines(orders, ct);
         var loadById = loads.ToDictionary(x => x.Id);
         var firstRunCreated = loads.Count == 0 ? (DateTimeOffset?)null : loads.Min(x => x.CreatedAtUtc);
 
@@ -39,7 +40,9 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
         foreach (var order in orders.Where(x => x.Status != OrderStatus.Cancelled))
         {
             details.TryGetValue(Normalise(order.Reference), out var detail);
-            var ordered = EffectiveOrderedPallets(order, detail);
+            sourceLines.TryGetValue(order.Id, out var orderSourceLines);
+            orderSourceLines ??= [];
+            var ordered = orderSourceLines.Count > 0 ? orderSourceLines.Sum(x => Math.Max(x.Pallets ?? 0, 0)) : EffectiveOrderedPallets(order, detail);
             if (ordered <= 0) continue;
 
             var hasExplicitAllocations = explicitAllocations.Keys.Any(key => key.OrderId == order.Id);
@@ -102,8 +105,23 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
                 source = detail?.Source,
                 receivedAtUtc = detail?.UpdatedAtUtc ?? order.CreatedAtUtc,
                 lateAddition = late,
+                sourceMovementId = order.SourceMovementId,
+                sourceLines = orderSourceLines.Select(line =>
+                {
+                    var lineAllocations = explicitAllocations.Values.Where(x => x.OrderId == order.Id && x.SourceLineId == line.Id && x.Pallets > 0).ToList();
+                    var lineOrdered = Math.Max(line.Pallets ?? 0, 0);
+                    var linePlanned = lineAllocations.Sum(x => x.Pallets);
+                    return new
+                    {
+                        sourceLineId = line.Id, line.SourceRowKey, line.CollectionSite, line.DeliverySite, line.CollectionDate, line.DeliveryDate,
+                        line.CollectionTimeFrom, line.CollectionTimeTo, line.PalletType, orderedPallets = lineOrdered,
+                        plannedPallets = linePlanned, outstandingPallets = Math.Max(lineOrdered - linePlanned, 0),
+                        overplannedPallets = Math.Max(linePlanned - lineOrdered, 0), line.TemperatureRequirement, line.LoadReference
+                    };
+                }).ToList(),
                 allocations = allocations.Select(x => new
                 {
+                    x.SourceLineId,
                     x.LoadId,
                     loadReference = loadById.TryGetValue(x.LoadId, out var linked) ? linked.Reference : null,
                     pallets = x.Pallets,
@@ -171,14 +189,29 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
         if (load.Status == LoadStatus.Cancelled) return BadRequest(new { message = "Pallets cannot be allocated to a cancelled run." });
 
         var latest = await ReadLatestAllocations(request.Date, ct);
-        latest.TryGetValue((request.OrderId, request.LoadId), out var previous);
+        latest.TryGetValue((request.OrderId, request.LoadId, request.SourceLineId), out var previous);
         var previousPallets = previous?.Pallets ?? 0;
+        var detailMap = await ReadOrderDetails(request.Date, ct);
+        detailMap.TryGetValue(Normalise(order.Reference), out var detail);
+        var sourceLineMap = await ReadCurrentSourceLines([order], ct);
+        sourceLineMap.TryGetValue(order.Id, out var sourceLines);
+        sourceLines ??= [];
+        var permitted = request.SourceLineId is Guid sourceLineId
+            ? sourceLines.SingleOrDefault(x => x.Id == sourceLineId)?.Pallets
+            : sourceLines.Count > 0 ? sourceLines.Sum(x => Math.Max(x.Pallets ?? 0, 0)) : EffectiveOrderedPallets(order, detail);
+        if (permitted is null) return BadRequest(new { message = "The selected source line could not be found for this order." });
+        var allocatedElsewhere = latest.Values.Where(x => x.OrderId == order.Id && x.LoadId != request.LoadId &&
+            (request.SourceLineId is null || x.SourceLineId is null || x.SourceLineId == request.SourceLineId)).Sum(x => Math.Max(x.Pallets, 0));
+        if (allocatedElsewhere + request.Pallets > permitted.Value)
+            return Conflict(new { message = "Allocation exceeds the approved pallet quantity.", approvedPallets = permitted, allocatedElsewhere, requestedPallets = request.Pallets });
         var now = DateTimeOffset.UtcNow;
-        var payload = new AllocationState(request.OrderId, request.LoadId, request.Pallets, request.Date, now, User.Identity?.Name);
+        var payload = new AllocationState(request.OrderId, request.LoadId, request.Pallets, request.Date, now, User.Identity?.Name, request.SourceLineId);
+        var allocationKey = $"palletallocation:{request.OrderId:N}:{request.LoadId:N}:{request.SourceLineId?.ToString("N") ?? "order"}:{now:yyyyMMddHHmmssfff}:{Guid.NewGuid():N}";
+        if (allocationKey.Length > 200) allocationKey = allocationKey[..200];
         db.StagedImports.Add(new StagedImport
         {
             EntityType = AllocationType,
-            IdempotencyKey = $"palletallocation:{request.OrderId:N}:{request.LoadId:N}:{now:yyyyMMddHHmmssfff}:{Guid.NewGuid():N}",
+            IdempotencyKey = allocationKey,
             PayloadJson = JsonSerializer.Serialize(payload, JsonOptions),
             Source = "Pallet planning control",
             Status = StagingStatus.Promoted,
@@ -187,19 +220,19 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
             ReviewNote = $"Run pallet allocation changed from {previousPallets} to {request.Pallets}. {request.Note}".Trim()
         });
         await db.SaveChangesAsync(ct);
+        db.ChangeTracker.Clear();
 
-        var detailMap = await ReadOrderDetails(request.Date, ct);
-        detailMap.TryGetValue(Normalise(order.Reference), out var detail);
         await EnsureOrderOnRun(load, order, detail, ct);
         var capacity = await UpdateRunPalletTotal(load.Id, request.Date, ct);
 
         var allLatest = await ReadLatestAllocations(request.Date, ct);
         var totalPlanned = allLatest.Values.Where(x => x.OrderId == order.Id).Sum(x => Math.Max(x.Pallets, 0));
-        var ordered = EffectiveOrderedPallets(order, detail);
+        var ordered = sourceLines.Count > 0 ? sourceLines.Sum(x => Math.Max(x.Pallets ?? 0, 0)) : EffectiveOrderedPallets(order, detail);
         return Ok(new
         {
             orderId = order.Id,
             orderReference = order.Reference,
+            sourceLineId = request.SourceLineId,
             loadId = load.Id,
             loadReference = load.Reference,
             allocatedToRun = request.Pallets,
@@ -275,18 +308,18 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
         return result;
     }
 
-    private async Task<Dictionary<(Guid OrderId, Guid LoadId), AllocationState>> ReadLatestAllocations(DateOnly date, CancellationToken ct)
+    private async Task<Dictionary<(Guid OrderId, Guid LoadId, Guid? SourceLineId), AllocationState>> ReadLatestAllocations(DateOnly date, CancellationToken ct)
     {
         var rows = await db.StagedImports.AsNoTracking().Where(x => x.EntityType == AllocationType && x.Status == StagingStatus.Promoted)
             .OrderByDescending(x => x.ReceivedAtUtc).Take(20000).ToListAsync(ct);
-        var result = new Dictionary<(Guid OrderId, Guid LoadId), AllocationState>();
+        var result = new Dictionary<(Guid OrderId, Guid LoadId, Guid? SourceLineId), AllocationState>();
         foreach (var row in rows)
         {
             try
             {
                 var state = JsonSerializer.Deserialize<AllocationState>(row.PayloadJson, JsonOptions);
                 if (state is null || state.Date != date) continue;
-                var key = (state.OrderId, state.LoadId);
+                var key = (state.OrderId, state.LoadId, state.SourceLineId);
                 if (!result.ContainsKey(key)) result[key] = state;
             }
             catch (JsonException) { }
@@ -302,12 +335,13 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
 
         try
         {
-            var tracked = await db.Loads.Include(x => x.Stops).SingleOrDefaultAsync(x => x.Id == load.Id, ct);
-            if (tracked is not null)
+            if (await db.Loads.AsNoTracking().AnyAsync(x => x.Id == load.Id, ct))
             {
-                if (!string.IsNullOrWhiteSpace(collection) && collection != "Collection not mapped" && !tracked.Stops.Any(x => x.Name.Contains(collection, StringComparison.OrdinalIgnoreCase)))
-                    tracked.Stops.Add(new LoadStop { LoadId = tracked.Id, Sequence = tracked.Stops.Count + 1, Name = $"Collect · {collection}" });
-                tracked.Stops.Add(new LoadStop { LoadId = tracked.Id, OrderId = order.Id, Sequence = tracked.Stops.Count + 1, Name = $"Deliver · {order.CustomerCode} · {destination}" });
+                var existingStops = await db.LoadStops.AsNoTracking().Where(x => x.LoadId == load.Id).OrderBy(x => x.Sequence).ToListAsync(ct);
+                var sequence = existingStops.Count == 0 ? 1 : existingStops.Max(x => x.Sequence) + 1;
+                if (!string.IsNullOrWhiteSpace(collection) && collection != "Collection not mapped" && !existingStops.Any(x => x.Name.Contains(collection, StringComparison.OrdinalIgnoreCase)))
+                    db.LoadStops.Add(new LoadStop { LoadId = load.Id, Sequence = sequence++, Name = $"Collect · {collection}" });
+                db.LoadStops.Add(new LoadStop { LoadId = load.Id, OrderId = order.Id, Sequence = sequence, Name = $"Deliver · {order.CustomerCode} · {destination}" });
                 await db.SaveChangesAsync(ct);
                 return;
             }
@@ -341,7 +375,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
             var hasExplicit = latest.Keys.Any(key => key.OrderId == order.Id);
             if (hasExplicit)
             {
-                pallets = latest.TryGetValue((order.Id, loadId), out var allocation) ? Math.Max(allocation.Pallets, 0) : 0;
+                pallets = latest.Values.Where(x => x.OrderId == order.Id && x.LoadId == loadId).Sum(x => Math.Max(x.Pallets, 0));
             }
             else
             {
@@ -460,8 +494,18 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
     private static bool SchemaUnavailable(Exception ex) => ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || ex.GetBaseException().Message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
 
     private sealed record OrderDetail(string Reference, string? Collection, string? Destination, string? Group, string? Temperature, string? PalletType, int? Pallets, string? Source, DateTimeOffset UpdatedAtUtc, bool Amended);
-    private sealed record AllocationState(Guid OrderId, Guid LoadId, int Pallets, DateOnly Date, DateTimeOffset UpdatedAtUtc, string? UpdatedBy);
-    public sealed record PalletAllocationRequest(Guid OrderId, Guid LoadId, DateOnly Date, int Pallets, string? Note);
+    private async Task<Dictionary<Guid, List<OrderSourceLine>>> ReadCurrentSourceLines(IReadOnlyCollection<TransportOrder> orders, CancellationToken ct)
+    {
+        var movementByOrder = orders.Where(x => x.SourceMovementId is not null).ToDictionary(x => x.SourceMovementId!.Value, x => x.Id);
+        if (movementByOrder.Count == 0) return [];
+        var movements = await db.OrderMovements.AsNoTracking().Where(x => movementByOrder.Keys.Contains(x.Id) && x.CurrentRevisionId != null).ToListAsync(ct);
+        var revisionToOrder = movements.ToDictionary(x => x.CurrentRevisionId!.Value, x => movementByOrder[x.Id]);
+        var lines = await db.OrderSourceLines.AsNoTracking().Where(x => revisionToOrder.Keys.Contains(x.RevisionId)).ToListAsync(ct);
+        return lines.GroupBy(x => revisionToOrder[x.RevisionId]).ToDictionary(x => x.Key, x => x.OrderBy(line => line.SourceRowKey).ToList());
+    }
+
+    private sealed record AllocationState(Guid OrderId, Guid LoadId, int Pallets, DateOnly Date, DateTimeOffset UpdatedAtUtc, string? UpdatedBy, Guid? SourceLineId = null);
+    public sealed record PalletAllocationRequest(Guid OrderId, Guid LoadId, DateOnly Date, int Pallets, string? Note, Guid? SourceLineId = null);
 
     private sealed class CellAccumulator(string group, string destination)
     {

@@ -91,6 +91,7 @@ public sealed class Site
     [NotMapped, MaxLength(200)] public string? CustomField1 { get; set; }
     [NotMapped, MaxLength(200)] public string? CustomField2 { get; set; }
     [NotMapped, MaxLength(200)] public string? CustomField3 { get; set; }
+    [MaxLength(80)] public string? OperationalRegion { get; set; }
     public bool Active { get; set; } = true;
 }
 public sealed class MarketContact
@@ -114,7 +115,7 @@ public sealed class FuelPrice
     [MaxLength(500)] public string? Notes { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
 }
-public enum StagingStatus { PendingReview, Approved, Rejected, Promoted, Failed }
+public enum StagingStatus { PendingReview, Approved, Rejected, Promoted, Failed, Archived }
 public sealed class StagedImport
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -129,10 +130,92 @@ public sealed class StagedImport
     [MaxLength(1000)] public string? ReviewNote { get; set; }
     public byte[] RowVersion { get; set; } = [];
 }
+public sealed class StagedImportEvent
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid StagedImportId { get; set; }
+    [MaxLength(40)] public required string EventType { get; set; }
+    public StagingStatus? PreviousStatus { get; set; }
+    public StagingStatus NewStatus { get; set; }
+    public required string PayloadJson { get; set; }
+    [MaxLength(1000)] public string? Note { get; set; }
+    [MaxLength(200)] public string? Actor { get; set; }
+    public DateTimeOffset OccurredAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
+public enum OrderMovementStatus { AwaitingDetails, PendingReview, PlannerReady, Superseded, Cancelled }
+public sealed class OrderMovement
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    [MaxLength(40)] public required string CustomerCode { get; set; }
+    [MaxLength(240)] public required string StableMovementKey { get; set; }
+    public Guid? CurrentRevisionId { get; set; }
+    public OrderMovementStatus LifecycleStatus { get; set; } = OrderMovementStatus.PendingReview;
+    public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
+public sealed class OrderRevision
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid MovementId { get; set; }
+    public Guid StagedImportId { get; set; }
+    public int RevisionNumber { get; set; }
+    [MaxLength(500)] public string? MessageId { get; set; }
+    [MaxLength(500)] public string? AttachmentIdentity { get; set; }
+    [MaxLength(120)] public string? ParserTemplate { get; set; }
+    [MaxLength(40)] public string? ParserVersion { get; set; }
+    public required string PayloadJson { get; set; }
+    public DateTimeOffset ReceivedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public Guid? SupersedesRevisionId { get; set; }
+}
+public sealed class OrderSourceLine
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid RevisionId { get; set; }
+    [MaxLength(160)] public required string SourceRowKey { get; set; }
+    [MaxLength(200)] public string? CollectionSite { get; set; }
+    [MaxLength(200)] public string? DeliverySite { get; set; }
+    public DateOnly? CollectionDate { get; set; }
+    public DateOnly? DeliveryDate { get; set; }
+    public TimeOnly? CollectionTimeFrom { get; set; }
+    public TimeOnly? CollectionTimeTo { get; set; }
+    [MaxLength(40)] public string? PalletType { get; set; }
+    public int? Pallets { get; set; }
+    [MaxLength(80)] public string? TemperatureRequirement { get; set; }
+    [MaxLength(120)] public string? LoadReference { get; set; }
+    public required string PayloadJson { get; set; }
+}
+public enum ReferenceIssueStatus { Open, Resolved }
+public sealed class OrderReferenceIssue
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid MovementId { get; set; }
+    public Guid? TransportOrderId { get; set; }
+    [MaxLength(40)] public required string ReferenceType { get; set; }
+    public ReferenceIssueStatus Status { get; set; } = ReferenceIssueStatus.Open;
+    [MaxLength(200)] public string? Owner { get; set; }
+    [MaxLength(1000)] public string? Notes { get; set; }
+    public DateTimeOffset DetectedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? ResolvedAtUtc { get; set; }
+    [MaxLength(200)] public string? ResolvedBy { get; set; }
+}
+public sealed class ReferenceChaseEvent
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ReferenceIssueId { get; set; }
+    [MaxLength(40)] public required string EventType { get; set; }
+    [MaxLength(320)] public string? Recipient { get; set; }
+    [MaxLength(500)] public string? ProviderMessageId { get; set; }
+    [MaxLength(500)] public string? ProviderThreadId { get; set; }
+    [MaxLength(1000)] public string? Note { get; set; }
+    [MaxLength(200)] public string? Actor { get; set; }
+    public DateTimeOffset OccurredAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
 public enum OrderStatus { Draft, ReadyToPlan, Planned, InTransit, Delivered, Cancelled }
 public sealed class TransportOrder
 {
     public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid? SourceStagedImportId { get; set; }
+    public Guid? SourceMovementId { get; set; }
     [MaxLength(80)] public required string Reference { get; set; }
     [MaxLength(40)] public required string CustomerCode { get; set; }
     public DateOnly CollectionDate { get; set; }
@@ -206,6 +289,14 @@ public sealed class IntegrationMapping
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     [MaxLength(200)] public string? UpdatedBy { get; set; }
+    [MaxLength(40)] public string? MappingKind { get; set; }
+    [MaxLength(300)] public string? NormalizedExternalValue { get; set; }
+    [MaxLength(320)] public string? SenderPattern { get; set; }
+    [MaxLength(120)] public string? TemplateName { get; set; }
+    [MaxLength(40)] public string? TemplateVersion { get; set; }
+    public decimal? ConfidenceThreshold { get; set; }
+    public DateTimeOffset? EffectiveFromUtc { get; set; }
+    public DateTimeOffset? EffectiveToUtc { get; set; }
 }
 public enum DriverDispatchStatus { Dispatched, Accepted, ArrivedCollection, Loaded, ArrivedDelivery, Delivered, IssueReported }
 public sealed class DriverStatusLog

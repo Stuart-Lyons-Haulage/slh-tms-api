@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
 
@@ -33,6 +34,7 @@ public sealed class StagingAmendmentController(TmsDbContext db) : ControllerBase
         if (string.IsNullOrWhiteSpace(po) || string.IsNullOrWhiteSpace(customer) || !DateOnly.TryParse(date, out _))
             return BadRequest(new { message = "Order requires poNumber/reference, customerCode and a valid collectionDate before it can be saved." });
 
+        var previousStatus = item.Status;
         item.PayloadJson = request.Payload.GetRawText();
         item.ReviewNote = string.Join(" | ", new[]
         {
@@ -40,6 +42,12 @@ public sealed class StagingAmendmentController(TmsDbContext db) : ControllerBase
             request.Note,
             $"Pending payload amended by {User.Identity?.Name ?? "authorised user"} at {DateTimeOffset.UtcNow:O}."
         }.Where(value => !string.IsNullOrWhiteSpace(value)));
+        db.StagedImportEvents.Add(StagingAudit.Create(
+            item,
+            "Amended",
+            previousStatus,
+            request.Note,
+            User.Identity?.Name ?? User.FindFirst("oid")?.Value));
         await db.SaveChangesAsync(ct);
         return Ok(item);
     }

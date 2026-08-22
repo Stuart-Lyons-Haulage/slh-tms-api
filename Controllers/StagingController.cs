@@ -39,7 +39,10 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
         if (existing is not null) return Ok(service.ToResponse(existing, Request));
         try
         {
-            var item = service.Create(request); db.StagedImports.Add(item); await db.SaveChangesAsync(ct);
+            var item = service.Create(request);
+            db.StagedImports.Add(item);
+            db.StagedImportEvents.Add(StagingAudit.Create(item, "Received"));
+            await db.SaveChangesAsync(ct);
             return Accepted(service.ToResponse(item, Request));
         }
         catch (ArgumentException ex)
@@ -68,7 +71,13 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
             foreach (var request in filteredRequests)
             {
                 if (existing.TryGetValue(request.IdempotencyKey, out var item)) responses.Add(service.ToResponse(item, Request));
-                else { var created = service.Create(request); db.StagedImports.Add(created); responses.Add(service.ToResponse(created, Request)); }
+                else
+                {
+                    var created = service.Create(request);
+                    db.StagedImports.Add(created);
+                    db.StagedImportEvents.Add(StagingAudit.Create(created, "Received"));
+                    responses.Add(service.ToResponse(created, Request));
+                }
             }
             await db.SaveChangesAsync(ct);
             return Accepted(new { received = requests.Count, existing = existingCount, created = responses.Count - existingCount, skippedZeroPallets, records = responses });
@@ -83,14 +92,57 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
     public async Task<IActionResult> Get(Guid id, CancellationToken ct) =>
         (await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct)) is { } x ? Ok(x) : NotFound();
 
+    [HttpGet("{id:guid}/history")]
+    public async Task<IActionResult> History(Guid id, CancellationToken ct)
+    {
+        if (!await db.StagedImports.AsNoTracking().AnyAsync(x => x.Id == id, ct)) return NotFound();
+        var events = await db.StagedImportEvents.AsNoTracking()
+            .Where(x => x.StagedImportId == id)
+            .OrderBy(x => x.OccurredAtUtc)
+            .ThenBy(x => x.Id)
+            .ToListAsync(ct);
+        return Ok(events.Select(x => new
+        {
+            x.Id,
+            x.StagedImportId,
+            x.EventType,
+            previousStatus = x.PreviousStatus?.ToString(),
+            newStatus = x.NewStatus.ToString(),
+            payload = JsonSerializer.Deserialize<JsonElement>(x.PayloadJson),
+            x.Note,
+            x.Actor,
+            x.OccurredAtUtc
+        }));
+    }
+
+    [HttpPost("pending/archive"), Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> ArchivePending(ArchivePendingRequest request, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(request.Reason))
+            return BadRequest(new ErrorResponse("archive_reason_required", "A reason is required to archive pending records.", HttpContext.TraceIdentifier));
+
+        var pending = await db.StagedImports.Where(item => item.Status == StagingStatus.PendingReview).ToListAsync(ct);
+        var actor = User.Identity?.Name ?? User.FindFirst("oid")?.Value ?? "authorised user";
+        foreach (var item in pending)
+        {
+            var previous = item.Status;
+            item.Status = StagingStatus.Archived;
+            item.ReviewedAtUtc = DateTimeOffset.UtcNow;
+            item.ReviewedBy = actor;
+            item.ReviewNote = request.Reason.Trim();
+            db.StagedImportEvents.Add(StagingAudit.Create(item, "Archived", previous, item.ReviewNote, actor));
+        }
+        await db.SaveChangesAsync(ct);
+        return Ok(new { archived = pending.Count });
+    }
+
     [HttpDelete("pending"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> ClearPending([FromQuery] string confirm, CancellationToken ct)
     {
         if (!string.Equals(confirm, "CLEAR-PENDING", StringComparison.Ordinal))
             return BadRequest(new ErrorResponse("confirmation_required", "Add confirm=CLEAR-PENDING to clear pending staging records.", HttpContext.TraceIdentifier));
 
-        var count = await db.StagedImports.Where(item => item.Status == StagingStatus.PendingReview).ExecuteDeleteAsync(ct);
-        return Ok(new { deleted = count });
+        return await ArchivePending(new ArchivePendingRequest("Archived through the legacy clear-pending operation."), ct);
     }
 
     [HttpPost("{id:guid}/approve"), Authorize(Policy = "TmsApprove")]
@@ -169,3 +221,5 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
         return false;
     }
 }
+
+public sealed record ArchivePendingRequest(string Reason);

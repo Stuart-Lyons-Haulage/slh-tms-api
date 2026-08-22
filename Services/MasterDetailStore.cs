@@ -88,6 +88,7 @@ public static class MasterDetailStore
                 site.CustomField3 = Text(payload, "customField3");
                 site.Latitude = Decimal(payload, "latitude");
                 site.Longitude = Decimal(payload, "longitude");
+                site.OperationalRegion = Text(payload, "operationalRegion") ?? Text(payload, "region") ?? site.OperationalRegion;
             }
             catch (JsonException) { }
         }

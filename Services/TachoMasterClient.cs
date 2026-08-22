@@ -136,7 +136,7 @@ public sealed class TachoMasterClient
  
         var (currentDuties, members, metrics, memberList) = await LoadDutyContextAsync(date, cancellationToken);
         var result = new Dictionary<string, TachoVehicleDriverStatus>();
-        foreach (var (vehicle, vehicleDuties) in currentDuties)
+        foreach (var (vehicle, vehicleDuties) in OpenDuties(currentDuties))
         {
             var status = BuildStatus(vehicle, vehicleDuties[0].MemCode, vehicleDuties, members, metrics);
             if (status is not null) result[vehicle] = status;
@@ -169,6 +169,29 @@ public sealed class TachoMasterClient
         logger.LogInformation(
             "Tacho continuous enrichment produced {Total} vehicle identities: {DutyCount} TachoMaster duty record(s), {FalconOnly} Falcon-only identity record(s), {OverlapCount} overlap(s), {MismatchCount} live mismatch(es).",
             result.Count, currentDuties.Count, falconOnly, overlaps, mismatches);
+        return result;
+    }
+
+    public async Task<IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>> GetOpenDriverStatusesByVehicleAsync(
+        DateOnly date,
+        CancellationToken cancellationToken = default)
+    {
+        if (!options.IsConfigured) return new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
+
+        var (duties, members, metrics, _) = await LoadDutyContextAsync(date, cancellationToken);
+        var result = new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
+        foreach (var (vehicle, vehicleDuties) in OpenDuties(duties))
+        {
+            var statuses = vehicleDuties
+                .Select(duty => duty.MemCode)
+                .Distinct()
+                .Select(memberCode => BuildStatus(vehicle, memberCode, vehicleDuties, members, metrics))
+                .Where(status => status is not null)
+                .Select(status => status!)
+                .ToList();
+            if (statuses.Count > 0) result[vehicle] = statuses;
+        }
+
         return result;
     }
  
@@ -267,6 +290,16 @@ public sealed class TachoMasterClient
             metric?.ShortDailyRestTakenThisWeek,
             metric?.WorkAvaiableWeek);
     }
+
+    private static Dictionary<string, List<TachoDuty>> OpenDuties(Dictionary<string, List<TachoDuty>> dutiesByVehicle)
+        => dutiesByVehicle
+            .Select(pair => new
+            {
+                pair.Key,
+                Duties = pair.Value.Where(duty => duty.DutyEnd is null).ToList()
+            })
+            .Where(pair => pair.Duties.Count > 0)
+            .ToDictionary(pair => pair.Key, pair => pair.Duties);
  
     private async Task<IReadOnlyDictionary<string, TachoVehicleDriverStatus>> TryGetFalconDriverStatusesAsync(IReadOnlyList<TachoMember> members, CancellationToken cancellationToken)
     {
