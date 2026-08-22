@@ -8,8 +8,23 @@ using Slh.Tms.Api.Services;
 namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/loads"), Authorize]
-public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatchService sms) : ControllerBase
+public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatchService sms, TachoMasterClient tachoMaster) : ControllerBase
 {
+    [HttpPost("{id:guid}/dispatch-readiness")]
+    public async Task<IActionResult> DispatchReadiness(Guid id, RunDispatchReadinessRequest request, CancellationToken ct)
+    {
+        var load = await FindLoad(id, ct);
+        if (load is null) return NotFound(new { message = "The run could not be found." });
+        if (load.DriverId is null || load.VehicleId is null) return BadRequest(new { message = "Allocate both a driver and vehicle before dispatch." });
+
+        var driver = await db.Drivers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.DriverId, ct);
+        var vehicle = await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.VehicleId, ct);
+        if (driver is null || vehicle is null) return BadRequest(new { message = "The allocated driver or vehicle could not be found." });
+
+        var readiness = await AssessReadiness(load, driver, vehicle, request.RouteDrivingMinutes, ct);
+        return Ok(readiness);
+    }
+
     [HttpPost("{id:guid}/driver-message/sms"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> Send(Guid id, RunDriverMessageRequest request, CancellationToken ct)
     {
@@ -40,8 +55,18 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
         if (driver is null) return BadRequest(new { message = "The allocated driver could not be found." });
         if (string.IsNullOrWhiteSpace(driver.MobileNumber)) return BadRequest(new { message = "The assigned driver has no approved mobile number." });
 
+        if (request.Dispatch)
+        {
+            if (request.RouteDrivingMinutes is not int routeDrivingMinutes || routeDrivingMinutes <= 0)
+                return BadRequest(new { message = "The route must be calculated before dispatch so TachoMaster can check the driver's remaining hours." });
+            var vehicle = await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.VehicleId, ct);
+            if (vehicle is null) return BadRequest(new { message = "The allocated vehicle could not be found." });
+            var readiness = await AssessReadiness(load, driver, vehicle, routeDrivingMinutes, ct);
+            if (!readiness.CanDispatch) return BadRequest(new { message = readiness.Explanation, readiness });
+        }
+
         var receipt = await sms.SendAsync(driver.MobileNumber, request.Message.Trim(), ct);
-        if (load.Status == LoadStatus.Planned) load.Status = LoadStatus.Dispatched;
+        if (request.Dispatch && load.Status == LoadStatus.Planned) load.Status = LoadStatus.Dispatched;
 
         if (register) await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
         else await db.SaveChangesAsync(ct);
@@ -63,6 +88,73 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
             message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase) ||
             message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
     }
+
+    private async Task<Load?> FindLoad(Guid id, CancellationToken ct)
+    {
+        Load? load = null;
+        try
+        {
+            load = await db.Loads.AsNoTracking().SingleOrDefaultAsync(item => item.Id == id, ct);
+        }
+        catch (Exception exception) when (IsSchemaUnavailable(exception))
+        {
+            db.ChangeTracker.Clear();
+        }
+
+        return load ?? await PlanningRegisterStore.GetLoadAsync(db, id, ct);
+    }
+
+    private async Task<RunDispatchReadinessResponse> AssessReadiness(Load load, Driver driver, Vehicle vehicle, int routeDrivingMinutes, CancellationToken ct)
+    {
+        var minutes = Math.Max(1, routeDrivingMinutes);
+        IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> statuses;
+        try
+        {
+            statuses = await tachoMaster.GetAllDriverStatusesByVehicleAsync(load.PlanningDate, ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return Blocked(minutes, 0, "TachoMaster could not be read live, so dispatch has been stopped until the driver's available hours can be confirmed.");
+        }
+
+        var aliases = await ExecutionIdentityResolver.VehicleAliasesAsync(db, [vehicle], ct);
+        var vehicleAliases = aliases.TryGetValue(vehicle.Id, out var knownAliases)
+            ? knownAliases
+            : ExecutionIdentityResolver.VehicleAliasVariants(vehicle.Registration).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var tacho = ExecutionIdentityResolver.MatchTachoForDriver(vehicleAliases, driver, statuses);
+        if (tacho is null)
+            return Blocked(minutes, 0, "No live TachoMaster duty was matched to this driver and vehicle. Confirm the driver has signed on before dispatch.");
+
+        var breakMinutes = RequiredBreakMinutes(tacho, minutes);
+        if (tacho.DriveAvailableTodayMinutes is not int driveAvailable)
+            return Blocked(minutes, breakMinutes, $"TachoMaster matched {tacho.DriverName}, but remaining drive time is not currently available. Dispatch has been stopped until hours are visible.");
+
+        if (minutes > driveAvailable)
+            return Blocked(minutes, breakMinutes, $"This run needs about {minutes} minutes driving, but TachoMaster shows {driveAvailable} minutes available today for {tacho.DriverName}. Re-plan before dispatch.", tacho);
+
+        var totalDutyMinutes = minutes + breakMinutes;
+        if (tacho.WorkAvailableWeekMinutes is int workAvailable && totalDutyMinutes > workAvailable)
+            return Blocked(minutes, breakMinutes, $"This run needs about {totalDutyMinutes} minutes including breaks, but TachoMaster shows {workAvailable} working minutes available this week for {tacho.DriverName}. Re-plan before dispatch.", tacho);
+
+        var status = breakMinutes > 0 ? "BreakRequired" : "Ready";
+        var explanation = breakMinutes > 0
+            ? $"TachoMaster confirms {tacho.DriverName} has {driveAvailable} driving minutes available. Dispatch can proceed and the ETA includes a {breakMinutes} minute statutory break."
+            : $"TachoMaster confirms {tacho.DriverName} has {driveAvailable} driving minutes available. Dispatch can proceed.";
+        return new(true, status, explanation, minutes, breakMinutes, tacho.DriverName, tacho.VehicleCode, tacho.DutyStartUtc, tacho.DriveAvailableTodayMinutes, tacho.WorkAvailableWeekMinutes);
+    }
+
+    private static int RequiredBreakMinutes(TachoVehicleDriverStatus tacho, int routeDrivingMinutes)
+    {
+        var existingBreakMinutes = tacho.BreakMinutes ?? 0;
+        var initialContinuousDriving = existingBreakMinutes >= 45 ? tacho.DriveMinutes % 270 : Math.Min(tacho.DriveMinutes, 270);
+        var requiredBreaks = Math.Max(0, (int)Math.Floor((initialContinuousDriving + routeDrivingMinutes - 0.01) / 270d));
+        return Math.Max(0, requiredBreaks * 45);
+    }
+
+    private static RunDispatchReadinessResponse Blocked(int routeDrivingMinutes, int breakMinutes, string explanation, TachoVehicleDriverStatus? tacho = null)
+        => new(false, "Blocked", explanation, routeDrivingMinutes, breakMinutes, tacho?.DriverName, tacho?.VehicleCode, tacho?.DutyStartUtc, tacho?.DriveAvailableTodayMinutes, tacho?.WorkAvailableWeekMinutes);
 }
 
-public sealed record RunDriverMessageRequest(string Message);
+public sealed record RunDriverMessageRequest(string Message, bool Dispatch = false, int? RouteDrivingMinutes = null);
+public sealed record RunDispatchReadinessRequest(int RouteDrivingMinutes);
+public sealed record RunDispatchReadinessResponse(bool CanDispatch, string Status, string Explanation, int RouteDrivingMinutes, int BreakMinutesIncluded, string? TachoDriverName, string? TachoVehicleCode, DateTimeOffset? DutyStartUtc, int? DriveAvailableTodayMinutes, int? WorkAvailableWeekMinutes);
