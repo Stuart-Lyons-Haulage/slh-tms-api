@@ -26,7 +26,7 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
             ? (Lat: firstStop.Latitude.Value, Lon: firstStop.Longitude.Value)
             : ((decimal Lat, decimal Lon)?)null;
         var plannedSpanMinutes = PlannedSpanMinutes(orderedStops);
-        var projectedShiftMinutes = plannedSpanMinutes is null ? null : plannedSpanMinutes + 15;
+        var projectedShiftMinutes = plannedSpanMinutes;
         var projectedShiftRisk = ShiftLengthRisk(projectedShiftMinutes);
 
         IReadOnlyDictionary<string, TachoVehicleDriverStatus> tacho = new Dictionary<string, TachoVehicleDriverStatus>();
@@ -126,7 +126,7 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
             lastStop = lastStop is null ? null : new { lastStop.Id, lastStop.Name, lastStop.Latitude, lastStop.Longitude, lastStop.PlannedArrivalUtc },
             projectedShiftMinutes,
             projectedShiftRisk,
-            walkroundMinutes = 15,
+            walkroundMinutes = 0,
             nightOutRequired = ReadNightOut(load.PlannerNotes),
             driverSuggestions,
             vehicleSuggestions,
@@ -237,7 +237,7 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
         if (previous is not null) parts.Add($"Last planned on {previous.Reference}{(final is null ? string.Empty : $" ending at {final.Name}")}");
         if (miles is not null) parts.Add($"about {miles:0} reposition miles to the first stop");
         if (tacho is not null) parts.Add($"TachoMaster live duty is in vehicle {tacho.VehicleCode}");
-        if (projectedShiftMinutes is int shift) parts.Add($"planned run span plus 15-minute walkround is about {shift / 60}h {shift % 60:00}m");
+        if (projectedShiftMinutes is int shift) parts.Add($"planned run span is about {shift / 60}h {shift % 60:00}m");
         return parts.Count == 0 ? "No recent run position or TachoMaster duty was matched." : string.Join("; ", parts) + ".";
     }
 

@@ -373,7 +373,7 @@ public sealed class PlannerPlanImportController(TmsDbContext db) : ControllerBas
 
     private static string? FirstCollectionWalkroundInstruction(string? window) => string.IsNullOrWhiteSpace(window)
         ? null
-        : $"First collection window is {window}. Please allow for your 15-minute walkround and plan your start accordingly.";
+        : $"First collection window is {window}. Plan the driver start from the actual Tacho other-work required before first drive.";
 
     private static Driver? ResolveDriver(IEnumerable<Driver> drivers, string? value) => string.IsNullOrWhiteSpace(value) || IsPlaceholder(value)
         ? null

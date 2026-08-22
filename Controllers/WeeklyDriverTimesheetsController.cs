@@ -129,7 +129,7 @@ public sealed class WeeklyDriverTimesheetsController(
             {
                 var dayLoads = loads.Where(x => x.DriverId == driver.Id && x.PlanningDate == date).OrderBy(x => x.Reference).ToList();
                 var plannedTimes = dayLoads.SelectMany(x => x.Stops).Where(x => x.PlannedArrivalUtc != null).Select(x => x.PlannedArrivalUtc!.Value).OrderBy(x => x).ToList();
-                var plannedStart = plannedTimes.Count > 0 ? plannedTimes.First().AddMinutes(-15) : (DateTimeOffset?)null;
+                var plannedStart = plannedTimes.Count > 0 ? plannedTimes.First() : (DateTimeOffset?)null;
                 var plannedEnd = plannedTimes.Count > 0 ? plannedTimes.Last() : (DateTimeOffset?)null;
                 var plannedMinutes = plannedStart != null && plannedEnd != null && plannedEnd >= plannedStart ? (int)Math.Round((plannedEnd.Value - plannedStart.Value).TotalMinutes) : (int?)null;
                 if (plannedMinutes is int pm) plannedMinutesWeek += pm;

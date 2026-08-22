@@ -35,13 +35,14 @@ public sealed class DailyComplianceController(
     {
         var report = await BuildReport(date, ct);
         var csv = new StringBuilder();
-        csv.AppendLine("Date,Asset Type,Asset,Run,Driver,Employment Type,Tacho Duty Start,Pre-use Other Work Minutes,First Movement,Fleetio Form,Fleetio Submitted,Fleetio User,Fleetio Driver Match,Failed Items,Status,Reason");
+        csv.AppendLine("Date,Asset Type,Asset,Run,Driver,Employment Type,Tacho Duty Start,Tacho First Drive,Other Work Before First Drive Minutes,First Movement,Fleetio Form,Fleetio Submitted,Fleetio User,Fleetio Driver Match,Failed Items,Status,Reason");
         foreach (var row in report.Rows)
         {
             csv.AppendLine(string.Join(',', new[]
             {
                 report.Date.ToString("yyyy-MM-dd"), row.AssetType, row.AssetName, row.RunReference, row.DriverName,
                 row.EmploymentType, row.TachoDutyStartUtc?.ToString("O") ?? string.Empty,
+                row.TachoFirstDriveUtc?.ToString("O") ?? string.Empty,
                 row.TachoPreUseOtherWorkMinutes?.ToString() ?? string.Empty, row.FirstMovementUtc?.ToString("O") ?? string.Empty,
                 row.FleetioForm ?? string.Empty, row.FleetioSubmittedAtUtc?.ToString("O") ?? string.Empty,
                 row.FleetioUser ?? string.Empty, row.FleetioDriverMatched?.ToString() ?? string.Empty,
@@ -94,11 +95,12 @@ public sealed class DailyComplianceController(
             if (driver is null) continue;
 
             var firstMovement = FirstMovement(tracking, vehicle, duty.DutyStartUtc, dayEndUtc);
-            var preUseMinutes = FindPreUse(preUse, duty, vehicle)?.PreDriveOtherWorkMinutes;
+            var preUseEvidence = FindPreUse(preUse, duty, vehicle);
+            var preUseMinutes = preUseEvidence?.PreDriveOtherWorkMinutes;
             var fleetioId = !string.IsNullOrWhiteSpace(vehicle.FleetioId) ? vehicle.FleetioId : MappingExternalKey(mappings, "Vehicle", vehicle.Id);
             var inspection = await InspectionFor(fleetioId, driver, duty.DutyStartUtc, firstMovement, dayStartUtc, dayEndUtc, fleetioCache, ct);
             var runReference = RunReferenceFor(loads, driver.Id, vehicle.Id);
-            rows.Add(BuildRow("Vehicle", vehicle.Id, vehicle.Registration, runReference, driver, EmploymentType(driver), duty, firstMovement, preUseMinutes, inspection));
+            rows.Add(BuildRow("Vehicle", vehicle.Id, vehicle.Registration, runReference, driver, EmploymentType(driver), duty, firstMovement, preUseEvidence?.FirstDriveUtc, preUseMinutes, inspection));
             representedVehicleDrivers.Add($"{vehicle.Id}|{driver.Id}");
         }
 
@@ -128,10 +130,11 @@ public sealed class DailyComplianceController(
 
                 var duty = FindDuty(duties, driver, vehicle);
                 var firstMovement = FirstMovement(tracking, vehicle, duty?.DutyStartUtc ?? inspection.SubmittedAtUtc, dayEndUtc);
-                var preUseMinutes = duty is null ? null : FindPreUse(preUse, duty, vehicle)?.PreDriveOtherWorkMinutes;
+                var preUseEvidence = duty is null ? null : FindPreUse(preUse, duty, vehicle);
+                var preUseMinutes = preUseEvidence?.PreDriveOtherWorkMinutes;
                 var runReference = RunReferenceFor(loads, driver.Id, vehicle.Id);
                 rows.Add(BuildRow("Vehicle", vehicle.Id, vehicle.Registration, runReference, driver, EmploymentType(driver), duty, firstMovement,
-                    preUseMinutes, new FleetioInspectionMatch(inspection, true)));
+                    preUseEvidence?.FirstDriveUtc, preUseMinutes, new FleetioInspectionMatch(inspection, true)));
                 representedVehicleDrivers.Add($"{vehicle.Id}|{driver.Id}");
             }
         }
@@ -173,10 +176,11 @@ public sealed class DailyComplianceController(
                 var vehicle = load?.VehicleId is Guid vehicleId ? vehicles.FirstOrDefault(v => v.Id == vehicleId) : null;
                 var duty = vehicle is null ? null : FindDuty(duties, driver, vehicle);
                 var firstMovement = vehicle is null ? null : FirstMovement(tracking, vehicle, duty?.DutyStartUtc ?? inspection.SubmittedAtUtc, dayEndUtc);
-                var preUseMinutes = duty is null || vehicle is null ? null : FindPreUse(preUse, duty, vehicle)?.PreDriveOtherWorkMinutes;
+                var preUseEvidence = duty is null || vehicle is null ? null : FindPreUse(preUse, duty, vehicle);
+                var preUseMinutes = preUseEvidence?.PreDriveOtherWorkMinutes;
                 var runReference = RunReferenceForTrailer(loads, driver.Id, trailer.Id);
                 rows.Add(BuildRow("Trailer", trailer.Id, trailer.TrailerNumber, runReference, driver, EmploymentType(driver), duty, firstMovement,
-                    preUseMinutes, new FleetioInspectionMatch(inspection, true)));
+                    preUseEvidence?.FirstDriveUtc, preUseMinutes, new FleetioInspectionMatch(inspection, true)));
                 representedTrailerDrivers.Add($"{trailer.Id}|{driver.Id}");
             }
         }
@@ -195,10 +199,11 @@ public sealed class DailyComplianceController(
             {
                 var duty = FindDuty(duties, driver, vehicle);
                 var firstMovement = FirstMovement(tracking, vehicle, duty?.DutyStartUtc, dayEndUtc);
-                var preUseMinutes = duty is null ? null : FindPreUse(preUse, duty, vehicle)?.PreDriveOtherWorkMinutes;
+                var preUseEvidence = duty is null ? null : FindPreUse(preUse, duty, vehicle);
+                var preUseMinutes = preUseEvidence?.PreDriveOtherWorkMinutes;
                 var vehicleFleetioId = !string.IsNullOrWhiteSpace(vehicle.FleetioId) ? vehicle.FleetioId : MappingExternalKey(mappings, "Vehicle", vehicle.Id);
                 var vehicleInspection = await InspectionFor(vehicleFleetioId, driver, duty?.DutyStartUtc, firstMovement, dayStartUtc, dayEndUtc, fleetioCache, ct);
-                rows.Add(BuildRow("Vehicle", vehicle.Id, vehicle.Registration, load.Reference, driver, EmploymentType(driver), duty, firstMovement, preUseMinutes, vehicleInspection));
+                rows.Add(BuildRow("Vehicle", vehicle.Id, vehicle.Registration, load.Reference, driver, EmploymentType(driver), duty, firstMovement, preUseEvidence?.FirstDriveUtc, preUseMinutes, vehicleInspection));
                 representedVehicleDrivers.Add(vehicleKey);
             }
 
@@ -210,10 +215,11 @@ public sealed class DailyComplianceController(
                 if (representedTrailerDrivers.Contains(trailerKey)) continue;
                 var duty = FindDuty(duties, driver, vehicle);
                 var firstMovement = FirstMovement(tracking, vehicle, duty?.DutyStartUtc, dayEndUtc);
-                var preUseMinutes = duty is null ? null : FindPreUse(preUse, duty, vehicle)?.PreDriveOtherWorkMinutes;
+                var preUseEvidence = duty is null ? null : FindPreUse(preUse, duty, vehicle);
+                var preUseMinutes = preUseEvidence?.PreDriveOtherWorkMinutes;
                 var trailerFleetioId = MappingExternalKey(mappings, "Trailer", trailer.Id);
                 var trailerInspection = await InspectionFor(trailerFleetioId, driver, duty?.DutyStartUtc, firstMovement, dayStartUtc, dayEndUtc, fleetioCache, ct);
-                rows.Add(BuildRow("Trailer", trailer.Id, trailer.TrailerNumber, load.Reference, driver, EmploymentType(driver), duty, firstMovement, preUseMinutes, trailerInspection));
+                rows.Add(BuildRow("Trailer", trailer.Id, trailer.TrailerNumber, load.Reference, driver, EmploymentType(driver), duty, firstMovement, preUseEvidence?.FirstDriveUtc, preUseMinutes, trailerInspection));
                 representedTrailerDrivers.Add(trailerKey);
             }
         }
@@ -230,8 +236,8 @@ public sealed class DailyComplianceController(
         return new ComplianceReport(
             date,
             DateTimeOffset.UtcNow,
-            new CompliancePolicy(15, true, true, true,
-                "SLH policy requires a fresh Fleetio pre-use walkround whenever a new driver takes control of a vehicle or trailer. Agency paper checks remain visible as an exception until Fleetio adoption."),
+            new CompliancePolicy(null, true, true, true,
+                "SLH policy requires a fresh Fleetio pre-use walkround whenever a new driver takes control of a vehicle or trailer. TachoMaster other-work before the first drive is recorded as evidence and does not decide the pass/fail result."),
             new SourceStatus(
                 tachoError is null ? "Available" : $"Partial: {tachoError}",
                 fleetioOptions.IsConfigured ? "Available" : "Not configured",
@@ -245,35 +251,35 @@ public sealed class DailyComplianceController(
                 rows.Count(x => x.AssetType == "Vehicle"),
                 rows.Count(x => x.AssetType == "Trailer"),
                 rows.Count(x => x.FleetioInspectionId is not null),
-                rows.Count(x => x.TachoPreUseOtherWorkMinutes >= 15)),
+                rows.Count(x => x.TachoPreUseOtherWorkMinutes is not null)),
             rows);
     }
 
     private ComplianceRow BuildRow(string assetType, Guid assetId, string assetName, string runReference, Driver driver, string employment,
-        TachoDriverDutyStatus? duty, DateTimeOffset? firstMovement, int? preUseMinutes, FleetioInspectionMatch inspection)
+        TachoDriverDutyStatus? duty, DateTimeOffset? firstMovement, DateTimeOffset? firstDrive, int? preUseMinutes, FleetioInspectionMatch inspection)
     {
-        var tachoOk = preUseMinutes >= 15;
+        var tachoRecorded = preUseMinutes is not null;
         var fleetioOk = inspection.Evidence is not null && inspection.DriverMatched;
-        var status = fleetioOk && tachoOk
+        var status = fleetioOk
             ? "Compliant"
             : employment == "Agency" && !fleetioOk
                 ? "Paper evidence required"
-                : fleetioOk || tachoOk ? "Review" : "Non-compliant";
+                : inspection.Evidence is not null ? "Review" : "Non-compliant";
 
         var reason = status switch
         {
-            "Compliant" => "Fleetio pre-use walkround and at least 15 minutes Tacho other-work before first drive are confirmed.",
+            "Compliant" when tachoRecorded => $"Fleetio pre-use walkround is confirmed. TachoMaster records {preUseMinutes} minutes other-work before the first drive.",
+            "Compliant" => "Fleetio pre-use walkround is confirmed. TachoMaster did not return a measurable pre-drive other-work segment.",
             "Paper evidence required" => "Agency driver has no matching Fleetio walkround. Verify the paper check and keep the driver visible for Fleetio adoption.",
             "Review" when !fleetioOk && inspection.Evidence is not null => "A Fleetio walkround exists in the pre-use window, but it was not submitted by the matched driver.",
-            "Review" when !fleetioOk => "Fleetio walkround is missing for this driver/asset handover.",
-            "Review" when duty is null => "Fleetio walkround is confirmed, but no matching Tacho duty was found for this driver and vehicle.",
-            "Review" => "Fleetio is confirmed but Tacho does not show 15 minutes of pre-drive other work.",
+            "Review" => "Fleetio walkround evidence needs review for this driver/asset handover.",
             _ when duty is null => "Fleetio walkround is missing and no matching Tacho duty was found for this driver and vehicle.",
-            _ => "Fleetio walkround is missing and Tacho pre-drive other work is below the 15 minute SLH standard."
+            _ when tachoRecorded => $"Fleetio walkround is missing. TachoMaster records {preUseMinutes} minutes other-work before the first drive.",
+            _ => "Fleetio walkround is missing. TachoMaster did not return a measurable pre-drive other-work segment."
         };
 
         return new ComplianceRow(assetType, assetId, assetName, runReference, driver.Id, driver.DisplayName, employment,
-            duty?.DutyStartUtc, preUseMinutes, firstMovement, inspection.Evidence?.Id, inspection.Evidence?.Form,
+            duty?.DutyStartUtc, firstDrive, preUseMinutes, firstMovement, inspection.Evidence?.Id, inspection.Evidence?.Form,
             inspection.Evidence?.SubmittedAtUtc, inspection.Evidence?.User, inspection.DriverMatched,
             inspection.Evidence?.FailedItems, status, reason);
     }
@@ -282,13 +288,13 @@ public sealed class DailyComplianceController(
         FleetioInspectionEvidence inspection, DateTimeOffset? firstMovement)
         => new(assetType, assetId, assetName, string.Empty, Guid.Empty,
             string.IsNullOrWhiteSpace(inspection.User) ? "Unmatched Fleetio user" : inspection.User!, "Unknown",
-            null, null, firstMovement, inspection.Id, inspection.Form, inspection.SubmittedAtUtc, inspection.User,
+            null, null, null, firstMovement, inspection.Id, inspection.Form, inspection.SubmittedAtUtc, inspection.User,
             false, inspection.FailedItems, "Review",
             "Fleetio walkround is present, but its submitter could not be matched to an active TMS driver. Run allocation is intentionally not inferred.");
 
     private static ComplianceRow BuildTrackerOnlyRow(Vehicle vehicle, DateTimeOffset firstMovement)
         => new("Vehicle", vehicle.Id, vehicle.Registration, string.Empty, Guid.Empty,
-            "Driver not identified", "Unknown", null, null, firstMovement, null, null, null, null, null, null,
+            "Driver not identified", "Unknown", null, null, null, firstMovement, null, null, null, null, null, null,
             "Review", "DOT/Falcon movement proves this vehicle was used, but no matching Tacho duty or Fleetio walkround identified the driver. Investigate the missing pre-use evidence.");
 
     private static string RunReferenceFor(IEnumerable<Load> loads, Guid driverId, Guid vehicleId)
@@ -553,11 +559,11 @@ public sealed class DailyComplianceController(
     private sealed record FleetioInspectionMatch(FleetioInspectionEvidence? Evidence, bool DriverMatched);
     private sealed record ActivitySegment(string Kind, DateTimeOffset? StartUtc, DateTimeOffset? EndUtc);
     private sealed record PreUseEvidence(string VehicleCode, int MemberCode, DateTimeOffset DutyStartUtc, DateTimeOffset? FirstDriveUtc, int PreDriveOtherWorkMinutes);
-    public sealed record CompliancePolicy(int MinimumPreUseOtherWorkMinutes, bool EmployedFleetioMandatory, bool AgencyPaperException, bool DriverChangeRequiresNewCheck, string Note);
+    public sealed record CompliancePolicy(int? MinimumPreUseOtherWorkMinutes, bool EmployedFleetioMandatory, bool AgencyPaperException, bool DriverChangeRequiresNewCheck, string Note);
     public sealed record SourceStatus(string TachoMaster, string Fleetio, string DotFalcon, string Tms);
     public sealed record ComplianceSummary(int AssetsOperated, int Green, int Amber, int Red, int Vehicles, int Trailers, int FleetioChecks, int TachoPreUseConfirmed);
     public sealed record ComplianceRow(string AssetType, Guid AssetId, string AssetName, string RunReference, Guid DriverId, string DriverName, string EmploymentType,
-        DateTimeOffset? TachoDutyStartUtc, int? TachoPreUseOtherWorkMinutes, DateTimeOffset? FirstMovementUtc, string? FleetioInspectionId, string? FleetioForm,
+        DateTimeOffset? TachoDutyStartUtc, DateTimeOffset? TachoFirstDriveUtc, int? TachoPreUseOtherWorkMinutes, DateTimeOffset? FirstMovementUtc, string? FleetioInspectionId, string? FleetioForm,
         DateTimeOffset? FleetioSubmittedAtUtc, string? FleetioUser, bool? FleetioDriverMatched, int? FleetioFailedItems, string Status, string Reason);
     public sealed record ComplianceReport(DateOnly Date, DateTimeOffset GeneratedAtUtc, CompliancePolicy Policy, SourceStatus SourceStatus, ComplianceSummary Summary, IReadOnlyList<ComplianceRow> Rows);
 }
