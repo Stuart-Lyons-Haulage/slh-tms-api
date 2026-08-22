@@ -35,6 +35,7 @@ builder.Services.AddScoped<StagingService>();
 builder.Services.AddScoped<OrderIntakeLedgerService>();
 builder.Services.AddScoped<IntakeMappingService>();
 builder.Services.AddScoped<OrderCompletenessService>();
+builder.Services.AddScoped<WarehouseMovementService>();
 builder.Services.AddScoped<DotTrackingTelemetryStore>();
 var assistantOptions = new AssistantOptions();
 builder.Configuration.GetSection("Integrations:OpenAI").Bind(assistantOptions);
