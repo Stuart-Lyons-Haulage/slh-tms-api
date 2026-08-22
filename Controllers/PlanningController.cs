@@ -19,7 +19,11 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
             var query = db.TransportOrders.AsNoTracking().AsQueryable();
             if (from is not null) query = query.Where(order => order.CollectionDate >= from);
             if (to is not null) query = query.Where(order => order.CollectionDate <= to);
-            return Ok(await query.OrderBy(order => order.CollectionDate).ThenBy(order => order.Reference).Take(1000).ToListAsync(ct));
+            var primary = await query.OrderBy(order => order.CollectionDate).ThenBy(order => order.Reference).Take(1000).ToListAsync(ct);
+            var registered = await PlanningRegisterStore.ReadOrdersAsync(db, from, to, ct);
+            foreach (var order in registered.Where(order => primary.All(existing => !string.Equals(existing.Reference, order.Reference, StringComparison.OrdinalIgnoreCase))))
+                primary.Add(order);
+            return Ok(primary.OrderBy(order => order.CollectionDate).ThenBy(order => order.Reference).Take(1000).ToList());
         }
         catch (Exception exception) when (IsSchemaUnavailable(exception))
         {
