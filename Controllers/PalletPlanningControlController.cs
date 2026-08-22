@@ -206,10 +206,12 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
             return Conflict(new { message = "Allocation exceeds the approved pallet quantity.", approvedPallets = permitted, allocatedElsewhere, requestedPallets = request.Pallets });
         var now = DateTimeOffset.UtcNow;
         var payload = new AllocationState(request.OrderId, request.LoadId, request.Pallets, request.Date, now, User.Identity?.Name, request.SourceLineId);
+        var allocationKey = $"palletallocation:{request.OrderId:N}:{request.LoadId:N}:{request.SourceLineId?.ToString("N") ?? "order"}:{now:yyyyMMddHHmmssfff}:{Guid.NewGuid():N}";
+        if (allocationKey.Length > 200) allocationKey = allocationKey[..200];
         db.StagedImports.Add(new StagedImport
         {
             EntityType = AllocationType,
-            IdempotencyKey = ($"palletallocation:{request.OrderId:N}:{request.LoadId:N}:{request.SourceLineId?.ToString("N") ?? "order"}:{now:yyyyMMddHHmmssfff}:{Guid.NewGuid():N}")[..200],
+            IdempotencyKey = allocationKey,
             PayloadJson = JsonSerializer.Serialize(payload, JsonOptions),
             Source = "Pallet planning control",
             Status = StagingStatus.Promoted,
