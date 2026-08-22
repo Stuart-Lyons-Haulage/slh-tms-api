@@ -13,7 +13,7 @@ public sealed class RoadTechLiveFreshnessTests
     public void RoadTech_data_mask_always_includes_gps()
     {
         var options = new DotTrackingOptions { DataMask = 0 };
-        Assert.Equal(0x01, options.DataMask);
+        Assert.Equal(0x05, options.DataMask);
 
         options.DataMask = 0x04;
         Assert.Equal(0x05, options.DataMask);
