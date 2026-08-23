@@ -16,7 +16,6 @@ public sealed class DriverHoursComplianceController(
     ILogger<DriverHoursComplianceController> logger) : ControllerBase
 {
     private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
-    private const double BaseRadiusKm = 1.5;
 
     [HttpGet("weekly")]
     public async Task<IActionResult> Weekly([FromQuery] DateOnly date, CancellationToken ct) => Ok(await Build(date, ct));
@@ -103,7 +102,25 @@ public sealed class DriverHoursComplianceController(
             logger.LogWarning(ex, "Tracker evidence unavailable for driver-hours compliance.");
         }
 
-        var basePoint = await TryBasePoint(ct);
+        var baseGeofence = await TryBaseGeofence(ct);
+        List<GeofenceVisit> baseVisits = [];
+        string? geofenceError = null;
+        if (baseGeofence is not null)
+        {
+            try
+            {
+                baseVisits = await db.GeofenceVisits.AsNoTracking()
+                    .Where(x => x.GeofenceId == baseGeofence.Id && x.EnteredAtUtc < trackingEndUtc && (x.ExitedAtUtc == null || x.ExitedAtUtc >= trackingStartUtc))
+                    .OrderBy(x => x.EnteredAtUtc).Take(10000).ToListAsync(ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                geofenceError = ex.GetBaseException().Message;
+                db.ChangeTracker.Clear();
+                logger.LogWarning(ex, "Base geofence visits unavailable for night-out confirmation.");
+            }
+        }
+
         var nonEmployedRows = new List<NonEmployedHourRow>();
         var nightRows = new List<NightOutEvidenceRow>();
 
@@ -148,32 +165,33 @@ public sealed class DriverHoursComplianceController(
 
                 var plannerTick = dayLoads.Any(x => ReadNightOut(x.PlannerNotes) == true);
                 var tachoRest = duties.Any(x => x.RestMinutes >= 60 && SpansOvernight(day, x));
-                var overnightEnd = StartOfDayUtc(day.AddDays(1)).AddHours(9);
-                var parkedEvidence = dayTracking.Where(x => x.EventTimeUtc <= overnightEnd && x.Latitude != 0m && x.Longitude != 0m)
-                    .OrderByDescending(x => x.EventTimeUtc).FirstOrDefault();
-                bool? awayFromBase = null;
-                double? distanceKm = null;
-                if (parkedEvidence is not null && basePoint is not null)
-                {
-                    distanceKm = HaversineKm((double)parkedEvidence.Latitude, (double)parkedEvidence.Longitude, basePoint.Value.Latitude, basePoint.Value.Longitude);
-                    awayFromBase = distanceKm > BaseRadiusKm;
-                }
+                var overnightStart = StartOfDayUtc(day.AddDays(1));
+                var overnightEnd = overnightStart.AddHours(9);
+                var overnightTracking = dayTracking.Where(x => x.EventTimeUtc >= overnightStart && x.EventTimeUtc <= overnightEnd).OrderBy(x => x.EventTimeUtc).ToList();
+                var trackerObservedOvernight = overnightTracking.Count > 0;
+                var baseVisit = baseVisits
+                    .Where(x => vehicleKeys.Contains(Normalise(x.VehicleIdentifier)) && x.EnteredAtUtc < overnightEnd && (x.ExitedAtUtc == null || x.ExitedAtUtc >= overnightStart))
+                    .OrderBy(x => x.EnteredAtUtc)
+                    .FirstOrDefault();
+
+                bool? awayFromBase = baseGeofence is null || geofenceError is not null || !trackerObservedOvernight
+                    ? null
+                    : baseVisit is null;
+                var trackerEvidenceUtc = overnightTracking.LastOrDefault()?.EventTimeUtc ?? baseVisit?.EnteredAtUtc;
 
                 if (plannerTick || tachoRest || awayFromBase == true)
                 {
                     var status = plannerTick && tachoRest && awayFromBase == true ? "Confirmed"
                         : !plannerTick && tachoRest && awayFromBase == true ? "Detected - planner tick missing"
-                        : awayFromBase == false && plannerTick ? "Review - tracker indicates base"
+                        : awayFromBase == false && plannerTick ? "Review - vehicle returned to base"
                         : "Review - evidence incomplete";
                     var sageExpense = string.Equals(employment, "Employed", StringComparison.OrdinalIgnoreCase) && status.StartsWith("Confirmed", StringComparison.OrdinalIgnoreCase)
                         ? "Expected - Sage HR expense reconciliation not yet connected"
                         : "Not yet reconciled";
                     nightRows.Add(new NightOutEvidenceRow(day, driver.Id, driver.DisplayName, employment,
                         dayLoads.Select(x => x.Reference).Distinct().ToArray(), plannerTick, tachoRest,
-                        duties.Sum(x => x.RestMinutes), parkedEvidence?.EventTimeUtc,
-                        parkedEvidence is null ? null : parkedEvidence.Latitude,
-                        parkedEvidence is null ? null : parkedEvidence.Longitude,
-                        awayFromBase, distanceKm, status, sageExpense));
+                        duties.Sum(x => x.RestMinutes), trackerEvidenceUtc, awayFromBase, baseVisit?.EnteredAtUtc,
+                        baseGeofence?.Name, status, sageExpense));
                 }
             }
         }
@@ -182,37 +200,28 @@ public sealed class DriverHoursComplianceController(
             weekStart, weekEnd, DateTimeOffset.UtcNow,
             new DriverHoursPolicy("Wednesday", "Tuesday",
                 "The operating week is Wednesday through Tuesday. A PM run remains attached to its commencement day even when delivery continues after midnight.",
-                "A night out is confirmed by Tacho rest evidence while the driver remains out, plus tracker position away from base. Planner Night out = Yes is intent/evidence, not the sole authority.",
-                BaseRadiusKm,
+                "A night out is confirmed when Tacho shows overnight rest while the driver remains out and tracker/geofence evidence shows the vehicle did not return to Base. Planner Night out = Yes records intent but is not the sole authority.",
                 "Fleetio pre-use evidence remains valid across midnight while the same driver retains control; a driver/vehicle/trailer handover creates a new check requirement."),
             new DriverHoursSourceStatus(
                 tachoError is null ? "Available" : $"Partial: {tachoError}",
                 trackerError is null ? "Available" : $"Partial: {trackerError}",
-                basePoint is null ? "Base geofence unavailable - tracker location cannot prove away-from-base" : $"Base resolved: {basePoint.Value.Name}",
+                baseGeofence is null ? "Base geofence not resolved" : geofenceError is null ? $"Base geofence: {baseGeofence.Name}" : $"Partial: {geofenceError}",
                 "Sage HR employee roster is connected; expense-claim API reconciliation is not yet implemented."),
             nightRows.OrderBy(x => x.Date).ThenBy(x => x.DriverName).ToArray(),
             nonEmployedRows.OrderBy(x => x.Date).ThenBy(x => x.DriverName).ToArray());
     }
 
-    private async Task<(string Name, double Latitude, double Longitude)?> TryBasePoint(CancellationToken ct)
+    private async Task<SiteGeofence?> TryBaseGeofence(CancellationToken ct)
     {
         try
         {
-            var sites = await db.Sites.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
-            try { await MasterDetailStore.EnrichSitesAsync(db, sites, ct); }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                logger.LogInformation(ex, "Optional Site detail enrichment unavailable while resolving home base.");
-                db.ChangeTracker.Clear();
-            }
-            var candidates = sites.Where(x => x.Latitude is not null && x.Longitude is not null).ToList();
-            var site = candidates.FirstOrDefault(x => Normalise(x.ExternalCode) is "SLH" or "BASE" or "YARD")
-                ?? candidates.FirstOrDefault(x => Normalise(x.Name).Contains("STUARTLYONS") || Normalise(x.Name).Contains("LYONSHAULAGE"));
-            return site is null ? null : (site.Name, (double)site.Latitude!.Value, (double)site.Longitude!.Value);
+            var geofences = await db.SiteGeofences.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
+            return geofences.FirstOrDefault(x => Normalise(x.SiteNumber) is "SLH" or "BASE" or "YARD")
+                ?? geofences.FirstOrDefault(x => Normalise(x.Name).Contains("STUARTLYONS") || Normalise(x.Name).Contains("LYONSHAULAGE") || Normalise(x.Name) == "BASE");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogWarning(ex, "Base Site Master lookup unavailable for night-out confirmation.");
+            logger.LogWarning(ex, "Base geofence lookup unavailable for night-out confirmation.");
             db.ChangeTracker.Clear();
             return null;
         }
@@ -287,24 +296,16 @@ public sealed class DriverHoursComplianceController(
         var a = Normalise(left); var b = Normalise(right);
         return a.Length >= 8 && b.Length >= 8 && (a == b || a.EndsWith(b, StringComparison.OrdinalIgnoreCase) || b.EndsWith(a, StringComparison.OrdinalIgnoreCase));
     }
-    private static double HaversineKm(double lat1, double lon1, double lat2, double lon2)
-    {
-        const double radius = 6371d;
-        static double Rad(double value) => value * Math.PI / 180d;
-        var dLat = Rad(lat2 - lat1); var dLon = Rad(lon2 - lon1);
-        var a = Math.Sin(dLat / 2) * Math.Sin(dLat / 2) + Math.Cos(Rad(lat1)) * Math.Cos(Rad(lat2)) * Math.Sin(dLon / 2) * Math.Sin(dLon / 2);
-        return radius * 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
-    }
     private static string Csv(string value) => $"\"{(value ?? string.Empty).Replace("\"", "\"\"")}\"";
 
     public sealed record DriverHoursComplianceReport(DateOnly WeekStart, DateOnly WeekEnd, DateTimeOffset GeneratedAtUtc,
         DriverHoursPolicy Policy, DriverHoursSourceStatus SourceStatus, IReadOnlyList<NightOutEvidenceRow> NightOuts,
         IReadOnlyList<NonEmployedHourRow> NonEmployedHours);
-    public sealed record DriverHoursPolicy(string WeekStarts, string WeekEnds, string OperatingDayRule, string NightOutRule, double BaseRadiusKm, string FleetCheckRule);
+    public sealed record DriverHoursPolicy(string WeekStarts, string WeekEnds, string OperatingDayRule, string NightOutRule, string FleetCheckRule);
     public sealed record DriverHoursSourceStatus(string TachoMaster, string Tracker, string BaseSite, string SageHrExpenses);
     public sealed record NightOutEvidenceRow(DateOnly Date, Guid DriverId, string DriverName, string EmploymentType, IReadOnlyList<string> Runs,
-        bool PlannerTicked, bool TachoRestEvidence, int TachoRestMinutes, DateTimeOffset? TrackerEvidenceUtc, decimal? TrackerLatitude,
-        decimal? TrackerLongitude, bool? TrackerAwayFromBase, double? DistanceFromBaseKm, string Status, string SageExpenseStatus);
+        bool PlannerTicked, bool TachoRestEvidence, int TachoRestMinutes, DateTimeOffset? TrackerEvidenceUtc, bool? TrackerAwayFromBase,
+        DateTimeOffset? BaseReturnAtUtc, string? BaseGeofenceName, string Status, string SageExpenseStatus);
     public sealed record NonEmployedHourRow(DateOnly Date, Guid DriverId, string DriverName, string EmployeeNumber, string EmploymentType,
         string? AgencyName, DateTimeOffset? TachoDutyStartUtc, DateTimeOffset? TachoDutyEndUtc, int? TachoDutySpanMinutes,
         int? TachoActivityMinutes, DateTimeOffset? TrackerFirstMovementUtc, DateTimeOffset? TrackerLastMovementUtc,
