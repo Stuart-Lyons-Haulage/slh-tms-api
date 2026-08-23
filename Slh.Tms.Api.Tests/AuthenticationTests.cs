@@ -201,7 +201,7 @@ public class AuthenticationTests : IClassFixture<CustomWebFactory>
     }
 
     [Fact]
-    public async Task Seven_day_capacity_and_margin_forecast_is_available()
+    public async Task Seven_day_operational_capacity_forecast_is_available_without_commercial_margin_fields()
     {
         var client = _factory.CreateClientWithUser(LyonsUser, "Tms.Access");
         var date = DateOnly.FromDateTime(DateTime.UtcNow).ToString("yyyy-MM-dd");
@@ -209,8 +209,12 @@ public class AuthenticationTests : IClassFixture<CustomWebFactory>
         var body = await response.Content.ReadAsStringAsync();
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Contains("\"days\"", body);
-        Assert.Contains("\"margin\"", body);
         Assert.Contains("\"emptyMiles\"", body);
+        Assert.Contains("\"utilisationPercent\"", body);
+        Assert.DoesNotContain("\"revenue\"", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("\"cost\"", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("\"margin\"", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("\"uninvoicedLoads\"", body, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
