@@ -19,7 +19,8 @@ public static class PlannerPlanImportRules
         var period = PlannerPeriod(run);
         var clean = source.Trim();
         var digits = new string(clean.Where(char.IsDigit).ToArray());
-        var label = digits.Length > 0 && clean.All(ch => char.IsDigit(ch) || char.IsWhiteSpace(ch)) ? $"Run {int.Parse(digits)}" : clean;
+        var simpleSource = clean.All(ch => char.IsLetterOrDigit(ch) || char.IsWhiteSpace(ch));
+        var label = digits.Length > 0 && simpleSource ? $"Run {int.Parse(digits)}" : clean;
         if (!label.StartsWith("Run ", StringComparison.OrdinalIgnoreCase)) label = $"Run {label}";
         return string.IsNullOrWhiteSpace(period) || label.Contains(period, StringComparison.OrdinalIgnoreCase) ? label : $"{label} {period}";
     }
@@ -34,7 +35,7 @@ public static class PlannerPlanImportRules
             .OrderBy(stop => stop.Sequence)
             .Select(stop => stop.CollectFrom)
             .FirstOrDefault();
-        return TimeOnly.TryParse(first, out var time) ? time.Hour >= 15 || time.Hour < 3 ? "PM" : "AM" : null;
+        return TimeOnly.TryParse(first, out var time) ? time.Hour >= 12 ? "PM" : "AM" : null;
     }
 
     public static PalletCapacityResult Capacity(PlannerPlanRunRequest run)
