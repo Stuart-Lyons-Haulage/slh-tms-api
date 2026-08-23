@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Tracking;
+using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Data;
 public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbContext(options)
@@ -38,6 +39,20 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
 
     public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
     {
+        var completionTransitions = ChangeTracker.Entries<Load>()
+            .Where(entry =>
+                entry.Entity.Status == LoadStatus.Completed
+                && (entry.State == EntityState.Added
+                    || entry.State == EntityState.Modified
+                    && entry.Property(load => load.Status).IsModified
+                    && entry.Property(load => load.Status).OriginalValue != LoadStatus.Completed))
+            .Select(entry => entry.Entity.Id)
+            .Distinct()
+            .ToList();
+
+        foreach (var loadId in completionTransitions)
+            await RunCompletionPersistenceGuard.EnsureCompletionEvidenceAsync(this, loadId, cancellationToken);
+
         try
         {
             return await base.SaveChangesAsync(cancellationToken);

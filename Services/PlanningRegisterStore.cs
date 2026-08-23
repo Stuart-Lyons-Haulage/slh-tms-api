@@ -43,6 +43,11 @@ public static class PlanningRegisterStore
         foreach (var stop in load.Stops) stop.LoadId = load.Id;
         var key = $"planningload:{load.Id:N}";
         var row = await db.StagedImports.SingleOrDefaultAsync(x => x.IdempotencyKey == key, ct);
+        var existingLoad = row is null ? null : ParseLoad(row);
+
+        if (load.Status == LoadStatus.Completed && existingLoad?.Status != LoadStatus.Completed)
+            await RunCompletionPersistenceGuard.EnsureCompletionEvidenceAsync(db, load.Id, ct);
+
         if (row is null)
         {
             row = new StagedImport { EntityType = LoadType, IdempotencyKey = key, PayloadJson = "{}", Source = "SLH planning register" };
