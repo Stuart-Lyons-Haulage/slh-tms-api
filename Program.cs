@@ -203,6 +203,7 @@ app.UseCors("Portal");
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseMiddleware<Slh.Tms.Api.Middleware.PlanningControlResilienceMiddleware>();
+app.UseMiddleware<Slh.Tms.Api.Middleware.SiteLookupResilienceMiddleware>();
 app.UseMiddleware<Slh.Tms.Api.Middleware.PlanLockMiddleware>();
 
 app.MapGet("/api/v1/health", () => Results.Ok(new { status = "healthy", revision = deploymentRevision })).AllowAnonymous();
