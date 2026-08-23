@@ -22,6 +22,7 @@ public sealed class PreDispatchSafetyTests
         db.Vehicles.Add(vehicle);
         db.Loads.Add(load);
         await db.SaveChangesAsync();
+        await SaveCapacity(db, load, 18, 26);
 
         var readiness = await new PreDispatchSafetyService(db, new FixedTimeProvider(EvidenceAt))
             .EvaluateAsync(load.Id, CancellationToken.None);
@@ -41,13 +42,12 @@ public sealed class PreDispatchSafetyTests
         var vehicle = Vehicle("SLH2");
         var trailer = new Trailer { TrailerNumber = "SLH20", Active = true };
         var load = LoadFor(new DateOnly(2026, 8, 28), driver.Id, vehicle.Id, trailer.Id);
-        load.PalletSpacesUsed = 27;
-        load.TotalPalletSpaces = 26;
         db.Drivers.Add(driver);
         db.Vehicles.Add(vehicle);
         db.Trailers.Add(trailer);
         db.Loads.Add(load);
         await db.SaveChangesAsync();
+        await SaveCapacity(db, load, 27, 26);
 
         var readiness = await new PreDispatchSafetyService(db, new FixedTimeProvider(EvidenceAt))
             .EvaluateAsync(load.Id, CancellationToken.None);
@@ -76,6 +76,7 @@ public sealed class PreDispatchSafetyTests
         db.Trailers.AddRange(trailer, otherTrailer);
         db.Loads.AddRange(target, existing);
         await db.SaveChangesAsync();
+        await SaveCapacity(db, target, 18, 26);
 
         var readiness = await new PreDispatchSafetyService(db, new FixedTimeProvider(EvidenceAt))
             .EvaluateAsync(target.Id, CancellationToken.None);
@@ -104,6 +105,7 @@ public sealed class PreDispatchSafetyTests
         db.Trailers.AddRange(trailer, otherTrailer);
         db.Loads.AddRange(target, existing);
         await db.SaveChangesAsync();
+        await SaveCapacity(db, target, 18, 26);
 
         var readiness = await new PreDispatchSafetyService(db, new FixedTimeProvider(EvidenceAt))
             .EvaluateAsync(target.Id, CancellationToken.None);
@@ -111,6 +113,14 @@ public sealed class PreDispatchSafetyTests
         Assert.Equal("Recommended", readiness.Classification);
         Assert.Contains(readiness.Checks, item => item.Code == "DriverConflict" && item.Passed);
     }
+
+    private static async Task SaveCapacity(TmsDbContext db, Load load, decimal used, decimal total) =>
+        await RunOperationalStore.SaveAsync(
+            db,
+            load,
+            new RunOperationalValues(used, total, "Standard pallets", null, null, null),
+            "test",
+            CancellationToken.None);
 
     private static Driver Driver(string employee) => new()
     {
@@ -141,8 +151,6 @@ public sealed class PreDispatchSafetyTests
             DriverId = driverId,
             VehicleId = vehicleId,
             TrailerId = trailerId,
-            PalletSpacesUsed = 18,
-            TotalPalletSpaces = 26,
             Stops =
             [
                 new LoadStop { Sequence = 1, Name = "Collection", Latitude = 52.0m, Longitude = -1.0m, PlannedArrivalUtc = startUtc },
