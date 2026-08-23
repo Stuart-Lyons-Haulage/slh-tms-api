@@ -21,6 +21,7 @@ public sealed class PreDispatchSafetyService
     {
         var load = await Slh.Tms.Api.Controllers.PlanningResilience.ReadLoadAsync(db, loadId, ct)
             ?? throw new PreDispatchException("RunNotFound", "The run could not be found.");
+        await RunOperationalStore.EnrichAsync(db, [load], ct);
         var evidenceAt = timeProvider.GetUtcNow();
         var checks = new List<PreDispatchCheck>();
 
