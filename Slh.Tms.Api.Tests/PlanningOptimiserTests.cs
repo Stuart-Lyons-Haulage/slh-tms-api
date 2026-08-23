@@ -80,6 +80,27 @@ public sealed class PlanningOptimiserTests
         Assert.Equal(
             first.Runs.Select(run => (run.Reference, run.CapacityPallets, run.PlannedPallets)),
             later.Runs.Select(run => (run.Reference, run.CapacityPallets, run.PlannedPallets)));
+
+        db.Trailers.Add(new Trailer
+        {
+            TrailerNumber = "SLH20",
+            Type = "Refrigerated",
+            StandardCapacity = 20,
+            EuroCapacity = 28,
+            Active = true
+        });
+        await db.SaveChangesAsync();
+        var changedEvidenceService = new PlanningOptimiserService(
+            db,
+            NullLogger<PlanningOptimiserService>.Instance,
+            new FixedTimeProvider(new DateTimeOffset(2026, 8, 23, 12, 0, 0, TimeSpan.Zero)));
+        var changedEvidence = await changedEvidenceService.GenerateAsync(
+            new GeneratePlanProposalRequest(date, "AM"),
+            "planner",
+            CancellationToken.None);
+
+        Assert.NotEqual(later.InputHash, changedEvidence.InputHash);
+        Assert.Equal(20, Assert.Single(changedEvidence.Runs).CapacityPallets);
     }
 
     [Fact]
