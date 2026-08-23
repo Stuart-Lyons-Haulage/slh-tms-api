@@ -6,7 +6,6 @@ namespace Slh.Tms.Api.Services;
 
 public sealed class PreDispatchSafetyService
 {
-    private static readonly TimeSpan FreshTachoThreshold = TimeSpan.FromHours(6);
     private readonly TmsDbContext db;
     private readonly TimeProvider timeProvider;
 
@@ -20,7 +19,7 @@ public sealed class PreDispatchSafetyService
 
     public async Task<PreDispatchReadinessResult> EvaluateAsync(Guid loadId, CancellationToken ct)
     {
-        var load = await PlanningResilience.ReadLoadAsync(db, loadId, ct)
+        var load = await Slh.Tms.Api.Controllers.PlanningResilience.ReadLoadAsync(db, loadId, ct)
             ?? throw new PreDispatchException("RunNotFound", "The run could not be found.");
         var evidenceAt = timeProvider.GetUtcNow();
         var checks = new List<PreDispatchCheck>();
@@ -40,15 +39,12 @@ public sealed class PreDispatchSafetyService
             ? "A vehicle is allocated."
             : "A vehicle must be allocated before dispatch."));
 
-        Driver? driver = null;
         if (load.DriverId is Guid driverId)
         {
-            driver = await db.Drivers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == driverId, ct);
+            var driver = await db.Drivers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == driverId, ct);
             checks.Add(Check("DriverActive", driver?.Active == true, "Critical", driver?.Active == true
                 ? "Allocated driver is active."
                 : "Allocated driver is missing or inactive."));
-            if (driver is not null)
-                await MasterDetailStore.EnrichDriversAsync(db, [driver], ct);
         }
 
         if (load.VehicleId is Guid vehicleId)
@@ -84,7 +80,7 @@ public sealed class PreDispatchSafetyService
         checks.Add(Check("StopsMapped", mappedStops.Count == orderedStops.Count && orderedStops.Count > 0, "Warning",
             mappedStops.Count == orderedStops.Count && orderedStops.Count > 0
                 ? "All planned stops have map coordinates."
-                : "One or more stops are not mapped; drive-time evidence is incomplete."));
+                : "One or more stops are not mapped; route evidence is incomplete."));
 
         if (load.PalletSpacesUsed is decimal used && load.TotalPalletSpaces is decimal capacity && capacity >= 0)
         {
@@ -99,38 +95,6 @@ public sealed class PreDispatchSafetyService
         }
 
         var estimatedDriveMinutes = EstimateDriveMinutes(orderedStops);
-        if (driver is not null)
-        {
-            if (driver.LastTachoSyncUtc is null)
-            {
-                checks.Add(Check("TachoEvidenceMissing", false, "Warning", "No TachoMaster freshness timestamp is available for the allocated driver."));
-            }
-            else if (evidenceAt - driver.LastTachoSyncUtc.Value > FreshTachoThreshold || driver.LastTachoSyncUtc > evidenceAt.AddMinutes(5))
-            {
-                checks.Add(Check("TachoEvidenceStale", false, "Warning", "The allocated driver's TachoMaster evidence is stale; planner acknowledgement is required."));
-            }
-            else
-            {
-                checks.Add(Check("TachoEvidenceFresh", true, "Information", "The allocated driver's TachoMaster evidence is current."));
-            }
-
-            if (estimatedDriveMinutes is null)
-            {
-                checks.Add(Check("DriveRequirementUnverified", false, "Warning", "Drive requirement cannot be estimated because the route is not fully mapped."));
-            }
-            else if (driver.TachoDriveAvailableTodayMinutes is null)
-            {
-                checks.Add(Check("DriveTimeUnknown", false, "Warning", "TachoMaster did not return remaining daily drive time for the allocated driver."));
-            }
-            else
-            {
-                checks.Add(Check("DriveTimeAvailable", estimatedDriveMinutes <= driver.TachoDriveAvailableTodayMinutes.Value, "Critical",
-                    estimatedDriveMinutes <= driver.TachoDriveAvailableTodayMinutes.Value
-                        ? $"Estimated driving requirement is {estimatedDriveMinutes} minutes and {driver.TachoDriveAvailableTodayMinutes.Value} minutes remain."
-                        : $"Estimated driving requirement is {estimatedDriveMinutes} minutes but only {driver.TachoDriveAvailableTodayMinutes.Value} minutes remain."));
-            }
-        }
-
         await AddResourceConflictChecks(load, checks, ct);
 
         var classification = checks.Any(item => !item.Passed && item.Severity == "Critical")
@@ -148,32 +112,9 @@ public sealed class PreDispatchSafetyService
             checks);
     }
 
-    public async Task<ControlledDispatchResult> DispatchAsync(Guid loadId, ControlledDispatchRequest request, string? actor, CancellationToken ct)
-    {
-        var readiness = await EvaluateAsync(loadId, ct);
-        if (readiness.Classification == "Blocked")
-            throw new PreDispatchException("DispatchBlocked", "The run has critical pre-dispatch failures and cannot be dispatched.");
-        if (readiness.Classification == "Unverified" && !request.AcknowledgeUnverified)
-            throw new PreDispatchException("UnverifiedAcknowledgementRequired", "Pre-dispatch evidence is incomplete and requires explicit planner acknowledgement.");
-
-        var registered = await PlanningRegisterStore.GetLoadAsync(db, loadId, ct);
-        if (registered is not null)
-        {
-            registered.Status = LoadStatus.Dispatched;
-            await PlanningRegisterStore.SaveLoadAsync(db, registered, actor, ct);
-            return new ControlledDispatchResult(loadId, LoadStatus.Dispatched.ToString(), readiness with { CanDispatch = true });
-        }
-
-        var tracked = await db.Loads.Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == loadId, ct)
-            ?? throw new PreDispatchException("RunNotFound", "The run could not be found.");
-        tracked.Status = LoadStatus.Dispatched;
-        await db.SaveChangesAsync(ct);
-        return new ControlledDispatchResult(loadId, LoadStatus.Dispatched.ToString(), readiness with { CanDispatch = true });
-    }
-
     private async Task AddResourceConflictChecks(Load load, List<PreDispatchCheck> checks, CancellationToken ct)
     {
-        var others = (await PlanningResilience.ReadLoadsAsync(db, load.PlanningDate, ct))
+        var others = (await Slh.Tms.Api.Controllers.PlanningResilience.ReadLoadsAsync(db, load.PlanningDate, ct))
             .Where(item => item.Id != load.Id && item.Status is LoadStatus.Planned or LoadStatus.Dispatched or LoadStatus.InProgress)
             .ToList();
         var targetSpan = Span(load);
