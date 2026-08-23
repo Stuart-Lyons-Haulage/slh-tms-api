@@ -188,6 +188,25 @@ END;
                             LoadId = visitLoadId, DriverId = visitLoad?.DriverId, Status = "GeofenceStopCompleted",
                             Notes = $"Stop {openVisit.LoadStopId} completed from geofence exit at {record.EventTimeUtc:u}.", CapturedBy = "RoadTech Geofence Engine"
                         });
+
+                        if (visitLoad is not null)
+                        {
+                            var completedStopIds = await CompletedStopIds(db, visitLoad.Id, ct);
+                            if (RunCompletionEvidence.CanAutoComplete(visitLoad, completedStopIds))
+                            {
+                                visitLoad.Status = LoadStatus.Completed;
+                                db.DriverStatusLogs.Add(new DriverStatusLog
+                                {
+                                    LoadId = visitLoad.Id,
+                                    DriverId = visitLoad.DriverId,
+                                    Status = "RunCompleted",
+                                    Notes = $"All {visitLoad.Stops.Count} planned stops have confirmed geofence departures; run completed at {record.EventTimeUtc:u}.",
+                                    CapturedBy = "RoadTech Geofence Engine"
+                                });
+                                if (db.Entry(visitLoad).State == EntityState.Detached)
+                                    await PlanningRegisterStore.SaveLoadAsync(db, visitLoad, "RoadTech Geofence Engine", ct);
+                            }
+                        }
                     }
                 }
             }
