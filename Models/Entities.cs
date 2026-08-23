@@ -219,6 +219,21 @@ public sealed class PlanProposalRun
     public required string ScoreComponentsJson { get; set; }
     public required string ExplanationJson { get; set; }
     public List<PlanProposalAllocation> Allocations { get; set; } = [];
+    public List<PlanProposalCandidate> Candidates { get; set; } = [];
+}
+public sealed class PlanProposalCandidate
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ProposalRunId { get; set; }
+    public Guid DriverId { get; set; }
+    public Guid VehicleId { get; set; }
+    public bool Selected { get; set; }
+    [MaxLength(40)] public required string Classification { get; set; }
+    [MaxLength(40)] public required string PositionSource { get; set; }
+    public decimal Score { get; set; }
+    public required string ScoreComponentsJson { get; set; }
+    public required string ConstraintResultsJson { get; set; }
+    public required string ExplanationJson { get; set; }
 }
 public sealed class PlanProposalAllocation
 {

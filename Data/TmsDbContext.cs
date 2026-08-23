@@ -20,6 +20,7 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<PlanProposal> PlanProposals => Set<PlanProposal>();
     public DbSet<PlanProposalRun> PlanProposalRuns => Set<PlanProposalRun>();
     public DbSet<PlanProposalAllocation> PlanProposalAllocations => Set<PlanProposalAllocation>();
+    public DbSet<PlanProposalCandidate> PlanProposalCandidates => Set<PlanProposalCandidate>();
     public DbSet<OrderReferenceIssue> OrderReferenceIssues => Set<OrderReferenceIssue>();
     public DbSet<ReferenceChaseEvent> ReferenceChaseEvents => Set<ReferenceChaseEvent>();
     public DbSet<TransportOrder> TransportOrders => Set<TransportOrder>();
@@ -122,6 +123,11 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<PlanProposalAllocation>().HasIndex(x => new { x.ProposalRunId, x.SourceLineId });
         b.Entity<PlanProposalRun>().HasMany(x => x.Allocations).WithOne().HasForeignKey(x => x.ProposalRunId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<PlanProposalAllocation>().HasOne<OrderSourceLine>().WithMany().HasForeignKey(x => x.SourceLineId).OnDelete(DeleteBehavior.Restrict);
+        b.Entity<PlanProposalCandidate>().HasIndex(x => new { x.ProposalRunId, x.DriverId, x.VehicleId }).IsUnique();
+        b.Entity<PlanProposalCandidate>().Property(x => x.Score).HasPrecision(10, 2);
+        b.Entity<PlanProposalRun>().HasMany(x => x.Candidates).WithOne().HasForeignKey(x => x.ProposalRunId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<PlanProposalCandidate>().HasOne<Driver>().WithMany().HasForeignKey(x => x.DriverId).OnDelete(DeleteBehavior.Restrict);
+        b.Entity<PlanProposalCandidate>().HasOne<Vehicle>().WithMany().HasForeignKey(x => x.VehicleId).OnDelete(DeleteBehavior.Restrict);
         b.Entity<OrderReferenceIssue>().HasIndex(x => new { x.MovementId, x.ReferenceType, x.Status });
         b.Entity<OrderReferenceIssue>().HasOne<OrderMovement>().WithMany().HasForeignKey(x => x.MovementId).OnDelete(DeleteBehavior.Restrict);
         b.Entity<ReferenceChaseEvent>().HasIndex(x => new { x.ReferenceIssueId, x.OccurredAtUtc });

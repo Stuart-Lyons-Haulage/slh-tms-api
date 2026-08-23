@@ -47,6 +47,28 @@ BEGIN
     CREATE UNIQUE INDEX IX_PlanProposalRuns_ProposalId_Sequence ON dbo.PlanProposalRuns(ProposalId, Sequence);
 END;
 
+IF OBJECT_ID(N'dbo.PlanProposalCandidates', N'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.PlanProposalCandidates
+    (
+        Id uniqueidentifier NOT NULL CONSTRAINT PK_PlanProposalCandidates PRIMARY KEY,
+        ProposalRunId uniqueidentifier NOT NULL,
+        DriverId uniqueidentifier NOT NULL,
+        VehicleId uniqueidentifier NOT NULL,
+        Selected bit NOT NULL CONSTRAINT DF_PlanProposalCandidates_Selected DEFAULT(0),
+        Classification nvarchar(40) NOT NULL,
+        PositionSource nvarchar(40) NOT NULL,
+        Score decimal(10,2) NOT NULL,
+        ScoreComponentsJson nvarchar(max) NOT NULL,
+        ConstraintResultsJson nvarchar(max) NOT NULL,
+        ExplanationJson nvarchar(max) NOT NULL,
+        CONSTRAINT FK_PlanProposalCandidates_PlanProposalRuns_ProposalRunId FOREIGN KEY(ProposalRunId) REFERENCES dbo.PlanProposalRuns(Id) ON DELETE CASCADE,
+        CONSTRAINT FK_PlanProposalCandidates_Drivers_DriverId FOREIGN KEY(DriverId) REFERENCES dbo.Drivers(Id),
+        CONSTRAINT FK_PlanProposalCandidates_Vehicles_VehicleId FOREIGN KEY(VehicleId) REFERENCES dbo.Vehicles(Id)
+    );
+    CREATE UNIQUE INDEX IX_PlanProposalCandidates_Run_Driver_Vehicle ON dbo.PlanProposalCandidates(ProposalRunId, DriverId, VehicleId);
+END;
+
 IF OBJECT_ID(N'dbo.PlanProposalAllocations', N'U') IS NULL
 BEGIN
     CREATE TABLE dbo.PlanProposalAllocations

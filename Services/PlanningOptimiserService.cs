@@ -97,6 +97,7 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
     {
         var proposal = await db.PlanProposals.AsNoTracking()
             .Include(item => item.Runs).ThenInclude(run => run.Allocations)
+            .Include(item => item.Runs).ThenInclude(run => run.Candidates)
             .SingleOrDefaultAsync(item => item.Id == id, ct);
         if (proposal is null) return null;
         return ToResult(proposal, DeserializeWarnings(proposal.WarningsJson));
@@ -212,7 +213,7 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
             var collection = MatchSite(sites, first?.CollectionSite);
             var delivery = MatchSite(sites, last?.DeliverySite);
             var requiredDrive = RequiredDriveMinutes(collection?.Latitude, delivery?.Latitude);
-            Candidate? selected = null;
+            var candidates = new List<Candidate>();
 
             foreach (var driver in drivers.OrderBy(item => item.DisplayName).ThenBy(item => item.Id))
             foreach (var vehicle in vehicles.OrderBy(item => item.Registration).ThenBy(item => item.Id))
@@ -245,10 +246,34 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
                     evidenceAt,
                     run.CapacityPallets == 0 ? 0m : Math.Round((decimal)run.PlannedPallets / run.CapacityPallets * 100m, 2)));
                 var candidate = new Candidate(driver, vehicle, constraints, score);
-                if (selected is null || CandidateOrder(candidate, selected) < 0) selected = candidate;
+                candidates.Add(candidate);
             }
 
+            candidates.Sort(CandidateOrder);
+            var selected = candidates.FirstOrDefault();
             if (selected is null) continue;
+            for (var index = 0; index < candidates.Count; index++)
+            {
+                var candidate = candidates[index];
+                var candidateClassification = index > 0 && candidate.Constraints.Classification == "Recommended"
+                    ? "Alternative"
+                    : candidate.Constraints.Classification;
+                var explanations = candidate.Score.Explanations
+                    .Concat(candidate.Constraints.Results.Select(result => result.Explanation))
+                    .ToList();
+                run.Candidates.Add(new PlanProposalCandidate
+                {
+                    DriverId = candidate.Driver.Id,
+                    VehicleId = candidate.Vehicle.Id,
+                    Selected = index == 0,
+                    Classification = candidateClassification,
+                    PositionSource = candidate.Score.PositionSource,
+                    Score = candidate.Score.Total,
+                    ScoreComponentsJson = JsonSerializer.Serialize(candidate.Score.Components, JsonOptions),
+                    ConstraintResultsJson = JsonSerializer.Serialize(candidate.Constraints.Results, JsonOptions),
+                    ExplanationJson = JsonSerializer.Serialize(explanations, JsonOptions)
+                });
+            }
             run.DriverId = selected.Driver.Id;
             run.VehicleId = selected.Vehicle.Id;
             run.PositionSource = selected.Score.PositionSource;
@@ -316,7 +341,19 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
                     allocation.CollectionSite,
                     allocation.DeliverySite,
                     allocation.CollectionSequence,
-                    allocation.DeliverySequence)).ToList())).ToList());
+                    allocation.DeliverySequence)).ToList(),
+                run.Candidates.OrderByDescending(candidate => candidate.Selected).ThenByDescending(candidate => candidate.Score).ThenBy(candidate => candidate.DriverId).ThenBy(candidate => candidate.VehicleId)
+                    .Select(candidate => new PlanProposalCandidateResult(
+                        candidate.Id,
+                        candidate.DriverId,
+                        candidate.VehicleId,
+                        candidate.Selected,
+                        candidate.Classification,
+                        candidate.PositionSource,
+                        candidate.Score,
+                        DeserializeComponents(candidate.ScoreComponentsJson),
+                        DeserializeConstraints(candidate.ConstraintResultsJson),
+                        DeserializeExplanations(candidate.ExplanationJson))).ToList())).ToList());
 
     private static IReadOnlyList<PlanProposalWarning> DeserializeWarnings(string value)
     {
@@ -333,6 +370,12 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
     private static IReadOnlyList<PlanningScoreComponent> DeserializeComponents(string value)
     {
         try { return JsonSerializer.Deserialize<List<PlanningScoreComponent>>(value, JsonOptions) ?? []; }
+        catch (JsonException) { return []; }
+    }
+
+    private static IReadOnlyList<PlanningConstraintResult> DeserializeConstraints(string value)
+    {
+        try { return JsonSerializer.Deserialize<List<PlanningConstraintResult>>(value, JsonOptions) ?? []; }
         catch (JsonException) { return []; }
     }
 

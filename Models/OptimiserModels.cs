@@ -11,6 +11,17 @@ public sealed record PlanProposalAllocationResult(
     string? DeliverySite,
     int CollectionSequence,
     int DeliverySequence);
+public sealed record PlanProposalCandidateResult(
+    Guid Id,
+    Guid DriverId,
+    Guid VehicleId,
+    bool Selected,
+    string Classification,
+    string PositionSource,
+    decimal Score,
+    IReadOnlyList<PlanningScoreComponent> ScoreComponents,
+    IReadOnlyList<PlanningConstraintResult> ConstraintResults,
+    IReadOnlyList<string> Explanations);
 public sealed record PlanProposalRunResult(
     Guid Id,
     int Sequence,
@@ -27,7 +38,8 @@ public sealed record PlanProposalRunResult(
     decimal Score,
     IReadOnlyList<PlanningScoreComponent> ScoreComponents,
     IReadOnlyList<string> Explanations,
-    IReadOnlyList<PlanProposalAllocationResult> Allocations);
+    IReadOnlyList<PlanProposalAllocationResult> Allocations,
+    IReadOnlyList<PlanProposalCandidateResult> Candidates);
 public sealed record PlanProposalResult(
     Guid Id,
     DateOnly PlanningDate,
