@@ -191,21 +191,36 @@ public sealed class PlanningOptimiserTests
         var sourceLineId = Guid.NewGuid();
         var stagedId = Guid.NewGuid();
         var driverId = Guid.NewGuid();
+        var secondDriverId = Guid.NewGuid();
         var vehicleId = Guid.NewGuid();
+        var secondVehicleId = Guid.NewGuid();
         var options = new DbContextOptionsBuilder<TmsDbContext>()
             .UseInMemoryDatabase(Guid.NewGuid().ToString())
             .Options;
         await using var db = new TmsDbContext(options);
-        db.Drivers.Add(new Driver { Id = driverId, EmployeeNumber = "D-001", DisplayName = "Driver One", Active = true });
-        db.Vehicles.Add(new Vehicle { Id = vehicleId, Registration = "AB12CDE", Active = true });
-        db.VehicleLiveStatuses.Add(new Slh.Tms.Api.Models.Tracking.VehicleLiveStatus
-        {
-            VehicleIdentifier = "AB12CDE",
-            LastEventTimeUtc = now.AddMinutes(-5),
-            LastReceivedAtUtc = now.AddMinutes(-5),
-            Latitude = 54.2m,
-            Longitude = -1.5m
-        });
+        db.Drivers.AddRange(
+            new Driver { Id = driverId, EmployeeNumber = "D-001", DisplayName = "Driver One", Active = true },
+            new Driver { Id = secondDriverId, EmployeeNumber = "D-002", DisplayName = "Driver Two", Active = true });
+        db.Vehicles.AddRange(
+            new Vehicle { Id = vehicleId, Registration = "AB12CDE", Active = true },
+            new Vehicle { Id = secondVehicleId, Registration = "CD34EFG", Active = true });
+        db.VehicleLiveStatuses.AddRange(
+            new Slh.Tms.Api.Models.Tracking.VehicleLiveStatus
+            {
+                VehicleIdentifier = "AB12CDE",
+                LastEventTimeUtc = now.AddMinutes(-5),
+                LastReceivedAtUtc = now.AddMinutes(-5),
+                Latitude = 54.2m,
+                Longitude = -1.5m
+            },
+            new Slh.Tms.Api.Models.Tracking.VehicleLiveStatus
+            {
+                VehicleIdentifier = "CD34EFG",
+                LastEventTimeUtc = now.AddMinutes(-5),
+                LastReceivedAtUtc = now.AddMinutes(-5),
+                Latitude = 51.0m,
+                Longitude = -0.1m
+            });
         db.Sites.AddRange(
             new Site { ExternalCode = "COLL", Name = "Northern Collection", Active = true },
             new Site { ExternalCode = "DEL", Name = "Southern Delivery", Active = true });
@@ -225,6 +240,18 @@ public sealed class PlanningOptimiserTests
                 PayloadJson = JsonSerializer.Serialize(new
                 {
                     employeeNumber = "D-001",
+                    tachoDriveAvailableTodayMinutes = 500,
+                    lastTachoSyncUtc = now.AddMinutes(-10)
+                }),
+                Status = StagingStatus.Promoted
+            },
+            new StagedImport
+            {
+                EntityType = "masterdetail:driver",
+                IdempotencyKey = "masterdetail:driver:d002",
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    employeeNumber = "D-002",
                     tachoDriveAvailableTodayMinutes = 500,
                     lastTachoSyncUtc = now.AddMinutes(-10)
                 }),
@@ -286,6 +313,10 @@ public sealed class PlanningOptimiserTests
         Assert.Equal("LiveTracking", run.PositionSource);
         Assert.Contains(run.ScoreComponents, component => component.Code == "SouthboundPositioning" && component.Value > 0);
         Assert.Contains(run.Explanations, explanation => explanation.Contains("southbound", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(4, run.Candidates.Count);
+        Assert.Single(run.Candidates.Where(candidate => candidate.Selected));
+        Assert.Contains(run.Candidates, candidate => candidate.Classification == "Alternative" && !candidate.Selected);
+        Assert.All(run.Candidates, candidate => Assert.NotEmpty(candidate.Explanations));
         Assert.Empty(await db.Loads.ToListAsync());
     }
 
