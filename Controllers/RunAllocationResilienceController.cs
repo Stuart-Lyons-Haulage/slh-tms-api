@@ -87,9 +87,11 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
         var (load, register) = await FindLoadAsync(id, includeStops: true, tracking: true, ct);
         if (load is null) return NotFound(new { message = "The run could not be found." });
         if (!Enum.TryParse<LoadStatus>(request.Status, true, out var next)) return BadRequest(new { message = "The requested run status is not valid." });
+        if (next == LoadStatus.Dispatched)
+            return BadRequest(new { message = "Dispatch must use the controlled driver-message dispatch flow so structural readiness and live TachoMaster checks cannot be bypassed." });
         if (!CanTransition(load.Status, next)) return BadRequest(new { message = $"A run cannot move from {load.Status} to {next}." });
-        if ((next is LoadStatus.Dispatched or LoadStatus.InProgress) && (load.DriverId is null || load.VehicleId is null))
-            return BadRequest(new { message = "Allocate both a driver and vehicle before dispatching a run." });
+        if (next == LoadStatus.InProgress && (load.DriverId is null || load.VehicleId is null))
+            return BadRequest(new { message = "Allocate both a driver and vehicle before starting a dispatched run." });
 
         load.Status = next;
         await SaveCoreLoadAsync(load, register, ct);
@@ -256,8 +258,6 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
     {
         (LoadStatus.Draft, LoadStatus.Planned) => true,
         (LoadStatus.Planned, LoadStatus.Draft) => true,
-        (LoadStatus.Planned, LoadStatus.Dispatched) => true,
-        (LoadStatus.Draft, LoadStatus.Dispatched) => true,
         (LoadStatus.Dispatched, LoadStatus.InProgress) => true,
         (LoadStatus.Dispatched, LoadStatus.Cancelled) => true,
         (LoadStatus.InProgress, LoadStatus.Completed) => true,
