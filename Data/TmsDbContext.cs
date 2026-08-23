@@ -117,6 +117,7 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<PlanProposalRun>().Property(x => x.Score).HasPrecision(10, 2);
         b.Entity<PlanProposalRun>().HasOne<Driver>().WithMany().HasForeignKey(x => x.DriverId).OnDelete(DeleteBehavior.Restrict);
         b.Entity<PlanProposalRun>().HasOne<Vehicle>().WithMany().HasForeignKey(x => x.VehicleId).OnDelete(DeleteBehavior.Restrict);
+        b.Entity<PlanProposalRun>().HasOne<Trailer>().WithMany().HasForeignKey(x => x.TrailerId).OnDelete(DeleteBehavior.Restrict);
         b.Entity<PlanProposal>().HasMany(x => x.Runs).WithOne().HasForeignKey(x => x.ProposalId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<PlanProposalAllocation>().HasIndex(x => new { x.ProposalRunId, x.SourceLineId });
         b.Entity<PlanProposalRun>().HasMany(x => x.Allocations).WithOne().HasForeignKey(x => x.ProposalRunId).OnDelete(DeleteBehavior.Cascade);

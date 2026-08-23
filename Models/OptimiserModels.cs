@@ -20,6 +20,7 @@ public sealed record PlanProposalRunResult(
     string Classification,
     Guid? DriverId,
     Guid? VehicleId,
+    Guid? TrailerId,
     string? PositionSource,
     int CapacityPallets,
     int PlannedPallets,

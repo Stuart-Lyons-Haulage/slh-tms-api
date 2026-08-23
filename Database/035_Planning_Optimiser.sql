@@ -32,6 +32,7 @@ BEGIN
         Classification nvarchar(40) NOT NULL,
         DriverId uniqueidentifier NULL,
         VehicleId uniqueidentifier NULL,
+        TrailerId uniqueidentifier NULL,
         PositionSource nvarchar(40) NULL,
         CapacityPallets int NOT NULL,
         PlannedPallets int NOT NULL,
@@ -40,7 +41,8 @@ BEGIN
         ExplanationJson nvarchar(max) NOT NULL,
         CONSTRAINT FK_PlanProposalRuns_PlanProposals_ProposalId FOREIGN KEY(ProposalId) REFERENCES dbo.PlanProposals(Id) ON DELETE CASCADE,
         CONSTRAINT FK_PlanProposalRuns_Drivers_DriverId FOREIGN KEY(DriverId) REFERENCES dbo.Drivers(Id),
-        CONSTRAINT FK_PlanProposalRuns_Vehicles_VehicleId FOREIGN KEY(VehicleId) REFERENCES dbo.Vehicles(Id)
+        CONSTRAINT FK_PlanProposalRuns_Vehicles_VehicleId FOREIGN KEY(VehicleId) REFERENCES dbo.Vehicles(Id),
+        CONSTRAINT FK_PlanProposalRuns_Trailers_TrailerId FOREIGN KEY(TrailerId) REFERENCES dbo.Trailers(Id)
     );
     CREATE UNIQUE INDEX IX_PlanProposalRuns_ProposalId_Sequence ON dbo.PlanProposalRuns(ProposalId, Sequence);
 END;

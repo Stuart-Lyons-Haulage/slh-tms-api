@@ -21,19 +21,30 @@ public sealed class PlanningOptimiserTests
         var sourceLineId = Guid.NewGuid();
         var stagedId = Guid.NewGuid();
         var trailerId = Guid.NewGuid();
+        var secondTrailerId = Guid.NewGuid();
         var options = new DbContextOptionsBuilder<TmsDbContext>()
             .UseInMemoryDatabase(Guid.NewGuid().ToString())
             .Options;
         await using var db = new TmsDbContext(options);
-        db.Trailers.Add(new Trailer
-        {
-            Id = trailerId,
-            TrailerNumber = "SLH20",
-            Type = "Refrigerated",
-            StandardCapacity = 20,
-            EuroCapacity = 28,
-            Active = true
-        });
+        db.Trailers.AddRange(
+            new Trailer
+            {
+                Id = trailerId,
+                TrailerNumber = "SLH20",
+                Type = "Refrigerated",
+                StandardCapacity = 20,
+                EuroCapacity = 28,
+                Active = true
+            },
+            new Trailer
+            {
+                Id = secondTrailerId,
+                TrailerNumber = "SLH21",
+                Type = "Refrigerated",
+                StandardCapacity = 20,
+                EuroCapacity = 28,
+                Active = true
+            });
         db.StagedImports.Add(new StagedImport
         {
             Id = stagedId,
@@ -81,9 +92,11 @@ public sealed class PlanningOptimiserTests
         Assert.Equal(2, runs.Count);
         Assert.All(runs, run =>
         {
-            Assert.Equal(trailerId, run.TrailerId);
             Assert.Equal(20, run.CapacityPallets);
         });
+        Assert.Equal(2, runs.Select(run => run.TrailerId).Distinct().Count());
+        Assert.Contains(runs, run => run.TrailerId == trailerId);
+        Assert.Contains(runs, run => run.TrailerId == secondTrailerId);
         Assert.Equal(25, runs.SelectMany(run => run.Allocations).Sum(allocation => allocation.Pallets));
         Assert.Equal(new[] { 20, 5 }, runs.Select(run => run.PlannedPallets).ToArray());
         Assert.All(runs.SelectMany(run => run.Allocations), allocation => Assert.True(allocation.CollectionSequence < allocation.DeliverySequence));

@@ -211,6 +211,7 @@ public sealed class PlanProposalRun
     [MaxLength(40)] public required string Classification { get; set; }
     public Guid? DriverId { get; set; }
     public Guid? VehicleId { get; set; }
+    public Guid? TrailerId { get; set; }
     [MaxLength(40)] public string? PositionSource { get; set; }
     public int CapacityPallets { get; set; }
     public int PlannedPallets { get; set; }

@@ -44,6 +44,7 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
         var drivers = await db.Drivers.AsNoTracking().Where(item => item.Active).ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
         var vehicles = await db.Vehicles.AsNoTracking().Where(item => item.Active).OrderBy(item => item.Registration).ToListAsync(ct);
+        var trailers = await db.Trailers.AsNoTracking().Where(item => item.Active).OrderBy(item => item.TrailerNumber).ToListAsync(ct);
         var sites = await db.Sites.AsNoTracking().Where(item => item.Active).ToListAsync(ct);
         await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
         var liveStatuses = await db.VehicleLiveStatuses.AsNoTracking().OrderByDescending(item => item.LastEventTimeUtc).ToListAsync(ct);
@@ -81,7 +82,7 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
 
         var lockedRuns = await PlanLockStore.BaselineAsync(db, request.PlanningDate, ct);
         AddLockedRuns(proposal, lockedRuns);
-        BuildRuns(proposal, balances, classification, request.PlanningDate, period);
+        BuildRuns(proposal, balances, trailers, classification, request.PlanningDate, period);
         AssignCandidateEvidence(proposal, drivers, vehicles, sites, liveStatuses, recentLoads, evidenceAt);
         proposal.Classification = WorstClassification(proposal.Runs.Select(run => run.Classification).Append(proposal.Classification));
         db.PlanProposals.Add(proposal);
@@ -101,25 +102,29 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
         return ToResult(proposal, DeserializeWarnings(proposal.WarningsJson));
     }
 
-    private static void BuildRuns(PlanProposal proposal, IReadOnlyList<Balance> balances, string classification, DateOnly date, string period)
+    private static void BuildRuns(PlanProposal proposal, IReadOnlyList<Balance> balances, IReadOnlyList<Trailer> trailers, string classification, DateOnly date, string period)
     {
         var runSequence = proposal.Runs.Count;
+        var usedTrailerIds = proposal.Runs.Where(run => run.TrailerId is not null).Select(run => run.TrailerId!.Value).ToHashSet();
         PlanProposalRun? current = null;
         foreach (var balance in balances)
         {
             var remaining = balance.Remaining;
-            var capacity = Capacity(balance.Line.PalletType);
             while (remaining > 0)
             {
-                if (current is null || current.CapacityPallets != capacity || current.PlannedPallets >= current.CapacityPallets)
+                var samePalletType = current is not null && IsEuro(current.Allocations.FirstOrDefault()?.PalletType) == IsEuro(balance.Line.PalletType);
+                if (current is null || !samePalletType || current.PlannedPallets >= current.CapacityPallets)
                 {
+                    var trailer = SelectTrailer(trailers, balance.Line.PalletType, usedTrailerIds);
+                    var capacity = TrailerCapacity(trailer, balance.Line.PalletType);
                     runSequence++;
                     current = new PlanProposalRun
                     {
                         Sequence = runSequence,
                         Reference = $"OPT-{date:yyyyMMdd}-{period}-{runSequence:00}",
                         IsLocked = false,
-                        Classification = classification,
+                        TrailerId = trailer?.Id,
+                        Classification = trailer is null && trailers.Count > 0 ? "Blocked" : classification,
                         CapacityPallets = capacity,
                         PlannedPallets = 0,
                         Score = 0m,
@@ -127,6 +132,7 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
                         ExplanationJson = "[]"
                     };
                     proposal.Runs.Add(current);
+                    if (trailer is not null) usedTrailerIds.Add(trailer.Id);
                 }
 
                 var quantity = Math.Min(remaining, current.CapacityPallets - current.PlannedPallets);
@@ -295,6 +301,7 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
                 run.Classification,
                 run.DriverId,
                 run.VehicleId,
+                run.TrailerId,
                 run.PositionSource,
                 run.CapacityPallets,
                 run.PlannedPallets,
@@ -346,6 +353,19 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
     private static string NormalisePeriod(string? value) => string.Equals(value?.Trim(), "PM", StringComparison.OrdinalIgnoreCase) ? "PM" : "AM";
     private static string Period(TimeOnly? value) => value is not null && value.Value >= new TimeOnly(17, 0) ? "PM" : "AM";
     private static int Capacity(string? palletType) => palletType?.Contains("euro", StringComparison.OrdinalIgnoreCase) == true ? 33 : 26;
+    private static bool IsEuro(string? palletType) => palletType?.Contains("euro", StringComparison.OrdinalIgnoreCase) == true;
+    private static Trailer? SelectTrailer(IReadOnlyList<Trailer> trailers, string? palletType, IReadOnlySet<Guid> excludedTrailerIds) => trailers
+        .Where(trailer => !excludedTrailerIds.Contains(trailer.Id))
+        .Where(trailer => TrailerCapacityOrNull(trailer, palletType) is > 0)
+        .OrderByDescending(trailer => TrailerCapacityOrNull(trailer, palletType))
+        .ThenBy(trailer => trailer.TrailerNumber, StringComparer.OrdinalIgnoreCase)
+        .FirstOrDefault();
+    private static int TrailerCapacity(Trailer? trailer, string? palletType) => TrailerCapacityOrNull(trailer, palletType) ?? Capacity(palletType);
+    private static int? TrailerCapacityOrNull(Trailer? trailer, string? palletType) => trailer is null
+        ? null
+        : palletType?.Contains("euro", StringComparison.OrdinalIgnoreCase) == true
+            ? trailer.EuroCapacity
+            : trailer.StandardCapacity;
     private static void AddLockedRuns(PlanProposal proposal, IReadOnlyList<LoadBaseline> lockedRuns)
     {
         foreach (var baseline in lockedRuns.OrderBy(run => run.Reference, StringComparer.OrdinalIgnoreCase))
@@ -358,6 +378,7 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
                 LiveLoadId = baseline.Id,
                 DriverId = baseline.DriverId,
                 VehicleId = baseline.VehicleId,
+                TrailerId = baseline.TrailerId,
                 Classification = "Recommended",
                 PositionSource = "LockedPlan",
                 CapacityPallets = 0,
