@@ -11,6 +11,85 @@ namespace Slh.Tms.Api.Tests;
 public sealed class PlanningOptimiserTests
 {
     [Fact]
+    public async Task Generate_uses_configured_trailer_capacity_and_conserves_split_pallets()
+    {
+        // Defect protected: the optimiser silently uses the 26-pallet default when
+        // a selected trailer has a configured capacity, or loses pallets when splitting.
+        var date = new DateOnly(2026, 8, 26);
+        var movementId = Guid.NewGuid();
+        var revisionId = Guid.NewGuid();
+        var sourceLineId = Guid.NewGuid();
+        var stagedId = Guid.NewGuid();
+        var trailerId = Guid.NewGuid();
+        var options = new DbContextOptionsBuilder<TmsDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using var db = new TmsDbContext(options);
+        db.Trailers.Add(new Trailer
+        {
+            Id = trailerId,
+            TrailerNumber = "SLH20",
+            Type = "Refrigerated",
+            StandardCapacity = 20,
+            EuroCapacity = 28,
+            Active = true
+        });
+        db.StagedImports.Add(new StagedImport
+        {
+            Id = stagedId,
+            EntityType = "order",
+            IdempotencyKey = "optimiser-capacity-order",
+            PayloadJson = "{}",
+            Status = StagingStatus.Approved
+        });
+        db.OrderMovements.Add(new OrderMovement
+        {
+            Id = movementId,
+            CustomerCode = "ALDI",
+            StableMovementKey = "ALDI:PO-CAPACITY",
+            CurrentRevisionId = revisionId,
+            LifecycleStatus = OrderMovementStatus.PlannerReady
+        });
+        db.OrderRevisions.Add(new OrderRevision
+        {
+            Id = revisionId,
+            MovementId = movementId,
+            StagedImportId = stagedId,
+            RevisionNumber = 1,
+            PayloadJson = "{}"
+        });
+        db.OrderSourceLines.Add(new OrderSourceLine
+        {
+            Id = sourceLineId,
+            RevisionId = revisionId,
+            SourceRowKey = "Sheet1!2",
+            CollectionSite = "Collection C",
+            DeliverySite = "Delivery C",
+            CollectionDate = date,
+            DeliveryDate = date,
+            CollectionTimeFrom = new TimeOnly(3, 0),
+            PalletType = "Standard",
+            Pallets = 25,
+            PayloadJson = "{}"
+        });
+        await db.SaveChangesAsync();
+
+        var service = new PlanningOptimiserService(db, NullLogger<PlanningOptimiserService>.Instance);
+        var proposal = await service.GenerateAsync(new GeneratePlanProposalRequest(date, "AM"), "planner", CancellationToken.None);
+
+        var runs = proposal.Runs.Where(run => !run.IsLocked).OrderBy(run => run.Sequence).ToList();
+        Assert.Equal(2, runs.Count);
+        Assert.All(runs, run =>
+        {
+            Assert.Equal(trailerId, run.TrailerId);
+            Assert.Equal(20, run.CapacityPallets);
+        });
+        Assert.Equal(25, runs.SelectMany(run => run.Allocations).Sum(allocation => allocation.Pallets));
+        Assert.Equal(new[] { 20, 5 }, runs.Select(run => run.PlannedPallets).ToArray());
+        Assert.All(runs.SelectMany(run => run.Allocations), allocation => Assert.True(allocation.CollectionSequence < allocation.DeliverySequence));
+    }
+
+    [Fact]
     public async Task Generate_carries_locked_live_runs_as_fixed_without_mutating_them()
     {
         // Defect protected: generating a whole-day proposal omits locked work or
