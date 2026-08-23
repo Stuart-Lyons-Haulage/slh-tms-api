@@ -15,15 +15,20 @@ public sealed class GeofencePayloadHealthController(IConfiguration configuration
         var revision = configuration["Deployment:Revision"] ?? Environment.GetEnvironmentVariable("Deployment__Revision");
         try
         {
-            var expected = OperationalGeofencePayload.ExpectedFenceCount;
+            var expected = GeofenceSeedPayload.ApprovedGeofenceCount;
             var count = EmbeddedGeofenceEngine.ApprovedFences.Count;
-            var healthy = count == expected && count > 0;
+            var progressionCount = EmbeddedGeofenceEngine.ApprovedProgressionFenceCount;
+            var healthy = count == expected && progressionCount == 335;
             var payload = new
             {
                 status = healthy ? "healthy" : "invalid",
                 revision,
+                sourceRecordCount = GeofenceSeedPayload.SourceRecordCount,
                 geofenceCount = count,
                 expectedGeofenceCount = expected,
+                progressionGeofenceCount = progressionCount,
+                expectedProgressionGeofenceCount = 335,
+                payloadSha256 = GeofenceSeedPayload.JsonSha256,
                 payloadReady = healthy,
                 checkedAtUtc = DateTimeOffset.UtcNow
             };
@@ -37,8 +42,11 @@ public sealed class GeofencePayloadHealthController(IConfiguration configuration
             {
                 status = "payload-failure",
                 revision,
+                sourceRecordCount = GeofenceSeedPayload.SourceRecordCount,
                 geofenceCount = 0,
-                expectedGeofenceCount = OperationalGeofencePayload.ExpectedFenceCount,
+                expectedGeofenceCount = GeofenceSeedPayload.ApprovedGeofenceCount,
+                expectedProgressionGeofenceCount = 335,
+                payloadSha256 = GeofenceSeedPayload.JsonSha256,
                 payloadReady = false,
                 error = exception.GetType().Name,
                 message = exception.GetBaseException().Message,
