@@ -22,8 +22,6 @@ public sealed class PlannerSiteReconciliationController(TmsDbContext db) : Contr
         }
         catch (Exception ex) when (IsSchemaUnavailable(ex))
         {
-            // Site detail enrichment is optional. Core Site rows still contain the
-            // authoritative name/address data needed for safe reconciliation.
             db.ChangeTracker.Clear();
         }
 
@@ -108,7 +106,22 @@ public sealed class PlannerSiteReconciliationController(TmsDbContext db) : Contr
         catch (Exception ex) when (IsSchemaUnavailable(ex))
         {
             db.ChangeTracker.Clear();
-            return await SiteLookupFallback.ReadActiveAsync(db, ct);
+            return await db.Sites.AsNoTracking()
+                .Where(x => x.Active)
+                .Select(x => new Site
+                {
+                    Id = x.Id,
+                    ExternalCode = x.ExternalCode,
+                    Name = x.Name,
+                    DriverTextName = x.DriverTextName,
+                    CollectionAddress = x.CollectionAddress,
+                    CollectionInstructions = x.CollectionInstructions,
+                    MapLink = x.MapLink,
+                    Active = x.Active
+                })
+                .OrderBy(x => x.Name)
+                .Take(5000)
+                .ToListAsync(ct);
         }
     }
 
