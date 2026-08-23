@@ -1,6 +1,10 @@
+using System.Text.Json;
+using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Middleware;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Services;
 using Xunit;
 
 namespace Slh.Tms.Api.Tests;
@@ -17,7 +21,8 @@ public sealed class RunCompletionPersistenceGuardTests
 
         load.Status = LoadStatus.Completed;
 
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => db.SaveChangesAsync());
+        var exception = await Assert.ThrowsAsync<RunCompletionEvidenceException>(() => db.SaveChangesAsync());
+        Assert.Equal("RUN_COMPLETION_EVIDENCE_REQUIRED", exception.Code);
         Assert.Contains("evidence-controlled", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -62,6 +67,26 @@ public sealed class RunCompletionPersistenceGuardTests
         await db.SaveChangesAsync();
 
         Assert.Equal(LoadStatus.Completed, (await db.Loads.SingleAsync()).Status);
+    }
+
+    [Fact]
+    public async Task Completion_evidence_failure_is_exposed_as_conflict_not_server_error()
+    {
+        var context = new DefaultHttpContext();
+        context.Request.Method = HttpMethods.Post;
+        context.Request.Path = "/api/v1/operations/loads/00000000-0000-0000-0000-000000000001/driver-status";
+        context.Response.Body = new MemoryStream();
+
+        var middleware = new PlanLockMiddleware(_ => throw new RunCompletionEvidenceException(
+            "RUN_COMPLETION_EVIDENCE_REQUIRED",
+            "Run completion is evidence-controlled."));
+
+        await middleware.InvokeAsync(context);
+
+        Assert.Equal(StatusCodes.Status409Conflict, context.Response.StatusCode);
+        context.Response.Body.Position = 0;
+        using var document = await JsonDocument.ParseAsync(context.Response.Body);
+        Assert.Equal("RUN_COMPLETION_EVIDENCE_REQUIRED", document.RootElement.GetProperty("code").GetString());
     }
 
     private static TmsDbContext CreateDb()
