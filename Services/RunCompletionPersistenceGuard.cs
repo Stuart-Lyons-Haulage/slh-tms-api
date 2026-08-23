@@ -20,7 +20,13 @@ public static class RunCompletionPersistenceGuard
             .AnyAsync(log => log.LoadId == loadId && log.Status == CompletionEvidenceStatus, ct);
         if (persistedEvidence) return;
 
-        throw new InvalidOperationException(
+        throw new RunCompletionEvidenceException(
+            "RUN_COMPLETION_EVIDENCE_REQUIRED",
             "Run completion is evidence-controlled. A load can only become Completed after a RunCompleted geofence evidence event has been recorded.");
     }
+}
+
+public sealed class RunCompletionEvidenceException(string code, string message) : InvalidOperationException(message)
+{
+    public string Code { get; } = code;
 }
