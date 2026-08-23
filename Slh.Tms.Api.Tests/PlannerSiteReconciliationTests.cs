@@ -21,7 +21,7 @@ public sealed class PlannerSiteReconciliationTests : IClassFixture<CustomWebFact
     }
 
     [Fact]
-    public async Task Reconciliation_applies_master_address_coordinates_and_alias_without_losing_operational_detail()
+    public async Task Reconciliation_applies_master_address_and_alias_without_copying_coordinates_or_losing_operational_detail()
     {
         var date = new DateOnly(2026, 8, 24);
         var loadId = Guid.NewGuid();
@@ -71,8 +71,8 @@ public sealed class PlannerSiteReconciliationTests : IClassFixture<CustomWebFact
         var stop = await verifyDb.LoadStops.SingleAsync(x => x.LoadId == loadId);
         Assert.StartsWith("Park Farm, Selsey, Chichester, PO20 0XY", stop.Address);
         Assert.Contains("4 pallets", stop.Address);
-        Assert.Equal(50.7331m, stop.Latitude);
-        Assert.Equal(-0.7891m, stop.Longitude);
+        Assert.Null(stop.Latitude);
+        Assert.Null(stop.Longitude);
     }
 
     [Fact]
@@ -106,5 +106,25 @@ public sealed class PlannerSiteReconciliationTests : IClassFixture<CustomWebFact
         Assert.Equal("Ref TEST", stop.Address);
         Assert.Null(stop.Latitude);
         Assert.Null(stop.Longitude);
+    }
+
+    [Fact]
+    public async Task Optional_master_detail_failure_does_not_turn_reconciliation_into_500()
+    {
+        var date = new DateOnly(2026, 8, 24);
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            // Duplicate active external codes reproduce a legacy-data condition that makes
+            // optional MasterDetailStore enrichment fail while core Site Master remains usable.
+            db.Sites.AddRange(
+                new Site { ExternalCode = "DUP", Name = "Depot One", CollectionAddress = "AA1 1AA" },
+                new Site { ExternalCode = "DUP", Name = "Depot Two", CollectionAddress = "BB2 2BB" });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Access");
+        var response = await client.PostAsync("/api/v1/planning/reconcile-sites/2026-08-24", null);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 }
