@@ -44,11 +44,11 @@ The reset is approval-protected. It cancels active work for that planning day, r
 
 ## Info mailbox / email attachments
 
-Mailbox intake is approval-first. Email-derived orders must be staged with their source evidence and reviewed before promotion; mailbox intake must never create live work silently.
+Mailbox intake is productionised on `main` and remains approval-first. Email-derived orders are staged as `PendingReview` with their source evidence and must be reviewed in the TMS before promotion; mailbox automation never creates live work silently.
 
-The production-hardening work for multiple customer email/attachment formats is tracked in draft PR #135 (`Productionise Info mailbox order intake`). That branch includes richer Outlook evidence, parsing and duplicate/amendment handling. Rebase/revalidate it against current `main` before production rollout.
+The current intake path preserves Outlook message and attachment evidence, uses PO-first duplicate/amendment classification, records append-only SQL-backed staging history, and keeps a durable source link from promoted orders back to the originating staging evidence. The production Power Automate runbook uses Outlook plus the existing TMS API/custom connector and must not write directly to live Orders.
 
-Power Automate should use the API/custom connector and preserve the source message ID, subject, sender and attachment evidence for idempotency/audit.
+Power Automate should preserve the source message ID, subject, sender and attachment identity for idempotency/audit. Failed sends or intake attempts remain retryable without losing the original evidence.
 
 ## Production health checks
 
