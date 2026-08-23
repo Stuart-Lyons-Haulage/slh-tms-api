@@ -19,8 +19,7 @@ public sealed class DriverHoursComplianceController(
     private const double BaseRadiusKm = 1.5;
 
     [HttpGet("weekly")]
-    public async Task<IActionResult> Weekly([FromQuery] DateOnly date, CancellationToken ct)
-        => Ok(await Build(date, ct));
+    public async Task<IActionResult> Weekly([FromQuery] DateOnly date, CancellationToken ct) => Ok(await Build(date, ct));
 
     [HttpGet("non-employed.csv")]
     public async Task<IActionResult> NonEmployedCsv([FromQuery] DateOnly date, CancellationToken ct)
@@ -150,13 +149,13 @@ public sealed class DriverHoursComplianceController(
                 var plannerTick = dayLoads.Any(x => ReadNightOut(x.PlannerNotes) == true);
                 var tachoRest = duties.Any(x => x.RestMinutes >= 60 && SpansOvernight(day, x));
                 var overnightEnd = StartOfDayUtc(day.AddDays(1)).AddHours(9);
-                var parkedEvidence = dayTracking.Where(x => x.EventTimeUtc <= overnightEnd && x.Latitude is not null && x.Longitude is not null)
+                var parkedEvidence = dayTracking.Where(x => x.EventTimeUtc <= overnightEnd && x.Latitude != 0m && x.Longitude != 0m)
                     .OrderByDescending(x => x.EventTimeUtc).FirstOrDefault();
                 bool? awayFromBase = null;
                 double? distanceKm = null;
                 if (parkedEvidence is not null && basePoint is not null)
                 {
-                    distanceKm = HaversineKm((double)parkedEvidence.Latitude!.Value, (double)parkedEvidence.Longitude!.Value, basePoint.Value.Latitude, basePoint.Value.Longitude);
+                    distanceKm = HaversineKm((double)parkedEvidence.Latitude, (double)parkedEvidence.Longitude, basePoint.Value.Latitude, basePoint.Value.Longitude);
                     awayFromBase = distanceKm > BaseRadiusKm;
                 }
 
@@ -171,19 +170,24 @@ public sealed class DriverHoursComplianceController(
                         : "Not yet reconciled";
                     nightRows.Add(new NightOutEvidenceRow(day, driver.Id, driver.DisplayName, employment,
                         dayLoads.Select(x => x.Reference).Distinct().ToArray(), plannerTick, tachoRest,
-                        duties.Sum(x => x.RestMinutes), parkedEvidence?.EventTimeUtc, parkedEvidence?.Latitude,
-                        parkedEvidence?.Longitude, awayFromBase, distanceKm, status, sageExpense));
+                        duties.Sum(x => x.RestMinutes), parkedEvidence?.EventTimeUtc,
+                        parkedEvidence is null ? null : parkedEvidence.Latitude,
+                        parkedEvidence is null ? null : parkedEvidence.Longitude,
+                        awayFromBase, distanceKm, status, sageExpense));
                 }
             }
         }
 
         return new DriverHoursComplianceReport(
             weekStart, weekEnd, DateTimeOffset.UtcNow,
-            new DriverHoursPolicy("Wednesday", "Tuesday", "The operating week is Wednesday through Tuesday. A PM run remains attached to its commencement day even when delivery continues after midnight.",
+            new DriverHoursPolicy("Wednesday", "Tuesday",
+                "The operating week is Wednesday through Tuesday. A PM run remains attached to its commencement day even when delivery continues after midnight.",
                 "A night out is confirmed by Tacho rest evidence while the driver remains out, plus tracker position away from base. Planner Night out = Yes is intent/evidence, not the sole authority.",
                 BaseRadiusKm,
                 "Fleetio pre-use evidence remains valid across midnight while the same driver retains control; a driver/vehicle/trailer handover creates a new check requirement."),
-            new DriverHoursSourceStatus(tachoError is null ? "Available" : $"Partial: {tachoError}", trackerError is null ? "Available" : $"Partial: {trackerError}",
+            new DriverHoursSourceStatus(
+                tachoError is null ? "Available" : $"Partial: {tachoError}",
+                trackerError is null ? "Available" : $"Partial: {trackerError}",
                 basePoint is null ? "Base geofence unavailable - tracker location cannot prove away-from-base" : $"Base resolved: {basePoint.Value.Name}",
                 "Sage HR employee roster is connected; expense-claim API reconciliation is not yet implemented."),
             nightRows.OrderBy(x => x.Date).ThenBy(x => x.DriverName).ToArray(),
@@ -194,8 +198,13 @@ public sealed class DriverHoursComplianceController(
     {
         try
         {
-            var sites = await SiteLookupFallback.ReadActiveAsync(db, ct);
-            try { await MasterDetailStore.EnrichSitesAsync(db, sites, ct); } catch { db.ChangeTracker.Clear(); }
+            var sites = await db.Sites.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
+            try { await MasterDetailStore.EnrichSitesAsync(db, sites, ct); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogInformation(ex, "Optional Site detail enrichment unavailable while resolving home base.");
+                db.ChangeTracker.Clear();
+            }
             var candidates = sites.Where(x => x.Latitude is not null && x.Longitude is not null).ToList();
             var site = candidates.FirstOrDefault(x => Normalise(x.ExternalCode) is "SLH" or "BASE" or "YARD")
                 ?? candidates.FirstOrDefault(x => Normalise(x.Name).Contains("STUARTLYONS") || Normalise(x.Name).Contains("LYONSHAULAGE"));
@@ -265,7 +274,7 @@ public sealed class DriverHoursComplianceController(
         return value.EndsWith("Yes", StringComparison.OrdinalIgnoreCase) ? true : value.EndsWith("No", StringComparison.OrdinalIgnoreCase) ? false : null;
     }
 
-    private static bool IsMovement(VehicleTrackingEvent x) => x.IsMoving == true || x.IgnitionOn == true || (x.SpeedKph ?? 0) > 0;
+    private static bool IsMovement(VehicleTrackingEvent x) => x.IsMoving == true || x.IgnitionOn == true || (x.SpeedKph ?? 0m) > 0m;
     private static int Minutes(TimeSpan value) => (int)Math.Round(value.TotalMinutes);
     private static DateTimeOffset StartOfDayUtc(DateOnly date)
     {
