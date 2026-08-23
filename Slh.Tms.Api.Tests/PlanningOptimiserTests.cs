@@ -11,6 +11,78 @@ namespace Slh.Tms.Api.Tests;
 public sealed class PlanningOptimiserTests
 {
     [Fact]
+    public async Task Identical_operational_evidence_has_the_same_hash_when_generated_later()
+    {
+        // Defect protected: proposal identity changes merely because the Generate
+        // button was pressed later, even though all operational evidence is identical.
+        var date = new DateOnly(2026, 8, 27);
+        var movementId = Guid.NewGuid();
+        var revisionId = Guid.NewGuid();
+        var stagedId = Guid.NewGuid();
+        var options = new DbContextOptionsBuilder<TmsDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using var db = new TmsDbContext(options);
+        db.StagedImports.Add(new StagedImport
+        {
+            Id = stagedId,
+            EntityType = "order",
+            IdempotencyKey = "optimiser-deterministic-order",
+            PayloadJson = "{}",
+            Status = StagingStatus.Approved
+        });
+        db.OrderMovements.Add(new OrderMovement
+        {
+            Id = movementId,
+            CustomerCode = "ALDI",
+            StableMovementKey = "ALDI:PO-DETERMINISTIC",
+            CurrentRevisionId = revisionId,
+            LifecycleStatus = OrderMovementStatus.PlannerReady
+        });
+        db.OrderRevisions.Add(new OrderRevision
+        {
+            Id = revisionId,
+            MovementId = movementId,
+            StagedImportId = stagedId,
+            RevisionNumber = 1,
+            PayloadJson = "{}"
+        });
+        db.OrderSourceLines.Add(new OrderSourceLine
+        {
+            RevisionId = revisionId,
+            SourceRowKey = "Sheet1!2",
+            CollectionSite = "Collection D",
+            DeliverySite = "Delivery D",
+            CollectionDate = date,
+            DeliveryDate = date,
+            CollectionTimeFrom = new TimeOnly(3, 0),
+            PalletType = "Standard",
+            Pallets = 16,
+            PayloadJson = "{}"
+        });
+        await db.SaveChangesAsync();
+
+        var firstService = new PlanningOptimiserService(
+            db,
+            NullLogger<PlanningOptimiserService>.Instance,
+            new FixedTimeProvider(new DateTimeOffset(2026, 8, 23, 8, 0, 0, TimeSpan.Zero)));
+        var first = await firstService.GenerateAsync(new GeneratePlanProposalRequest(date, "AM"), "planner", CancellationToken.None);
+        db.ChangeTracker.Clear();
+        var laterService = new PlanningOptimiserService(
+            db,
+            NullLogger<PlanningOptimiserService>.Instance,
+            new FixedTimeProvider(new DateTimeOffset(2026, 8, 23, 11, 0, 0, TimeSpan.Zero)));
+        var later = await laterService.GenerateAsync(new GeneratePlanProposalRequest(date, "AM"), "planner", CancellationToken.None);
+
+        Assert.NotEqual(first.Id, later.Id);
+        Assert.NotEqual(first.Version, later.Version);
+        Assert.Equal(first.InputHash, later.InputHash);
+        Assert.Equal(
+            first.Runs.Select(run => (run.Reference, run.CapacityPallets, run.PlannedPallets)),
+            later.Runs.Select(run => (run.Reference, run.CapacityPallets, run.PlannedPallets)));
+    }
+
+    [Fact]
     public async Task Generate_uses_configured_trailer_capacity_and_conserves_split_pallets()
     {
         // Defect protected: the optimiser silently uses the 26-pallet default when
@@ -468,5 +540,10 @@ public sealed class PlanningOptimiserTests
         var stored = Assert.Single(await db.PlanProposals.AsNoTracking().ToListAsync());
         Assert.Equal(proposal.Id, stored.Id);
         Assert.Equal("Generated", stored.Status);
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset utcNow) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => utcNow;
     }
 }
