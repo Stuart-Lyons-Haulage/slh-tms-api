@@ -71,7 +71,7 @@ public sealed class PlanningOptimiserService
         if (!tachoVerified)
             warnings.Add(new PlanProposalWarning("TachoEvidenceMissing", "Warning", "Driver hours evidence is missing or stale; this proposal requires planner acknowledgement before application."));
 
-        var inputHash = Hash(request.PlanningDate, period, balances, allocated, drivers);
+        var inputHash = Hash(request.PlanningDate, period, balances, allocated, drivers, trailers);
         var nextVersion = (await db.PlanProposals.AsNoTracking()
             .Where(item => item.PlanningDate == request.PlanningDate && item.Period == period)
             .MaxAsync(item => (int?)item.Version, ct) ?? 0) + 1;
@@ -397,7 +397,13 @@ public sealed class PlanningOptimiserService
         catch (JsonException) { return []; }
     }
 
-    private static string Hash(DateOnly date, string period, IReadOnlyList<Balance> balances, IReadOnlyDictionary<Guid, int> allocated, IReadOnlyList<Driver> drivers)
+    private static string Hash(
+        DateOnly date,
+        string period,
+        IReadOnlyList<Balance> balances,
+        IReadOnlyDictionary<Guid, int> allocated,
+        IReadOnlyList<Driver> drivers,
+        IReadOnlyList<Trailer> trailers)
     {
         var source = string.Join("|", new[]
         {
@@ -405,7 +411,8 @@ public sealed class PlanningOptimiserService
             period,
             string.Join(";", balances.Select(item => $"{item.Line.Id:N}:{item.Remaining}:{item.Line.CollectionSite}:{item.Line.DeliverySite}:{item.Line.PalletType}")),
             string.Join(";", allocated.OrderBy(item => item.Key).Select(item => $"{item.Key:N}:{item.Value}")),
-            string.Join(";", drivers.OrderBy(item => item.Id).Select(item => $"{item.Id:N}:{item.TachoDriveAvailableTodayMinutes}:{item.LastTachoSyncUtc?.ToUnixTimeSeconds()}"))
+            string.Join(";", drivers.OrderBy(item => item.Id).Select(item => $"{item.Id:N}:{item.TachoDriveAvailableTodayMinutes}:{item.LastTachoSyncUtc?.ToUnixTimeSeconds()}")),
+            string.Join(";", trailers.OrderBy(item => item.Id).Select(item => $"{item.Id:N}:{item.TrailerNumber}:{item.Type}:{item.StandardCapacity}:{item.EuroCapacity}"))
         });
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(source))).ToLowerInvariant();
     }
