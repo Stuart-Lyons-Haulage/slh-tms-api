@@ -26,20 +26,20 @@ public sealed class TvDisplayRunLabelsController(TmsDbContext db, IConfiguration
         var loads = (await PlanningResilience.ReadLoadsAsync(db, day, ct))
             .Where(load => load.Status != LoadStatus.Cancelled)
             .ToList();
-
-        // PlannerNotes is a resilient/not-mapped operational field, so enrich both
-        // SQL-backed and planning-register loads before building the visible run name.
         await LoadCommercialStore.EnrichAsync(db, loads, ct);
 
         return Ok(new
         {
             planningDate = day,
-            labels = loads.Select(load => new
-            {
-                loadId = load.Id,
-                reference = load.Reference,
-                displayReference = RunDisplayLabel.For(load)
-            }).ToList()
+            labels = loads
+                .OrderBy(load => load.Stops.Where(stop => stop.PlannedArrivalUtc is not null).Select(stop => stop.PlannedArrivalUtc).Min() ?? DateTimeOffset.MaxValue)
+                .ThenBy(load => load.Reference)
+                .Select(load => new
+                {
+                    loadId = load.Id,
+                    reference = load.Reference,
+                    displayReference = RunDisplayLabel.For(load)
+                }).ToList()
         });
     }
 
@@ -133,9 +133,9 @@ internal static partial class RunDisplayLabel
 
     private static string? PeriodFromFirstStop(Load load)
     {
-        var first = load.Stops.OrderBy(stop => stop.Sequence).FirstOrDefault(stop => stop.PlannedArrivalUtc is not null)?.PlannedArrivalUtc;
+        var first = load.Stops.Where(stop => stop.PlannedArrivalUtc is not null).OrderBy(stop => stop.PlannedArrivalUtc).FirstOrDefault()?.PlannedArrivalUtc;
         if (first is null) return null;
         var local = TimeZoneInfo.ConvertTime(first.Value, UkZone);
-        return local.Hour >= 15 || local.Hour < 3 ? "PM" : "AM";
+        return local.TimeOfDay >= TimeSpan.FromHours(12) ? "PM" : "AM";
     }
 }
