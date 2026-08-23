@@ -13,6 +13,7 @@ public sealed class RunCompletionEvidenceTests
         var second = new LoadStop { Id = Guid.NewGuid(), Sequence = 2, Name = "Delivery" };
         var load = new Load
         {
+            Reference = "TEST-RUN-01",
             Status = LoadStatus.InProgress,
             Stops = [first, second]
         };
@@ -28,6 +29,7 @@ public sealed class RunCompletionEvidenceTests
         var second = new LoadStop { Id = Guid.NewGuid(), Sequence = 2, Name = "Delivery" };
         var load = new Load
         {
+            Reference = "TEST-RUN-02",
             Status = LoadStatus.InProgress,
             Stops = [first, second]
         };
@@ -45,7 +47,7 @@ public sealed class RunCompletionEvidenceTests
     public void Only_in_progress_runs_can_auto_complete(LoadStatus status)
     {
         var stop = new LoadStop { Id = Guid.NewGuid(), Sequence = 1, Name = "Delivery" };
-        var load = new Load { Status = status, Stops = [stop] };
+        var load = new Load { Reference = "TEST-RUN-03", Status = status, Stops = [stop] };
 
         Assert.False(RunCompletionEvidence.CanAutoComplete(load, new HashSet<Guid> { stop.Id }));
     }
@@ -53,9 +55,10 @@ public sealed class RunCompletionEvidenceTests
     [Fact]
     public void Empty_or_invalid_stop_plan_never_auto_completes()
     {
-        var empty = new Load { Status = LoadStatus.InProgress, Stops = [] };
+        var empty = new Load { Reference = "TEST-RUN-04", Status = LoadStatus.InProgress, Stops = [] };
         var invalid = new Load
         {
+            Reference = "TEST-RUN-05",
             Status = LoadStatus.InProgress,
             Stops = [new LoadStop { Id = Guid.Empty, Sequence = 1, Name = "Delivery" }]
         };
