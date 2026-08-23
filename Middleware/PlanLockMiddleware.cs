@@ -11,6 +11,24 @@ public sealed class PlanLockMiddleware(RequestDelegate next)
 {
     public async Task InvokeAsync(HttpContext context)
     {
+        try
+        {
+            await InvokeCoreAsync(context);
+        }
+        catch (RunCompletionEvidenceException exception)
+        {
+            if (context.Response.HasStarted) throw;
+            context.Response.StatusCode = StatusCodes.Status409Conflict;
+            await context.Response.WriteAsJsonAsync(new
+            {
+                code = exception.Code,
+                detail = exception.Message
+            }, context.RequestAborted);
+        }
+    }
+
+    private async Task InvokeCoreAsync(HttpContext context)
+    {
         if (ControlPageFallback.IsProtectedGet(context.Request))
         {
             try
