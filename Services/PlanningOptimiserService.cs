@@ -7,12 +7,30 @@ using Slh.Tms.Api.Models;
 
 namespace Slh.Tms.Api.Services;
 
-public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOptimiserService> logger)
+public sealed class PlanningOptimiserService
 {
     private const string AllocationType = "planningpalletallocation";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
+    private readonly TmsDbContext db;
+    private readonly ILogger<PlanningOptimiserService> logger;
+    private readonly TimeProvider timeProvider;
     private readonly PlanningConstraintEvaluator constraintEvaluator = new();
     private readonly PlanningCandidateRanker candidateRanker = new();
+
+    public PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOptimiserService> logger)
+        : this(db, logger, TimeProvider.System)
+    {
+    }
+
+    public PlanningOptimiserService(
+        TmsDbContext db,
+        ILogger<PlanningOptimiserService> logger,
+        TimeProvider timeProvider)
+    {
+        this.db = db;
+        this.logger = logger;
+        this.timeProvider = timeProvider;
+    }
 
     public async Task<PlanProposalResult> GenerateAsync(
         GeneratePlanProposalRequest request,
@@ -20,7 +38,7 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
         CancellationToken ct)
     {
         var period = NormalisePeriod(request.Period);
-        var evidenceAt = DateTimeOffset.UtcNow;
+        var evidenceAt = timeProvider.GetUtcNow();
         var movements = await db.OrderMovements.AsNoTracking()
             .Where(item => item.LifecycleStatus == OrderMovementStatus.PlannerReady && item.CurrentRevisionId != null)
             .OrderBy(item => item.CustomerCode).ThenBy(item => item.StableMovementKey)
@@ -53,7 +71,7 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
         if (!tachoVerified)
             warnings.Add(new PlanProposalWarning("TachoEvidenceMissing", "Warning", "Driver hours evidence is missing or stale; this proposal requires planner acknowledgement before application."));
 
-        var inputHash = Hash(request.PlanningDate, period, balances, allocated, drivers, evidenceAt);
+        var inputHash = Hash(request.PlanningDate, period, balances, allocated, drivers);
         var nextVersion = (await db.PlanProposals.AsNoTracking()
             .Where(item => item.PlanningDate == request.PlanningDate && item.Period == period)
             .MaxAsync(item => (int?)item.Version, ct) ?? 0) + 1;
@@ -379,7 +397,7 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
         catch (JsonException) { return []; }
     }
 
-    private static string Hash(DateOnly date, string period, IReadOnlyList<Balance> balances, IReadOnlyDictionary<Guid, int> allocated, IReadOnlyList<Driver> drivers, DateTimeOffset evidenceAt)
+    private static string Hash(DateOnly date, string period, IReadOnlyList<Balance> balances, IReadOnlyDictionary<Guid, int> allocated, IReadOnlyList<Driver> drivers)
     {
         var source = string.Join("|", new[]
         {
@@ -387,8 +405,7 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
             period,
             string.Join(";", balances.Select(item => $"{item.Line.Id:N}:{item.Remaining}:{item.Line.CollectionSite}:{item.Line.DeliverySite}:{item.Line.PalletType}")),
             string.Join(";", allocated.OrderBy(item => item.Key).Select(item => $"{item.Key:N}:{item.Value}")),
-            string.Join(";", drivers.OrderBy(item => item.Id).Select(item => $"{item.Id:N}:{item.TachoDriveAvailableTodayMinutes}:{item.LastTachoSyncUtc?.ToUnixTimeSeconds()}")),
-            evidenceAt.ToString("yyyy-MM-ddTHH:mm")
+            string.Join(";", drivers.OrderBy(item => item.Id).Select(item => $"{item.Id:N}:{item.TachoDriveAvailableTodayMinutes}:{item.LastTachoSyncUtc?.ToUnixTimeSeconds()}"))
         });
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(source))).ToLowerInvariant();
     }
@@ -441,38 +458,3 @@ public sealed class PlanningOptimiserService(TmsDbContext db, ILogger<PlanningOp
         var keys = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(Normalise).ToHashSet();
         return statuses.Where(status => keys.Contains(Normalise(status.VehicleIdentifier))).OrderByDescending(status => status.LastEventTimeUtc).FirstOrDefault();
     }
-    private static int RequiredDriveMinutes(decimal? collectionLatitude, decimal? deliveryLatitude) => collectionLatitude is null || deliveryLatitude is null
-        ? 240
-        : Math.Max(60, (int)Math.Ceiling(Math.Abs(collectionLatitude.Value - deliveryLatitude.Value) * 69m / 45m * 60m) + 60);
-    private static int ConsecutiveDays(IEnumerable<Load> loads, Guid driverId, DateOnly planningDate)
-    {
-        var days = loads.Where(load => load.DriverId == driverId).Select(load => load.PlanningDate).ToHashSet();
-        var count = 0;
-        for (var day = planningDate.AddDays(-1); days.Contains(day); day = day.AddDays(-1)) count++;
-        return count;
-    }
-    private static bool SixthDayAllowed(Driver driver) => driver.Notes?.Contains("sixth day allowed", StringComparison.OrdinalIgnoreCase) == true;
-    private static int CandidateOrder(Candidate left, Candidate right)
-    {
-        var classification = Rank(left.Constraints.Classification).CompareTo(Rank(right.Constraints.Classification));
-        if (classification != 0) return classification;
-        var score = right.Score.Total.CompareTo(left.Score.Total);
-        if (score != 0) return score;
-        var driver = string.Compare(left.Driver.DisplayName, right.Driver.DisplayName, StringComparison.OrdinalIgnoreCase);
-        return driver != 0 ? driver : string.Compare(left.Vehicle.Registration, right.Vehicle.Registration, StringComparison.OrdinalIgnoreCase);
-    }
-    private static int Rank(string classification) => classification switch { "Recommended" => 0, "Alternative" => 1, "Unverified" => 2, _ => 3 };
-    private static string WorstClassification(IEnumerable<string> values) => values.OrderByDescending(Rank).FirstOrDefault() ?? "Unverified";
-    private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
-    private static DateTimeOffset StartOfDayUtc(DateOnly date) => new(date.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
-    private static bool SchemaUnavailable(Exception exception)
-    {
-        var message = exception.GetBaseException().Message;
-        return exception is InvalidOperationException or DbUpdateException ||
-            message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) ||
-            message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase) ||
-            message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase);
-    }
-    private sealed record Balance(OrderSourceLine Line, int Remaining);
-    private sealed record Candidate(Driver Driver, Vehicle Vehicle, PlanningConstraintEvaluation Constraints, PlanningCandidateScore Score);
-}
