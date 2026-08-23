@@ -36,10 +36,10 @@ public sealed class PlannerPlanImportTests : IClassFixture<CustomWebFactory>
     }
 
     [Theory]
-    [InlineData("02:59:00", "Run 1 PM")]
-    [InlineData("03:00:00", "Run 1 AM")]
-    [InlineData("14:59:00", "Run 1 AM")]
-    [InlineData("15:00:00", "Run 1 PM")]
+    [InlineData("00:00:00", "Run 1 AM")]
+    [InlineData("11:59:59", "Run 1 AM")]
+    [InlineData("12:00:00", "Run 1 PM")]
+    [InlineData("23:59:59", "Run 1 PM")]
     public void Planner_run_label_uses_collection_time_period_boundaries(string collectFrom, string expected)
     {
         var date = new DateOnly(2026, 8, 20);

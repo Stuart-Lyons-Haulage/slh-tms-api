@@ -34,7 +34,10 @@ public sealed class PlannerResourceReconciliationController(TmsDbContext db) : C
         var registerFallback = false;
         try
         {
-            loads = await db.Loads.Where(x => x.PlanningDate == planningDate).ToListAsync(ct);
+            // Include stops because every reconciled load is mirrored into the resilient planning
+            // register below. That keeps Planner/Runs consistent if either screen later has to use
+            // the register fallback because an optional planning table/column is unavailable.
+            loads = await db.Loads.Include(x => x.Stops).Where(x => x.PlanningDate == planningDate).ToListAsync(ct);
         }
         catch (Exception ex) when (IsSchemaUnavailable(ex))
         {
@@ -64,6 +67,7 @@ public sealed class PlannerResourceReconciliationController(TmsDbContext db) : C
             var beforeDriver = load.DriverId;
             var beforeVehicle = load.VehicleId;
             var beforeTrailer = load.TrailerId;
+            var beforeStatus = load.Status;
 
             if (load.DriverId is null && !string.IsNullOrWhiteSpace(run.Driver) && !IsPlaceholder(run.Driver))
             {
@@ -89,21 +93,27 @@ public sealed class PlannerResourceReconciliationController(TmsDbContext db) : C
             if (load.DriverId is not null && load.VehicleId is not null && load.Status == LoadStatus.Draft)
                 load.Status = LoadStatus.Planned;
 
-            var didChange = beforeDriver != load.DriverId || beforeVehicle != load.VehicleId || beforeTrailer != load.TrailerId;
-            if (!didChange)
-            {
-                unchanged++;
-                results.Add(new { run = run.RunRef, reference, outcome = "Unchanged" });
-                continue;
-            }
+            var didChange = beforeDriver != load.DriverId || beforeVehicle != load.VehicleId || beforeTrailer != load.TrailerId || beforeStatus != load.Status;
 
-            if (registerFallback)
-                await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
-            else
+            if (!registerFallback && didChange)
                 await db.SaveChangesAsync(ct);
 
-            changed++;
-            results.Add(new { run = run.RunRef, reference, outcome = "Backfilled", driverId = load.DriverId, vehicleId = load.VehicleId, trailerId = load.TrailerId });
+            // Always refresh the audited planning-register copy, even when the SQL Load already
+            // contained the right resources. Planner and Runs deliberately fall back to this copy
+            // during optional schema drift; leaving it stale made imported driver/vehicle evidence
+            // visible on the import overview but absent from those operational screens.
+            await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
+
+            if (didChange)
+            {
+                changed++;
+                results.Add(new { run = run.RunRef, reference, outcome = "Backfilled", driverId = load.DriverId, vehicleId = load.VehicleId, trailerId = load.TrailerId });
+            }
+            else
+            {
+                unchanged++;
+                results.Add(new { run = run.RunRef, reference, outcome = "VerifiedAndMirrored", driverId = load.DriverId, vehicleId = load.VehicleId, trailerId = load.TrailerId });
+            }
         }
 
         return Ok(new
