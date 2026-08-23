@@ -36,15 +36,16 @@ public static class RunOperationalStore
                 continue;
             }
 
-            // Preserve operational values from historic planner imports without
-            // exposing or depending on any commercial fields.
+            // Preserve only operational values from historic commercial-control rows.
+            // Revenue, cost, surcharge, invoice and commercial-note data are deliberately
+            // not projected back into live run models after the Phase 1 foundation cleanup.
             var legacy = rows.FirstOrDefault(x => x.EntityType == LegacyCommercialType && x.IdempotencyKey == LegacyKey(load.Id));
             if (legacy is null) continue;
             try
             {
                 var values = JsonSerializer.Deserialize<LoadCommercialValues>(legacy.PayloadJson, JsonOptions);
                 if (values is not null)
-                    Apply(load, new RunOperationalValues(values.PalletSpacesUsed, values.TotalPalletSpaces, values.CapacityType, values.DepotSplits, values.TemperatureC, values.PlannerNotes));
+                    Apply(load, new RunOperationalValues(values.PalletSpacesUsed, values.TotalPalletSpaces, values.CapacityType, values.DepotSplits, values.TemperatureC, values.PlannerNotes, values.EmptyMiles));
             }
             catch (JsonException) { }
         }
@@ -83,10 +84,11 @@ public static class RunOperationalStore
         load.DepotSplits = values.DepotSplits;
         load.TemperatureC = values.TemperatureC;
         load.PlannerNotes = values.PlannerNotes;
+        load.EmptyMiles = values.EmptyMiles;
     }
 
     private static string Key(Guid id) => $"runoperational:{id:N}";
     private static string LegacyKey(Guid id) => $"loadcommercial:{id:N}";
 }
 
-public sealed record RunOperationalValues(decimal? PalletSpacesUsed, decimal? TotalPalletSpaces, string? CapacityType, string? DepotSplits, decimal? TemperatureC, string? PlannerNotes);
+public sealed record RunOperationalValues(decimal? PalletSpacesUsed, decimal? TotalPalletSpaces, string? CapacityType, string? DepotSplits, decimal? TemperatureC, string? PlannerNotes, decimal? EmptyMiles = null);
