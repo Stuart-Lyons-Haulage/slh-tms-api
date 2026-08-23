@@ -21,8 +21,14 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
         var vehicle = await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.VehicleId, ct);
         if (driver is null || vehicle is null) return BadRequest(new { message = "The allocated driver or vehicle could not be found." });
 
+        var structural = await new PreDispatchSafetyService(db).EvaluateAsync(id, ct);
+        if (structural.Classification == "Blocked")
+            return Ok(Blocked(request.RouteDrivingMinutes, 0, StructuralExplanation(structural), structural: structural));
+        if (structural.Classification == "Unverified" && !request.AcknowledgeUnverified)
+            return Ok(Blocked(request.RouteDrivingMinutes, 0, "Pre-dispatch evidence is incomplete. Review the warnings and explicitly acknowledge them before dispatch.", structural: structural));
+
         var readiness = await AssessReadiness(load, driver, vehicle, request.RouteDrivingMinutes, ct);
-        return Ok(readiness);
+        return Ok(readiness with { StructuralReadiness = structural });
     }
 
     [HttpPost("{id:guid}/driver-message/sms"), Authorize(Policy = "TmsWrite")]
@@ -61,7 +67,15 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
                 return BadRequest(new { message = "The route must be calculated before dispatch so TachoMaster can check the driver's remaining hours." });
             var vehicle = await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(item => item.Id == load.VehicleId, ct);
             if (vehicle is null) return BadRequest(new { message = "The allocated vehicle could not be found." });
+
+            var structural = await new PreDispatchSafetyService(db).EvaluateAsync(id, ct);
+            if (structural.Classification == "Blocked")
+                return BadRequest(new { message = StructuralExplanation(structural), structural });
+            if (structural.Classification == "Unverified" && !request.AcknowledgeUnverified)
+                return BadRequest(new { message = "Pre-dispatch evidence is incomplete. Review and acknowledge the warnings before dispatch.", structural });
+
             var readiness = await AssessReadiness(load, driver, vehicle, routeDrivingMinutes, ct);
+            readiness = readiness with { StructuralReadiness = structural };
             if (!readiness.CanDispatch) return BadRequest(new { message = readiness.Explanation, readiness });
         }
 
@@ -151,10 +165,18 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
         return Math.Max(0, requiredBreaks * 45);
     }
 
-    private static RunDispatchReadinessResponse Blocked(int routeDrivingMinutes, int breakMinutes, string explanation, TachoVehicleDriverStatus? tacho = null)
-        => new(false, "Blocked", explanation, routeDrivingMinutes, breakMinutes, tacho?.DriverName, tacho?.VehicleCode, tacho?.DutyStartUtc, tacho?.DriveAvailableTodayMinutes, tacho?.WorkAvailableWeekMinutes);
+    private static string StructuralExplanation(PreDispatchReadinessResult readiness)
+    {
+        var failures = readiness.Checks.Where(item => !item.Passed).Select(item => item.Message).Take(4).ToList();
+        return failures.Count == 0
+            ? "Pre-dispatch validation did not pass."
+            : string.Join(" ", failures);
+    }
+
+    private static RunDispatchReadinessResponse Blocked(int routeDrivingMinutes, int breakMinutes, string explanation, TachoVehicleDriverStatus? tacho = null, PreDispatchReadinessResult? structural = null)
+        => new(false, "Blocked", explanation, routeDrivingMinutes, breakMinutes, tacho?.DriverName, tacho?.VehicleCode, tacho?.DutyStartUtc, tacho?.DriveAvailableTodayMinutes, tacho?.WorkAvailableWeekMinutes, structural);
 }
 
-public sealed record RunDriverMessageRequest(string Message, bool Dispatch = false, int? RouteDrivingMinutes = null);
-public sealed record RunDispatchReadinessRequest(int RouteDrivingMinutes);
-public sealed record RunDispatchReadinessResponse(bool CanDispatch, string Status, string Explanation, int RouteDrivingMinutes, int BreakMinutesIncluded, string? TachoDriverName, string? TachoVehicleCode, DateTimeOffset? DutyStartUtc, int? DriveAvailableTodayMinutes, int? WorkAvailableWeekMinutes);
+public sealed record RunDriverMessageRequest(string Message, bool Dispatch = false, int? RouteDrivingMinutes = null, bool AcknowledgeUnverified = false);
+public sealed record RunDispatchReadinessRequest(int RouteDrivingMinutes, bool AcknowledgeUnverified = false);
+public sealed record RunDispatchReadinessResponse(bool CanDispatch, string Status, string Explanation, int RouteDrivingMinutes, int BreakMinutesIncluded, string? TachoDriverName, string? TachoVehicleCode, DateTimeOffset? DutyStartUtc, int? DriveAvailableTodayMinutes, int? WorkAvailableWeekMinutes, PreDispatchReadinessResult? StructuralReadiness = null);
