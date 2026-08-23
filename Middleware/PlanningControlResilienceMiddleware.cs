@@ -83,7 +83,7 @@ public sealed class PlanningControlResilienceMiddleware(RequestDelegate next, IL
                             sourceLines = Array.Empty<object>(),
                             allocations = linkedLoad is null || ordered <= 0
                                 ? Array.Empty<object>()
-                                : new object[] { new { sourceLineId = (Guid?)null, loadId = linkedLoad.Id, loadReference = linkedLoad.Reference, pallets = ordered, updatedAtUtc = linkedLoad.UpdatedAtUtc, updatedBy = "resilient-fallback" } }
+                                : new object[] { new { sourceLineId = (Guid?)null, loadId = linkedLoad.Id, loadReference = linkedLoad.Reference, pallets = ordered, updatedAtUtc = linkedLoad.CreatedAtUtc, updatedBy = "resilient-fallback" } }
                         };
                     })
                     .Where(row => row.orderedPallets > 0)
