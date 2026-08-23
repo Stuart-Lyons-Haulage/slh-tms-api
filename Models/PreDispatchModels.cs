@@ -11,13 +11,6 @@ public sealed record PreDispatchReadinessResult(
     DateTimeOffset EvidenceCapturedAtUtc,
     IReadOnlyList<PreDispatchCheck> Checks);
 
-public sealed record ControlledDispatchRequest(bool AcknowledgeUnverified = false);
-
-public sealed record ControlledDispatchResult(
-    Guid LoadId,
-    string Status,
-    PreDispatchReadinessResult Readiness);
-
 public sealed class PreDispatchException(string code, string message) : InvalidOperationException(message)
 {
     public string Code { get; } = code;
