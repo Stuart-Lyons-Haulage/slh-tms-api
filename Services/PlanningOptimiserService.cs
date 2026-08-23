@@ -458,3 +458,38 @@ public sealed class PlanningOptimiserService
         var keys = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(Normalise).ToHashSet();
         return statuses.Where(status => keys.Contains(Normalise(status.VehicleIdentifier))).OrderByDescending(status => status.LastEventTimeUtc).FirstOrDefault();
     }
+    private static int RequiredDriveMinutes(decimal? collectionLatitude, decimal? deliveryLatitude) => collectionLatitude is null || deliveryLatitude is null
+        ? 240
+        : Math.Max(60, (int)Math.Ceiling(Math.Abs(collectionLatitude.Value - deliveryLatitude.Value) * 69m / 45m * 60m) + 60);
+    private static int ConsecutiveDays(IEnumerable<Load> loads, Guid driverId, DateOnly planningDate)
+    {
+        var days = loads.Where(load => load.DriverId == driverId).Select(load => load.PlanningDate).ToHashSet();
+        var count = 0;
+        for (var day = planningDate.AddDays(-1); days.Contains(day); day = day.AddDays(-1)) count++;
+        return count;
+    }
+    private static bool SixthDayAllowed(Driver driver) => driver.Notes?.Contains("sixth day allowed", StringComparison.OrdinalIgnoreCase) == true;
+    private static int CandidateOrder(Candidate left, Candidate right)
+    {
+        var classification = Rank(left.Constraints.Classification).CompareTo(Rank(right.Constraints.Classification));
+        if (classification != 0) return classification;
+        var score = right.Score.Total.CompareTo(left.Score.Total);
+        if (score != 0) return score;
+        var driver = string.Compare(left.Driver.DisplayName, right.Driver.DisplayName, StringComparison.OrdinalIgnoreCase);
+        return driver != 0 ? driver : string.Compare(left.Vehicle.Registration, right.Vehicle.Registration, StringComparison.OrdinalIgnoreCase);
+    }
+    private static int Rank(string classification) => classification switch { "Recommended" => 0, "Alternative" => 1, "Unverified" => 2, _ => 3 };
+    private static string WorstClassification(IEnumerable<string> values) => values.OrderByDescending(Rank).FirstOrDefault() ?? "Unverified";
+    private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static DateTimeOffset StartOfDayUtc(DateOnly date) => new(date.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+    private static bool SchemaUnavailable(Exception exception)
+    {
+        var message = exception.GetBaseException().Message;
+        return exception is InvalidOperationException or DbUpdateException ||
+            message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase);
+    }
+    private sealed record Balance(OrderSourceLine Line, int Remaining);
+    private sealed record Candidate(Driver Driver, Vehicle Vehicle, PlanningConstraintEvaluation Constraints, PlanningCandidateScore Score);
+}
