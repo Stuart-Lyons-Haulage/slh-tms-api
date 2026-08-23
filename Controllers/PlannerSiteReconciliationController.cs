@@ -15,8 +15,15 @@ public sealed class PlannerSiteReconciliationController(TmsDbContext db) : Contr
     public async Task<IActionResult> ReconcileSites(DateTime date, CancellationToken ct)
     {
         var planningDate = DateOnly.FromDateTime(date);
-        var sites = await db.Sites.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
-        await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
+        var sites = await ReadSitesAsync(ct);
+        try
+        {
+            await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
+        }
+        catch (Exception ex) when (IsSchemaUnavailable(ex))
+        {
+            db.ChangeTracker.Clear();
+        }
 
         List<Load> loads;
         var registerFallback = false;
@@ -88,6 +95,34 @@ public sealed class PlannerSiteReconciliationController(TmsDbContext db) : Contr
             unresolved = unresolved.OrderBy(x => x).ToArray(),
             ambiguous = ambiguous.OrderBy(x => x).ToArray()
         });
+    }
+
+    private async Task<List<Site>> ReadSitesAsync(CancellationToken ct)
+    {
+        try
+        {
+            return await db.Sites.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
+        }
+        catch (Exception ex) when (IsSchemaUnavailable(ex))
+        {
+            db.ChangeTracker.Clear();
+            return await db.Sites.AsNoTracking()
+                .Where(x => x.Active)
+                .Select(x => new Site
+                {
+                    Id = x.Id,
+                    ExternalCode = x.ExternalCode,
+                    Name = x.Name,
+                    DriverTextName = x.DriverTextName,
+                    CollectionAddress = x.CollectionAddress,
+                    CollectionInstructions = x.CollectionInstructions,
+                    MapLink = x.MapLink,
+                    Active = x.Active
+                })
+                .OrderBy(x => x.Name)
+                .Take(5000)
+                .ToListAsync(ct);
+        }
     }
 
     internal static IEnumerable<Site> MatchSites(IEnumerable<Site> sites, string value)
