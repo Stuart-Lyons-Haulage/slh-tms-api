@@ -106,8 +106,8 @@ public sealed class PlanningOptimiserService
         db.PlanProposals.Add(proposal);
         await db.SaveChangesAsync(ct);
         logger.LogInformation(
-            "Generated immutable planning proposal {ProposalId} version {Version} for {PlanningDate} {Period} with {RunCount} runs and classification {Classification}.",
-            proposal.Id, proposal.Version, proposal.PlanningDate, proposal.Period, proposal.Runs.Count, proposal.Classification);
+            "Generated immutable planning proposal {ProposalId} version {Version} with {RunCount} runs and classification {Classification}.",
+            proposal.Id, proposal.Version, proposal.Runs.Count, proposal.Classification);
         return ToResult(proposal, warnings);
     }
 
