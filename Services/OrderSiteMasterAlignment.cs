@@ -17,6 +17,29 @@ public static class OrderSiteMasterAlignment
 
     public static async Task<Alignment> ResolveAsync(TmsDbContext db, JsonElement payload, CancellationToken ct)
     {
+        var rawCollection = Text(payload, "collectionSite") ?? Text(payload, "collectionLocation") ?? Text(payload, "sellerName");
+        var rawDelivery = Text(payload, "deliverySite") ?? Text(payload, "deliveryLocation") ?? Text(payload, "stallNumber") ?? Text(payload, "destination");
+        return await ResolveNamesAsync(
+            db,
+            rawCollection,
+            rawDelivery,
+            Text(payload, "collectionAddress"),
+            Text(payload, "deliveryAddress"),
+            Text(payload, "mapLink"),
+            Text(payload, "driverInstructions"),
+            ct);
+    }
+
+    public static async Task<Alignment> ResolveNamesAsync(
+        TmsDbContext db,
+        string? rawCollection,
+        string? rawDelivery,
+        string? rawCollectionAddress,
+        string? rawDeliveryAddress,
+        string? rawMapLink,
+        string? rawDriverInstructions,
+        CancellationToken ct)
+    {
         List<Site> sites;
         try
         {
@@ -25,27 +48,18 @@ public static class OrderSiteMasterAlignment
         catch (Exception ex) when (SchemaUnavailable(ex))
         {
             db.ChangeTracker.Clear();
-            return new Alignment(
-                Text(payload, "collectionSite") ?? Text(payload, "collectionLocation") ?? Text(payload, "sellerName"),
-                Text(payload, "collectionAddress"),
-                Text(payload, "deliverySite") ?? Text(payload, "deliveryLocation") ?? Text(payload, "stallNumber"),
-                Text(payload, "deliveryAddress"),
-                Text(payload, "mapLink"),
-                Text(payload, "driverInstructions"));
+            return new Alignment(rawCollection, rawCollectionAddress, rawDelivery, rawDeliveryAddress, rawMapLink, rawDriverInstructions);
         }
 
-        var rawCollection = Text(payload, "collectionSite") ?? Text(payload, "collectionLocation") ?? Text(payload, "sellerName");
-        var rawDelivery = Text(payload, "deliverySite") ?? Text(payload, "deliveryLocation") ?? Text(payload, "stallNumber") ?? Text(payload, "destination");
         var collection = Match(sites, rawCollection);
         var delivery = Match(sites, rawDelivery);
-
         var collectionName = DisplayName(collection) ?? rawCollection;
         var deliveryName = DisplayName(delivery) ?? rawDelivery;
-        var collectionAddress = collection?.CollectionAddress ?? Text(payload, "collectionAddress");
-        var deliveryAddress = delivery?.CollectionAddress ?? Text(payload, "deliveryAddress");
-        var deliveryMapLink = delivery?.MapLink ?? Text(payload, "mapLink");
+        var collectionAddress = collection?.CollectionAddress ?? rawCollectionAddress;
+        var deliveryAddress = delivery?.CollectionAddress ?? rawDeliveryAddress;
+        var deliveryMapLink = delivery?.MapLink ?? rawMapLink;
 
-        var instructions = Text(payload, "driverInstructions");
+        var instructions = rawDriverInstructions;
         instructions = UpsertTag(instructions, "Collection site", collectionName);
         instructions = UpsertTag(instructions, "Collection address", collectionAddress);
         instructions = UpsertTag(instructions, "Depot", deliveryName);
