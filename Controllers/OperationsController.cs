@@ -10,7 +10,14 @@ namespace Slh.Tms.Api.Controllers;
  
 [ApiController, Route("api/v1/operations")]
 [Authorize]
-public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient maps, TachoMasterClient tachoMaster, ILogger<OperationsController> logger, IConfiguration configuration) : ControllerBase
+public sealed class OperationsController(
+    TmsDbContext db,
+    AzureMapsRouteClient maps,
+    TachoMasterClient tachoMaster,
+    DotTrackingClient trackingClient,
+    DotTrackingTelemetryStore telemetryStore,
+    ILogger<OperationsController> logger,
+    IConfiguration configuration) : ControllerBase
 {
     [HttpGet("delivery-etas"), AllowAnonymous]
     public async Task<IActionResult> DeliveryEtas([FromQuery] DateOnly? date, CancellationToken ct)
@@ -39,6 +46,20 @@ public sealed class OperationsController(TmsDbContext db, AzureMapsRouteClient m
         var drivers = await SafeDictionary(db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id)), driver => driver.Id, ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers.Values.ToList(), ct);
         var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles.Values.ToList(), ct);
+        try
+        {
+            var trackingRecords = (await trackingClient.GetLatestVehicleEventsAsync(ct))
+                .Select(DotTelemetryRecord.FromProvider)
+                .Where(record => record.Latitude is not null && record.Longitude is not null)
+                .ToList();
+            if (trackingRecords.Count > 0)
+                await telemetryStore.PersistAsync(trackingRecords, ct, markAsLiveReceipt: true);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "RoadTech live refresh failed while calculating delivery ETAs; using stored live telemetry fallback.");
+            db.ChangeTracker.Clear();
+        }
         var statuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
         IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> tachoStatuses = new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
         try { tachoStatuses = await tachoMaster.GetOpenDriverStatusesByVehicleAsync(planningDate, ct); }
