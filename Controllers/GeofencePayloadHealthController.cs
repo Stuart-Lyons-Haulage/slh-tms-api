@@ -15,7 +15,7 @@ public sealed class GeofencePayloadHealthController(IConfiguration configuration
         var revision = configuration["Deployment:Revision"] ?? Environment.GetEnvironmentVariable("Deployment__Revision");
         try
         {
-            var expected = OperationalGeofencePayload.ExpectedFenceCount;
+            var expected = GeofenceSeedPayload.ExpectedFenceCount;
             var count = EmbeddedGeofenceEngine.ApprovedFences.Count;
             var healthy = count == expected && count > 0;
             var payload = new
@@ -38,7 +38,7 @@ public sealed class GeofencePayloadHealthController(IConfiguration configuration
                 status = "payload-failure",
                 revision,
                 geofenceCount = 0,
-                expectedGeofenceCount = OperationalGeofencePayload.ExpectedFenceCount,
+                expectedGeofenceCount = GeofenceSeedPayload.ExpectedFenceCount,
                 payloadReady = false,
                 error = exception.GetType().Name,
                 message = exception.GetBaseException().Message,

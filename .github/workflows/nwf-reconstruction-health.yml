@@ -1,0 +1,108 @@
+name: Verify Nature's Way reconstruction
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - 'CD - Deploy TMS to Azure Container Apps'
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-nwf-reconstruction:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    env:
+      API_BASE: https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+      TV_WALLBOARD_ACCESS_KEY: ${{ secrets.TV_WALLBOARD_ACCESS_KEY }}
+    steps:
+      - name: Verify approved geofence payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          body_file="$(mktemp)"
+          status="$(curl --silent --show-error --output "$body_file" --write-out "%{http_code}" "$API_BASE/api/v1/health/geofences" || true)"
+          cat "$body_file"
+          echo
+          test "$status" = "200"
+          grep -Eq '"geofenceCount"[[:space:]]*:[[:space:]]*316' "$body_file"
+          grep -Eq '"expectedGeofenceCount"[[:space:]]*:[[:space:]]*316' "$body_file"
+          rm -f "$body_file"
+
+      - name: Check Site Master geofence linkage
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$TV_WALLBOARD_ACCESS_KEY"
+          body_file="$(mktemp)"
+          status="$(curl --silent --show-error --output "$body_file" --write-out "%{http_code}" \
+            -H "X-TMS-TV-Key: $TV_WALLBOARD_ACCESS_KEY" \
+            "$API_BASE/api/v1/health/geofence-links" || true)"
+          test "$status" = "200"
+          summary="$(jq -c '{total, linked, unlinked, unlinkedFenceHashes, source, checkedAtUtc}' "$body_file")"
+          echo "$summary"
+          {
+            echo "### Geofence ↔ Site Master linkage"
+            echo
+            echo '```json'
+            echo "$summary" | jq .
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          rm -f "$body_file"
+
+      - name: Check today's Nature's Way reconstruction
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$TV_WALLBOARD_ACCESS_KEY"
+          operating_date="$(TZ=Europe/London date +%F)"
+          body_file="$(mktemp)"
+          status="$(curl --silent --show-error --output "$body_file" --write-out "%{http_code}" \
+            -H "X-TMS-TV-Key: $TV_WALLBOARD_ACCESS_KEY" \
+            "$API_BASE/api/v1/run-progress?date=$operating_date" || true)"
+          test "$status" = "200"
+
+          summary="$(jq -c '
+            def planned($site):
+              [ .records[]? | .stopDwell[]? | select(((.stopName // "") | ascii_downcase | contains($site))) ] | length;
+            def evidence($site):
+              [ .records[]? | .stopDwell[]? | select(((.stopName // "") | ascii_downcase | contains($site)) and .geofenceName != null) ] | length;
+            def departed($site):
+              [ .records[]? | .stopDwell[]? | select(((.stopName // "") | ascii_downcase | contains($site)) and .state == "Departed") ] | length;
+            {
+              planningDate,
+              source,
+              geofenceCount,
+              geofenceVisitCount,
+              geofenceLinkedRuns,
+              trackingEventCount,
+              latestTrackingUtc,
+              naturesWay: {
+                selsey:  { plannedStops: planned("selsey"),  visitEvidenceStops: evidence("selsey"),  departedStops: departed("selsey") },
+                runcton: { plannedStops: planned("runcton"), visitEvidenceStops: evidence("runcton"), departedStops: departed("runcton") },
+                drayton: { plannedStops: planned("drayton"), visitEvidenceStops: evidence("drayton"), departedStops: departed("drayton") }
+              }
+            }' "$body_file")"
+
+          echo "$summary"
+          {
+            echo "### Nature's Way reconstruction"
+            echo
+            echo '```json'
+            echo "$summary" | jq .
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for site in selsey runcton drayton; do
+            planned="$(echo "$summary" | jq -r ".naturesWay.$site.plannedStops")"
+            evidence="$(echo "$summary" | jq -r ".naturesWay.$site.visitEvidenceStops")"
+            if test "$planned" -gt 0 && test "$evidence" -eq 0; then
+              echo "::warning title=Nature's Way $site::$planned planned stop(s) were found for $site but no linked geofence visit evidence was reconstructed for today's operating date."
+            fi
+          done
+
+          rm -f "$body_file"
