@@ -73,6 +73,13 @@ public static class RunOperationalStore
         row.ReviewedAtUtc = DateTimeOffset.UtcNow;
         row.ReviewedBy = user;
         row.ReviewNote = "Operational run details updated.";
+
+        // A planner can deliberately put only part of a single pallet order on a run.
+        // Persist that run quantity into the shared pallet-allocation ledger so every
+        // planning surface (Orders to Plan, Pallet Control and capacity) sees the same
+        // outstanding balance. Multi-order and non-pallet runs are ignored safely by
+        // PlanningAllocationStore.CandidateAsync.
+        await PlanningAllocationStore.SyncSingleOrderRunAsync(db, load, user, ct);
         await db.SaveChangesAsync(ct);
     }
 
