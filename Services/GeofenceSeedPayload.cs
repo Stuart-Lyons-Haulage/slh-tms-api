@@ -9,6 +9,9 @@ internal static class GeofenceSeedPayload
     // operational fences because they are absent from that export. Runcton already
     // exists in the approved payload as "Vitacress Runcton", so it must not be
     // duplicated with an overlapping Nature's Way polygon.
+    internal const int SupplementalFenceCount = 2;
+    internal static int ExpectedFenceCount => OperationalGeofencePayload.ExpectedFenceCount + SupplementalFenceCount;
+
     private static readonly Lazy<string> Payload = new(Build);
 
     internal static string Json => Payload.Value;
