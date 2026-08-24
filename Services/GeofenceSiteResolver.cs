@@ -21,7 +21,6 @@ public static class GeofenceSiteResolver
                 ExternalCode = x.ExternalCode,
                 Name = x.Name,
                 DriverTextName = x.DriverTextName,
-                CollectionAddress = x.CollectionAddress,
                 Active = x.Active
             })
             .ToListAsync(ct);
