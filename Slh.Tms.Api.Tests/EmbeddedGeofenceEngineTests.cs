@@ -6,13 +6,14 @@ namespace Slh.Tms.Api.Tests;
 public sealed class EmbeddedGeofenceEngineTests
 {
     [Fact]
-    public void Operational_falcon_payload_loads_all_314_unique_run_fences()
+    public void Operational_falcon_payload_loads_all_unique_run_fences_plus_approved_supplements()
     {
         var fences = EmbeddedGeofenceEngine.ApprovedFences;
+        var expected = OperationalGeofencePayload.ExpectedFenceCount + 2;
 
-        Assert.Equal(314, fences.Count);
-        Assert.Equal(314, fences.Select(x => x.Id).Distinct().Count());
-        Assert.Equal(314, fences.Select(x => x.Name.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        Assert.Equal(expected, fences.Count);
+        Assert.Equal(expected, fences.Select(x => x.Id).Distinct().Count());
+        Assert.Equal(expected, fences.Select(x => x.Name.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count());
         Assert.All(fences, fence =>
         {
             Assert.False(string.IsNullOrWhiteSpace(fence.Name));
@@ -41,6 +42,7 @@ public sealed class EmbeddedGeofenceEngineTests
         Assert.Equal(5, counts["FWC Collection"]);
         Assert.Equal(4, counts["Roundstone Collection"]);
         Assert.Equal(1, counts["SLH DEPOT"]);
+        Assert.Equal(2, counts["SLH supplemental"]);
 
         var excluded = new[] { "DVS", "DVSA Checkpoint", "Restricted Access", "Service Centre", "Service Station" };
         Assert.DoesNotContain(fences, fence => excluded.Contains(fence.Category, StringComparer.OrdinalIgnoreCase));
