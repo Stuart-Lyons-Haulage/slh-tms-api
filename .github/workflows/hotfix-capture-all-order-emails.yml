@@ -1,0 +1,149 @@
+name: Hotfix - capture all plausible Info mailbox orders
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/hotfix-capture-all-order-emails.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Harden backend intake and Power Automate definition
+        shell: python
+        run: |
+          from pathlib import Path
+
+          controller = Path('Controllers/OrderIntakeController.cs')
+          text = controller.read_text()
+          old = '''        var parsed = ParseEmail(request);
+        if (parsed.IgnoredReason is not null)
+            return Ok(new { ignored = true, reason = parsed.IgnoredReason, staged = 0, existing = 0, superseded = 0, warnings = parsed.Warnings });
+
+        var staged = 0;'''
+          new = '''        var parsed = ParseEmail(request);
+        if (parsed.IgnoredReason is not null)
+        {
+            if (!ShouldRetainForReview(request, parsed.IgnoredReason))
+                return Ok(new { ignored = true, reason = parsed.IgnoredReason, staged = 0, existing = 0, superseded = 0, warnings = parsed.Warnings });
+
+            parsed = BuildReviewFallback(request, parsed);
+        }
+
+        var staged = 0;'''
+          if old not in text:
+              raise SystemExit('OrderIntakeController intake block not found')
+          text = text.replace(old, new, 1)
+
+          marker = '''    private async Task<int> SupersedeOlderPendingByMatchKeys'''
+          helpers = r'''    private static bool ShouldRetainForReview(MailboxEmailIntakeRequest request, string ignoredReason)
+    {
+        if (ignoredReason.Contains("loop", StringComparison.OrdinalIgnoreCase) ||
+            ignoredReason.Contains("Operational request", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var value = $"{request.Subject} {request.BodyText} {request.BodyHtml}";
+        var orderWords = new[]
+        {
+            "order", "booking", "bookings", "transport", "collect", "collection", "deliver", "delivery",
+            "pallet", "pallets", "crate", "crates", "tray", "trays", "depot", "aldi", "morrisons", "waitrose",
+            "amazon", "coop", "nwf", "ifco", "langmead", "langmeads", "ham farm", "haulier", "purchase order", " po "
+        };
+        var keywordCandidate = orderWords.Any(word => value.Contains(word, StringComparison.OrdinalIgnoreCase));
+        var attachmentCandidate = (request.Attachments ?? []).Any(attachment =>
+        {
+            if (attachment.IsInline == true || string.IsNullOrWhiteSpace(attachment.Name)) return false;
+            var extension = Path.GetExtension(attachment.Name).ToLowerInvariant();
+            return extension is ".xls" or ".xlsx" or ".xlsm" or ".csv" or ".pdf";
+        });
+        return keywordCandidate || attachmentCandidate;
+    }
+
+    private static EmailIntakeParseResult BuildReviewFallback(MailboxEmailIntakeRequest request, EmailIntakeParseResult parsed)
+    {
+        var received = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
+        var date = DateOnly.FromDateTime(received.Date);
+        var compact = CompactKey(request.MessageId);
+        var reference = $"REVIEW-{(compact.Length <= 24 ? compact : compact[^24..])}";
+        var warnings = parsed.Warnings.Concat(new[]
+        {
+            parsed.IgnoredReason ?? "The email could not be mapped automatically.",
+            "Order-looking email retained for planner review instead of being discarded."
+        }).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+        var payload = JsonSerializer.SerializeToElement(new Dictionary<string, object?>
+        {
+            ["poNumber"] = reference,
+            ["customerCode"] = "UNMAPPED",
+            ["collectionDate"] = date.ToString("yyyy-MM-dd"),
+            ["deliveryDate"] = date.ToString("yyyy-MM-dd"),
+            ["pallets"] = null,
+            ["sellerName"] = null,
+            ["stallNumber"] = null,
+            ["plannerReady"] = false,
+            ["lifecycleStatus"] = "AwaitingDetails",
+            ["reviewStatus"] = "Pending Review",
+            ["intakeStatus"] = "MappingException",
+            ["validationStatus"] = "Warning",
+            ["intakeConfidence"] = "Low",
+            ["intakeWarnings"] = warnings,
+            ["intakeNaturalKey"] = $"REVIEW:{compact}",
+            ["driverInstructions"] = $"Mailbox order requires mapping before approval. Source email: {request.Subject}"
+        });
+
+        return new EmailIntakeParseResult(
+            [new ParsedEmailOrder("review-fallback-1", $"REVIEW:{compact}", payload, warnings)],
+            warnings,
+            null);
+    }
+
+'''
+          if marker not in text:
+              raise SystemExit('Controller insertion marker not found')
+          text = text.replace(marker, helpers + marker, 1)
+          controller.write_text(text)
+
+          workflow = Path('power-automate/info-mailbox-order-intake/workflow.json')
+          wf = workflow.read_text()
+          old_runafter = '''"runAfter": { "Scope_Receive_Source": ["Succeeded"] }'''
+          new_runafter = '''"runAfter": { "Scope_Receive_Source": ["Succeeded", "Failed", "TimedOut"] }'''
+          if old_runafter not in wf:
+              raise SystemExit('Power Automate submit runAfter block not found')
+          wf = wf.replace(old_runafter, new_runafter, 1)
+          workflow.write_text(wf)
+
+          doc = Path('docs/PowerAutomate-InfoMailbox-Order-Intake-Production.md')
+          if doc.exists():
+              d = doc.read_text()
+              note = '''\n\n## Capture-all order-candidate safeguard\n\nThe Info mailbox submission scope must run even when attachment retrieval fails or times out. The TMS intake endpoint is authoritative for classification. If an email looks like an order because of its subject/body or a non-inline XLS/XLSX/XLSM/CSV/PDF attachment, but extraction cannot map it into a complete order, the TMS creates a Pending Review staging record with `intakeStatus=MappingException`, `plannerReady=false`, and preserved source evidence. Only clear operational/non-order messages and TMS loopback notifications may be ignored.\n'''
+              if '## Capture-all order-candidate safeguard' not in d:
+                  doc.write_text(d + note)
+
+      - name: Build and test API
+        run: dotnet test --configuration Release
+
+      - name: Validate Power Automate definition
+        run: |
+          python power-automate/info-mailbox-order-intake/validate_workflow.py
+          python power-automate/info-mailbox-order-intake/test_validate_workflow.py
+
+      - name: Commit hardened intake
+        run: |
+          git config user.name "SLH TMS Automation"
+          git config user.email "automation@lyonshaulage.com"
+          git add Controllers/OrderIntakeController.cs power-automate/info-mailbox-order-intake/workflow.json docs/PowerAutomate-InfoMailbox-Order-Intake-Production.md
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "Capture unparsed order emails for TMS review"
+          git push origin HEAD:main
