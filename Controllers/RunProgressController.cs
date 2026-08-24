@@ -62,7 +62,6 @@ public sealed class RunProgressController(
             // Match on a cloned view so the planner-facing labels remain unchanged.
             var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
             var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, geofenceLoads, ct);
-            await RunStopDwellProjection.TryPersistAsync(db, snapshot, ct);
             var records = loads.Select(load => BuildRecord(load, snapshot, now)).ToList();
 
             return Ok(new

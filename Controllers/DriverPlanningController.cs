@@ -38,6 +38,26 @@ public sealed class DriverPlanningController(TmsDbContext db, IConfiguration con
                 .Take(2000).ToList();
         }
 
+        try
+        {
+            var registerLoads = (await PlanningRegisterStore.ReadLoadsAsync(db, null, ct))
+                .Where(load => load.PlanningDate >= firstDate && load.PlanningDate <= lastDate)
+                .OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference)
+                .Take(2000)
+                .ToList();
+
+            foreach (var registerLoad in registerLoads)
+            {
+                var index = loads.FindIndex(load => load.Id == registerLoad.Id);
+                if (index >= 0) loads[index] = registerLoad;
+                else loads.Add(registerLoad);
+            }
+        }
+        catch (Exception) when (!ct.IsCancellationRequested)
+        {
+            db.ChangeTracker.Clear();
+        }
+
         try { await LoadCommercialStore.EnrichAsync(db, loads, ct); }
         catch (Exception exception) when (IsSchemaUnavailable(exception)) { db.ChangeTracker.Clear(); }
 

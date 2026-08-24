@@ -110,7 +110,6 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
 
         var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
         var geofenceSnapshot = await EmbeddedGeofenceEngine.BuildAsync(db, day, geofenceLoads, ct);
-        await RunStopDwellProjection.TryPersistAsync(db, geofenceSnapshot, ct);
 
         var rows = new List<TvRunDisplayRow>();
         foreach (var load in loads)

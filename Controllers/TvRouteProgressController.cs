@@ -52,7 +52,6 @@ public sealed class TvRouteProgressController(
         // visible TV marker because liveStatuses above already contains the provider data.
         var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
         var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, day, geofenceLoads, ct);
-        await RunStopDwellProjection.TryPersistAsync(db, snapshot, ct);
         var vehicleIds = loads.Where(x => x.VehicleId is not null).Select(x => x.VehicleId!.Value).Distinct().ToList();
         var vehicles = vehicleIds.Count == 0
             ? new List<Vehicle>()
