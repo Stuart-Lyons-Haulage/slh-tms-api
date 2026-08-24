@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -21,6 +22,9 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     private readonly NwfDailyTrackerParser nwfParser = new();
     private readonly NwfWorkbookSnapshotParser nwfWorkbookParser = new();
     private readonly NwfPalletOrderCsvParser nwfCsvParser = new();
+    private static readonly Regex DateRegex = new(
+        @"\b(?<day>0?[1-9]|[12]\d|3[01])[./-](?<month>0?[1-9]|1[0-2])(?:[./-](?<year>20\d{2}|\d{2}))?\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     [HttpPost("email/preview"), Authorize(Policy = "TmsWrite")]
     public IActionResult Preview([FromBody] MailboxEmailIntakeRequest request)
@@ -50,7 +54,11 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
         var parsed = ParseEmail(request);
         if (parsed.IgnoredReason is not null)
+        {
+            if (ShouldStageMappingException(request, parsed))
+                return await StageMappingException(request, parsed, ct);
             return Ok(new { ignored = true, reason = parsed.IgnoredReason, staged = 0, existing = 0, superseded = 0, warnings = parsed.Warnings });
+        }
 
         var staged = 0;
         var existing = 0;
@@ -125,6 +133,146 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         ?? sainsburyParser.TryParse(request)
         ?? specialistParser.TryParse(request)
         ?? emailParser.Parse(request);
+
+    private async Task<IActionResult> StageMappingException(MailboxEmailIntakeRequest request, EmailIntakeParseResult parsed, CancellationToken ct)
+    {
+        var idempotencyKey = $"email:{CompactKey(request.MessageId)}:mapping-exception";
+        if (idempotencyKey.Length > 200) idempotencyKey = idempotencyKey[..200];
+        var already = await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(item => item.IdempotencyKey == idempotencyKey, ct);
+        if (already is not null)
+            return Accepted(new
+            {
+                ignored = false,
+                staged = 0,
+                existing = 1,
+                superseded = 0,
+                warnings = parsed.Warnings,
+                records = new[]
+                {
+                    new
+                    {
+                        stagingId = already.Id,
+                        status = already.Status.ToString(),
+                        existing = true,
+                        plannerReady = false,
+                        intakeStatus = "MappingException",
+                        warnings = parsed.Warnings.Append(parsed.IgnoredReason).Where(value => !string.IsNullOrWhiteSpace(value)).ToList(),
+                        reviewUrl = $"{Request.Scheme}://{Request.Host}/api/v1/staging/{already.Id}"
+                    }
+                }
+            });
+
+        var warnings = parsed.Warnings.Append(parsed.IgnoredReason).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var date = ExtractDate(request) ?? DateOnly.FromDateTime((request.ReceivedAtUtc ?? DateTimeOffset.UtcNow).DateTime);
+        var payload = JsonSerializer.SerializeToElement(new Dictionary<string, object?>
+        {
+            ["poNumber"] = $"MAPPING-{CompactKey(request.MessageId)[..Math.Min(CompactKey(request.MessageId).Length, 24)]}",
+            ["customerCode"] = InferMappingCustomer(request),
+            ["collectionDate"] = date.ToString("yyyy-MM-dd"),
+            ["deliveryDate"] = date.ToString("yyyy-MM-dd"),
+            ["pallets"] = null,
+            ["sellerName"] = null,
+            ["marketName"] = InferMappingCustomer(request),
+            ["stallNumber"] = null,
+            ["jobType"] = "Mapping Exception",
+            ["driverInstructions"] = "Mailbox order needs manual mapping before approval.",
+            ["plannerReady"] = false,
+            ["intakeStatus"] = "MappingException",
+            ["intakeConfidence"] = "Low",
+            ["intakeWarnings"] = warnings,
+            ["intakeParser"] = "Mapping Exception",
+            ["sourceMessageId"] = request.MessageId,
+            ["sourceInternetMessageId"] = request.InternetMessageId,
+            ["sourceSender"] = request.SenderAddress,
+            ["sourceSenderName"] = request.SenderName,
+            ["sourceSubject"] = request.Subject,
+            ["sourceReceivedAtUtc"] = request.ReceivedAtUtc,
+            ["sourceWebLink"] = request.WebLink,
+            ["sourceAttachmentNames"] = (request.Attachments ?? []).Where(item => item.IsInline != true).Select(item => item.Name).Where(name => !string.IsNullOrWhiteSpace(name)).ToList()
+        });
+        var stagedPayload = EnrichSourceEvidence(payload, request);
+        var item = stagingService.Create(new StageImportRequest(
+            "order",
+            idempotencyKey,
+            stagedPayload,
+            $"Info mailbox mapping exception / {(request.SenderAddress ?? "unknown sender").Trim()}"));
+        db.StagedImports.Add(item);
+        db.StagedImportEvents.Add(StagingAudit.Create(item, "MappingException", item.Status, "Plausible mailbox order could not be parsed automatically; source evidence retained for review.", "Info mailbox intake"));
+        await db.SaveChangesAsync(ct);
+
+        logger.LogWarning(
+            "Info mailbox intake {MessageId}: staged mapping exception for {Sender} / {Subject}. Reason: {Reason}",
+            request.MessageId,
+            request.SenderAddress,
+            request.Subject,
+            parsed.IgnoredReason);
+
+        return Accepted(new
+        {
+            ignored = false,
+            staged = 1,
+            existing = 0,
+            superseded = 0,
+            warnings,
+            records = new[]
+            {
+                new
+                {
+                    stagingId = item.Id,
+                    status = item.Status.ToString(),
+                    existing = false,
+                    plannerReady = false,
+                    intakeStatus = "MappingException",
+                    warnings,
+                    reviewUrl = $"{Request.Scheme}://{Request.Host}/api/v1/staging/{item.Id}"
+                }
+            }
+        });
+    }
+
+    private static bool ShouldStageMappingException(MailboxEmailIntakeRequest request, EmailIntakeParseResult parsed)
+    {
+        if (string.IsNullOrWhiteSpace(request.MessageId)) return false;
+        var reason = parsed.IgnoredReason ?? string.Empty;
+        if (reason.Contains("Internal TMS", StringComparison.OrdinalIgnoreCase) ||
+            reason.Contains("Operational request", StringComparison.OrdinalIgnoreCase)) return false;
+        var sender = request.SenderAddress ?? string.Empty;
+        var subject = request.Subject ?? string.Empty;
+        var body = $"{request.BodyText} {request.BodyHtml}";
+        var attachments = string.Join(" ", (request.Attachments ?? []).Select(item => item.Name));
+        var value = $"{sender} {subject} {body} {attachments}";
+        return sender.EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("NWAY", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("NWF", StringComparison.OrdinalIgnoreCase) ||
+               (value.Contains("pallet", StringComparison.OrdinalIgnoreCase) && value.Contains("order", StringComparison.OrdinalIgnoreCase)) ||
+               value.Contains("transport", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string InferMappingCustomer(MailboxEmailIntakeRequest request)
+    {
+        var value = $"{request.SenderAddress} {request.Subject}";
+        if (value.Contains("NWAY", StringComparison.OrdinalIgnoreCase) || value.Contains("NWF", StringComparison.OrdinalIgnoreCase) ||
+            (request.SenderAddress ?? string.Empty).EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase))
+            return "NWF";
+        return "EMAIL";
+    }
+
+    private static DateOnly? ExtractDate(MailboxEmailIntakeRequest request)
+    {
+        var value = $"{request.Subject}\n{request.BodyText}\n{string.Join("\n", (request.Attachments ?? []).Select(item => item.Name))}";
+        var match = DateRegex.Match(value);
+        if (!match.Success) return null;
+        var day = int.Parse(match.Groups["day"].Value);
+        var month = int.Parse(match.Groups["month"].Value);
+        var yearText = match.Groups["year"].Value;
+        var year = string.IsNullOrWhiteSpace(yearText)
+            ? (request.ReceivedAtUtc ?? DateTimeOffset.UtcNow).Year
+            : yearText.Length == 2
+                ? 2000 + int.Parse(yearText)
+                : int.Parse(yearText);
+        try { return new DateOnly(year, month, day); }
+        catch (ArgumentOutOfRangeException) { return null; }
+    }
 
     private async Task<int> SupersedeOlderPendingByMatchKeys(IReadOnlyCollection<string> currentKeys, string currentMessageId, CancellationToken ct)
     {

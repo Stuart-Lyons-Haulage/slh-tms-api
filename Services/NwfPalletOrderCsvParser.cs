@@ -1,6 +1,8 @@
 using System.Globalization;
+using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace Slh.Tms.Api.Services;
 
@@ -19,6 +21,9 @@ public sealed class NwfPalletOrderCsvParser
     ];
 
     public EmailIntakeParseResult? TryParse(MailboxEmailIntakeRequest request)
+        => TryParse(request, allowBodyFallback: true);
+
+    private EmailIntakeParseResult? TryParse(MailboxEmailIntakeRequest request, bool allowBodyFallback)
     {
         var candidates = (request.Attachments ?? [])
             .Where(item => item.IsInline != true
@@ -185,7 +190,117 @@ public sealed class NwfPalletOrderCsvParser
             }
         }
 
+        if (allowBodyFallback && LooksLikeNwfPalletOrder(request) && TryBuildBodyTableCsv(request) is { } bodyCsv)
+        {
+            var bodyRequest = request with
+            {
+                Attachments =
+                [
+                    new MailboxAttachmentRequest(
+                        "NWF pallet order email body table.csv",
+                        "text/csv",
+                        Convert.ToBase64String(Encoding.UTF8.GetBytes(bodyCsv)),
+                        false)
+                ]
+            };
+            return TryParse(bodyRequest, allowBodyFallback: false);
+        }
+
+        if (LooksLikeNwfPalletOrder(request))
+        {
+            var attachmentNames = string.Join(", ", (request.Attachments ?? [])
+                .Where(item => item.IsInline != true)
+                .Select(item => item.Name)
+                .Where(name => !string.IsNullOrWhiteSpace(name)));
+            var detail = string.IsNullOrWhiteSpace(attachmentNames)
+                ? "No attachment metadata was supplied with the recognised NWF pallet-order email."
+                : $"No readable NWF pallet-order CSV content was supplied. Attachments seen: {attachmentNames}.";
+            return new EmailIntakeParseResult(
+                [],
+                [detail],
+                "NWF pallet-order email was recognised but the CSV attachment content was not available for automatic mapping.");
+        }
+
         return null;
+    }
+
+    private static string? TryBuildBodyTableCsv(MailboxEmailIntakeRequest request)
+    {
+        var htmlRows = ExtractHtmlTableRows(request.BodyHtml);
+        if (LooksLikePalletOrderRows(htmlRows)) return ToCsv(htmlRows);
+        var body = !string.IsNullOrWhiteSpace(request.BodyHtml) ? request.BodyHtml : request.BodyText;
+        var pipeRows = ExtractPipeRows(body);
+        return LooksLikePalletOrderRows(pipeRows) ? ToCsv(pipeRows) : null;
+    }
+
+    private static List<List<string>> ExtractHtmlTableRows(string? html)
+    {
+        var rows = new List<List<string>>();
+        if (string.IsNullOrWhiteSpace(html)) return rows;
+        foreach (Match rowMatch in Regex.Matches(html, @"<tr\b[^>]*>(?<row>.*?)</tr>", RegexOptions.IgnoreCase | RegexOptions.Singleline))
+        {
+            var cells = Regex.Matches(rowMatch.Groups["row"].Value, @"<t[dh]\b[^>]*>(?<cell>.*?)</t[dh]>", RegexOptions.IgnoreCase | RegexOptions.Singleline)
+                .Select(match => CleanHtmlCell(match.Groups["cell"].Value))
+                .ToList();
+            if (cells.Any(value => !string.IsNullOrWhiteSpace(value))) rows.Add(cells);
+        }
+        return rows;
+    }
+
+    private static List<List<string>> ExtractPipeRows(string? value)
+    {
+        var rows = new List<List<string>>();
+        if (string.IsNullOrWhiteSpace(value)) return rows;
+        var text = WebUtility.HtmlDecode(Regex.Replace(value, "<[^>]+>", "\n"));
+        foreach (var line in text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (!line.Contains('|')) continue;
+            var cells = line.Split('|').Select(cell => cell.Replace("\\.", ".").Trim()).ToList();
+            if (cells.Count < 4 || cells.All(cell => cell.Length == 0 || cell.All(ch => ch == '-' || char.IsWhiteSpace(ch)))) continue;
+            rows.Add(cells);
+        }
+        return rows;
+    }
+
+    private static bool LooksLikePalletOrderRows(IReadOnlyList<List<string>> rows)
+    {
+        if (rows.Count < 2) return false;
+        return rows.Any(row =>
+        {
+            var header = HeaderMap(row);
+            return RequiredHeaders.All(header.ContainsKey);
+        });
+    }
+
+    private static string ToCsv(IEnumerable<IReadOnlyList<string>> rows) =>
+        string.Join("\n", rows.Select(row => string.Join(",", row.Select(Csv))));
+
+    private static string Csv(string? value)
+    {
+        var text = value ?? string.Empty;
+        return text.Contains(',') || text.Contains('"') || text.Contains('\n') || text.Contains('\r')
+            ? $"\"{text.Replace("\"", "\"\"", StringComparison.Ordinal)}\""
+            : text;
+    }
+
+    private static string CleanHtmlCell(string value)
+    {
+        var text = Regex.Replace(value, @"<br\s*/?>", "\n", RegexOptions.IgnoreCase);
+        text = Regex.Replace(text, "<[^>]+>", " ");
+        text = WebUtility.HtmlDecode(text);
+        return Regex.Replace(text, @"\s+", " ").Trim();
+    }
+
+    private static bool LooksLikeNwfPalletOrder(MailboxEmailIntakeRequest request)
+    {
+        var sender = request.SenderAddress ?? string.Empty;
+        var subject = request.Subject ?? string.Empty;
+        var attachments = string.Join(" ", (request.Attachments ?? []).Select(item => item.Name));
+        var value = $"{sender} {subject} {attachments}";
+        return sender.EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) &&
+               (value.Contains("NWAY", StringComparison.OrdinalIgnoreCase) || value.Contains("NWF", StringComparison.OrdinalIgnoreCase)) &&
+               value.Contains("pallet", StringComparison.OrdinalIgnoreCase) &&
+               value.Contains("order", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string DecodeText(string base64)

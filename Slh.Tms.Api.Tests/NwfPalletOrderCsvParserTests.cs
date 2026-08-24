@@ -99,6 +99,46 @@ Stuart Lyons,19/08/2026,Drayton,Aldi,ALD20,Aldi SAWLEY Distribution Centre,DE72 
     }
 
     [Fact]
+    public void NwfEmailBodyPipeTable_IsParsed_WhenAttachmentContentIsUnavailable()
+    {
+        const string body = """
+Hello,
+
+Please see below and attached.
+
+Haulier Name| Requested Ship Date| 04. Collection Site| Customer Name| DepotID| Depot Description| Delivery Address| Sales Order ID| CustomerRef| Pallet Name| PalletQty| PO REF
+---|---|---|---|---|---|---|---|---|---|---|---
+Stuart Lyons| 25/08/2026| Drayton| Aldi| ALD20| Aldi SAWLEY Distribution Centre| DE72 2HP| SO000368395| 6511967794| IPP Euro| 2| PO00500547
+Stuart Lyons| 25/08/2026| Selsey| Aldi| ALD26| Aldi ATHERSTONE Distribution Centre| CV9 2SQ| SO000368427| 6511972761| IPP Euro| 1| PO00500547
+Stuart Lyons| 25/08/2026| Selsey| Tesco| ONE01| One Stop Tamworth| B78 1ST| SO000368432| 8000053695| IPP STD| 0| PO00500547
+""";
+        var request = new MailboxEmailIntakeRequest(
+            "message-body-table",
+            null,
+            "info@lyonshaulage.com",
+            "ShiftLogisticalPlanner@nwfltd.co.uk",
+            "Shift Logistical Planner",
+            "NWAY Stuart Lyons Transport Pallet Order Report 25/08/2026",
+            DateTimeOffset.Parse("2026-08-24T13:26:16Z"),
+            body,
+            body,
+            null,
+            [new MailboxAttachmentRequest("NWAY Stuart Lyons Transport Pallet Order Report 25-08-2026.csv", "text/csv", null, false, Size: 4096)]);
+
+        var result = parser.TryParse(request);
+
+        Assert.NotNull(result);
+        Assert.Null(result!.IgnoredReason);
+        Assert.Equal(2, result.Orders.Count);
+        Assert.Contains(result.Warnings, warning => warning.Contains("zero-pallet", StringComparison.OrdinalIgnoreCase));
+        var first = result.Orders[0].Payload;
+        Assert.Equal("PO00500547/SO000368395/Drayton/ALD20", first.GetProperty("poNumber").GetString());
+        Assert.Equal("NWF pallet order email body table.csv", first.GetProperty("sourceAttachmentName").GetString());
+        Assert.Equal("Aldi SAWLEY Distribution Centre", first.GetProperty("stallNumber").GetString());
+        Assert.Equal(2, first.GetProperty("pallets").GetInt32());
+    }
+
+    [Fact]
     public void MissingPo_UsesSalesOrderOnlyAsFallbackAndFlagsReview()
     {
         const string csv = """
