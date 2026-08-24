@@ -31,6 +31,10 @@ def validate(workflow):
 
     if "When_New_Email_Arrives_Info_Shared_Mailbox" not in triggers:
         errors.append("shared-mailbox trigger is missing")
+    trigger = triggers.get("When_New_Email_Arrives_Info_Shared_Mailbox", {})
+    trigger_parameters = trigger.get("inputs", {}).get("parameters", {})
+    if "hasAttachments" in trigger_parameters:
+        errors.append("shared-mailbox trigger must not filter by attachment presence")
 
     serialized = json.dumps(workflow, separators=(",", ":"))
     if "/api/v1/orders" in serialized or '"operationId":"CreateOrder"' in serialized:
@@ -47,6 +51,11 @@ def validate(workflow):
     if missing:
         errors.append("request evidence fields missing: " + ", ".join(missing))
 
+    submit_scope = actions.get("Scope_Submit_To_TMS", {})
+    receive_run_after = set(submit_scope.get("runAfter", {}).get("Scope_Receive_Source", []))
+    if not {"Succeeded", "Failed", "TimedOut"}.issubset(receive_run_after):
+        errors.append("TMS submission must still run when attachment retrieval fails or times out")
+
     for node in _walk(actions):
         if not isinstance(node, dict) or "runtimeConfiguration" not in node:
             continue
@@ -58,7 +67,7 @@ def validate(workflow):
         ):
             errors.append("API retry must be bounded exponential with 1-4 attempts")
 
-    trigger_concurrency = triggers.get("When_New_Email_Arrives_Info_Shared_Mailbox", {}).get("runtimeConfiguration", {}).get("concurrency", {})
+    trigger_concurrency = trigger.get("runtimeConfiguration", {}).get("concurrency", {})
     if trigger_concurrency.get("runs") != 4:
         errors.append("trigger concurrency must be 4")
 

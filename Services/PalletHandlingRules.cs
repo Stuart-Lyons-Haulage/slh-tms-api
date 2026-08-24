@@ -26,7 +26,7 @@ public static class PalletHandlingRules
         var isAldi = ContainsAny(customerKey, "ALDI") || ContainsAny(destinationKey, "ALDI");
         var isBarefoots = ContainsAny(collectionKey, "BAREFOOT", "BAREFOOTS");
         var isNwf = ContainsAny(collectionKey, "NWF");
-        var isLangmeads = ContainsAny(collectionKey, "LANGMEAD", "LANGMEADS");
+        var isLangmeads = ContainsAny(collectionKey, "LANGMEAD", "LANGMEADS", "HAMFARM");
         var isAtherstone = ContainsAny(destinationKey, "ATHERSTONE");
 
         if (isAldi && (isBarefoots || isNwf))

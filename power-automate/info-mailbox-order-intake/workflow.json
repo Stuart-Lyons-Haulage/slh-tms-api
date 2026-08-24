@@ -34,7 +34,6 @@
               "mailboxAddress": "@parameters('SLH_InfoMailboxUPN')",
               "folderId": "Inbox",
               "importance": "Any",
-              "hasAttachments": false,
               "includeAttachments": false
             }
           },
@@ -117,7 +116,7 @@
         },
         "Scope_Submit_To_TMS": {
           "type": "Scope",
-          "runAfter": { "Scope_Receive_Source": ["Succeeded"] },
+          "runAfter": { "Scope_Receive_Source": ["Succeeded", "Failed", "TimedOut"] },
           "actions": {
             "POST_To_TMS_Staging": {
               "type": "OpenApiConnection",

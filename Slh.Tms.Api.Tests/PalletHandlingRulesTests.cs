@@ -39,6 +39,16 @@ public sealed class PalletHandlingRulesTests
         Assert.Contains("Atherstone", result.RuleSource);
     }
 
+    [Fact]
+    public void Ham_farm_to_aldi_atherstone_uses_langmeads_euro_rule()
+    {
+        var result = PalletHandlingRules.Resolve("Aldi", "Ham Farm", "Atherstone", null);
+        Assert.True(result.IsPallet);
+        Assert.Equal("Euro", result.PalletType);
+        Assert.Equal("euro", result.ColourKey);
+        Assert.Contains("Langmeads", result.RuleSource);
+    }
+
     [Theory]
     [InlineData("Tesco")]
     [InlineData("Sainsburys")]
@@ -46,6 +56,15 @@ public sealed class PalletHandlingRulesTests
     public void Other_langmeads_work_is_standard(string destination)
     {
         var result = PalletHandlingRules.Resolve(null, "Langmeads", destination, null);
+        Assert.True(result.IsPallet);
+        Assert.Equal("Standard", result.PalletType);
+        Assert.Equal("standard", result.ColourKey);
+    }
+
+    [Fact]
+    public void Ham_farm_to_other_aldi_depots_uses_langmeads_standard_default()
+    {
+        var result = PalletHandlingRules.Resolve("Aldi", "Ham Farm", "Swindon", null);
         Assert.True(result.IsPallet);
         Assert.Equal("Standard", result.PalletType);
         Assert.Equal("standard", result.ColourKey);
