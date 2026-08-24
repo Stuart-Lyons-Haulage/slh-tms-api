@@ -64,6 +64,50 @@ public sealed class EmailOrderIntakeServiceTests
         Assert.Contains(result.Warnings, warning => warning.Contains("not enough order detail", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Theory]
+    [InlineData("Sainsburys order 26/08", "Please arrange 12 pallets.", null, "SAINSBURY", "Sainsbury")]
+    [InlineData("Collection request 26/08", "Waitrose Bracknell needs 8 pallets.", null, "WAITROSE", "Waitrose")]
+    [InlineData("Collection request 26/08", "Please arrange 10 pallets.", "Natures Way collections.xlsx", "NWF", "Natures Way")]
+    [InlineData("Collection request 26/08", "Barfoots Sefter 6 pallets.", null, "BARFOOTS", "Barfoots")]
+    [InlineData("Weightrose order 26/08", "Please arrange 4 pallets.", null, "WAITROSE", "Waitrose")]
+    public void RecognisedCustomerOrSite_WithDateAndPallets_IsStagedForReview(
+        string subject,
+        string body,
+        string? attachmentName,
+        string expectedCustomer,
+        string expectedSite)
+    {
+        var attachments = attachmentName is null
+            ? null
+            : new List<MailboxAttachmentRequest> { new(attachmentName, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", null, false) };
+
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            $"message-{expectedCustomer}-{expectedSite}", null, "info@lyonshaulage.com", "loads@example.com", "Loads",
+            subject, DateTimeOffset.Parse("2026-08-24T09:00:00Z"),
+            body, null, null, attachments));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal(expectedCustomer, order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal(expectedSite, order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal("2026-08-26", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Contains(order.Warnings, warning => warning.Contains("Collection site was not explicit", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void MasterDataSiteName_WithDateAndPallets_IsStagedForReview()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-master-site", null, "info@lyonshaulage.com", "loads@example.com", "Loads",
+            "Collection request 26/08", DateTimeOffset.Parse("2026-08-24T09:00:00Z"),
+            "Sainsbury Waltham Point has 16 pallets for collection.", null, null, null),
+            ["Sainsbury Waltham Point"]);
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("SAINSBURY", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("Sainsbury Waltham Point", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal(16, order.Payload.GetProperty("pallets").GetInt32());
+    }
+
     [Fact]
     public void NightShunting_IsNotMisclassifiedAsOrder()
     {

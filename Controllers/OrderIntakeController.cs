@@ -27,9 +27,9 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     [HttpPost("email/preview"), Authorize(Policy = "TmsWrite")]
-    public IActionResult Preview([FromBody] MailboxEmailIntakeRequest request)
+    public async Task<IActionResult> Preview([FromBody] MailboxEmailIntakeRequest request, CancellationToken ct)
     {
-        var parsed = ParseEmail(request);
+        var parsed = await ParseEmail(request, ct);
         return Ok(new
         {
             ignored = parsed.IgnoredReason is not null,
@@ -52,7 +52,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         if (string.IsNullOrWhiteSpace(request.MessageId))
             return BadRequest(new ErrorResponse("missing_message_id", "Mailbox message ID is required so repeated flow runs remain idempotent.", HttpContext.TraceIdentifier));
 
-        var parsed = ParseEmail(request);
+        var parsed = await ParseEmail(request, ct);
         if (parsed.IgnoredReason is not null)
         {
             if (ShouldStageMappingException(request, parsed))
@@ -126,13 +126,27 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         return Accepted(new { ignored = false, staged, existing, superseded, warnings = parsed.Warnings, records });
     }
 
-    private EmailIntakeParseResult ParseEmail(MailboxEmailIntakeRequest request) =>
+    private async Task<EmailIntakeParseResult> ParseEmail(MailboxEmailIntakeRequest request, CancellationToken ct) =>
         nwfCsvParser.TryParse(request)
         ?? nwfWorkbookParser.TryParse(request)
         ?? nwfParser.TryParse(request)
         ?? sainsburyParser.TryParse(request)
         ?? specialistParser.TryParse(request)
-        ?? emailParser.Parse(request);
+        ?? emailParser.Parse(request, await MasterSiteNames(ct));
+
+    private async Task<IReadOnlyCollection<string>> MasterSiteNames(CancellationToken ct)
+    {
+        var sites = await db.Sites.AsNoTracking()
+            .Where(site => site.Active)
+            .Select(site => new { site.Name, site.DriverTextName })
+            .ToListAsync(ct);
+
+        return sites
+            .SelectMany(site => new[] { site.Name, site.DriverTextName })
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList()!;
+    }
 
     private async Task<IActionResult> StageMappingException(MailboxEmailIntakeRequest request, EmailIntakeParseResult parsed, CancellationToken ct)
     {

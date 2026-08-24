@@ -23,6 +23,10 @@ public sealed class EmailOrderIntakeService
         @"\bTotal\s+Pallets?\s*[:=-]?\s*(?<qty>\d+)\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    private static readonly Regex PalletQuantityRegex = new(
+        @"\b(?<qty>\d{1,3})\s+pallets?\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private static readonly Regex CollectionTimeRegex = new(
         @"\bCollection\s+time\s*[:=-]?\s*(?<time>[0-2]?\d[:.]\d{2})\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -37,17 +41,33 @@ public sealed class EmailOrderIntakeService
 
     private static readonly Regex HtmlRegex = new(@"<[^>]+>", RegexOptions.Compiled);
     private static readonly Regex ReFwRegex = new(@"^(?:(?:RE|FW|FWD)\s*:\s*)+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly IReadOnlyList<KnownIntakeSignal> KnownSignals =
+    [
+        new("SAINSBURY", "Sainsbury", ["SAINSBURY", "SAINSBURYS", "SAINSBURY'S"]),
+        new("WAITROSE", "Waitrose", ["WAITROSE", "WEIGHTROSE"]),
+        new("NWF", "Natures Way", ["NATURES WAY", "NATURE'S WAY", "NWF", "NWAY"]),
+        new("BARFOOTS", "Barfoots", ["BARFOOTS", "BARFOOT"]),
+        new("MORRISONS", "Morrisons", ["MORRISONS", "MORRISON'S"]),
+        new("ALDI", "Aldi", ["ALDI"]),
+        new("COOP", "COOP", ["COOP", "CO-OP", "CO OP"]),
+        new("OCADO", "Ocado", ["OCADO"])
+    ];
 
     static EmailOrderIntakeService()
     {
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
     }
 
-    public EmailIntakeParseResult Parse(MailboxEmailIntakeRequest request)
+    public EmailIntakeParseResult Parse(MailboxEmailIntakeRequest request, IReadOnlyCollection<string>? masterSiteNames = null)
     {
         var subject = (request.Subject ?? string.Empty).Trim();
         var sender = (request.SenderAddress ?? string.Empty).Trim();
         var body = NormaliseBody(request.BodyText, request.BodyHtml);
+        var attachmentNames = string.Join("\n", (request.Attachments ?? [])
+            .Where(attachment => attachment.IsInline != true)
+            .Select(attachment => attachment.Name)
+            .Where(name => !string.IsNullOrWhiteSpace(name)));
+        var sourceText = $"{subject}\n{body}\n{attachmentNames}";
 
         if (string.IsNullOrWhiteSpace(request.MessageId))
             return EmailIntakeParseResult.Ignored("MessageId is required for idempotent mailbox intake.");
@@ -59,8 +79,8 @@ public sealed class EmailOrderIntakeService
             return EmailIntakeParseResult.Ignored("Operational request detected; it was not converted into a transport order automatically.");
 
         var receivedAt = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
-        var sourceDate = ExtractDate($"{subject}\n{body}", receivedAt);
-        var rawPo = ExtractPo($"{subject}\n{body}");
+        var sourceDate = ExtractDate(sourceText, receivedAt);
+        var rawPo = ExtractPo(sourceText);
         var globalWarnings = new List<string>();
         var orders = new List<ParsedEmailOrder>();
 
@@ -90,7 +110,7 @@ public sealed class EmailOrderIntakeService
 
         if (orders.Count == 0)
         {
-            var bodyOrder = ParseBodyOrder(request, sourceDate, rawPo, body, globalWarnings);
+            var bodyOrder = ParseBodyOrder(request, sourceDate, rawPo, body, sourceText, masterSiteNames ?? [], globalWarnings);
             if (bodyOrder is not null)
                 orders.Add(bodyOrder);
         }
@@ -225,6 +245,8 @@ public sealed class EmailOrderIntakeService
         DateOnly? sourceDate,
         string? rawPo,
         string body,
+        string sourceText,
+        IReadOnlyCollection<string> masterSiteNames,
         List<string> globalWarnings)
     {
         if (sourceDate is null)
@@ -233,13 +255,14 @@ public sealed class EmailOrderIntakeService
             return null;
         }
 
-        var customer = InferCustomerCode(request.Subject, request.SenderAddress, request.Subject);
+        var signal = DetectKnownSignal(sourceText, masterSiteNames);
+        var customer = signal?.CustomerCode ?? InferCustomerCode(request.Subject, request.SenderAddress, sourceText);
         var jobType = InferJobType(request.Subject, body);
         var collection = InferCollectionSite(request.Subject, body, jobType);
-        var destination = InferDestination(request.Subject, jobType);
-        var pallets = ExtractInt(TotalPalletsRegex, body, "qty");
+        var destination = InferDestination(request.Subject, jobType) ?? signal?.SiteName;
+        var pallets = ExtractInt(TotalPalletsRegex, body, "qty") ?? ExtractInt(PalletQuantityRegex, sourceText, "qty");
         var requestedTime = ExtractMatch(CollectionTimeRegex, body, "time")?.Replace('.', ':');
-        if (!HasEnoughBodyOrderEvidence(rawPo, collection, destination, pallets, requestedTime, jobType))
+        if (!HasEnoughBodyOrderEvidence(rawPo, collection, destination, pallets, requestedTime, jobType, signal is not null))
         {
             globalWarnings.Add("Email body contained a date but not enough order detail to stage a transport order.");
             return null;
@@ -296,7 +319,7 @@ public sealed class EmailOrderIntakeService
         return new ParsedEmailOrder("body-1", naturalKey, JsonSerializer.SerializeToElement(payload), warnings);
     }
 
-    private static bool HasEnoughBodyOrderEvidence(string? rawPo, string? collection, string? destination, int? pallets, string? requestedTime, string jobType)
+    private static bool HasEnoughBodyOrderEvidence(string? rawPo, string? collection, string? destination, int? pallets, string? requestedTime, string jobType, bool recognisedCustomerOrSite)
     {
         var hasReference = !string.IsNullOrWhiteSpace(rawPo);
         var hasCollection = !string.IsNullOrWhiteSpace(collection);
@@ -305,7 +328,7 @@ public sealed class EmailOrderIntakeService
         var hasTime = !string.IsNullOrWhiteSpace(requestedTime);
         if (jobType.Contains("Tray", StringComparison.OrdinalIgnoreCase))
             return hasReference && (hasCollection || hasDestination);
-        return hasQuantity && (hasReference || hasCollection || hasDestination || hasTime);
+        return hasQuantity && (hasReference || hasCollection || hasDestination || hasTime || recognisedCustomerOrSite);
     }
 
     private static bool IsBookingHeader(object?[] row)
@@ -417,10 +440,17 @@ public sealed class EmailOrderIntakeService
     private static string InferCustomerCode(string? subject, string? senderAddress, string? depot)
     {
         var source = $"{subject} {depot}".ToUpperInvariant();
-        foreach (var brand in new[] { "MORRISONS", "ALDI", "WAITROSE", "COOP", "CO-OP", "OCADO", "SAINSBURYS", "SAINSBURY" })
+        foreach (var brand in new[] { "MORRISONS", "ALDI", "WAITROSE", "WEIGHTROSE", "COOP", "CO-OP", "OCADO", "SAINSBURYS", "SAINSBURY", "NATURES WAY", "NATURE'S WAY", "NWF", "NWAY", "BARFOOTS" })
         {
             if (source.Contains(brand, StringComparison.OrdinalIgnoreCase))
-                return brand.Replace("CO-OP", "COOP").Replace("SAINSBURYS", "SAINSBURY");
+                return brand
+                    .Replace("CO-OP", "COOP", StringComparison.OrdinalIgnoreCase)
+                    .Replace("WEIGHTROSE", "WAITROSE", StringComparison.OrdinalIgnoreCase)
+                    .Replace("SAINSBURYS", "SAINSBURY", StringComparison.OrdinalIgnoreCase)
+                    .Replace("NATURE'S WAY", "NWF", StringComparison.OrdinalIgnoreCase)
+                    .Replace("NATURES WAY", "NWF", StringComparison.OrdinalIgnoreCase)
+                    .Replace("NWAY", "NWF", StringComparison.OrdinalIgnoreCase)
+                    .Replace("BARFOOTS", "BARFOOTS", StringComparison.OrdinalIgnoreCase);
         }
         if ((senderAddress ?? string.Empty).EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase)) return "NWF";
         if ((senderAddress ?? string.Empty).EndsWith("@summerberry.co.uk", StringComparison.OrdinalIgnoreCase)) return "TSBC";
@@ -465,6 +495,25 @@ public sealed class EmailOrderIntakeService
         if (clean.Contains("COOP", StringComparison.OrdinalIgnoreCase) || clean.Contains("CO-OP", StringComparison.OrdinalIgnoreCase)) return "COOP";
         var delivery = Regex.Match(clean, @"^(?:\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\s*)?(?<dest>.+?)\s+delivery$", RegexOptions.IgnoreCase);
         return delivery.Success ? delivery.Groups["dest"].Value.Trim() : null;
+    }
+
+    private static KnownIntakeSignal? DetectKnownSignal(string sourceText, IReadOnlyCollection<string> masterSiteNames)
+    {
+        foreach (var site in masterSiteNames.Where(site => !string.IsNullOrWhiteSpace(site)).OrderByDescending(site => site.Length))
+        {
+            var cleanSite = CleanSourceLine(site);
+            if (cleanSite.Length < 3) continue;
+            if (sourceText.Contains(cleanSite, StringComparison.OrdinalIgnoreCase))
+                return new KnownIntakeSignal(InferCustomerCode(sourceText, null, cleanSite), cleanSite, [cleanSite]);
+        }
+
+        foreach (var signal in KnownSignals)
+        {
+            if (signal.Aliases.Any(alias => sourceText.Contains(alias, StringComparison.OrdinalIgnoreCase)))
+                return signal;
+        }
+
+        return null;
     }
 
     private static string NaturalKey(MailboxEmailIntakeRequest request, string customer, string destination, DateOnly date)
@@ -574,6 +623,8 @@ public sealed class EmailOrderIntakeService
     private static string NormaliseKey(string? value) =>
         new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 }
+
+internal sealed record KnownIntakeSignal(string CustomerCode, string SiteName, IReadOnlyList<string> Aliases);
 
 public sealed record MailboxAttachmentRequest(
     string? Name,
