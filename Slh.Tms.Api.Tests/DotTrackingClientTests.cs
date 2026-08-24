@@ -143,6 +143,21 @@ public sealed class DotTrackingClientTests
         Assert.True(record.IsMoving);
     }
 
+    [Fact]
+    public void RoadTech_record_treats_timezone_less_falcon_time_as_utc()
+    {
+        var item = JsonSerializer.Deserialize<RoadTechTelemetryItem>("""
+            {
+              "vehCode": "AB12 CDE",
+              "dataGps": { "Time": "2026-08-13T08:30:00", "Lat": 54.957858, "Long": -1.653757 }
+            }
+            """, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+
+        var record = DotTelemetryRecord.FromProvider(item);
+
+        Assert.Equal(new DateTimeOffset(2026, 8, 13, 8, 30, 0, TimeSpan.Zero), record.EventTimeUtc);
+    }
+
     private sealed class CapturingHandler : HttpMessageHandler
     {
         private readonly bool _rejectFirstLogin;

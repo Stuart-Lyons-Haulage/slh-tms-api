@@ -29,8 +29,8 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
         var projectedShiftMinutes = plannedSpanMinutes;
         var projectedShiftRisk = ShiftLengthRisk(projectedShiftMinutes);
 
-        IReadOnlyDictionary<string, TachoVehicleDriverStatus> tacho = new Dictionary<string, TachoVehicleDriverStatus>();
-        try { tacho = await tachoMaster.GetCurrentDriverStatusesByVehicleAsync(load.PlanningDate, ct); }
+        IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> tacho = new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
+        try { tacho = await tachoMaster.GetOpenDriverStatusesByVehicleAsync(load.PlanningDate, ct); }
         catch (Exception ex) when (ex is not OperationCanceledException) { logger.LogWarning(ex, "TachoMaster planning enrichment unavailable for {LoadId}", id); }
 
         List<Driver> drivers;
@@ -49,7 +49,7 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
 
         var driverSuggestions = drivers.Select(driver =>
         {
-            var tachoMatch = tacho.Values.FirstOrDefault(status => DriverMatches(driver, status));
+            var tachoMatch = tacho.Values.SelectMany(status => status).FirstOrDefault(status => DriverMatches(driver, status));
             var previous = previousLoads.FirstOrDefault(x => x.DriverId == driver.Id);
             var final = previous?.Stops.OrderByDescending(x => x.Sequence).FirstOrDefault(x => x.Latitude is not null && x.Longitude is not null);
             decimal? reposition = firstPoint is not null && final?.Latitude is not null && final.Longitude is not null
@@ -74,6 +74,8 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
                 dailyRemainingMinutes = daily,
                 weeklyRemainingMinutes = weekly,
                 weeklyWorkRemainingMinutes = weeklyWork,
+                tachoStatus = tachoMatch is null ? "NotSignedOn" : "SignedOn",
+                tachoSignOnUtc = tachoMatch?.DutyStartUtc,
                 tachoVehicle = tachoMatch?.VehicleCode,
                 previousRun = previous?.Reference,
                 previousDate = previous?.PlanningDate,
@@ -97,7 +99,11 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
                 ? ((decimal Lat, decimal Lon)?)(status.Latitude, status.Longitude)
                 : final?.Latitude is not null && final.Longitude is not null ? (final.Latitude.Value, final.Longitude.Value) : null;
             decimal? reposition = firstPoint is not null && start is not null ? EstimatedRoadMiles(start.Value, firstPoint.Value) : null;
-            tacho.TryGetValue(keys.FirstOrDefault(k => tacho.ContainsKey(k)) ?? string.Empty, out var currentDuty);
+            var currentDuty = tacho
+                .Where(pair => ExecutionIdentityResolver.MatchesVehicleIdentifier(keys, pair.Key))
+                .SelectMany(pair => pair.Value)
+                .OrderByDescending(status => status.DutyStartUtc)
+                .FirstOrDefault();
             var score = 100m - Math.Min(reposition ?? 40m, 40m) + (status?.IsMoving == true ? 5 : 0);
             return new
             {
@@ -109,6 +115,8 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
                 status?.IsMoving,
                 status?.LastKnownStatus,
                 currentDriver = currentDuty?.DriverName,
+                tachoStatus = currentDuty is null ? "NotSignedOn" : "SignedOn",
+                tachoSignOnUtc = currentDuty?.DutyStartUtc,
                 previousRun = previous?.Reference,
                 previousEnd = final?.Name,
                 estimatedEmptyMiles = reposition,

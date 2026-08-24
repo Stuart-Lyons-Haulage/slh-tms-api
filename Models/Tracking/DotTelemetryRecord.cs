@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace Slh.Tms.Api.Models.Tracking;
 
@@ -41,7 +42,7 @@ public sealed record DotTelemetryRecord(
         var longitude = ReadDecimal(gps, "longitude", "long", "lon", "lng");
         var speed = ReadDecimal(gps, "speedKph", "speed", "speedkmh", "kmh");
         var timestamp = ReadString(gps, "eventTimeUtc", "timestamp", "time", "datetime", "t");
-        var eventTime = DateTimeOffset.TryParse(timestamp, out var parsed) ? parsed.ToUniversalTime() : DateTimeOffset.UtcNow;
+        var eventTime = ParseRoadTechTimestamp(timestamp);
         var moving = item.Moving ?? ReadBoolean(gps, "isMoving", "moving");
         var ignitionOn = item.Ign
             ?? ReadBoolean(item.DataCan, "ignitionOn", "ignition", "ign", "engineOn", "engineRunning")
@@ -133,6 +134,16 @@ public sealed record DotTelemetryRecord(
     }
 
     private static bool LooksLikeIdentifierOnly(string value) { var compact = new string(value.Where(char.IsLetterOrDigit).ToArray()); return compact.Length == 0 || compact.All(char.IsDigit) || (compact.Length > 12 && compact.Count(char.IsDigit) > compact.Length / 2); }
+    private static DateTimeOffset ParseRoadTechTimestamp(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return DateTimeOffset.UtcNow;
+        if (Regex.IsMatch(value.Trim(), @"(?:Z|[+-]\d{2}:?\d{2})$", RegexOptions.IgnoreCase) &&
+            DateTimeOffset.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out var offset))
+            return offset.ToUniversalTime();
+        return DateTime.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var utc)
+            ? new DateTimeOffset(DateTime.SpecifyKind(utc, DateTimeKind.Utc))
+            : DateTimeOffset.UtcNow;
+    }
     private static string? CleanCardNumber(string? value) { var compact = new string((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray()); return compact.Length < 8 ? null : compact; }
     private static string? ReadExtraString(IReadOnlyDictionary<string, JsonElement> values, params string[] names) { foreach (var name in names) { var pair = values.FirstOrDefault(item => string.Equals(item.Key, name, StringComparison.OrdinalIgnoreCase)); if (string.IsNullOrWhiteSpace(pair.Key)) continue; var value = pair.Value; if (value.ValueKind is JsonValueKind.String or JsonValueKind.Number) return value.ToString(); if (value.ValueKind == JsonValueKind.Object) { var nested = ReadString(value, "name", "displayName", "driverName", "fullName", "memberName", "cardHolderName", "cardNumber", "cardNo", "cardNoShort"); if (!string.IsNullOrWhiteSpace(nested)) return nested; } } return null; }
     private static string? CleanDriverName(string? value) { var cleaned = (value ?? string.Empty).Trim(); return cleaned.Length == 0 || cleaned == "0" || cleaned.Equals("unknown", StringComparison.OrdinalIgnoreCase) || cleaned.Equals("none", StringComparison.OrdinalIgnoreCase) ? null : cleaned; }

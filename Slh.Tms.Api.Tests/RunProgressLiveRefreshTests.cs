@@ -110,6 +110,7 @@ public sealed class RunProgressLiveRefreshTests
             db,
             tracking,
             store,
+            DisabledTachoMaster(),
             NullLogger<RunProgressController>.Instance,
             new ConfigurationBuilder().Build())
         {
@@ -117,7 +118,7 @@ public sealed class RunProgressLiveRefreshTests
         };
 
         var response = Assert.IsType<OkObjectResult>(await controller.Get(planningDate, CancellationToken.None));
-        using var document = JsonDocument.Parse(JsonSerializer.Serialize(response.Value));
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(response.Value, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
         var root = document.RootElement;
 
         Assert.Equal(1, root.GetProperty("geofenceLinkedRuns").GetInt32());
@@ -125,6 +126,86 @@ public sealed class RunProgressLiveRefreshTests
         var record = Assert.Single(root.GetProperty("records").EnumerateArray());
         Assert.Equal(loadId, record.GetProperty("loadId").GetGuid());
         Assert.NotEqual(JsonValueKind.Null, record.GetProperty("currentVisit").ValueKind);
+    }
+
+    [Fact]
+    public async Task Operations_progress_returns_explicit_tachomaster_sign_on_evidence()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var planningDate = UkDate(now);
+        var vehicleId = Guid.NewGuid();
+        var driverId = Guid.NewGuid();
+        var loadId = Guid.NewGuid();
+        var stopId = Guid.NewGuid();
+
+        var options = new DbContextOptionsBuilder<TmsDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using var db = new TmsDbContext(options);
+        db.Vehicles.Add(new Vehicle { Id = vehicleId, Registration = "RK69 FZL", Active = true });
+        db.Drivers.Add(new Driver { Id = driverId, EmployeeNumber = "SLH-42", DisplayName = "Marius Paun", TachoName = "Marius Paun", Active = true });
+        var load = new Load
+        {
+            Id = loadId,
+            Reference = "RUN 9 PM",
+            PlanningDate = planningDate,
+            Status = LoadStatus.Planned,
+            VehicleId = vehicleId,
+            DriverId = driverId,
+            Stops =
+            [
+                new LoadStop
+                {
+                    Id = stopId,
+                    LoadId = loadId,
+                    Sequence = 1,
+                    Name = "First delivery",
+                    PlannedArrivalUtc = now.AddMinutes(30)
+                }
+            ]
+        };
+        db.StagedImports.Add(new StagedImport
+        {
+            EntityType = "planningload",
+            IdempotencyKey = $"planningload:{loadId:N}",
+            PayloadJson = JsonSerializer.Serialize(load, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+            Source = "test planning register",
+            Status = StagingStatus.Promoted
+        });
+        await db.SaveChangesAsync();
+
+        var tracking = new DotTrackingClient(new HttpClient(new FalconCurrentHandler(now, 50.8, -1.1)), new DotTrackingOptions { Enabled = false }, NullLogger<DotTrackingClient>.Instance);
+        var tacho = new TachoMasterClient(
+            new HttpClient(new SingleDutyTachoHandler()),
+            new TachoMasterOptions
+            {
+                Enabled = true,
+                BaseUrl = "https://api-v1-alpha.roadtech.co.uk",
+                ApiKey = "test-key",
+                Username = "planner",
+                Password = "secret"
+            },
+            NullLogger<TachoMasterClient>.Instance);
+        var controller = new RunProgressController(
+            db,
+            tracking,
+            new DotTrackingTelemetryStore(db, NullLogger<DotTrackingTelemetryStore>.Instance),
+            tacho,
+            NullLogger<RunProgressController>.Instance,
+            new ConfigurationBuilder().Build())
+        {
+            ControllerContext = new ControllerContext { HttpContext = LyonsContext() }
+        };
+
+        var response = Assert.IsType<OkObjectResult>(await controller.Get(planningDate, CancellationToken.None));
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(response.Value, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        var record = Assert.Single(document.RootElement.GetProperty("records").EnumerateArray());
+        var evidence = record.GetProperty("tacho");
+
+        Assert.Equal("Matched", evidence.GetProperty("status").GetString());
+        Assert.Equal("Marius Paun", evidence.GetProperty("driverName").GetString());
+        Assert.Equal("RK69FZL", evidence.GetProperty("vehicleCode").GetString());
+        Assert.NotEqual(JsonValueKind.Null, evidence.GetProperty("signOnUtc").ValueKind);
     }
 
     private static DefaultHttpContext LyonsContext()
@@ -149,6 +230,11 @@ public sealed class RunProgressLiveRefreshTests
         }
     }
 
+    private static TachoMasterClient DisabledTachoMaster() => new(
+        new HttpClient(new EmptyTachoHandler()),
+        new TachoMasterOptions { Enabled = false },
+        NullLogger<TachoMasterClient>.Instance);
+
     private sealed class FalconCurrentHandler(DateTimeOffset now, double latitude, double longitude) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -171,6 +257,47 @@ public sealed class RunProgressLiveRefreshTests
                         }
                     }
                 });
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(payload, Encoding.UTF8, "application/json")
+            });
+        }
+    }
+
+    private sealed class EmptyTachoHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") });
+    }
+
+    private sealed class SingleDutyTachoHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var payload = request.RequestUri!.AbsolutePath switch
+            {
+                "/api/auth/login" => "{\"token\":\"sid-123\"}",
+                "/api/Duty/GetDutyTransactions" => """
+                    {"dutyNew":{"moreData":false,"recordOffset":0,"recordCount":1,"data":[{
+                      "memCode":42,"vehCode":"RK69 FZL","dutyStart":"2026-08-24T05:25:00Z","dutyEnd":null,
+                      "timeWork":45,"timeRest":0,"timeAvailable":0,"timeDrive":20,"wtd":[]
+                    }]}}
+                    """,
+                "/api/Member/GetMembersLong" => """
+                    {"moreData":false,"recordOffset":0,"recordCount":1,"data":[{
+                      "memCode":42,"cName":"Marius","sName":"Paun","cardNoShort":"GB123456789","employeeNumber":"SLH-42"
+                    }]}
+                    """,
+                "/api/Member/GetMemberMetrics" => """
+                    {"moreData":false,"recordOffset":0,"recordCount":1,"data":[{
+                      "memCode":42,"dateTimeWhenValid":"2026-08-24T06:00:00Z","dailyDriverPeriodsAvaiable":1,
+                      "driveAvailableToday":480,"driveAvailableTomorrow":600,"driveAvailableWeek":2400,
+                      "driveAvailableFortnight":5400,"longDaysWorkedThisWeek":0,"shortDailyRestTakenThisWeek":0,
+                      "workAvaiableWeek":3000
+                    }]}
+                    """,
+                _ => throw new InvalidOperationException($"Unexpected test request {request.RequestUri}")
+            };
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")

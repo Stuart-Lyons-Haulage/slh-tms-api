@@ -13,6 +13,7 @@ public sealed class RunProgressController(
     TmsDbContext db,
     DotTrackingClient trackingClient,
     DotTrackingTelemetryStore telemetryStore,
+    TachoMasterClient tachoMaster,
     ILogger<RunProgressController> logger,
     IConfiguration configuration) : ControllerBase
 {
@@ -75,7 +76,8 @@ public sealed class RunProgressController(
             // Match on a cloned view so the planner-facing labels remain unchanged.
             var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
             var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, geofenceLoads, ct);
-            var records = loads.Select(load => BuildRecord(load, snapshot, now)).ToList();
+            var tachoEvidence = await RunTachoEvidenceResolver.ResolveAsync(db, tachoMaster, loads, planningDate, logger, ct);
+            var records = loads.Select(load => BuildRecord(load, snapshot, now, tachoEvidence.ByLoadId.GetValueOrDefault(load.Id))).ToList();
 
             return Ok(new
             {
@@ -89,7 +91,9 @@ public sealed class RunProgressController(
                 geofenceLinkedRuns = snapshot.Visits.Where(x => x.LoadId != null).Select(x => x.LoadId!.Value).Distinct().Count(),
                 trackingEventCount = snapshot.TrackingEventCount,
                 latestTrackingUtc = snapshot.LatestTrackingUtc,
-                warning = refreshWarning,
+                tachoAvailable = tachoEvidence.Available,
+                tachoWarning = tachoEvidence.Warning,
+                warning = string.Join(" ", new[] { refreshWarning, tachoEvidence.Warning }.Where(value => !string.IsNullOrWhiteSpace(value))),
                 records
             });
         }
@@ -101,11 +105,13 @@ public sealed class RunProgressController(
             List<Load> loads;
             try { loads = await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct); }
             catch { loads = []; db.ChangeTracker.Clear(); }
+            var tachoEvidence = await RunTachoEvidenceResolver.ResolveAsync(db, tachoMaster, loads, planningDate, logger, ct);
 
             var records = loads.OrderBy(x => x.Reference).Select(load =>
             {
                 var stops = (load.Stops ?? []).OrderBy(x => x.Sequence).ToList();
                 var next = stops.FirstOrDefault();
+                var tacho = tachoEvidence.ByLoadId.GetValueOrDefault(load.Id);
                 return new
                 {
                     loadId = load.Id,
@@ -120,6 +126,7 @@ public sealed class RunProgressController(
                     linkageException = (object?)null,
                     currentVisit = (object?)null,
                     lastDeparture = (object?)null,
+                    tacho,
                     calculatedAtUtc = now
                 };
             }).ToList();
@@ -141,15 +148,21 @@ public sealed class RunProgressController(
                 geofenceCount,
                 geofenceVisitCount = 0,
                 geofenceLinkedRuns = 0,
-                warning = geofenceCount > 0
+                tachoAvailable = tachoEvidence.Available,
+                tachoWarning = tachoEvidence.Warning,
+                warning = string.Join(" ", new[]
+                {
+                    geofenceCount > 0
                     ? "Approved SLH geofences are loaded, but live progression could not be calculated from tracking on this refresh."
                     : "Live run progression could not be calculated and the approved geofence payload was unavailable on this refresh.",
+                    tachoEvidence.Warning
+                }.Where(value => !string.IsNullOrWhiteSpace(value))),
                 records
             });
         }
     }
 
-    private static object BuildRecord(Load load, EmbeddedGeofenceSnapshot snapshot, DateTimeOffset now)
+    private static object BuildRecord(Load load, EmbeddedGeofenceSnapshot snapshot, DateTimeOffset now, RunTachoEvidence? tacho)
     {
         var orderedStops = (load.Stops ?? []).OrderBy(x => x.Sequence).ToList();
         var visits = snapshot.Visits.Where(x => x.LoadId == load.Id).OrderBy(x => x.EnteredAtUtc).ToList();
@@ -244,6 +257,7 @@ public sealed class RunProgressController(
                 stop.DwellSeconds
             }),
             linkageException,
+            tacho,
             calculatedAtUtc = now
         };
     }
