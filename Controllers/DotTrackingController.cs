@@ -277,36 +277,10 @@ public sealed class DotTrackingController(
                 "TachoMaster driver lookup failed; continuing with live Falcon and allocation names.");
         }
 
-        List<Load> assignments;
-
-        try
-        {
-            assignments = await db.Loads
-                .AsNoTracking()
-                .Include(load => load.Stops)
-                .Where(load =>
-                    load.PlanningDate == today &&
-                    load.VehicleId != null &&
-                    load.Status != LoadStatus.Cancelled &&
-                    load.Status != LoadStatus.Completed)
-                .ToListAsync(cancellationToken);
-        }
-        catch (Exception exception)
-            when (IsSchemaUnavailable(exception))
-        {
-            db.ChangeTracker.Clear();
-
-            assignments =
-                (await PlanningRegisterStore.ReadLoadsAsync(
-                    db,
-                    today,
-                    cancellationToken))
-                .Where(load =>
-                    load.VehicleId != null &&
-                    load.Status != LoadStatus.Cancelled &&
-                    load.Status != LoadStatus.Completed)
-                .ToList();
-        }
+        var assignments =
+            await LoadLiveAssignmentsAsync(
+                today,
+                cancellationToken);
 
         var driverIds = assignments
             .Where(load => load.DriverId != null)
@@ -795,7 +769,9 @@ public sealed class DotTrackingController(
                         // for the fleet-status response.
                         CurrentDriverName =
                             CleanDriverName(
-                                record.DriverName)
+                                record.DriverName),
+                        CurrentDriverCardNumber =
+                            record.DriverCardNumber
                     })
                 .ToList();
         }
@@ -876,6 +852,86 @@ public sealed class DotTrackingController(
                 return [];
             }
         }
+    }
+
+    private async Task<List<Load>> LoadLiveAssignmentsAsync(
+        DateOnly today,
+        CancellationToken ct)
+    {
+        var firstDate =
+            today.AddDays(-1);
+
+        var lastDate =
+            today;
+
+        var assignments =
+            new List<Load>();
+
+        try
+        {
+            assignments = await db.Loads
+                .AsNoTracking()
+                .Include(load => load.Stops)
+                .Where(load =>
+                    load.PlanningDate >= firstDate &&
+                    load.PlanningDate <= lastDate &&
+                    load.VehicleId != null &&
+                    load.Status != LoadStatus.Cancelled &&
+                    load.Status != LoadStatus.Completed)
+                .ToListAsync(ct);
+        }
+        catch (Exception exception)
+            when (IsSchemaUnavailable(exception))
+        {
+            logger.LogWarning(
+                exception,
+                "Live tracking legacy load assignments are unavailable; using planning-register assignments.");
+            db.ChangeTracker.Clear();
+        }
+
+        try
+        {
+            var registerLoads =
+                (await PlanningRegisterStore.ReadLoadsAsync(
+                    db,
+                    null,
+                    ct))
+                .Where(load =>
+                    load.PlanningDate >= firstDate &&
+                    load.PlanningDate <= lastDate &&
+                    load.VehicleId != null &&
+                    load.Status != LoadStatus.Cancelled &&
+                    load.Status != LoadStatus.Completed)
+                .ToList();
+
+            foreach (var registerLoad in registerLoads)
+            {
+                var index =
+                    assignments.FindIndex(load =>
+                        load.Id == registerLoad.Id);
+
+                if (index >= 0)
+                {
+                    assignments[index] =
+                        registerLoad;
+                }
+                else
+                {
+                    assignments.Add(
+                        registerLoad);
+                }
+            }
+        }
+        catch (Exception exception)
+            when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(
+                exception,
+                "Live tracking planning-register assignments are unavailable; continuing with legacy assignments only.");
+            db.ChangeTracker.Clear();
+        }
+
+        return assignments;
     }
 
     private static FleetStatusResponse MasterFleetFallback(
