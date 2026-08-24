@@ -84,6 +84,12 @@ jobs:
           probe_200 'RoadTech current GPS' "$API_BASE/api/v1/health/tracking"
           probe_tachomaster
           probe_200 'Falcon geofence payload' "$API_BASE/api/v1/health/geofences"
+          # The planner/import health route is introduced by this change. During the PR
+          # the currently deployed revision does not have it yet, so require it only after
+          # deployment (or on a manual health run once the new revision is live).
+          if test "$GITHUB_EVENT_NAME" != "pull_request"; then
+            probe_200 'Planner and import data path' "$API_BASE/api/v1/health/planner-import"
+          fi
           probe_200 'Portal' "$PORTAL_BASE/"
 
       - name: Verify protected operational routes fail closed
