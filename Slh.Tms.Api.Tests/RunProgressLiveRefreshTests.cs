@@ -19,7 +19,7 @@ namespace Slh.Tms.Api.Tests;
 public sealed class RunProgressLiveRefreshTests
 {
     [Fact]
-    public void Planned_allocated_run_is_reported_in_progress_after_its_start_time_when_live_refresh_falls_back()
+    public void Planned_allocated_run_remains_planned_after_its_start_time_without_live_evidence()
     {
         var now = DateTimeOffset.UtcNow;
         var load = new Load
@@ -42,7 +42,7 @@ public sealed class RunProgressLiveRefreshTests
 
         var state = RunProgressController.InferredRunState(load, load.Stops, now);
 
-        Assert.Equal("InProgress", state);
+        Assert.Equal("Planned", state);
     }
 
     [Fact]

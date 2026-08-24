@@ -18,6 +18,7 @@ public sealed class TvRouteProgressController(
     TmsDbContext db,
     IConfiguration configuration,
     DotTrackingClient trackingClient,
+    TachoMasterClient tachoMaster,
     DotTrackingTelemetryStore telemetryStore,
     ILogger<TvRouteProgressController> logger) : ControllerBase
 {
@@ -65,6 +66,25 @@ public sealed class TvRouteProgressController(
                 liveStatuses.Select(status => status.VehicleIdentifier),
                 ct);
         var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles, ct);
+        var driverIds = loads.Where(x => x.DriverId is not null).Select(x => x.DriverId!.Value).Distinct().ToList();
+        var drivers = driverIds.Count == 0
+            ? new List<Driver>()
+            : await SafeList(db.Drivers.AsNoTracking().Where(x => driverIds.Contains(x.Id)), ct);
+        await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
+        var driverById = drivers.ToDictionary(x => x.Id);
+        IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> tachoStatuses = new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
+        var tachoAvailable = true;
+        string? tachoWarning = null;
+        try
+        {
+            tachoStatuses = await tachoMaster.GetOpenDriverStatusesByVehicleAsync(day, ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            tachoAvailable = false;
+            tachoWarning = "TachoMaster sign-on evidence is unavailable on this refresh.";
+            logger.LogWarning(exception, "TachoMaster sign-on lookup failed for TV route progress on {PlanningDate}.", day);
+        }
 
         var rows = new List<object>();
         foreach (var load in loads)
@@ -91,6 +111,14 @@ public sealed class TvRouteProgressController(
                 live = aliasesByVehicle.TryGetValue(vehicle.Id, out var aliases)
                     ? ExecutionIdentityResolver.MatchLive(aliases, liveStatuses)
                     : null;
+            var allocatedDriver = load.DriverId is Guid driverId && driverById.TryGetValue(driverId, out var driver) ? driver : null;
+            var vehicleAliases = load.VehicleId is Guid aliasVehicleId && aliasesByVehicle.TryGetValue(aliasVehicleId, out var knownAliases)
+                ? knownAliases
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var tacho = ExecutionIdentityResolver.MatchTachoForDriver(vehicleAliases, allocatedDriver, tachoStatuses);
+            var tachoEvidenceStatus = tachoAvailable
+                ? ExecutionIdentityResolver.DriverEvidenceStatus(allocatedDriver, tacho)
+                : "Unavailable";
 
             var freshnessAtUtc = live?.LastReceivedAtUtc;
             var trackingAge = freshnessAtUtc is null ? (TimeSpan?)null : now - freshnessAtUtc.Value;
@@ -161,6 +189,16 @@ public sealed class TvRouteProgressController(
                 trackingObservedAtUtc = freshnessAtUtc,
                 trackingAgeSeconds = trackingAge is null ? (int?)null : (int)Math.Max(0, Math.Floor(trackingAge.Value.TotalSeconds)),
                 speedKph = trackingFresh ? live?.SpeedKph : null,
+                tacho = new
+                {
+                    status = tachoEvidenceStatus,
+                    driverName = tacho?.DriverName,
+                    vehicleCode = tacho?.VehicleCode,
+                    signOnUtc = tacho?.DutyStartUtc,
+                    dutyEndUtc = tacho?.DutyEndUtc,
+                    driveAvailableTodayMinutes = tacho?.DriveAvailableTodayMinutes,
+                    explanation = TachoExplanation(tachoAvailable, allocatedDriver, tacho)
+                },
                 stops = stopRows
             });
         }
@@ -178,8 +216,20 @@ public sealed class TvRouteProgressController(
             geofenceVisitCount = snapshot.Visits.Count,
             geofenceConfirmedVisitCount = snapshot.ConfirmedVisits.Count,
             geofenceLinkedRuns = snapshot.Visits.Where(x => x.LoadId is not null).Select(x => x.LoadId!.Value).Distinct().Count(),
+            tachoAvailable,
+            tachoWarning,
             runs = rows
         });
+    }
+
+    private static string TachoExplanation(bool tachoAvailable, Driver? allocatedDriver, TachoVehicleDriverStatus? tacho)
+    {
+        if (!tachoAvailable) return "TachoMaster could not be reached for this refresh.";
+        if (allocatedDriver is null) return "No planned driver is allocated to this run.";
+        if (tacho is null) return "No current TachoMaster duty was matched to the planned driver and vehicle.";
+        if (ExecutionIdentityResolver.DriverMatches(allocatedDriver, tacho))
+            return $"{tacho.DriverName} signed on at {tacho.DutyStartUtc:O}.";
+        return $"TachoMaster duty is present for {tacho.DriverName}, but it does not match the planned driver.";
     }
 
     private async Task<(List<VehicleLiveStatus> Statuses, string Source)> LoadLiveStatusesAsync(

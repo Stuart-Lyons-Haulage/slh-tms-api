@@ -259,15 +259,7 @@ public sealed class RunProgressController(
         if (load.VehicleId is null && load.DriverId is null)
             return load.Status.ToString();
 
-        var firstPlanned = orderedStops
-            .Where(stop => stop.PlannedArrivalUtc is not null)
-            .Select(stop => stop.PlannedArrivalUtc!.Value)
-            .OrderBy(value => value)
-            .FirstOrDefault();
-
-        return firstPlanned != default && firstPlanned <= now.AddMinutes(10)
-            ? "InProgress"
-            : load.Status.ToString();
+        return load.Status.ToString();
     }
 
     private static DateOnly UkOperatingDate(DateTimeOffset value)
