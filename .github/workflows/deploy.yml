@@ -59,7 +59,7 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in {1..45}; do
-            state="$(az containerapp show \
+            state="$(timeout 20s az containerapp show \
               --name "$AZURE_CONTAINER_APP_NAME" \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --query properties.provisioningState \
@@ -72,7 +72,7 @@ jobs:
             sleep 10
           done
           echo "Container App did not report Succeeded, checking whether the live API is still healthy before continuing."
-          if curl --fail --silent --show-error "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health" >/dev/null; then
+          if curl --fail --silent --show-error --max-time 10 "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health" >/dev/null; then
             echo "::warning::Container App provisioning state is still ${state:-unknown}, but the live API is healthy. Continuing with image-only deployment."
             exit 0
           fi
@@ -101,7 +101,7 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in {1..90}; do
-            state="$(az containerapp show --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.provisioningState --output tsv 2>/dev/null || true)"
+            state="$(timeout 20s az containerapp show --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.provisioningState --output tsv 2>/dev/null || true)"
             if test "$state" = "Succeeded"; then exit 0; fi
             echo "Waiting for registry operation to complete: ${state:-unknown} ($attempt/90)..."
             sleep 10
@@ -140,7 +140,7 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in {1..90}; do
-            state="$(az containerapp show --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.provisioningState --output tsv 2>/dev/null || true)"
+            state="$(timeout 20s az containerapp show --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.provisioningState --output tsv 2>/dev/null || true)"
             if test "$state" = "Succeeded"; then exit 0; fi
             echo "Waiting for secret operation to complete: ${state:-unknown} ($attempt/90)..."
             sleep 10
@@ -193,7 +193,7 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in {1..90}; do
-            state="$(az containerapp show --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.provisioningState --output tsv 2>/dev/null || true)"
+            state="$(timeout 20s az containerapp show --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.provisioningState --output tsv 2>/dev/null || true)"
             if test "$state" = "Succeeded"; then exit 0; fi
             echo "Waiting for image deployment to complete: ${state:-unknown} ($attempt/90)..."
             sleep 10
@@ -215,7 +215,7 @@ jobs:
           done
 
           for attempt in {1..90}; do
-            state="$(az containerapp show --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.provisioningState --output tsv 2>/dev/null || true)"
+            state="$(timeout 20s az containerapp show --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.provisioningState --output tsv 2>/dev/null || true)"
             if test "$state" = "Succeeded"; then break; fi
             echo "Waiting for ingress operation: ${state:-unknown} ($attempt/90)..."
             sleep 10
