@@ -67,7 +67,10 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
             var group = collection;
             var destination = Destination(detail, order);
             var temperature = detail?.Temperature;
-            var palletType = NormalisePalletType(detail?.PalletType);
+            var lineUnitTypes = orderSourceLines.Select(x => x.PalletType).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            var sourceUnitType = detail?.PalletType ?? (lineUnitTypes.Count == 1 ? lineUnitTypes[0] : lineUnitTypes.Count > 1 ? "Mixed" : null);
+            var handling = PalletHandlingRules.Resolve(order.CustomerCode, collection, destination, sourceUnitType);
+            var palletType = handling.PalletType;
             var late = firstRunCreated is not null && order.CreatedAtUtc > firstRunCreated.Value.AddMinutes(15);
             if (late) lateCount++;
 
@@ -102,6 +105,9 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
                 planningGroup = group,
                 temperature,
                 palletType,
+                loadUnitType = handling.LoadUnitType,
+                palletColourKey = handling.ColourKey,
+                palletRuleSource = handling.RuleSource,
                 source = detail?.Source,
                 receivedAtUtc = detail?.UpdatedAtUtc ?? order.CreatedAtUtc,
                 lateAddition = late,
@@ -111,11 +117,13 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
                     var lineAllocations = explicitAllocations.Values.Where(x => x.OrderId == order.Id && x.SourceLineId == line.Id && x.Pallets > 0).ToList();
                     var lineOrdered = Math.Max(line.Pallets ?? 0, 0);
                     var linePlanned = lineAllocations.Sum(x => x.Pallets);
+                    var lineHandling = PalletHandlingRules.Resolve(order.CustomerCode, line.CollectionSite, line.DeliverySite, line.PalletType);
                     return new
                     {
                         sourceLineId = line.Id, line.SourceRowKey, line.CollectionSite, line.DeliverySite, line.CollectionDate, line.DeliveryDate,
-                        line.CollectionTimeFrom, line.CollectionTimeTo, line.PalletType, orderedPallets = lineOrdered,
-                        plannedPallets = linePlanned, outstandingPallets = Math.Max(lineOrdered - linePlanned, 0),
+                        line.CollectionTimeFrom, line.CollectionTimeTo, sourcePalletType = line.PalletType, palletType = lineHandling.PalletType,
+                        loadUnitType = lineHandling.LoadUnitType, palletColourKey = lineHandling.ColourKey, palletRuleSource = lineHandling.RuleSource,
+                        orderedPallets = lineOrdered, plannedPallets = linePlanned, outstandingPallets = Math.Max(lineOrdered - linePlanned, 0),
                         overplannedPallets = Math.Max(linePlanned - lineOrdered, 0), line.TemperatureRequirement, line.LoadReference
                     };
                 }).ToList(),
@@ -365,6 +373,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
         var latest = await ReadLatestAllocations(date, ct);
         var orders = await ReadOrders(date, ct);
         var details = await ReadOrderDetails(date, ct);
+        var sourceLines = await ReadCurrentSourceLines(orders, ct);
         decimal standard = 0;
         decimal euro = 0;
         decimal unknown = 0;
@@ -372,6 +381,8 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
         foreach (var order in orders.Where(x => x.Status != OrderStatus.Cancelled))
         {
             details.TryGetValue(Normalise(order.Reference), out var detail);
+            sourceLines.TryGetValue(order.Id, out var orderSourceLines);
+            orderSourceLines ??= [];
             int pallets;
             var hasExplicit = latest.Keys.Any(key => key.OrderId == order.Id);
             if (hasExplicit)
@@ -384,7 +395,15 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
                 pallets = EffectiveOrderedPallets(order, detail);
             }
             if (pallets <= 0) continue;
-            switch (NormalisePalletType(detail?.PalletType))
+
+            var collection = Collection(detail, order);
+            var destination = Destination(detail, order);
+            var lineUnitTypes = orderSourceLines.Select(x => x.PalletType).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            var sourceUnitType = detail?.PalletType ?? (lineUnitTypes.Count == 1 ? lineUnitTypes[0] : lineUnitTypes.Count > 1 ? "Mixed" : null);
+            var handling = PalletHandlingRules.Resolve(order.CustomerCode, collection, destination, sourceUnitType);
+            if (!handling.IsPallet) continue;
+
+            switch (handling.PalletType)
             {
                 case "Standard": standard += pallets; break;
                 case "Euro": euro += pallets; break;
