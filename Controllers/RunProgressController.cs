@@ -16,6 +16,8 @@ public sealed class RunProgressController(
     ILogger<RunProgressController> logger,
     IConfiguration configuration) : ControllerBase
 {
+    private static readonly TimeSpan LiveRefreshBudget = TimeSpan.FromSeconds(4);
+
     [HttpGet, AllowAnonymous]
     public async Task<IActionResult> Get([FromQuery] DateOnly? date, CancellationToken ct)
     {
@@ -32,13 +34,24 @@ public sealed class RunProgressController(
                 // Keep Operations progression on the same current Falcon evidence as
                 // the Hisense route board. SQL remains the resilience fallback when
                 // RoadTech is temporarily unavailable.
-                var trackingRecords = (await trackingClient.GetLatestVehicleEventsAsync(ct))
+                using var liveRefresh = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                liveRefresh.CancelAfter(LiveRefreshBudget);
+                var trackingRecords = (await trackingClient.GetLatestVehicleEventsAsync(liveRefresh.Token))
                     .Select(DotTelemetryRecord.FromProvider)
                     .Where(record => record.Latitude is not null && record.Longitude is not null)
                     .ToList();
 
                 if (trackingRecords.Count > 0)
                     await telemetryStore.PersistAsync(trackingRecords, ct, markAsLiveReceipt: true);
+            }
+            catch (OperationCanceledException exception) when (!ct.IsCancellationRequested)
+            {
+                db.ChangeTracker.Clear();
+                logger.LogWarning(
+                    exception,
+                    "RoadTech live refresh timed out for Operations progression on {PlanningDate}; using stored tracking evidence.",
+                    planningDate);
+                refreshWarning = "Live Falcon refresh timed out; progression is using the latest stored tracking evidence.";
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
@@ -98,7 +111,7 @@ public sealed class RunProgressController(
                     loadId = load.Id,
                     loadReference = load.Reference,
                     loadStatus = load.Status.ToString(),
-                    runState = load.Status.ToString(),
+                    runState = InferredRunState(load, stops, now),
                     totalStops = stops.Count,
                     completedStops = 0,
                     progressPercent = 0m,
@@ -165,7 +178,7 @@ public sealed class RunProgressController(
         var activeStatus = activeVisit is null ? null : delayed ? "SiteDelay" : activeVisit.ConfirmedAtUtc is not null ? "OnSiteConfirmed" : "Arrived";
         var runState = totalStops > 0 && completedStops >= totalStops
             ? "Completed"
-            : activeStatus ?? (completedStops > 0 ? "BetweenStops" : load.Status.ToString());
+            : activeStatus ?? (completedStops > 0 ? "BetweenStops" : InferredRunState(load, orderedStops, now));
 
         return new
         {
@@ -233,6 +246,28 @@ public sealed class RunProgressController(
             linkageException,
             calculatedAtUtc = now
         };
+    }
+
+    internal static string InferredRunState(Load load, IReadOnlyList<LoadStop> orderedStops, DateTimeOffset now)
+    {
+        if (load.Status is LoadStatus.Completed or LoadStatus.Cancelled)
+            return load.Status.ToString();
+        if (load.Status is LoadStatus.Dispatched or LoadStatus.InProgress)
+            return "InProgress";
+        if (load.Status != LoadStatus.Planned)
+            return load.Status.ToString();
+        if (load.VehicleId is null && load.DriverId is null)
+            return load.Status.ToString();
+
+        var firstPlanned = orderedStops
+            .Where(stop => stop.PlannedArrivalUtc is not null)
+            .Select(stop => stop.PlannedArrivalUtc!.Value)
+            .OrderBy(value => value)
+            .FirstOrDefault();
+
+        return firstPlanned != default && firstPlanned <= now.AddMinutes(10)
+            ? "InProgress"
+            : load.Status.ToString();
     }
 
     private static DateOnly UkOperatingDate(DateTimeOffset value)

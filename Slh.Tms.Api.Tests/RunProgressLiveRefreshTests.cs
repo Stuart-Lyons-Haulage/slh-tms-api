@@ -19,6 +19,33 @@ namespace Slh.Tms.Api.Tests;
 public sealed class RunProgressLiveRefreshTests
 {
     [Fact]
+    public void Planned_allocated_run_is_reported_in_progress_after_its_start_time_when_live_refresh_falls_back()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var load = new Load
+        {
+            Reference = "AM-STARTED",
+            PlanningDate = UkDate(now),
+            Status = LoadStatus.Planned,
+            VehicleId = Guid.NewGuid(),
+            Stops =
+            [
+                new LoadStop
+                {
+                    LoadId = Guid.NewGuid(),
+                    Sequence = 1,
+                    Name = "NWF Selsey",
+                    PlannedArrivalUtc = now.AddMinutes(-30)
+                }
+            ]
+        };
+
+        var state = RunProgressController.InferredRunState(load, load.Stops, now);
+
+        Assert.Equal("InProgress", state);
+    }
+
+    [Fact]
     public async Task Operations_progress_refreshes_the_same_live_falcon_evidence_as_the_tv_route_board()
     {
         // Regression: the Hisense route board refreshed Falcon before deriving visits,

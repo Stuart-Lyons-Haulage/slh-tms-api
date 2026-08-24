@@ -22,6 +22,7 @@ public sealed class TvRouteProgressController(
     ILogger<TvRouteProgressController> logger) : ControllerBase
 {
     private static readonly TimeSpan LiveTrackingThreshold = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan LiveRefreshBudget = TimeSpan.FromSeconds(4);
 
     [HttpGet, AllowAnonymous]
     public async Task<IActionResult> Get(
@@ -187,7 +188,9 @@ public sealed class TvRouteProgressController(
     {
         try
         {
-            var providerRows = await trackingClient.GetLatestVehicleEventsAsync(ct);
+            using var liveRefresh = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            liveRefresh.CancelAfter(LiveRefreshBudget);
+            var providerRows = await trackingClient.GetLatestVehicleEventsAsync(liveRefresh.Token);
             var records = providerRows
                 .Select(DotTelemetryRecord.FromProvider)
                 .Where(record => record.Latitude is not null && record.Longitude is not null)
@@ -233,6 +236,12 @@ public sealed class TvRouteProgressController(
                 if (statuses.Count > 0)
                     return (statuses, "RoadTech current");
             }
+        }
+        catch (OperationCanceledException exception) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(
+                exception,
+                "RoadTech direct TV snapshot timed out; falling back to persisted live status.");
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {

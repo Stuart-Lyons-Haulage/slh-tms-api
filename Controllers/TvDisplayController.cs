@@ -14,6 +14,9 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController, Route("api/v1/tv-display")]
 public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient maps) : ControllerBase
 {
+    private const int MaxLiveEtaCalculationsPerRefresh = 12;
+    private static readonly TimeSpan MapEtaBudget = TimeSpan.FromSeconds(2);
+
     [HttpGet("key"), Authorize(Policy = "TmsAccess")]
     public async Task<IActionResult> Key(CancellationToken ct)
     {
@@ -104,12 +107,13 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
         var trailers = await SafeDictionary(db.Trailers.AsNoTracking().Where(x => trailerIds.Contains(x.Id)), x => x.Id, ct);
         var liveStatuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
         loads = loads.Where(load => load.PlanningDate == day ||
-            (load.VehicleId is not null && MatchLive(vehicles.GetValueOrDefault(load.VehicleId.Value), liveStatuses) is { } live && now - live.LastEventTimeUtc <= TimeSpan.FromMinutes(30)) ||
+            (load.VehicleId is Guid vehicleId && vehicles.TryGetValue(vehicleId, out var vehicle) && MatchLive(vehicle, liveStatuses) is { } live && now - live.LastEventTimeUtc <= TimeSpan.FromMinutes(30)) ||
             load.Status is LoadStatus.Dispatched or LoadStatus.InProgress)
             .OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).ToList();
 
         var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
         var geofenceSnapshot = await EmbeddedGeofenceEngine.BuildAsync(db, day, geofenceLoads, ct);
+        var useLiveMapEtas = loads.Count <= MaxLiveEtaCalculationsPerRefresh;
 
         var rows = new List<TvRunDisplayRow>();
         foreach (var load in loads)
@@ -139,15 +143,28 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
             var etaSource = eta is null ? "Unavailable" : "Planned";
             if (live is not null && nextStop?.Latitude is not null && nextStop.Longitude is not null && now - live.LastEventTimeUtc <= TimeSpan.FromMinutes(30))
             {
-                try
+                if (useLiveMapEtas)
                 {
-                    var travel = await maps.TravelTime((live.Longitude, live.Latitude), (nextStop.Longitude.Value, nextStop.Latitude.Value), ct);
-                    eta = now + travel;
-                    etaSource = "Live";
+                    try
+                    {
+                        using var mapEta = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                        mapEta.CancelAfter(MapEtaBudget);
+                        var travel = await maps.TravelTime((live.Longitude, live.Latitude), (nextStop.Longitude.Value, nextStop.Latitude.Value), mapEta.Token);
+                        eta = now + travel;
+                        etaSource = "Live";
+                    }
+                    catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                    {
+                        etaSource = eta is null ? "Tracking" : "Planned";
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        etaSource = eta is null ? "Unavailable" : "Planned";
+                    }
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                else
                 {
-                    etaSource = eta is null ? "Unavailable" : "Planned";
+                    etaSource = eta is null ? "Tracking" : "Planned";
                 }
             }
 
