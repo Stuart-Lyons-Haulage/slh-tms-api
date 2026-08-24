@@ -58,6 +58,11 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
             db.ChangeTracker.Clear();
             return Ok(await PlanningRegisterStore.ReadLoadsAsync(db, date, ct));
         }
+        catch (Exception) when (!ct.IsCancellationRequested)
+        {
+            db.ChangeTracker.Clear();
+            return Ok(await PlanningRegisterStore.ReadLoadsAsync(db, date, ct));
+        }
     }
 
     [HttpPost("loads"), Authorize(Policy = "TmsWrite")]

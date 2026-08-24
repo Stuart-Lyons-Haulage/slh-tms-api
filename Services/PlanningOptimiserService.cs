@@ -10,6 +10,8 @@ namespace Slh.Tms.Api.Services;
 public sealed class PlanningOptimiserService
 {
     private const string AllocationType = "planningpalletallocation";
+    private const int MaxCandidateDriversPerRun = 80;
+    private const int MaxCandidateVehiclesPerRun = 80;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
     private readonly TmsDbContext db;
     private readonly ILogger<PlanningOptimiserService> logger;
@@ -232,9 +234,13 @@ public sealed class PlanningOptimiserService
             var delivery = MatchSite(sites, last?.DeliverySite);
             var requiredDrive = RequiredDriveMinutes(collection?.Latitude, delivery?.Latitude);
             var candidates = new List<Candidate>();
+            var recentDriverIds = recentLoads.Where(load => load.DriverId is not null).Select(load => load.DriverId!.Value).ToHashSet();
+            var recentVehicleIds = recentLoads.Where(load => load.VehicleId is not null).Select(load => load.VehicleId!.Value).ToHashSet();
+            var candidateDrivers = CandidateDrivers(drivers, recentDriverIds, evidenceAt);
+            var candidateVehicles = CandidateVehicles(vehicles, liveStatuses, recentVehicleIds, evidenceAt);
 
-            foreach (var driver in drivers.OrderBy(item => item.DisplayName).ThenBy(item => item.Id))
-            foreach (var vehicle in vehicles.OrderBy(item => item.Registration).ThenBy(item => item.Id))
+            foreach (var driver in candidateDrivers)
+            foreach (var vehicle in candidateVehicles)
             {
                 var consecutiveDays = ConsecutiveDays(recentLoads, driver.Id, proposal.PlanningDate);
                 var constraints = constraintEvaluator.EvaluateDriver(new PlanningDriverEvidence(
@@ -465,6 +471,36 @@ public sealed class PlanningOptimiserService
         var keys = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(Normalise).ToHashSet();
         return statuses.Where(status => keys.Contains(Normalise(status.VehicleIdentifier))).OrderByDescending(status => status.LastEventTimeUtc).FirstOrDefault();
     }
+    private static IReadOnlyList<Driver> CandidateDrivers(
+        IReadOnlyList<Driver> drivers,
+        IReadOnlySet<Guid> recentDriverIds,
+        DateTimeOffset evidenceAt) =>
+        drivers
+            .OrderByDescending(driver =>
+                driver.TachoDriveAvailableTodayMinutes is not null &&
+                driver.LastTachoSyncUtc is not null &&
+                evidenceAt - driver.LastTachoSyncUtc <= TimeSpan.FromHours(6))
+            .ThenByDescending(driver => recentDriverIds.Contains(driver.Id))
+            .ThenBy(driver => driver.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(driver => driver.Id)
+            .Take(MaxCandidateDriversPerRun)
+            .ToList();
+
+    private static IReadOnlyList<Vehicle> CandidateVehicles(
+        IReadOnlyList<Vehicle> vehicles,
+        IReadOnlyList<Slh.Tms.Api.Models.Tracking.VehicleLiveStatus> liveStatuses,
+        IReadOnlySet<Guid> recentVehicleIds,
+        DateTimeOffset evidenceAt) =>
+        vehicles
+            .OrderByDescending(vehicle =>
+                MatchLive(vehicle, liveStatuses) is { LastEventTimeUtc: var observedAt } &&
+                evidenceAt - observedAt <= TimeSpan.FromMinutes(30))
+            .ThenByDescending(vehicle => recentVehicleIds.Contains(vehicle.Id))
+            .ThenBy(vehicle => vehicle.Registration, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(vehicle => vehicle.Id)
+            .Take(MaxCandidateVehiclesPerRun)
+            .ToList();
+
     private static int RequiredDriveMinutes(decimal? collectionLatitude, decimal? deliveryLatitude) => collectionLatitude is null || deliveryLatitude is null
         ? 240
         : Math.Max(60, (int)Math.Ceiling(Math.Abs(collectionLatitude.Value - deliveryLatitude.Value) * 69m / 45m * 60m) + 60);

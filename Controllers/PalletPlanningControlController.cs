@@ -285,6 +285,12 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             db.ChangeTracker.Clear();
             return await PlanningRegisterStore.ReadLoadsAsync(db, date, ct);
         }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "Planning-control live load read failed; continuing from the audited planning register.");
+            db.ChangeTracker.Clear();
+            return await PlanningRegisterStore.ReadLoadsAsync(db, date, ct);
+        }
     }
 
     private async Task<Dictionary<string, OrderDetail>> ReadOrderDetails(DateOnly date, CancellationToken ct)
