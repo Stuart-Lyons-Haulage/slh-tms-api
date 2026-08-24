@@ -11,18 +11,40 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/v1/planning-control")]
 [Authorize]
-public sealed class PlanningRegionController(TmsDbContext db) : ControllerBase
+public sealed class PlanningRegionController(TmsDbContext db, ILogger<PlanningRegionController> logger) : ControllerBase
 {
     [HttpGet("regions")]
     public async Task<IActionResult> Regions([FromQuery] DateOnly date, CancellationToken ct)
     {
-        await SitePlanningProfileStore.SyncOrderProfilesAsync(db, date, ct);
-        var temperatureSync = await SitePlanningProfileStore.ApplyDailyRunTemperaturesAsync(db, date, ct);
-        var destinations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var rows = await db.StagedImports.AsNoTracking()
-            .Where(x => (x.EntityType == "order" || x.EntityType == "register:order") && x.Status != StagingStatus.Rejected)
-            .OrderByDescending(x => x.ReceivedAtUtc).Take(8000).ToListAsync(ct);
+        var degraded = false;
+        var temperatureSync = new TemperatureSyncResult(0, 0, []);
+        try
+        {
+            await SitePlanningProfileStore.SyncOrderProfilesAsync(db, date, ct);
+            temperatureSync = await SitePlanningProfileStore.ApplyDailyRunTemperaturesAsync(db, date, ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            db.ChangeTracker.Clear();
+            degraded = true;
+            logger.LogWarning(ex, "Planning region enrichment could not run; continuing with a basic destination list.");
+        }
 
+        var destinations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        List<StagedImport> rows;
+        try
+        {
+            rows = await db.StagedImports.AsNoTracking()
+                .Where(x => (x.EntityType == "order" || x.EntityType == "register:order") && x.Status != StagingStatus.Rejected)
+                .OrderByDescending(x => x.ReceivedAtUtc).Take(8000).ToListAsync(ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            db.ChangeTracker.Clear();
+            logger.LogWarning(ex, "Planning region staging rows could not be read; returning an empty region map.");
+            rows = [];
+            degraded = true;
+        }
         foreach (var row in rows)
         {
             try
@@ -38,7 +60,18 @@ public sealed class PlanningRegionController(TmsDbContext db) : ControllerBase
             catch (JsonException) { }
         }
 
-        var map = await SitePlanningProfileStore.ResolveRegionsAsync(db, destinations, ct);
+        Dictionary<string, string> map;
+        try
+        {
+            map = await SitePlanningProfileStore.ResolveRegionsAsync(db, destinations, ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            db.ChangeTracker.Clear();
+            degraded = true;
+            logger.LogWarning(ex, "Planning destination regions could not be resolved; assigning all destinations to Other.");
+            map = destinations.ToDictionary(destination => destination, _ => "Other", StringComparer.OrdinalIgnoreCase);
+        }
         var rank = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {
             ["North"] = 0,
@@ -59,7 +92,8 @@ public sealed class PlanningRegionController(TmsDbContext db) : ControllerBase
             destinationRegions = map,
             temperatureConflicts = temperatureSync.Conflicts,
             temperatureUpdatedLoads = temperatureSync.UpdatedLoads,
-            temperatureUpdatedOrders = temperatureSync.UpdatedOrders
+            temperatureUpdatedOrders = temperatureSync.UpdatedOrders,
+            degraded
         });
     }
 

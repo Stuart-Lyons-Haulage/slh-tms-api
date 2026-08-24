@@ -42,6 +42,15 @@ public sealed class PlanningOptimiserController(
                 });
             }
         }
+        catch (Exception exception) when (!ct.IsCancellationRequested)
+        {
+            logger.LogError(exception, "Planning optimiser proposal generation failed before any live plan changes were made.");
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                code = "PlanningOptimiserUnavailable",
+                message = "Planning proposal generation is temporarily unavailable. No live runs were created or changed; use manual planning while this is checked."
+            });
+        }
     }
 
     [HttpGet("proposals/{id:guid}")]
@@ -66,6 +75,36 @@ public sealed class PlanningOptimiserController(
         catch (PlanProposalApplyException exception)
         {
             return Conflict(new { exception.Code, exception.Message });
+        }
+        catch (Exception exception) when (SchemaUnavailable(exception))
+        {
+            logger.LogWarning(exception, "Planning optimiser apply schema was unavailable; applying the embedded schema repair before one retry.");
+            db.ChangeTracker.Clear();
+            await PlanningSchemaInitializer.Apply(db, logger, ct);
+            db.ChangeTracker.Clear();
+            try
+            {
+                var result = await new PlanningProposalApplicationService(db).ApplyAsync(id, request, User.Identity?.Name, ct);
+                return Ok(result);
+            }
+            catch (Exception retryException) when (SchemaUnavailable(retryException))
+            {
+                logger.LogError(retryException, "Planning optimiser apply remained unavailable after schema repair.");
+                return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+                {
+                    code = "PlanningOptimiserSchemaUnavailable",
+                    message = "Applying the reviewed proposal is temporarily unavailable while the planning schema catches up. No additional live runs were created."
+                });
+            }
+        }
+        catch (Exception exception) when (!ct.IsCancellationRequested)
+        {
+            logger.LogError(exception, "Planning optimiser proposal apply failed.");
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                code = "PlanningOptimiserApplyUnavailable",
+                message = "The reviewed proposal could not be applied just now. Refresh the planner before retrying so live planning is not duplicated."
+            });
         }
     }
 

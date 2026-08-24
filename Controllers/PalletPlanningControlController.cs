@@ -11,7 +11,7 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/v1/planning-control")]
 [Authorize]
-public sealed class PalletPlanningControlController(TmsDbContext db) : ControllerBase
+public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<PalletPlanningControlController> logger) : ControllerBase
 {
     private const string AllocationType = "planningpalletallocation";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
@@ -518,10 +518,23 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
     {
         var movementByOrder = orders.Where(x => x.SourceMovementId is not null).ToDictionary(x => x.SourceMovementId!.Value, x => x.Id);
         if (movementByOrder.Count == 0) return [];
-        var movements = await db.OrderMovements.AsNoTracking().Where(x => movementByOrder.Keys.Contains(x.Id) && x.CurrentRevisionId != null).ToListAsync(ct);
-        var revisionToOrder = movements.ToDictionary(x => x.CurrentRevisionId!.Value, x => movementByOrder[x.Id]);
-        var lines = await db.OrderSourceLines.AsNoTracking().Where(x => revisionToOrder.Keys.Contains(x.RevisionId)).ToListAsync(ct);
-        return lines.GroupBy(x => revisionToOrder[x.RevisionId]).ToDictionary(x => x.Key, x => x.OrderBy(line => line.SourceRowKey).ToList());
+        try
+        {
+            var movements = await db.OrderMovements.AsNoTracking().Where(x => movementByOrder.Keys.Contains(x.Id) && x.CurrentRevisionId != null).ToListAsync(ct);
+            var revisionToOrder = movements
+                .Where(x => x.CurrentRevisionId is not null && movementByOrder.ContainsKey(x.Id))
+                .GroupBy(x => x.CurrentRevisionId!.Value)
+                .ToDictionary(group => group.Key, group => movementByOrder[group.OrderByDescending(x => x.UpdatedAtUtc).First().Id]);
+            if (revisionToOrder.Count == 0) return [];
+            var lines = await db.OrderSourceLines.AsNoTracking().Where(x => revisionToOrder.Keys.Contains(x.RevisionId)).ToListAsync(ct);
+            return lines.GroupBy(x => revisionToOrder[x.RevisionId]).ToDictionary(x => x.Key, x => x.OrderBy(line => line.SourceRowKey).ToList());
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            db.ChangeTracker.Clear();
+            logger.LogWarning(ex, "Planning source-line evidence could not be read; pallet planning is continuing from approved order totals.");
+            return [];
+        }
     }
 
     private sealed record AllocationState(Guid OrderId, Guid LoadId, int Pallets, DateOnly Date, DateTimeOffset UpdatedAtUtc, string? UpdatedBy, Guid? SourceLineId = null);
