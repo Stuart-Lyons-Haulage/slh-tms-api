@@ -108,6 +108,10 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
             load.Status is LoadStatus.Dispatched or LoadStatus.InProgress)
             .OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).ToList();
 
+        var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
+        var geofenceSnapshot = await EmbeddedGeofenceEngine.BuildAsync(db, day, geofenceLoads, ct);
+        await RunStopDwellProjection.TryPersistAsync(db, geofenceSnapshot, ct);
+
         var rows = new List<TvRunDisplayRow>();
         foreach (var load in loads)
         {
@@ -116,7 +120,19 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
             trailers.TryGetValue(load.TrailerId ?? Guid.Empty, out var trailer);
             var live = vehicle is null ? null : MatchLive(vehicle, liveStatuses);
             var stops = load.Stops.OrderBy(x => x.Sequence).ToList();
-            var nextStop = PickNextStop(stops, now, load.Status);
+            var visits = geofenceSnapshot.Visits.Where(visit => visit.LoadId == load.Id).OrderBy(visit => visit.EnteredAtUtc).ToList();
+            var completedStopIds = GeofencePlanningMatch.CompletedStopIds(load, visits);
+            var currentVisit = geofenceSnapshot.ActiveVisits
+                .Where(visit => visit.LoadId == load.Id)
+                .OrderByDescending(visit => visit.EnteredAtUtc)
+                .FirstOrDefault();
+            var stopDwell = RunStopDwellProjection.Build(load, visits, geofenceSnapshot.ActiveVisits, now);
+            var activeDwell = stopDwell.FirstOrDefault(stop => stop.State == "OnSite");
+            var finalDwell = stopDwell.LastOrDefault(stop => stop.State == "Departed");
+            var nextStop = currentVisit?.LoadStopId is Guid currentStopId
+                ? stops.FirstOrDefault(stop => stop.Id == currentStopId)
+                : stops.FirstOrDefault(stop => !completedStopIds.Contains(stop.Id))
+                    ?? PickNextStop(stops, now, load.Status);
             var firstStop = stops.FirstOrDefault();
             var finalStop = stops.LastOrDefault();
 
@@ -138,6 +154,15 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
 
             var trackingAgeMinutes = live is null ? (double?)null : Math.Max(0, (now - live.LastEventTimeUtc).TotalMinutes);
             var state = State(load, driver, vehicle, live, trackingAgeMinutes, eta, nextStop?.PlannedArrivalUtc);
+            if (activeDwell is not null)
+            {
+                var minutes = activeDwell.LiveDwellMinutes ?? 0;
+                var delayed = currentVisit?.Fence.MaxWaitMinutes is int waitLimit && minutes > waitLimit ||
+                    currentVisit?.Fence.CategoryMaxWaitMinutes is int categoryWaitLimit && minutes > categoryWaitLimit;
+                state = delayed
+                    ? ("SITE DELAY", $"{activeDwell.GeofenceName ?? "Site"} · time on site {minutes} min", 98)
+                    : ("ON SITE", $"{activeDwell.GeofenceName ?? "Site"} · time on site {minutes} min", 88);
+            }
             rows.Add(new TvRunDisplayRow(
                 load.Id,
                 load.Reference,
@@ -155,7 +180,15 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
                 live?.SpeedKph,
                 state.Label,
                 state.Detail,
-                state.Priority));
+                state.Priority,
+                activeDwell?.SiteArrivalUtc,
+                activeDwell?.SiteDepartureUtc ?? finalDwell?.SiteDepartureUtc,
+                activeDwell?.LiveDwellMinutes,
+                activeDwell?.LiveDwellSeconds,
+                finalDwell?.FinalDwellMinutes,
+                finalDwell?.FinalDwellSeconds,
+                activeDwell?.State ?? finalDwell?.State ?? "EnRoute",
+                RunStopDwellProjection.LinkExceptionFor(load, geofenceSnapshot)?.Message));
         }
 
         return Ok(new
@@ -416,4 +449,6 @@ internal sealed record TvDisplayAccess(string Key, DateTimeOffset CreatedAtUtc);
 internal sealed record TvDisplayPairing(string Code, DateTimeOffset CreatedAtUtc, DateTimeOffset ExpiresAtUtc, DateTimeOffset? UsedAtUtc);
 internal sealed record TvRunDisplayRow(Guid Id, string Reference, string Status, string Driver, string Vehicle, string? Trailer,
     DateTimeOffset? FirstPlannedUtc, DateTimeOffset? FinalPlannedUtc, string? NextStop, DateTimeOffset? EtaUtc, string EtaSource,
-    string Tracking, DateTimeOffset? TrackingUpdatedAtUtc, decimal? SpeedKph, string State, string StateDetail, int Priority);
+    string Tracking, DateTimeOffset? TrackingUpdatedAtUtc, decimal? SpeedKph, string State, string StateDetail, int Priority,
+    DateTimeOffset? SiteArrivalUtc, DateTimeOffset? SiteDepartureUtc, int? LiveDwellMinutes, int? LiveDwellSeconds,
+    int? FinalDwellMinutes, int? FinalDwellSeconds, string DwellState, string? LinkageException);

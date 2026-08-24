@@ -52,6 +52,7 @@ public sealed class TvRouteProgressController(
         // visible TV marker because liveStatuses above already contains the provider data.
         var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
         var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, day, geofenceLoads, ct);
+        await RunStopDwellProjection.TryPersistAsync(db, snapshot, ct);
         var vehicleIds = loads.Where(x => x.VehicleId is not null).Select(x => x.VehicleId!.Value).Distinct().ToList();
         var vehicles = vehicleIds.Count == 0
             ? new List<Vehicle>()
@@ -71,6 +72,8 @@ public sealed class TvRouteProgressController(
             var stops = load.Stops.OrderBy(x => x.Sequence).ToList();
             var visits = snapshot.Visits.Where(x => x.LoadId == load.Id).OrderBy(x => x.EnteredAtUtc).ToList();
             var completedStopIds = GeofencePlanningMatch.CompletedStopIds(load, visits);
+            var stopDwell = RunStopDwellProjection.Build(load, visits, snapshot.ActiveVisits, now);
+            var linkageException = RunStopDwellProjection.LinkExceptionFor(load, snapshot);
             var activeVisit = snapshot.ActiveVisits
                 .Where(x => x.LoadId == load.Id)
                 .OrderByDescending(x => x.EnteredAtUtc)
@@ -138,6 +141,21 @@ public sealed class TvRouteProgressController(
                 phase,
                 truckPositionPercent = truckPosition,
                 geofenceOnSite = currentStop is not null,
+                currentVisit = activeVisit is null ? null : new
+                {
+                    geofenceName = activeVisit.Fence.Name,
+                    loadStopId = activeVisit.LoadStopId,
+                    enteredAtUtc = activeVisit.EnteredAtUtc,
+                    siteArrivalUtc = activeVisit.EnteredAtUtc,
+                    siteDepartureUtc = (DateTimeOffset?)null,
+                    state = "OnSite",
+                    dwellMinutes = Math.Max(activeVisit.DwellMinutes, Math.Max(0, (int)Math.Floor((now - activeVisit.EnteredAtUtc).TotalMinutes))),
+                    liveDwellMinutes = Math.Max(activeVisit.DwellMinutes, Math.Max(0, (int)Math.Floor((now - activeVisit.EnteredAtUtc).TotalMinutes))),
+                    liveDwellSeconds = Math.Max(0, (int)Math.Floor((now - activeVisit.EnteredAtUtc).TotalSeconds)),
+                    status = activeVisit.ConfirmedAtUtc is null ? "Arrived" : "OnSite"
+                },
+                stopDwell,
+                linkageException,
                 trackingFresh,
                 trackingMoving,
                 trackingObservedAtUtc = freshnessAtUtc,

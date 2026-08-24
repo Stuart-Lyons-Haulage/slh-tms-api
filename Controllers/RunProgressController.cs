@@ -62,6 +62,7 @@ public sealed class RunProgressController(
             // Match on a cloned view so the planner-facing labels remain unchanged.
             var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
             var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, geofenceLoads, ct);
+            await RunStopDwellProjection.TryPersistAsync(db, snapshot, ct);
             var records = loads.Select(load => BuildRecord(load, snapshot, now)).ToList();
 
             return Ok(new
@@ -103,6 +104,8 @@ public sealed class RunProgressController(
                     completedStops = 0,
                     progressPercent = 0m,
                     nextStop = next is null ? null : new { next.Id, next.Sequence, next.Name, next.Address, next.PlannedArrivalUtc },
+                    stopDwell = Array.Empty<object>(),
+                    linkageException = (object?)null,
                     currentVisit = (object?)null,
                     lastDeparture = (object?)null,
                     calculatedAtUtc = now
@@ -139,6 +142,8 @@ public sealed class RunProgressController(
         var orderedStops = (load.Stops ?? []).OrderBy(x => x.Sequence).ToList();
         var visits = snapshot.Visits.Where(x => x.LoadId == load.Id).OrderBy(x => x.EnteredAtUtc).ToList();
         var completedStopIds = GeofencePlanningMatch.CompletedStopIds(load, visits);
+        var stopDwell = RunStopDwellProjection.Build(load, visits, snapshot.ActiveVisits, now);
+        var linkageException = RunStopDwellProjection.LinkExceptionFor(load, snapshot);
 
         var activeVisit = snapshot.ActiveVisits
             .Where(x => x.LoadId == load.Id)
@@ -181,8 +186,15 @@ public sealed class RunProgressController(
                 category = activeVisit.Fence.Category,
                 activeVisit.LoadStopId,
                 activeVisit.EnteredAtUtc,
+                siteArrivalUtc = activeVisit.EnteredAtUtc,
                 activeVisit.ConfirmedAtUtc,
+                siteDepartureUtc = (DateTimeOffset?)null,
+                state = "OnSite",
                 dwellMinutes = dwell,
+                liveDwellMinutes = dwell,
+                liveDwellSeconds = Math.Max(0, (int)Math.Floor((now - activeVisit.EnteredAtUtc).TotalSeconds)),
+                finalDwellMinutes = (int?)null,
+                finalDwellSeconds = (int?)null,
                 waitLimitMinutes = waitLimit,
                 isDelayed = delayed,
                 status = activeStatus,
@@ -192,7 +204,34 @@ public sealed class RunProgressController(
                         ? $"Confirmed after {dwell.GetValueOrDefault()} minutes in {activeVisit.Fence.Name}."
                         : $"Inside {activeVisit.Fence.Name}; awaiting 10-minute confirmation."
             },
-            lastDeparture = lastDeparture is null ? null : new { lastDeparture.LoadStopId, lastDeparture.ExitedAtUtc, lastDeparture.DwellMinutes },
+            lastDeparture = lastDeparture is null ? null : new
+            {
+                lastDeparture.LoadStopId,
+                siteArrivalUtc = lastDeparture.EnteredAtUtc,
+                siteDepartureUtc = lastDeparture.ExitedAtUtc,
+                lastDeparture.ExitedAtUtc,
+                lastDeparture.DwellMinutes,
+                finalDwellMinutes = lastDeparture.DwellMinutes,
+                finalDwellSeconds = lastDeparture.ExitedAtUtc is null ? (int?)null : Math.Max(0, (int)Math.Floor((lastDeparture.ExitedAtUtc.Value - lastDeparture.EnteredAtUtc).TotalSeconds)),
+                state = "Departed"
+            },
+            stopDwell = stopDwell.Select(stop => new
+            {
+                stop.StopId,
+                stop.Sequence,
+                stop.StopName,
+                stop.State,
+                stop.GeofenceId,
+                stop.GeofenceName,
+                stop.SiteArrivalUtc,
+                stop.SiteDepartureUtc,
+                stop.LiveDwellSeconds,
+                stop.LiveDwellMinutes,
+                stop.FinalDwellSeconds,
+                stop.FinalDwellMinutes,
+                stop.DwellSeconds
+            }),
+            linkageException,
             calculatedAtUtc = now
         };
     }
