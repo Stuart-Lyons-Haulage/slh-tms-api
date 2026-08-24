@@ -33,6 +33,27 @@ jobs:
           grep -Eq '"expectedGeofenceCount"[[:space:]]*:[[:space:]]*316' "$body_file"
           rm -f "$body_file"
 
+      - name: Check Site Master geofence linkage
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$TV_WALLBOARD_ACCESS_KEY"
+          body_file="$(mktemp)"
+          status="$(curl --silent --show-error --output "$body_file" --write-out "%{http_code}" \
+            -H "X-TMS-TV-Key: $TV_WALLBOARD_ACCESS_KEY" \
+            "$API_BASE/api/v1/health/geofence-links" || true)"
+          test "$status" = "200"
+          summary="$(jq -c '{total, linked, unlinked, unlinkedFenceHashes, source, checkedAtUtc}' "$body_file")"
+          echo "$summary"
+          {
+            echo "### Geofence ↔ Site Master linkage"
+            echo
+            echo '```json'
+            echo "$summary" | jq .
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          rm -f "$body_file"
+
       - name: Check today's Nature's Way reconstruction
         shell: bash
         run: |
