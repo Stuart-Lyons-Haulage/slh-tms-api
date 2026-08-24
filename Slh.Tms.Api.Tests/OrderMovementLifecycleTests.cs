@@ -43,6 +43,27 @@ public sealed class OrderMovementLifecycleTests
         Assert.Equal(revisions[1].Id, movement.CurrentRevisionId);
     }
 
+    [Fact]
+    public async Task Later_approved_revision_updates_existing_live_order_dates()
+    {
+        await using var db = CreateDb();
+        var service = new StagingService(db);
+        var first = StageSingle("amend-first", "PO-AMEND-1", "2026-08-25", "2026-08-25", 4);
+        var second = StageSingle("amend-second", "PO-AMEND-1", "2026-08-26", "2026-08-27", 9);
+        db.StagedImports.AddRange(first, second);
+        await db.SaveChangesAsync();
+
+        await service.ReviewAndPromote(first.Id, true, "Original accepted", Planner(), CancellationToken.None);
+        await service.ReviewAndPromote(second.Id, true, "Amendment accepted", Planner(), CancellationToken.None);
+
+        var order = Assert.Single(await db.TransportOrders.ToListAsync());
+        Assert.Equal("PO-AMEND-1", order.Reference);
+        Assert.Equal(new DateOnly(2026, 8, 26), order.CollectionDate);
+        Assert.Equal(new DateOnly(2026, 8, 27), order.DeliveryDate);
+        Assert.Equal(9, order.Pallets);
+        Assert.Equal(second.Id, order.SourceStagedImportId);
+    }
+
     private static StagedImport Stage(string key, int lineCount, string messageId, string attachment, string state)
     {
         var lines = new[]
@@ -71,6 +92,23 @@ public sealed class OrderMovementLifecycleTests
             })
         };
     }
+
+    private static StagedImport StageSingle(string key, string reference, string collectionDate, string deliveryDate, int pallets) => new()
+    {
+        EntityType = "order",
+        IdempotencyKey = key,
+        Source = "PowerAutomate/InfoMailbox",
+        PayloadJson = JsonSerializer.Serialize(new
+        {
+            customerCode = "AMAZON",
+            poNumber = reference,
+            collectionDate,
+            deliveryDate,
+            pallets,
+            sellerName = "APS Produce",
+            stallNumber = "Amazon delivery"
+        })
+    };
 
     private static ClaimsPrincipal Planner() => new(new ClaimsIdentity(
         new[] { new Claim(ClaimTypes.Name, "planner@lyonshaulage.com") }, "test"));

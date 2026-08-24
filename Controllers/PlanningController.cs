@@ -16,7 +16,7 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
     {
         try
         {
-            var query = db.TransportOrders.AsNoTracking().AsQueryable();
+            var query = db.TransportOrders.AsNoTracking().Where(order => order.Status != OrderStatus.Cancelled).AsQueryable();
             if (from is not null) query = query.Where(order => order.CollectionDate >= from);
             if (to is not null) query = query.Where(order => order.CollectionDate <= to);
             var primary = await query.OrderBy(order => order.CollectionDate).ThenBy(order => order.Reference).Take(1000).ToListAsync(ct);
@@ -26,6 +26,11 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
             return Ok(primary.OrderBy(order => order.CollectionDate).ThenBy(order => order.Reference).Take(1000).ToList());
         }
         catch (Exception exception) when (IsSchemaUnavailable(exception))
+        {
+            db.ChangeTracker.Clear();
+            return Ok(await PlanningRegisterStore.ReadOrdersAsync(db, from, to, ct));
+        }
+        catch (Exception) when (!ct.IsCancellationRequested)
         {
             db.ChangeTracker.Clear();
             return Ok(await PlanningRegisterStore.ReadOrdersAsync(db, from, to, ct));

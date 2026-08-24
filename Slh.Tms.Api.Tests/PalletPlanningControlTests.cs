@@ -91,6 +91,55 @@ public sealed class PalletPlanningControlTests : IClassFixture<CustomWebFactory>
         Assert.Equal(JsonValueKind.Null, order.GetProperty("palletType").ValueKind);
     }
 
+    [Fact]
+    public async Task Pending_review_register_order_does_not_appear_in_orders_to_plan()
+    {
+        var date = new DateOnly(2026, 9, 6);
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.StagedImports.Add(new StagedImport
+            {
+                EntityType = "order",
+                IdempotencyKey = $"pending-register-{Guid.NewGuid():N}",
+                Status = StagingStatus.PendingReview,
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    poNumber = "PENDING-REGISTER-ORDER",
+                    customerCode = "IFCO",
+                    collectionDate = date.ToString("yyyy-MM-dd"),
+                    deliveryDate = date.ToString("yyyy-MM-dd"),
+                    sellerName = "IFCO Glasshoughton",
+                    stallNumber = "Runcton",
+                    pallets = 26
+                })
+            });
+            db.StagedImports.Add(new StagedImport
+            {
+                EntityType = "order",
+                IdempotencyKey = $"promoted-register-{Guid.NewGuid():N}",
+                Status = StagingStatus.Promoted,
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    poNumber = "PROMOTED-REGISTER-ORDER",
+                    customerCode = "IFCO",
+                    collectionDate = date.ToString("yyyy-MM-dd"),
+                    deliveryDate = date.ToString("yyyy-MM-dd"),
+                    sellerName = "IFCO Glasshoughton",
+                    stallNumber = "Selsey",
+                    pallets = 26
+                })
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Read");
+        using var response = JsonDocument.Parse(await (await client.GetAsync($"/api/v1/orders?from={date:yyyy-MM-dd}&to={date:yyyy-MM-dd}")).Content.ReadAsStringAsync());
+        var references = response.RootElement.EnumerateArray().Select(x => x.GetProperty("reference").GetString()).ToList();
+        Assert.Contains("PROMOTED-REGISTER-ORDER", references);
+        Assert.DoesNotContain("PENDING-REGISTER-ORDER", references);
+    }
+
     private async Task<(Guid OrderId, Guid SourceLineId, Guid FirstLoadId, Guid SecondLoadId)> Seed()
     {
         using var scope = factory.Services.CreateScope();

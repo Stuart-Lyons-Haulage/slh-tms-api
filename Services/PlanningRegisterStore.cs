@@ -13,7 +13,8 @@ public static class PlanningRegisterStore
     public static async Task<List<TransportOrder>> ReadOrdersAsync(TmsDbContext db, DateOnly? from, DateOnly? to, CancellationToken ct)
     {
         var rows = await db.StagedImports.AsNoTracking()
-            .Where(x => (x.EntityType == "order" || x.EntityType == "register:order") && x.Status != StagingStatus.Rejected)
+            .Where(x => (x.EntityType == "order" || x.EntityType == "register:order") &&
+                (x.Status == StagingStatus.Approved || x.Status == StagingStatus.Promoted))
             .OrderByDescending(x => x.ReceivedAtUtc).Take(5000).ToListAsync(ct);
         var orders = new Dictionary<string, TransportOrder>(StringComparer.OrdinalIgnoreCase);
         foreach (var row in rows)

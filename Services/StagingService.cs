@@ -317,8 +317,12 @@ public sealed class StagingService(TmsDbContext db)
         }
         else
         {
-            if (existing.SourceStagedImportId is null) existing.SourceStagedImportId = item.Id;
-            existing.SourceMovementId ??= movement.Id;
+            existing.SourceStagedImportId = item.Id;
+            existing.SourceMovementId = movement.Id;
+            existing.CollectionDate = collectionDate;
+            if (DateOnly.TryParse(Text(payload, "deliveryDate"), out var parsedDelivery)) existing.DeliveryDate = parsedDelivery;
+            if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowStartUtc"), out var parsedWindowStart)) existing.DeliveryWindowStartUtc = parsedWindowStart;
+            if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowEndUtc"), out var parsedWindowEnd)) existing.DeliveryWindowEndUtc = parsedWindowEnd;
             existing.Pallets = IntOrNull(payload, "pallets") ?? existing.Pallets;
             existing.SellerName = Clip(siteAlignment.CollectionName ?? Text(payload, "sellerName") ?? existing.SellerName, 200);
             existing.MarketName = Clip(Text(payload, "marketName") ?? existing.MarketName, 80);
