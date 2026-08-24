@@ -42,6 +42,10 @@ public sealed class SpecialistMailboxOrderParser
         @"\bCollection\s+from\s+(?<from>.+?)\s+to\s+(?<to>.+?)\s+(?<date>\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)(?:\s*,\s*(?<ref>\d{5,}))?\s*$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    private static readonly Regex RouteTransferSubjectRegex = new(
+        @"^(?<from>[A-Z0-9 .&'()/-]{2,100}?)\s+to\s+(?<to>[A-Z0-9 .&'()/-]{2,100}?)\s+transfers?\s+for\s+collections?\s*[-–—:]?\s*(?<date>\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)(?:\s*,\s*(?<ref>\d{5,}))?\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     private static readonly Regex CoventDropRegex = new(
         @"^(?<name>[^\r\n-][^\r\n]{1,100}?)\s*-\s*(?<qty>\d{1,3})\s+pallets?\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.Multiline);
@@ -86,6 +90,10 @@ public sealed class SpecialistMailboxOrderParser
         var transfer = TransferSubjectRegex.Match(subject);
         if (transfer.Success)
             return ParseTransfer(request, transfer, body);
+
+        var routeTransfer = RouteTransferSubjectRegex.Match(subject);
+        if (routeTransfer.Success)
+            return ParseTransfer(request, routeTransfer, body);
 
         return null;
     }
@@ -286,7 +294,7 @@ public sealed class SpecialistMailboxOrderParser
             : StableEmailReference(request.MessageId);
         var pallets = FirstPalletQuantity(body);
         var combined = $"{request.Subject}\n{body}";
-        var customer = combined.Contains("IFCO", StringComparison.OrdinalIgnoreCase) ? "IFCO" : SenderCustomer(request.SenderAddress);
+        var customer = InferTransferCustomer(request, combined, collection, destination);
         var warnings = new List<string>();
         if (pallets is null) warnings.Add("Pallet quantity was not identified.");
         var reference = BuildReference(transportRef, destination);
@@ -616,5 +624,21 @@ public sealed class SpecialistMailboxOrderParser
         var stem = domain.Split('.').FirstOrDefault() ?? "EMAIL";
         var clean = new string(stem.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
         return string.IsNullOrWhiteSpace(clean) ? "EMAIL" : clean[..Math.Min(40, clean.Length)];
+    }
+
+    private static string InferTransferCustomer(MailboxEmailIntakeRequest request, string combined, string collection, string destination)
+    {
+        if (combined.Contains("IFCO", StringComparison.OrdinalIgnoreCase))
+            return "IFCO";
+
+        var route = $"{combined} {collection} {destination}";
+        if (route.Contains("NWF", StringComparison.OrdinalIgnoreCase) ||
+            route.Contains("Natures Way", StringComparison.OrdinalIgnoreCase) ||
+            route.Contains("Merston", StringComparison.OrdinalIgnoreCase) ||
+            route.Contains("Drayton", StringComparison.OrdinalIgnoreCase) ||
+            (request.SenderAddress ?? string.Empty).EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase))
+            return "NWF";
+
+        return SenderCustomer(request.SenderAddress);
     }
 }

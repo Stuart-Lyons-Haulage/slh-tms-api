@@ -69,6 +69,25 @@ public sealed class SpecialistMailboxOrderParserTests
     }
 
     [Fact]
+    public void RouteTransferSubject_ExtractsMerstonDraytonCollectionRoute()
+    {
+        var result = parser.TryParse(new MailboxEmailIntakeRequest(
+            "transfer-2", null, "info@lyonshaulage.com", "planner@example.com", "Planner",
+            "Merston to Drayton transfers for collections - 25-08-2026", DateTimeOffset.Parse("2026-08-24T14:00:00Z"),
+            "Test email for today's transfer collection import.", null, null, null));
+
+        var order = Assert.Single(result!.Orders);
+        Assert.Equal("NWF", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("Merston", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Drayton", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal("2026-08-25", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("2026-08-25", order.Payload.GetProperty("deliveryDate").GetString());
+        Assert.Equal("Collection transfer", order.Payload.GetProperty("jobType").GetString());
+        Assert.True(order.Payload.GetProperty("pallets").ValueKind is System.Text.Json.JsonValueKind.Null);
+        Assert.Contains("Pallet quantity was not identified.", order.Warnings);
+    }
+
+    [Fact]
     public void IfcoConfirmedCollectionsBody_CreatesCrateTrayCollectionRows()
     {
         var result = parser.TryParse(new MailboxEmailIntakeRequest(
