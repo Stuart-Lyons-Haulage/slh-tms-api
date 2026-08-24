@@ -88,6 +88,8 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<Driver>().HasIndex(x => x.EmployeeNumber).IsUnique();
         b.Entity<Trailer>().HasIndex(x => x.TrailerNumber).IsUnique();
         b.Entity<Site>().HasIndex(x => x.ExternalCode).IsUnique();
+        if (Database.ProviderName == "Microsoft.EntityFrameworkCore.SqlServer")
+            b.Entity<Site>().Ignore(x => x.OperationalRegion);
         b.Entity<MarketContact>().HasIndex(x => new { x.Market, x.Name }).IsUnique();
         b.Entity<FuelPrice>().HasIndex(x => new { x.WeekCommencing, x.Provider }).IsUnique();
         b.Entity<FuelPrice>().Property(x => x.PricePencePerLitre).HasPrecision(10, 2);
