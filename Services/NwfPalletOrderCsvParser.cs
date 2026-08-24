@@ -22,7 +22,7 @@ public sealed class NwfPalletOrderCsvParser
     {
         var candidates = (request.Attachments ?? [])
             .Where(item => item.IsInline != true
-                && !string.IsNullOrWhiteSpace(item.ContentBase64)
+                && !string.IsNullOrWhiteSpace(item.EffectiveContentBase64)
                 && string.Equals(Path.GetExtension(item.Name ?? string.Empty), ".csv", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
@@ -30,7 +30,7 @@ public sealed class NwfPalletOrderCsvParser
         {
             try
             {
-                var text = DecodeText(attachment.ContentBase64!);
+                var text = DecodeText(attachment.EffectiveContentBase64!);
                 var rows = ParseCsv(text);
                 if (rows.Count == 0) continue;
 

@@ -277,7 +277,7 @@ public sealed class DriverHoursComplianceController(
     private static bool? ReadNightOut(string? notes)
     {
         if (string.IsNullOrWhiteSpace(notes)) return null;
-        var parts = notes.Split(['|', '·', '\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var parts = notes.Split(new[] { '|', '·', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var value = parts.FirstOrDefault(x => x.StartsWith("Night out:", StringComparison.OrdinalIgnoreCase));
         if (value is null) return null;
         return value.EndsWith("Yes", StringComparison.OrdinalIgnoreCase) ? true : value.EndsWith("No", StringComparison.OrdinalIgnoreCase) ? false : null;

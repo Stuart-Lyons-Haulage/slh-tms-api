@@ -67,6 +67,38 @@ Stuart Lyons,19/08/2026,Drayton,Aldi,ALD20,Aldi SAWLEY Distribution Centre,DE72 
     }
 
     [Fact]
+    public void OutlookContentBytesAttachment_IsParsed()
+    {
+        const string csv = """
+Haulier Name,Requested Ship Date,04. Collection Site,Customer Name,DepotID,Depot Description,Delivery Address,Sales Order ID,CustomerRef,Pallet Name,PalletQty,PO REF
+Stuart Lyons,19/08/2026,Drayton,Aldi,ALD20,Aldi SAWLEY Distribution Centre,DE72 2HP,SO000367762,6511786146,IPP Euro,2,PO00499461
+""";
+
+        var request = new MailboxEmailIntakeRequest(
+            "message-content-bytes",
+            null,
+            "info@lyonshaulage.com",
+            "ShiftLogisticalPlanner@nwfltd.co.uk",
+            "Shift Logistical Planner",
+            "NWAY Stuart Lyons Transport Pallet Order Report 19/08/2026",
+            DateTimeOffset.Parse("2026-08-18T18:00:00Z"),
+            "Please see attached pallet order report.",
+            null,
+            null,
+            [new MailboxAttachmentRequest(
+                "NWAY PALLET ORDER REPORT SLH.csv",
+                "text/csv",
+                null,
+                false,
+                ContentBytes: Convert.ToBase64String(Encoding.UTF8.GetBytes(csv)))]);
+
+        var order = Assert.Single(parser.TryParse(request)!.Orders);
+
+        Assert.Equal("SO000367762", order.Payload.GetProperty("salesOrderId").GetString());
+        Assert.Equal(2, order.Payload.GetProperty("pallets").GetInt32());
+    }
+
+    [Fact]
     public void MissingPo_UsesSalesOrderOnlyAsFallbackAndFlagsReview()
     {
         const string csv = """

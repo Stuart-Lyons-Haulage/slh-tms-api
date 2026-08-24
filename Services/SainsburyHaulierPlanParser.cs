@@ -20,7 +20,7 @@ public sealed class SainsburyHaulierPlanParser
 
         var attachment = (request.Attachments ?? []).FirstOrDefault(item =>
             item.IsInline != true &&
-            !string.IsNullOrWhiteSpace(item.ContentBase64) &&
+            !string.IsNullOrWhiteSpace(item.EffectiveContentBase64) &&
             (item.Name ?? string.Empty).EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase));
 
         if (attachment is null)
@@ -33,7 +33,7 @@ public sealed class SainsburyHaulierPlanParser
 
         try
         {
-            var bytes = DecodeBase64(attachment.ContentBase64!);
+            var bytes = DecodeBase64(attachment.EffectiveContentBase64!);
             using var stream = new MemoryStream(bytes, writable: false);
             using var reader = ExcelReaderFactory.CreateReader(stream);
             var orders = new List<ParsedEmailOrder>();

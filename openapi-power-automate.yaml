@@ -136,6 +136,7 @@ paths:
     post:
       operationId: IntakeInfoMailboxEmail
       summary: Parse one complete Info mailbox email and stage identified orders for review
+      x-ms-visibility: important
       parameters:
         - name: body
           in: body
@@ -228,6 +229,7 @@ definitions:
       name: { type: string }
       contentType: { type: string }
       contentBase64: { type: string, description: Base64 content returned by Get attachment content }
+      contentBytes: { type: string, description: Base64 content returned by Outlook shared-mailbox attachment triggers }
       isInline: { type: boolean, default: false }
       contentId: { type: string }
       size: { type: integer, format: int64 }
