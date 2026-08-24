@@ -295,6 +295,7 @@ public sealed class StagingService(TmsDbContext db)
         if (!DateOnly.TryParse(collectionDateText, out var collectionDate)) throw new JsonException("Order payload requires a valid collectionDate.");
         var (movement, plannerReady) = await RecordOrderRevision(item, payload, reference, customerCode, ct);
         if (!plannerReady) return;
+        var siteAlignment = await OrderSiteMasterAlignment.ResolveAsync(db, payload, ct);
         TransportOrder? existing;
         try { existing = await db.TransportOrders.SingleOrDefaultAsync(order => order.Reference == reference, ct); }
         catch (Exception ex) when (ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase))
@@ -312,12 +313,18 @@ public sealed class StagingService(TmsDbContext db)
             DateTimeOffset? deliveryWindowEndUtc = null;
             if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowEndUtc"), out var parsedWindowEnd)) deliveryWindowEndUtc = parsedWindowEnd;
             Guid? sourceStagedImportId = db.Entry(item).State == EntityState.Detached ? null : item.Id;
-            db.TransportOrders.Add(new TransportOrder { SourceStagedImportId = sourceStagedImportId, SourceMovementId = movement.Id, Reference = ClipRequired(reference, 80), CustomerCode = ClipRequired(customerCode, 40), CollectionDate = collectionDate, DeliveryDate = deliveryDate, DeliveryWindowStartUtc = deliveryWindowStartUtc, DeliveryWindowEndUtc = deliveryWindowEndUtc, Pallets = IntOrNull(payload, "pallets"), SellerName = Clip(Text(payload, "sellerName"), 200), MarketName = Clip(Text(payload, "marketName"), 80), StallNumber = Clip(Text(payload, "stallNumber"), 200), DriverInstructions = Clip(Text(payload, "driverInstructions"), 1000), MapLink = Clip(Text(payload, "mapLink"), 1000) });
+            db.TransportOrders.Add(new TransportOrder { SourceStagedImportId = sourceStagedImportId, SourceMovementId = movement.Id, Reference = ClipRequired(reference, 80), CustomerCode = ClipRequired(customerCode, 40), CollectionDate = collectionDate, DeliveryDate = deliveryDate, DeliveryWindowStartUtc = deliveryWindowStartUtc, DeliveryWindowEndUtc = deliveryWindowEndUtc, Pallets = IntOrNull(payload, "pallets"), SellerName = Clip(siteAlignment.CollectionName ?? Text(payload, "sellerName"), 200), MarketName = Clip(Text(payload, "marketName"), 80), StallNumber = Clip(siteAlignment.DeliveryName ?? Text(payload, "stallNumber"), 200), DriverInstructions = Clip(siteAlignment.DriverInstructions ?? Text(payload, "driverInstructions"), 1000), MapLink = Clip(siteAlignment.DeliveryMapLink ?? Text(payload, "mapLink"), 1000) });
         }
         else
         {
             if (existing.SourceStagedImportId is null) existing.SourceStagedImportId = item.Id;
             existing.SourceMovementId ??= movement.Id;
+            existing.Pallets = IntOrNull(payload, "pallets") ?? existing.Pallets;
+            existing.SellerName = Clip(siteAlignment.CollectionName ?? Text(payload, "sellerName") ?? existing.SellerName, 200);
+            existing.MarketName = Clip(Text(payload, "marketName") ?? existing.MarketName, 80);
+            existing.StallNumber = Clip(siteAlignment.DeliveryName ?? Text(payload, "stallNumber") ?? existing.StallNumber, 200);
+            existing.DriverInstructions = Clip(siteAlignment.DriverInstructions ?? Text(payload, "driverInstructions") ?? existing.DriverInstructions, 1000);
+            existing.MapLink = Clip(siteAlignment.DeliveryMapLink ?? Text(payload, "mapLink") ?? existing.MapLink, 1000);
         }
     }
 
