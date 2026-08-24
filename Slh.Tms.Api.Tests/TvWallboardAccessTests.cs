@@ -1,3 +1,4 @@
+using System.Net;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
@@ -9,6 +10,7 @@ namespace Slh.Tms.Api.Tests;
 public sealed class TvWallboardAccessTests
 {
     private const string DisplayKey = "office-display-key-2026-08-20";
+    private const string TestEndpointKey = "test-tv-wallboard-key-20260824";
 
     [Fact]
     public void Configured_display_key_allows_wallboard_read()
@@ -40,6 +42,19 @@ public sealed class TvWallboardAccessTests
         };
 
         Assert.True(TvWallboardAccess.IsAllowed(context, Configuration(null)));
+    }
+
+    [Fact]
+    public async Task Tv_live_runs_accepts_legacy_wallboard_key()
+    {
+        await using var factory = new CustomWebFactory();
+        using var client = factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/v1/tv-display/live-runs?date=2026-08-24");
+        request.Headers.Add(TvWallboardAccess.HeaderName, TestEndpointKey);
+
+        using var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
     private static IConfiguration Configuration(string? displayKey) =>

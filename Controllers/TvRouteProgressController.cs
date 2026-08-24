@@ -24,6 +24,7 @@ public sealed class TvRouteProgressController(
 {
     private static readonly TimeSpan LiveTrackingThreshold = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan LiveRefreshBudget = TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan TachoEvidenceBudget = TimeSpan.FromSeconds(5);
 
     [HttpGet, AllowAnonymous]
     public async Task<IActionResult> Get(
@@ -66,7 +67,7 @@ public sealed class TvRouteProgressController(
                 liveStatuses.Select(status => status.VehicleIdentifier),
                 ct);
         var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles, ct);
-        var tachoEvidence = await RunTachoEvidenceResolver.ResolveAsync(db, tachoMaster, loads, day, logger, ct);
+        var tachoEvidence = await ResolveTachoEvidenceForTvAsync(loads, day, ct);
 
         var rows = new List<object>();
         foreach (var load in loads)
@@ -257,6 +258,30 @@ public sealed class TvRouteProgressController(
         }
 
         return (await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct), "SQL fallback");
+    }
+
+    private async Task<RunTachoEvidenceResult> ResolveTachoEvidenceForTvAsync(
+        IReadOnlyCollection<Load> loads,
+        DateOnly day,
+        CancellationToken ct)
+    {
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TachoEvidenceBudget);
+            return await RunTachoEvidenceResolver.ResolveAsync(db, tachoMaster, loads, day, logger, timeout.Token);
+        }
+        catch (OperationCanceledException exception) when (!ct.IsCancellationRequested)
+        {
+            db.ChangeTracker.Clear();
+            logger.LogWarning(
+                exception,
+                "TachoMaster TV evidence timed out; route-progress will keep tracking visible without tacho enrichment.");
+            return new RunTachoEvidenceResult(
+                new Dictionary<Guid, RunTachoEvidence>(),
+                false,
+                "TachoMaster evidence timed out on this TV refresh.");
+        }
     }
 
     private static decimal TruckPositionPercent(

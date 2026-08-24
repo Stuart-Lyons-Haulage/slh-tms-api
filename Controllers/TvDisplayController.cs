@@ -12,7 +12,7 @@ using Slh.Tms.Api.Services;
 namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/tv-display")]
-public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient maps) : ControllerBase
+public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient maps, IConfiguration configuration) : ControllerBase
 {
     private const int MaxLiveEtaCalculationsPerRefresh = 12;
     private static readonly TimeSpan MapEtaBudget = TimeSpan.FromSeconds(2);
@@ -84,7 +84,9 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
     [HttpGet("live-runs"), AllowAnonymous]
     public async Task<IActionResult> LiveRuns([FromHeader(Name = "X-TV-Display-Key")] string? displayKey, [FromQuery] DateOnly? date, CancellationToken ct)
     {
-        if (!await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct))
+        var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct);
+        var legacyKeyAllowed = TvWallboardAccess.IsAllowed(HttpContext, configuration);
+        if (!pairedKeyAllowed && !legacyKeyAllowed)
             return Unauthorized(new { message = "This TV display is not paired. Open the TV display page in the signed-in TMS to get a new pairing code." });
 
         var day = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
