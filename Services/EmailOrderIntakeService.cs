@@ -239,6 +239,11 @@ public sealed class EmailOrderIntakeService
         var destination = InferDestination(request.Subject, jobType);
         var pallets = ExtractInt(TotalPalletsRegex, body, "qty");
         var requestedTime = ExtractMatch(CollectionTimeRegex, body, "time")?.Replace('.', ':');
+        if (!HasEnoughBodyOrderEvidence(rawPo, collection, destination, pallets, requestedTime, jobType))
+        {
+            globalWarnings.Add("Email body contained a date but not enough order detail to stage a transport order.");
+            return null;
+        }
         var warnings = new List<string>();
         if (string.IsNullOrWhiteSpace(rawPo))
             warnings.Add("No customer PO/reference was found; a stable email reference was generated and should be checked before approval.");
@@ -289,6 +294,18 @@ public sealed class EmailOrderIntakeService
         };
 
         return new ParsedEmailOrder("body-1", naturalKey, JsonSerializer.SerializeToElement(payload), warnings);
+    }
+
+    private static bool HasEnoughBodyOrderEvidence(string? rawPo, string? collection, string? destination, int? pallets, string? requestedTime, string jobType)
+    {
+        var hasReference = !string.IsNullOrWhiteSpace(rawPo);
+        var hasCollection = !string.IsNullOrWhiteSpace(collection);
+        var hasDestination = !string.IsNullOrWhiteSpace(destination);
+        var hasQuantity = pallets is > 0;
+        var hasTime = !string.IsNullOrWhiteSpace(requestedTime);
+        if (jobType.Contains("Tray", StringComparison.OrdinalIgnoreCase))
+            return hasReference && (hasCollection || hasDestination);
+        return hasQuantity && (hasReference || hasCollection || hasDestination || hasTime);
     }
 
     private static bool IsBookingHeader(object?[] row)

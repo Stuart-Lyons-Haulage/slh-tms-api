@@ -52,6 +52,19 @@ public sealed class EmailOrderIntakeServiceTests
     }
 
     [Fact]
+    public void DatedBodyWithoutOrderFields_IsNotStagedAsZeroPalletFallback()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-vague", null, "info@lyonshaulage.com", "loads@example.com", "Loads",
+            "Available work 26/08", DateTimeOffset.Parse("2026-08-24T09:00:00Z"),
+            "Can you look at these from tomorrow. Pallets may be exchanged.", null, null, null));
+
+        Assert.Empty(result.Orders);
+        Assert.Contains("No transport order", result.IgnoredReason);
+        Assert.Contains(result.Warnings, warning => warning.Contains("not enough order detail", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void NightShunting_IsNotMisclassifiedAsOrder()
     {
         var result = service.Parse(new MailboxEmailIntakeRequest(
