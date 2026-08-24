@@ -53,7 +53,8 @@ public sealed class OperationalOrderMaintenanceController(
             order.MarketName = depotId;
             order.StallNumber = destination;
             order.DriverInstructions = BuildNotes(collectionSite, depotId, destination, deliveryAddress,
-                Clip(request.CustomerRef, 200), Clip(request.PoRef, 200), Clip(request.PalletName, 200), Clip(request.Notes, 1000));
+                Clip(request.CustomerRef, 200), Clip(request.PoRef, 200), Clip(request.UnitType, 80),
+                Clip(request.PalletName, 200), Clip(request.Notes, 1000));
             order.MapLink = string.IsNullOrWhiteSpace(deliveryAddress)
                 ? Clip(request.MapLink, 1000)
                 : $"https://www.google.com/maps/search/?api=1&query={Uri.EscapeDataString(deliveryAddress)}";
@@ -88,7 +89,8 @@ public sealed class OperationalOrderMaintenanceController(
                 order.MarketName = depotId;
                 order.StallNumber = destination;
                 order.DriverInstructions = BuildNotes(collectionSite, depotId, destination, deliveryAddress,
-                    Clip(request.CustomerRef, 200), Clip(request.PoRef, 200), Clip(request.PalletName, 200), Clip(request.Notes, 1000));
+                    Clip(request.CustomerRef, 200), Clip(request.PoRef, 200), Clip(request.UnitType, 80),
+                    Clip(request.PalletName, 200), Clip(request.Notes, 1000));
                 order.MapLink = string.IsNullOrWhiteSpace(deliveryAddress)
                     ? Clip(request.MapLink, 1000)
                     : $"https://www.google.com/maps/search/?api=1&query={Uri.EscapeDataString(deliveryAddress)}";
@@ -128,6 +130,8 @@ public sealed class OperationalOrderMaintenanceController(
         Set(payload, "deliveryAddress", Clip(request.DeliveryAddress, 500));
         Set(payload, "customerRef", Clip(request.CustomerRef, 200));
         Set(payload, "poRef", Clip(request.PoRef, 200));
+        Set(payload, "unitType", Clip(request.UnitType, 80));
+        Set(payload, "palletType", Clip(request.UnitType, 80));
         Set(payload, "palletName", Clip(request.PalletName, 200));
         Set(payload, "notes", Clip(request.Notes, 1000));
         Set(payload, "mapLink", string.IsNullOrWhiteSpace(request.DeliveryAddress)
@@ -154,13 +158,13 @@ public sealed class OperationalOrderMaintenanceController(
     }
 
     private static string BuildNotes(string? collectionSite, string? depotId, string? destination, string? deliveryAddress,
-        string? customerRef, string? poRef, string? palletName, string? notes)
+        string? customerRef, string? poRef, string? unitType, string? palletName, string? notes)
     {
         var value = string.Join(" · ", new[]
         {
             Tag("Collection site", collectionSite), Tag("Depot ID", depotId), Tag("Depot", destination),
             Tag("Delivery address", deliveryAddress), Tag("Customer ref", customerRef), Tag("PO ref", poRef),
-            Tag("Pallet", palletName), notes
+            Tag("Unit type", unitType), Tag("Pallet", palletName), notes
         }.Where(item => !string.IsNullOrWhiteSpace(item)));
         return value.Length <= 1000 ? value : value[..1000];
     }
@@ -191,6 +195,7 @@ public sealed record OperationalOrderUpdateRequest(
     string? DeliveryAddress,
     string? CustomerRef,
     string? PoRef,
+    string? UnitType,
     string? PalletName,
     string? Notes,
     string? MapLink);

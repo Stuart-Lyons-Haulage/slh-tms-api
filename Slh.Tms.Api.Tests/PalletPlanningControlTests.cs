@@ -46,6 +46,51 @@ public sealed class PalletPlanningControlTests : IClassFixture<CustomWebFactory>
         Assert.DoesNotContain(db.StagedImports, x => x.EntityType == "planningpalletallocation" && x.PayloadJson.Contains(seeded.SecondLoadId.ToString(), StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public async Task Pending_review_order_payload_does_not_enrich_planner_orders()
+    {
+        var date = new DateOnly(2026, 8, 24);
+        var reference = $"GH-{Guid.NewGuid():N}"[..18];
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.TransportOrders.Add(new TransportOrder
+            {
+                Reference = reference,
+                CustomerCode = "GH",
+                CollectionDate = date,
+                Pallets = 4,
+                SellerName = "Approved collection",
+                StallNumber = "Approved destination"
+            });
+            db.StagedImports.Add(new StagedImport
+            {
+                EntityType = "order",
+                IdempotencyKey = $"pending-gh-{Guid.NewGuid():N}",
+                Status = StagingStatus.PendingReview,
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    poNumber = reference,
+                    customerCode = "GH",
+                    collectionDate = "2026-08-24",
+                    collectionSite = "Waiting approval collection",
+                    destination = "Waiting approval destination",
+                    pallets = 99,
+                    unitType = "Trays"
+                })
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Read");
+        using var response = JsonDocument.Parse(await (await client.GetAsync("/api/v1/planning-control/pallets?date=2026-08-24")).Content.ReadAsStringAsync());
+        var order = Assert.Single(response.RootElement.GetProperty("orders").EnumerateArray().Where(x => x.GetProperty("reference").GetString() == reference));
+        Assert.Equal("Approved collection", order.GetProperty("collection").GetString());
+        Assert.Equal("Approved destination", order.GetProperty("destination").GetString());
+        Assert.Equal(4, order.GetProperty("orderedPallets").GetInt32());
+        Assert.Equal(JsonValueKind.Null, order.GetProperty("palletType").ValueKind);
+    }
+
     private async Task<(Guid OrderId, Guid SourceLineId, Guid FirstLoadId, Guid SecondLoadId)> Seed()
     {
         using var scope = factory.Services.CreateScope();

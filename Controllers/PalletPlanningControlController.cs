@@ -283,7 +283,8 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
     {
         var result = new Dictionary<string, OrderDetail>(StringComparer.OrdinalIgnoreCase);
         var rows = await db.StagedImports.AsNoTracking()
-            .Where(x => (x.EntityType == "order" || x.EntityType == "register:order") && x.Status != StagingStatus.Rejected)
+            .Where(x => (x.EntityType == "order" || x.EntityType == "register:order") &&
+                (x.Status == StagingStatus.Approved || x.Status == StagingStatus.Promoted))
             .OrderByDescending(x => x.ReviewedAtUtc ?? x.ReceivedAtUtc).ThenByDescending(x => x.ReceivedAtUtc).Take(8000).ToListAsync(ct);
         foreach (var row in rows)
         {
@@ -298,7 +299,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db) : Controlle
                 var destination = Text(root, "deliveryLocation", "deliverySite", "delivery", "destination", "depot", "stallNumber");
                 var group = Text(root, "planningGroup", "palletOrderGroup", "collectionGroup");
                 var temperature = Text(root, "temperature", "temperatureC", "temp", "temperatureRequirement") ?? Tagged(Text(root, "driverInstructions", "notes"), "Temperature");
-                var palletType = Text(root, "palletType", "palletName", "palletFormat", "pallet");
+                var palletType = Text(root, "unitType", "capacityType", "palletType", "palletName", "palletFormat", "pallet");
                 var pallets = Int(root, "pallets", "palletQty", "palletQuantity", "quantity");
                 var amended = row.ReviewNote?.Contains("Amended from Manage Jobs", StringComparison.OrdinalIgnoreCase) == true;
                 result[Normalise(reference)] = new OrderDetail(reference, collection, destination, group, temperature, palletType, pallets, row.Source, row.ReviewedAtUtc ?? row.ReceivedAtUtc, amended);
