@@ -10,7 +10,7 @@ using System.Text.RegularExpressions;
 namespace Slh.Tms.Api.Controllers;
 [ApiController, Route("api/v1")]
 [Authorize]
-public sealed class LookupsController(TmsDbContext db) : ControllerBase
+public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController> logger) : ControllerBase
 {
     [HttpGet("customers")] public async Task<IActionResult> Customers([FromQuery] string? q, CancellationToken ct) => Ok(await db.Customers.AsNoTracking().Where(x => x.Active && (q == null || x.Code.Contains(q) || x.Name.Contains(q))).OrderBy(x => x.Name).Take(5000).ToListAsync(ct));
     [HttpGet("customer-contacts")] public async Task<IActionResult> CustomerContacts([FromQuery] string? q, CancellationToken ct) => Ok(await db.CustomerContacts.AsNoTracking().Where(x => x.Active && (q == null || x.CustomerCode.Contains(q) || x.Name.Contains(q) || (x.Email != null && x.Email.Contains(q)))).OrderBy(x => x.CustomerCode).ThenBy(x => x.Name).Take(5000).ToListAsync(ct));
@@ -28,8 +28,27 @@ public sealed class LookupsController(TmsDbContext db) : ControllerBase
     [HttpGet("trailers")] public async Task<IActionResult> Trailers([FromQuery] string? q, CancellationToken ct) => Ok(await db.Trailers.AsNoTracking().Where(x => x.Active && (q == null || x.TrailerNumber.Contains(q) || (x.Type != null && x.Type.Contains(q)))).OrderBy(x => x.TrailerNumber).Take(5000).ToListAsync(ct));
     [HttpGet("sites")] public async Task<IActionResult> Sites([FromQuery] string? q, CancellationToken ct)
     {
-        var rows = await db.Sites.AsNoTracking().Where(x => x.Active && (q == null || x.Name.Contains(q) || (x.DriverTextName != null && x.DriverTextName.Contains(q)))).OrderBy(x => x.Name).Take(5000).ToListAsync(ct);
-        await MasterDetailStore.EnrichSitesAsync(db, rows, ct);
+        List<Site> rows;
+        try
+        {
+            rows = await db.Sites.AsNoTracking().Where(x => x.Active && (q == null || x.Name.Contains(q) || (x.DriverTextName != null && x.DriverTextName.Contains(q)))).OrderBy(x => x.Name).Take(5000).ToListAsync(ct);
+        }
+        catch (Exception ex) when (IsLookupSchemaUnavailable(ex))
+        {
+            logger.LogWarning(ex, "Site lookup table is unavailable; returning an empty site list so live planning can continue.");
+            db.ChangeTracker.Clear();
+            return Ok(Array.Empty<Site>());
+        }
+
+        try
+        {
+            await MasterDetailStore.EnrichSitesAsync(db, rows, ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(ex, "Site lookup detail enrichment failed; returning base site records so live planning can continue.");
+            db.ChangeTracker.Clear();
+        }
         return Ok(rows);
     }
     [HttpGet("market-contacts")] public async Task<IActionResult> MarketContacts([FromQuery] string? q, CancellationToken ct)
@@ -137,6 +156,12 @@ public sealed class LookupsController(TmsDbContext db) : ControllerBase
 
     private static string? Clip(string? value, int maxLength) => string.IsNullOrWhiteSpace(value) ? null : value.Trim().Length <= maxLength ? value.Trim() : value.Trim()[..maxLength];
     private static string ClipRequired(string value, int maxLength) => value.Trim().Length <= maxLength ? value.Trim() : value.Trim()[..maxLength];
+    private static bool IsLookupSchemaUnavailable(Exception exception)
+    {
+        var message = exception.GetBaseException().Message;
+        return message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
+    }
     private static string CanonicalMarket(string value)
     {
         var normal = new string(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());

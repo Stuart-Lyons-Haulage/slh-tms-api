@@ -68,7 +68,10 @@ public static class MasterDetailStore
     public static async Task EnrichSitesAsync(TmsDbContext db, IReadOnlyCollection<Site> sites, CancellationToken ct)
     {
         if (sites.Count == 0) return;
-        var byCode = sites.ToDictionary(site => NormaliseKey(site.ExternalCode), StringComparer.OrdinalIgnoreCase);
+        var byCode = sites
+            .Where(site => !string.IsNullOrWhiteSpace(site.ExternalCode))
+            .GroupBy(site => NormaliseKey(site.ExternalCode), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
         var rows = await db.StagedImports.AsNoTracking().Where(item => item.EntityType == SiteType && item.Status == StagingStatus.Promoted)
             .OrderByDescending(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc).Take(5000).ToListAsync(ct);
         var applied = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -81,14 +84,17 @@ public static class MasterDetailStore
                 var code = Text(payload, "externalCode") ?? Text(payload, "siteCode");
                 if (string.IsNullOrWhiteSpace(code)) continue;
                 var normalised = NormaliseKey(code);
-                if (!applied.Add(normalised) || !byCode.TryGetValue(normalised, out var site)) continue;
-                site.Aliases = Text(payload, "aliases");
-                site.CustomField1 = Text(payload, "customField1");
-                site.CustomField2 = Text(payload, "customField2");
-                site.CustomField3 = Text(payload, "customField3");
-                site.Latitude = Decimal(payload, "latitude");
-                site.Longitude = Decimal(payload, "longitude");
-                site.OperationalRegion = Text(payload, "operationalRegion") ?? Text(payload, "region") ?? site.OperationalRegion;
+                if (!applied.Add(normalised) || !byCode.TryGetValue(normalised, out var matchingSites)) continue;
+                foreach (var site in matchingSites)
+                {
+                    site.Aliases = Text(payload, "aliases");
+                    site.CustomField1 = Text(payload, "customField1");
+                    site.CustomField2 = Text(payload, "customField2");
+                    site.CustomField3 = Text(payload, "customField3");
+                    site.Latitude = Decimal(payload, "latitude");
+                    site.Longitude = Decimal(payload, "longitude");
+                    site.OperationalRegion = Text(payload, "operationalRegion") ?? Text(payload, "region") ?? site.OperationalRegion;
+                }
             }
             catch (JsonException) { }
         }

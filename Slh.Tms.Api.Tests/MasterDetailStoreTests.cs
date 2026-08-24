@@ -70,6 +70,29 @@ public sealed class MasterDetailStoreTests
         Assert.Equal(-0.127758m, enriched.Longitude);
     }
 
+    [Fact]
+    public async Task DuplicateSiteCodesDoNotBreakLookupEnrichment()
+    {
+        await using var db = CreateDb();
+        db.Sites.AddRange(
+            new Site { ExternalCode = "DUP", Name = "Duplicate Depot A" },
+            new Site { ExternalCode = "DUP", Name = "Duplicate Depot B" });
+        await db.SaveChangesAsync();
+        await MasterDetailStore.SaveAsync(db, "site", "DUP", """{"externalCode":"DUP","aliases":"Shared depot","latitude":52.1,"longitude":-1.2}""", "test", "tester", CancellationToken.None);
+
+        db.ChangeTracker.Clear();
+        var rows = await db.Sites.AsNoTracking().OrderBy(site => site.Name).ToListAsync();
+        await MasterDetailStore.EnrichSitesAsync(db, rows, CancellationToken.None);
+
+        Assert.Equal(2, rows.Count);
+        Assert.All(rows, site =>
+        {
+            Assert.Equal("Shared depot", site.Aliases);
+            Assert.Equal(52.1m, site.Latitude);
+            Assert.Equal(-1.2m, site.Longitude);
+        });
+    }
+
     private static TmsDbContext CreateDb()
     {
         var options = new DbContextOptionsBuilder<TmsDbContext>().UseInMemoryDatabase($"master-detail-{Guid.NewGuid()}").Options;
