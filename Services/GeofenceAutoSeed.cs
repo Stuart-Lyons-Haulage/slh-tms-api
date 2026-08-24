@@ -7,6 +7,13 @@ namespace Slh.Tms.Api.Services;
 public static class GeofenceAutoSeed
 {
     private static readonly SemaphoreSlim Gate = new(1, 1);
+    private const int SupplementalFenceCount = 3;
+    private static readonly string[] SupplementalFenceNames =
+    [
+        "Natures Way Foods Selsey",
+        "Natures Way Foods Runcton",
+        "Natures Way Foods Drayton"
+    ];
 
     public static async Task<GeofenceAutoSeedResult> EnsureAsync(TmsDbContext db, CancellationToken ct)
     {
@@ -14,13 +21,13 @@ public static class GeofenceAutoSeed
         await GeofenceRunProgression.EnsureSchemaAsync(db, ct);
 
         var active = await db.SiteGeofences.AsNoTracking().CountAsync(x => x.Active, ct);
-        if (active > 0) return new GeofenceAutoSeedResult(false, active, 0, 0);
+        if (await IsCompleteAsync(db, active, ct)) return new GeofenceAutoSeedResult(false, active, 0, 0);
 
         await Gate.WaitAsync(ct);
         try
         {
             active = await db.SiteGeofences.AsNoTracking().CountAsync(x => x.Active, ct);
-            if (active > 0) return new GeofenceAutoSeedResult(false, active, 0, 0);
+            if (await IsCompleteAsync(db, active, ct)) return new GeofenceAutoSeedResult(false, active, 0, 0);
 
             using var document = JsonDocument.Parse(GeofenceSeedPayload.Json);
             var inserted = 0;
@@ -63,6 +70,21 @@ public static class GeofenceAutoSeed
             Gate.Release();
         }
     }
+
+    private static async Task<bool> IsCompleteAsync(TmsDbContext db, int active, CancellationToken ct)
+    {
+        if (active < OperationalGeofencePayload.ExpectedFenceCount + SupplementalFenceCount) return false;
+        var required = SupplementalFenceNames.Select(Normalize).ToList();
+        var present = await db.SiteGeofences.AsNoTracking()
+            .Where(x => x.Active && required.Contains(x.NormalizedName))
+            .Select(x => x.NormalizedName)
+            .Distinct()
+            .CountAsync(ct);
+        return present == SupplementalFenceNames.Length;
+    }
+
+    private static string Normalize(string value) =>
+        new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     private static string? NullableText(JsonElement element, string property) =>
         element.TryGetProperty(property, out var value) && value.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined ? value.ToString() : null;
