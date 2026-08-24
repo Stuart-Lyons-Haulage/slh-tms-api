@@ -124,7 +124,7 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
         IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> statuses;
         try
         {
-            statuses = await tachoMaster.GetAllDriverStatusesByVehicleAsync(load.PlanningDate, ct);
+            statuses = await tachoMaster.GetLiveDriverStatusesByVehicleAsync(load.PlanningDate, ct);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -135,13 +135,15 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
         var vehicleAliases = aliases.TryGetValue(vehicle.Id, out var knownAliases)
             ? knownAliases
             : ExecutionIdentityResolver.VehicleAliasVariants(vehicle.Registration).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var tacho = ExecutionIdentityResolver.MatchTachoForDriver(vehicleAliases, driver, statuses);
+        var tacho = ExecutionIdentityResolver.MatchLiveDriverIdentityForVehicle(vehicleAliases, driver, statuses);
         if (tacho is null)
-            return Blocked(minutes, 0, "No live TachoMaster duty was matched to this driver and vehicle. Confirm the driver has signed on before dispatch.");
+            return Blocked(minutes, 0, "No live driver card, Falcon driver identity or TachoMaster duty was matched to this driver and vehicle. Confirm the driver has signed on before dispatch.");
+        if (!ExecutionIdentityResolver.DriverMatches(driver, tacho))
+            return Blocked(minutes, 0, $"Live card/driver evidence is present for {tacho.DriverName}, but it does not match the planned driver. Correct the allocation before dispatch.", tacho);
 
         var breakMinutes = RequiredBreakMinutes(tacho, minutes);
         if (tacho.DriveAvailableTodayMinutes is not int driveAvailable)
-            return Blocked(minutes, breakMinutes, $"TachoMaster matched {tacho.DriverName}, but remaining drive time is not currently available. Dispatch has been stopped until hours are visible.");
+            return Blocked(minutes, breakMinutes, $"{IdentitySource(tacho)} confirms {tacho.DriverName}, but remaining drive time is not currently available. Dispatch has been stopped until hours are visible.");
 
         if (minutes > driveAvailable)
             return Blocked(minutes, breakMinutes, $"This run needs about {minutes} minutes driving, but TachoMaster shows {driveAvailable} minutes available today for {tacho.DriverName}. Re-plan before dispatch.", tacho);
@@ -152,10 +154,13 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
 
         var status = breakMinutes > 0 ? "BreakRequired" : "Ready";
         var explanation = breakMinutes > 0
-            ? $"TachoMaster confirms {tacho.DriverName} has {driveAvailable} driving minutes available. Dispatch can proceed and the ETA includes a {breakMinutes} minute statutory break."
-            : $"TachoMaster confirms {tacho.DriverName} has {driveAvailable} driving minutes available. Dispatch can proceed.";
+            ? $"{IdentitySource(tacho)} confirms {tacho.DriverName} has {driveAvailable} driving minutes available. Dispatch can proceed and the ETA includes a {breakMinutes} minute statutory break."
+            : $"{IdentitySource(tacho)} confirms {tacho.DriverName} has {driveAvailable} driving minutes available. Dispatch can proceed.";
         return new(true, status, explanation, minutes, breakMinutes, tacho.DriverName, tacho.VehicleCode, tacho.DutyStartUtc, tacho.DriveAvailableTodayMinutes, tacho.WorkAvailableWeekMinutes);
     }
+
+    private static string IdentitySource(TachoVehicleDriverStatus tacho)
+        => tacho.EvidenceSource == "FalconLiveCard" ? "Falcon live card evidence with TachoMaster profile metrics" : "TachoMaster";
 
     private static int RequiredBreakMinutes(TachoVehicleDriverStatus tacho, int routeDrivingMinutes)
     {

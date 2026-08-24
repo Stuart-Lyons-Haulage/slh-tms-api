@@ -142,7 +142,7 @@ public sealed class TachoMasterClient
             if (status is not null) result[vehicle] = status;
         }
  
-        var falconDrivers = await TryGetFalconDriverStatusesAsync(memberList, cancellationToken);
+        var falconDrivers = await TryGetFalconDriverStatusesAsync(memberList, metrics, cancellationToken);
         var falconOnly = 0;
         var overlaps = 0;
         var mismatches = 0;
@@ -194,6 +194,42 @@ public sealed class TachoMasterClient
 
         return result;
     }
+
+    public async Task<IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>> GetLiveDriverStatusesByVehicleAsync(
+        DateOnly date,
+        CancellationToken cancellationToken = default)
+    {
+        if (!options.IsConfigured) return new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
+
+        var (duties, members, metrics, memberList) = await LoadDutyContextAsync(date, cancellationToken);
+        var result = new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
+        foreach (var (vehicle, vehicleDuties) in OpenDuties(duties))
+        {
+            var statuses = vehicleDuties
+                .Select(duty => duty.MemCode)
+                .Distinct()
+                .Select(memberCode => BuildStatus(vehicle, memberCode, vehicleDuties, members, metrics))
+                .Where(status => status is not null)
+                .Select(status => status!)
+                .ToList();
+            if (statuses.Count > 0) result[vehicle] = statuses;
+        }
+
+        var falconDrivers = await TryGetFalconDriverStatusesAsync(memberList, metrics, cancellationToken);
+        foreach (var (vehicle, falcon) in falconDrivers)
+        {
+            if (!result.TryGetValue(vehicle, out var existing))
+            {
+                result[vehicle] = new List<TachoVehicleDriverStatus> { falcon };
+                continue;
+            }
+
+            if (!existing.Any(status => SameIdentity(status, falcon)))
+                result[vehicle] = existing.Append(falcon).ToList();
+        }
+
+        return result;
+    }
  
     public async Task<IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>> GetAllDriverStatusesByVehicleAsync(DateOnly date, CancellationToken cancellationToken = default)
     {
@@ -213,7 +249,7 @@ public sealed class TachoMasterClient
             if (statuses.Count > 0) result[vehicle] = statuses;
         }
  
-        var falconDrivers = await TryGetFalconDriverStatusesAsync(memberList, cancellationToken);
+        var falconDrivers = await TryGetFalconDriverStatusesAsync(memberList, metrics, cancellationToken);
         foreach (var (vehicle, falcon) in falconDrivers)
         {
             if (!result.TryGetValue(vehicle, out var existing))
@@ -288,7 +324,8 @@ public sealed class TachoMasterClient
             metric?.DriveAvailableFortnight,
             metric?.LongDaysWorkedThisWeek,
             metric?.ShortDailyRestTakenThisWeek,
-            metric?.WorkAvaiableWeek);
+            metric?.WorkAvaiableWeek,
+            "TachoMasterDuty");
     }
 
     private static Dictionary<string, List<TachoDuty>> OpenDuties(Dictionary<string, List<TachoDuty>> dutiesByVehicle)
@@ -301,7 +338,10 @@ public sealed class TachoMasterClient
             .Where(pair => pair.Duties.Count > 0)
             .ToDictionary(pair => pair.Key, pair => pair.Duties);
  
-    private async Task<IReadOnlyDictionary<string, TachoVehicleDriverStatus>> TryGetFalconDriverStatusesAsync(IReadOnlyList<TachoMember> members, CancellationToken cancellationToken)
+    private async Task<IReadOnlyDictionary<string, TachoVehicleDriverStatus>> TryGetFalconDriverStatusesAsync(
+        IReadOnlyList<TachoMember> members,
+        IReadOnlyDictionary<int, TachoMemberMetric> metrics,
+        CancellationToken cancellationToken)
     {
         if (dotTrackingClient is null) return new Dictionary<string, TachoVehicleDriverStatus>();
         try
@@ -321,8 +361,13 @@ public sealed class TachoMasterClient
             foreach (var record in records)
             {
                 var member = FindMemberByCard(members, record.DriverCardNumber);
-                var resolvedName = !string.IsNullOrWhiteSpace(record.DriverName) ? record.DriverName!.Trim() : member is null ? null : DriverName(member);
+                var resolvedName = !string.IsNullOrWhiteSpace(record.DriverName)
+                    ? record.DriverName!.Trim()
+                    : member is null
+                        ? string.IsNullOrWhiteSpace(record.DriverCardNumber) ? null : "Driver card observed"
+                        : DriverName(member);
                 if (string.IsNullOrWhiteSpace(resolvedName)) continue;
+                var metric = member is null || !metrics.TryGetValue(member.MemCode, out var matchedMetric) ? null : matchedMetric;
  
                 var vehicle = NormaliseIdentifier(record.VehicleIdentifier);
                 result[vehicle] = new TachoVehicleDriverStatus(
@@ -334,7 +379,17 @@ public sealed class TachoMasterClient
                     record.EventTimeUtc,
                     null,
                     0, 0, 0, 0, 0,
-                    null, null, null, null, null, null, null, null, null, null);
+                    null,
+                    metric?.DateTimeWhenValid,
+                    metric?.DailyDriverPeriodsAvaiable,
+                    metric?.DriveAvailableToday,
+                    metric?.DriveAvailableTomorrow,
+                    metric?.DriveAvailableWeek,
+                    metric?.DriveAvailableFortnight,
+                    metric?.LongDaysWorkedThisWeek,
+                    metric?.ShortDailyRestTakenThisWeek,
+                    metric?.WorkAvaiableWeek,
+                    "FalconLiveCard");
             }
  
             return result;
@@ -615,7 +670,8 @@ public sealed record TachoVehicleDriverStatus(
     int? DriveAvailableFortnightMinutes,
     int? LongDaysWorkedThisWeek,
     int? ShortDailyRestTakenThisWeek,
-    int? WorkAvailableWeekMinutes);
+    int? WorkAvailableWeekMinutes,
+    string EvidenceSource = "TachoMasterDuty");
  
 public sealed record TachoDriverDutyStatus(
     string VehicleCode,

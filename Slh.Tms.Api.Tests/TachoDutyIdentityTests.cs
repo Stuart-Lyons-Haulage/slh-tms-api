@@ -58,6 +58,32 @@ public sealed class TachoDutyIdentityTests
             ExecutionIdentityResolver.VehicleAliasVariants("AB12CDE"), driver, statuses);
 
         Assert.Null(match);
+
+        var liveIdentity = ExecutionIdentityResolver.MatchLiveDriverIdentityForVehicle(
+            ExecutionIdentityResolver.VehicleAliasVariants("AB12CDE"), driver, statuses);
+
+        Assert.Same(falconOnly, liveIdentity);
+    }
+
+    [Fact]
+    public void Falcon_card_with_profile_hours_can_support_eta_assessment_without_claiming_duty()
+    {
+        var driver = new Driver { EmployeeNumber = "1234", DisplayName = "Joe Bloggs" };
+        var falconCard = Duty("AB12CDE", 77, "Joe Bloggs", "UK12345678901234", "1234", 300) with { EvidenceSource = "FalconLiveCard" };
+        var statuses = new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["AB12CDE"] = new List<TachoVehicleDriverStatus> { falconCard }
+        };
+
+        var legalDuty = ExecutionIdentityResolver.MatchTachoForDriver(
+            ExecutionIdentityResolver.VehicleAliasVariants("AB12CDE"), driver, statuses);
+        var liveIdentity = ExecutionIdentityResolver.MatchLiveDriverIdentityForVehicle(
+            ExecutionIdentityResolver.VehicleAliasVariants("AB12CDE"), driver, statuses);
+        var assessment = OperationsController.TachoAssessment(liveIdentity, 90, 0);
+
+        Assert.Null(legalDuty);
+        Assert.Same(falconCard, liveIdentity);
+        Assert.Equal("CardConfirmedWithinDriveTime", assessment.Status);
     }
 
     private static TachoVehicleDriverStatus Duty(

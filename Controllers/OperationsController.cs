@@ -62,7 +62,7 @@ public sealed class OperationsController(
         }
         var statuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
         IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> tachoStatuses = new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
-        try { tachoStatuses = await tachoMaster.GetOpenDriverStatusesByVehicleAsync(planningDate, ct); }
+        try { tachoStatuses = await tachoMaster.GetLiveDriverStatusesByVehicleAsync(planningDate, ct); }
         catch (Exception exception) when (exception is not OperationCanceledException) { logger.LogWarning(exception, "TachoMaster data was unavailable for tacho-aware ETA calculations."); }
  
         EmbeddedGeofenceSnapshot? geofence = null;
@@ -90,7 +90,7 @@ public sealed class OperationsController(
                 ? (DateTimeOffset?)null
                 : live.LastReceivedAtUtc >= live.LastEventTimeUtc ? live.LastReceivedAtUtc : live.LastEventTimeUtc;
             var driver = load.DriverId is Guid driverId && drivers.TryGetValue(driverId, out var matchedDriver) ? matchedDriver : null;
-            var tacho = vehicle is null ? null : ExecutionIdentityResolver.MatchTachoForDriver(aliases, driver, tachoStatuses);
+            var tacho = vehicle is null ? null : ExecutionIdentityResolver.MatchLiveDriverIdentityForVehicle(aliases, driver, tachoStatuses);
             var visits = geofence?.Visits.Where(visit => visit.LoadId == load.Id).OrderBy(visit => visit.EnteredAtUtc).ToList() ?? [];
             var completedStopIds = geofence is null ? new HashSet<Guid>() : GeofencePlanningMatch.CompletedStopIds(load, visits);
  
@@ -241,13 +241,17 @@ public sealed class OperationsController(
  
     internal static (string Status, string Explanation) TachoAssessment(TachoVehicleDriverStatus? tacho, double routeDrivingMinutes, int breakMinutes)
     {
-        if (tacho is null) return ("Unavailable", "No current TachoMaster duty was matched; verify the driver before promising this ETA.");
+        if (tacho is null) return ("Unavailable", "No live driver card, Falcon driver identity or current TachoMaster duty was matched; verify the driver before promising this ETA.");
+        if (tacho.EvidenceSource == "FalconLiveCard" && tacho.DriveAvailableTodayMinutes is null)
+            return ("CardConfirmedHoursUnavailable", $"Falcon confirms {tacho.DriverName} is in the vehicle, but TachoMaster did not return remaining-drive metrics. ETA cannot safely include legal break calculations.");
         if (tacho.DriveAvailableTodayMinutes is null)
             return ("DutyMatchedHoursUnavailable", $"TachoMaster matched {tacho.DriverName}'s duty, but remaining-drive metrics are temporarily unavailable. The duty remains visible, but the ETA is not customer-promise ready until legal-hours availability is confirmed.");
         if (tacho.DriveAvailableTodayMinutes is int remaining && routeDrivingMinutes > remaining)
             return ("InsufficientDriveTime", $"The route needs about {Math.Ceiling(routeDrivingMinutes)} driving minutes but TachoMaster shows {remaining} minutes available today. Re-plan or confirm legal availability.");
-        if (breakMinutes > 0) return ("BreakIncluded", $"ETA includes {breakMinutes} minutes for a statutory driving break based on current duty and route time.");
-        return ("WithinDriveTime", "Current TachoMaster availability covers the calculated route without an additional driving break.");
+        if (breakMinutes > 0) return ("BreakIncluded", $"ETA includes {breakMinutes} minutes for a statutory driving break based on current duty/card evidence and route time.");
+        return tacho.EvidenceSource == "FalconLiveCard"
+            ? ("CardConfirmedWithinDriveTime", "Falcon confirms the card/driver is present and TachoMaster profile availability covers the calculated route; no additional driving break was added.")
+            : ("WithinDriveTime", "Current TachoMaster availability covers the calculated route without an additional driving break.");
     }
  
     private static bool IsDeliveryStop(LoadStop stop) => stop.Name.StartsWith("Deliver", StringComparison.OrdinalIgnoreCase);

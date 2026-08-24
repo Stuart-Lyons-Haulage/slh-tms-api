@@ -14,6 +14,9 @@ public sealed record RunTachoEvidence(
     int? DriveAvailableTodayMinutes,
     int? DriveAvailableWeekMinutes,
     int? WorkAvailableWeekMinutes,
+    bool CardConfirmed,
+    bool LegalHoursAvailable,
+    string? EvidenceSource,
     string Explanation);
 
 public sealed record RunTachoEvidenceResult(
@@ -50,7 +53,7 @@ public static class RunTachoEvidenceResolver
         {
             try
             {
-                statuses = await tachoMaster.GetOpenDriverStatusesByVehicleAsync(planningDate, ct);
+                statuses = await tachoMaster.GetLiveDriverStatusesByVehicleAsync(planningDate, ct);
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
@@ -69,7 +72,7 @@ public static class RunTachoEvidenceResolver
                 ? knownAliases
                 : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var tacho = available && aliases.Count > 0
-                ? ExecutionIdentityResolver.MatchTachoForDriver(aliases, driver, statuses)
+                ? ExecutionIdentityResolver.MatchLiveDriverIdentityForVehicle(aliases, driver, statuses)
                 : null;
             var status = !available
                 ? "Unavailable"
@@ -77,7 +80,7 @@ public static class RunTachoEvidenceResolver
                     ? "NoPlannedDriver"
                     : vehicle is null
                         ? "NoPlannedVehicle"
-                        : ExecutionIdentityResolver.DriverEvidenceStatus(driver, tacho);
+                        : EvidenceStatus(driver, tacho);
 
             result[load.Id] = new RunTachoEvidence(
                 status,
@@ -88,6 +91,9 @@ public static class RunTachoEvidenceResolver
                 tacho?.DriveAvailableTodayMinutes,
                 tacho?.DriveAvailableWeekMinutes,
                 tacho?.WorkAvailableWeekMinutes,
+                tacho is not null,
+                tacho?.DriveAvailableTodayMinutes is not null,
+                tacho?.EvidenceSource,
                 Explanation(available, driver, vehicle, tacho));
         }
 
@@ -117,9 +123,21 @@ public static class RunTachoEvidenceResolver
         if (!available) return "TachoMaster could not be reached for this refresh.";
         if (driver is null) return "No planned driver is allocated to this run.";
         if (vehicle is null) return "No planned vehicle is allocated to this run.";
-        if (tacho is null) return "No open TachoMaster duty was matched to the planned driver and vehicle.";
-        if (ExecutionIdentityResolver.DriverMatches(driver, tacho))
-            return $"{tacho.DriverName} signed on at {tacho.DutyStartUtc:O}.";
-        return $"TachoMaster duty is present for {tacho.DriverName}, but it does not match the planned driver.";
+        if (tacho is null) return "No live driver card, Falcon driver identity or open TachoMaster duty was matched to the planned driver and vehicle.";
+        if (!ExecutionIdentityResolver.DriverMatches(driver, tacho))
+            return $"Live card/driver evidence is present for {tacho.DriverName}, but it does not match the planned driver.";
+        if (tacho.EvidenceSource == "FalconLiveCard")
+            return tacho.DriveAvailableTodayMinutes is null
+                ? $"{tacho.DriverName} is confirmed by Falcon live card/driver evidence at {tacho.DutyStartUtc:O}; TachoMaster did not return legal-hours metrics."
+                : $"{tacho.DriverName} is confirmed by Falcon live card/driver evidence at {tacho.DutyStartUtc:O}; TachoMaster profile metrics are attached for hours checks.";
+        return $"{tacho.DriverName} signed on in TachoMaster at {tacho.DutyStartUtc:O}.";
+    }
+
+    private static string EvidenceStatus(Driver? driver, TachoVehicleDriverStatus? tacho)
+    {
+        if (driver is null) return "NoPlannedDriver";
+        if (tacho is null) return "NoTachoDuty";
+        if (!ExecutionIdentityResolver.DriverMatches(driver, tacho)) return "Mismatch";
+        return tacho.EvidenceSource == "FalconLiveCard" ? "CardConfirmed" : "Matched";
     }
 }

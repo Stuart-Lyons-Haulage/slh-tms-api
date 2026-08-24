@@ -51,7 +51,9 @@ public sealed class TachoContinuousEnrichmentTests
         Assert.Equal(90, statuses["AB12CDE"].DriveMinutes);
         Assert.Equal("Sam Falcon", statuses["XY34ZTT"].DriverName);
         Assert.Equal("CARD20000002", statuses["XY34ZTT"].CardNumber);
+        Assert.Equal("FalconLiveCard", statuses["XY34ZTT"].EvidenceSource);
         Assert.Equal(0, statuses["XY34ZTT"].DriveMinutes);
+        Assert.Equal(420, statuses["XY34ZTT"].DriveAvailableTodayMinutes);
         Assert.Contains("/api/Falcon/GetCurrentTelemetry", falconHandler.Paths);
     }
 
@@ -96,7 +98,16 @@ public sealed class TachoContinuousEnrichmentTests
                         new { memCode = 2, cName = "Sam", sName = "Falcon", cardNoShort = "CARD20000002", employeeNumber = "SLH-2" }
                     }
                 }),
-                "/api/Member/GetMemberMetrics" => "{\"moreData\":false,\"recordCount\":0,\"data\":[]}",
+                "/api/Member/GetMemberMetrics" => """
+                    {"moreData":false,"recordCount":2,"data":[
+                      {"memCode":1,"dateTimeWhenValid":"2026-08-24T06:00:00Z","dailyDriverPeriodsAvaiable":1,
+                       "driveAvailableToday":300,"driveAvailableTomorrow":540,"driveAvailableWeek":1800,
+                       "driveAvailableFortnight":4200,"longDaysWorkedThisWeek":0,"shortDailyRestTakenThisWeek":0,"workAvaiableWeek":2400},
+                      {"memCode":2,"dateTimeWhenValid":"2026-08-24T06:00:00Z","dailyDriverPeriodsAvaiable":1,
+                       "driveAvailableToday":420,"driveAvailableTomorrow":540,"driveAvailableWeek":2100,
+                       "driveAvailableFortnight":4200,"longDaysWorkedThisWeek":0,"shortDailyRestTakenThisWeek":0,"workAvaiableWeek":2600}
+                    ]}
+                    """,
                 _ => throw new InvalidOperationException($"Unexpected TachoMaster request {request.RequestUri}")
             };
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)

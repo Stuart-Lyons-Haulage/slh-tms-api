@@ -156,7 +156,7 @@ public static class ExecutionIdentityResolver
             // A real TachoMaster duty remains valid identity evidence even when the separate
             // remaining-drive metrics endpoint is temporarily delayed. Hours availability is
             // assessed separately; do not turn an existing duty into "Tacho unavailable".
-            .Where(item => item.MatchLength > 0 && item.Status.MemberCode > 0)
+            .Where(item => item.MatchLength > 0 && item.Status.EvidenceSource == "TachoMasterDuty" && item.Status.MemberCode > 0)
             .OrderByDescending(item => item.MatchLength)
             .ThenByDescending(item => item.Status.DutyStartUtc)
             .Select(item => item.Status)
@@ -179,7 +179,7 @@ public static class ExecutionIdentityResolver
             .SelectMany(item => item.Value.Select(status => (item.MatchLength, Status: status)))
             // Falcon-only identity rows use MemberCode 0. They can identify a current occupant,
             // but they are not a TachoMaster duty and must never carry legal-hours authority.
-            .Where(item => item.Status.MemberCode > 0)
+            .Where(item => item.Status.EvidenceSource == "TachoMasterDuty" && item.Status.MemberCode > 0)
             .ToList();
  
         if (candidates.Count == 0) return null;
@@ -195,6 +195,43 @@ public static class ExecutionIdentityResolver
         }
  
         return candidates.OrderByDescending(item => item.MatchLength).ThenByDescending(item => item.Status.DutyStartUtc).Select(item => item.Status).First();
+    }
+
+    public static TachoVehicleDriverStatus? MatchLiveDriverIdentityForVehicle(
+        IReadOnlyCollection<string> aliases,
+        Driver? driver,
+        IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> statusesByVehicle)
+    {
+        var keys = ExpandAliases(aliases);
+        var candidates = statusesByVehicle
+            .Select(pair => new
+            {
+                MatchLength = VehicleAliasVariants(pair.Key).Where(keys.Contains).Select(alias => alias.Length).DefaultIfEmpty(0).Max(),
+                pair.Value
+            })
+            .Where(item => item.MatchLength > 0)
+            .SelectMany(item => item.Value.Select(status => (item.MatchLength, Status: status)))
+            .ToList();
+
+        if (candidates.Count == 0) return null;
+        if (driver is not null)
+        {
+            var driverMatch = candidates
+                .Where(item => DriverMatches(driver, item.Status))
+                .OrderByDescending(item => item.MatchLength)
+                .ThenByDescending(item => item.Status.EvidenceSource == "TachoMasterDuty")
+                .ThenByDescending(item => item.Status.DutyStartUtc)
+                .Select(item => item.Status)
+                .FirstOrDefault();
+            if (driverMatch is not null) return driverMatch;
+        }
+
+        return candidates
+            .OrderByDescending(item => item.MatchLength)
+            .ThenByDescending(item => item.Status.EvidenceSource == "TachoMasterDuty")
+            .ThenByDescending(item => item.Status.DutyStartUtc)
+            .Select(item => item.Status)
+            .First();
     }
  
     public static DateTimeOffset? FirstMovement(IReadOnlyCollection<string> aliases, IEnumerable<VehicleTrackingEvent> events, DateTimeOffset? notBeforeUtc = null)
