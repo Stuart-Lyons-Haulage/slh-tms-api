@@ -67,4 +67,47 @@ public sealed class SpecialistMailboxOrderParserTests
         Assert.Equal(38, order.Payload.GetProperty("pallets").GetInt32());
         Assert.Equal("2026-08-18", order.Payload.GetProperty("collectionDate").GetString());
     }
+
+    [Fact]
+    public void IfcoConfirmedCollectionsBody_CreatesCrateTrayCollectionRows()
+    {
+        var result = parser.TryParse(new MailboxEmailIntakeRequest(
+            "ifco-1", null, "info@lyonshaulage.com", "MalwinaFrasek@nwfltd.co.uk", "Malwina Frasek",
+            "IFCO confirmed collections for 26/08", DateTimeOffset.Parse("2026-08-24T12:02:53Z"),
+            """
+            Good afternoon,
+
+            Please find attached IFCO collection for 26/8
+
+            IFCO| PO00501528 | £551.75| 26/08/2026| 27/08/2026| 22| IFCO Glasshoughton| 285362822| PO00501064 | Runcton| 26| Please use new reference - Order moved from Covenry to Glasshoughton
+            ---|---|---|---|---|---|---|---|---|---|---|---
+            IFCO| TBC| £0.00| 26/08/2026| 27/08/2026| 22| TBC|  | PO00501076 | Selsey| 17|
+            IFCO| PO00501686 | £551.75| 26/08/2026| same day | 22| IFCO Glasshoughton| 285362754| PO00501074 | Selsey| 26|
+            """, null, null, null));
+
+        Assert.NotNull(result);
+        Assert.Equal(3, result!.Orders.Count);
+
+        var first = result.Orders[0].Payload;
+        Assert.Equal("IFCO", first.GetProperty("customerCode").GetString());
+        Assert.Equal("IFCO crate/tray collection", first.GetProperty("jobType").GetString());
+        Assert.Equal("2026-08-26", first.GetProperty("collectionDate").GetString());
+        Assert.Equal("2026-08-27", first.GetProperty("deliveryDate").GetString());
+        Assert.Equal("IFCO Glasshoughton", first.GetProperty("sellerName").GetString());
+        Assert.Equal("Runcton", first.GetProperty("stallNumber").GetString());
+        Assert.Equal("PO00501528", first.GetProperty("transportPo").GetString());
+        Assert.Equal("PO00501064", first.GetProperty("cratePo").GetString());
+        Assert.Equal("285362822", first.GetProperty("collectionReference").GetString());
+        Assert.Equal(26, first.GetProperty("pallets").GetInt32());
+        Assert.True(first.GetProperty("plannerReady").GetBoolean());
+
+        var pending = result.Orders[1].Payload;
+        Assert.False(pending.GetProperty("plannerReady").GetBoolean());
+        Assert.Equal("PendingReview", pending.GetProperty("intakeStatus").GetString());
+        Assert.Contains("Transport PO is TBC.", pending.GetProperty("intakeWarnings").EnumerateArray().Select(item => item.GetString()));
+
+        var sameDay = result.Orders[2].Payload;
+        Assert.Equal("2026-08-26", sameDay.GetProperty("deliveryDate").GetString());
+        Assert.Equal("Selsey", sameDay.GetProperty("stallNumber").GetString());
+    }
 }

@@ -244,6 +244,9 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         return sender.EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("NWAY", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("NWF", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("IFCO", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("crate", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("tray", StringComparison.OrdinalIgnoreCase) ||
                (value.Contains("pallet", StringComparison.OrdinalIgnoreCase) && value.Contains("order", StringComparison.OrdinalIgnoreCase)) ||
                value.Contains("transport", StringComparison.OrdinalIgnoreCase);
     }
@@ -251,6 +254,8 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     private static string InferMappingCustomer(MailboxEmailIntakeRequest request)
     {
         var value = $"{request.SenderAddress} {request.Subject}";
+        if (value.Contains("IFCO", StringComparison.OrdinalIgnoreCase))
+            return "IFCO";
         if (value.Contains("NWAY", StringComparison.OrdinalIgnoreCase) || value.Contains("NWF", StringComparison.OrdinalIgnoreCase) ||
             (request.SenderAddress ?? string.Empty).EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase))
             return "NWF";
@@ -372,6 +377,16 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
              parts[2].StartsWith("CRATEREF:", StringComparison.OrdinalIgnoreCase)))
         {
             return $"NWF|{parts[2].ToUpperInvariant()}";
+        }
+
+        if (parts.Length >= 3 &&
+            string.Equals(parts[0], "IFCO", StringComparison.OrdinalIgnoreCase) &&
+            DateOnly.TryParse(parts[1], out _) &&
+            (parts[2].StartsWith("TRANSPORT:", StringComparison.OrdinalIgnoreCase) ||
+             parts[2].StartsWith("CRATEPO:", StringComparison.OrdinalIgnoreCase) ||
+             parts[2].StartsWith("LOAD:", StringComparison.OrdinalIgnoreCase)))
+        {
+            return $"IFCO|{parts[2].ToUpperInvariant()}";
         }
 
         // Route/loading fallback identities remain date-scoped because they are

@@ -46,6 +46,10 @@ public sealed class SpecialistMailboxOrderParser
         @"^(?<name>[^\r\n-][^\r\n]{1,100}?)\s*-\s*(?<qty>\d{1,3})\s+pallets?\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.Multiline);
 
+    private static readonly Regex IfcoRowRegex = new(
+        @"(?m)^IFCO\s*\|(?<fields>.+)$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     public EmailIntakeParseResult? TryParse(MailboxEmailIntakeRequest request)
     {
         var subject = (request.Subject ?? string.Empty).Trim();
@@ -70,6 +74,13 @@ public sealed class SpecialistMailboxOrderParser
             body.Contains("APS Produce", StringComparison.OrdinalIgnoreCase))
         {
             return ParseAmazon(request, subject, body);
+        }
+
+        if (combined.Contains("IFCO", StringComparison.OrdinalIgnoreCase) &&
+            combined.Contains("|", StringComparison.Ordinal))
+        {
+            var ifco = ParseIfcoCollections(request, body);
+            if (ifco is not null) return ifco;
         }
 
         var transfer = TransferSubjectRegex.Match(subject);
@@ -190,6 +201,76 @@ public sealed class SpecialistMailboxOrderParser
         return new EmailIntakeParseResult(orders, [], null);
     }
 
+    private static EmailIntakeParseResult? ParseIfcoCollections(MailboxEmailIntakeRequest request, string body)
+    {
+        var received = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
+        var orders = new List<ParsedEmailOrder>();
+        var warnings = new List<string>();
+        var rowNumber = 0;
+
+        foreach (Match match in IfcoRowRegex.Matches(body))
+        {
+            var fields = match.Groups["fields"].Value
+                .Split('|')
+                .Select(CleanField)
+                .ToList();
+            if (fields.Count < 10)
+                continue;
+
+            rowNumber++;
+            var transportPo = NullIfTbc(fields.ElementAtOrDefault(0));
+            var collectionDate = ParseFlexibleNumericDate(fields.ElementAtOrDefault(2) ?? string.Empty, received.Year);
+            var deliveryDate = ParseFlexibleNumericDate(fields.ElementAtOrDefault(3) ?? string.Empty, received.Year)
+                ?? (fields.ElementAtOrDefault(3)?.Contains("same day", StringComparison.OrdinalIgnoreCase) == true ? collectionDate : null)
+                ?? collectionDate;
+            var collectionDepot = NullIfTbc(fields.ElementAtOrDefault(5));
+            var loadReference = NullIfTbc(fields.ElementAtOrDefault(6));
+            var cratePo = NullIfTbc(fields.ElementAtOrDefault(7));
+            var returningTo = NullIfTbc(fields.ElementAtOrDefault(8));
+            var quantity = int.TryParse(fields.ElementAtOrDefault(9), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedQty) ? parsedQty : (int?)null;
+            var notes = fields.ElementAtOrDefault(10);
+
+            if (collectionDate is null || deliveryDate is null)
+            {
+                warnings.Add("IFCO row was skipped because the collection date could not be read.");
+                continue;
+            }
+
+            var rowWarnings = new List<string>();
+            if (transportPo is null) rowWarnings.Add("Transport PO is TBC.");
+            if (collectionDepot is null) rowWarnings.Add("IFCO collection depot is TBC.");
+            if (loadReference is null) rowWarnings.Add("IFCO load reference is missing.");
+            if (returningTo is null) rowWarnings.Add("Return destination is missing.");
+            if (quantity is null or <= 0) rowWarnings.Add("Crate/tray quantity is missing.");
+
+            var sourceRef = transportPo ?? cratePo ?? loadReference ?? $"IFCO-{collectionDate:yyyyMMdd}-{rowNumber}";
+            var destination = returningTo ?? "Destination TBC";
+            var collection = collectionDepot ?? "Collection depot TBC";
+            var reference = BuildReference(sourceRef, destination);
+            var naturalKey = NaturalKey(request, "IFCO", destination, collectionDate.Value, transportPo ?? cratePo ?? loadReference);
+            var matchKeys = BuildIfcoMatchKeys(collectionDate.Value, transportPo, cratePo, loadReference, collectionDepot, returningTo);
+            var payload = BuildIfcoPayload(
+                request,
+                reference,
+                transportPo,
+                cratePo,
+                loadReference,
+                collectionDate.Value,
+                deliveryDate.Value,
+                quantity,
+                collection,
+                destination,
+                notes,
+                rowWarnings,
+                matchKeys);
+
+            orders.Add(new ParsedEmailOrder($"ifco-row-{rowNumber}", naturalKey, payload, rowWarnings));
+        }
+
+        if (orders.Count == 0) return null;
+        return new EmailIntakeParseResult(orders, warnings, null);
+    }
+
     private static EmailIntakeParseResult ParseTransfer(
         MailboxEmailIntakeRequest request,
         Match transfer,
@@ -229,6 +310,68 @@ public sealed class SpecialistMailboxOrderParser
             [new ParsedEmailOrder("transfer-body-1", naturalKey, payload, warnings)],
             [],
             null);
+    }
+
+    private static JsonElement BuildIfcoPayload(
+        MailboxEmailIntakeRequest request,
+        string reference,
+        string? transportPo,
+        string? cratePo,
+        string? loadReference,
+        DateOnly collectionDate,
+        DateOnly deliveryDate,
+        int? quantity,
+        string collection,
+        string destination,
+        string? notes,
+        IReadOnlyList<string> warnings,
+        IReadOnlyList<string> matchKeys)
+    {
+        var ready = warnings.Count == 0;
+        var instructions = string.Join(" · ", new[]
+        {
+            "Order type: IFCO crate/tray collection",
+            string.IsNullOrWhiteSpace(transportPo) ? null : $"Transport PO: {transportPo}",
+            string.IsNullOrWhiteSpace(cratePo) ? null : $"Crate PO: {cratePo}",
+            string.IsNullOrWhiteSpace(loadReference) ? null : $"IFCO load ref: {loadReference}",
+            string.IsNullOrWhiteSpace(notes) ? null : notes,
+            $"Source email: {request.Subject}",
+            "Parser: NWF/IFCO body table",
+            warnings.Count == 0 ? null : $"Intake warning: {string.Join("; ", warnings)}"
+        }.Where(value => !string.IsNullOrWhiteSpace(value)));
+
+        var payload = new Dictionary<string, object?>
+        {
+            ["poNumber"] = reference,
+            ["customerPo"] = transportPo ?? cratePo,
+            ["transportPo"] = transportPo,
+            ["cratePo"] = cratePo,
+            ["collectionReference"] = loadReference,
+            ["customerCode"] = "IFCO",
+            ["collectionDate"] = collectionDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            ["deliveryDate"] = deliveryDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            ["pallets"] = quantity,
+            ["sellerName"] = collection,
+            ["marketName"] = "IFCO",
+            ["stallNumber"] = destination,
+            ["jobType"] = "IFCO crate/tray collection",
+            ["driverInstructions"] = instructions.Length <= 1000 ? instructions : instructions[..1000],
+            ["plannerReady"] = ready,
+            ["intakeStatus"] = ready ? null : "PendingReview",
+            ["sourceMessageId"] = request.MessageId,
+            ["sourceInternetMessageId"] = request.InternetMessageId,
+            ["sourceSender"] = request.SenderAddress,
+            ["sourceSenderName"] = request.SenderName,
+            ["sourceSubject"] = request.Subject,
+            ["sourceReceivedAtUtc"] = request.ReceivedAtUtc,
+            ["sourceWebLink"] = request.WebLink,
+            ["intakeNaturalKey"] = NaturalKey(request, "IFCO", destination, collectionDate, transportPo ?? cratePo ?? loadReference),
+            ["intakeMatchKeys"] = matchKeys,
+            ["intakeConfidence"] = ready ? "High" : "Medium",
+            ["intakeWarnings"] = warnings,
+            ["intakeParser"] = "NWF/IFCO body table"
+        };
+        return JsonSerializer.SerializeToElement(payload);
     }
 
     private static JsonElement BasePayload(
@@ -394,6 +537,38 @@ public sealed class SpecialistMailboxOrderParser
 
     private static string CleanDropName(string value) =>
         Regex.Replace(value.Trim(' ', '*'), @"\s+", " ");
+
+    private static string CleanField(string value) =>
+        Regex.Replace(value.Trim(' ', '*'), @"\s+", " ");
+
+    private static string? NullIfTbc(string? value)
+    {
+        var clean = string.IsNullOrWhiteSpace(value) ? null : CleanField(value);
+        return clean is null || clean.Equals("TBC", StringComparison.OrdinalIgnoreCase) ? null : clean;
+    }
+
+    private static IReadOnlyList<string> BuildIfcoMatchKeys(
+        DateOnly collectionDate,
+        string? transportPo,
+        string? cratePo,
+        string? loadReference,
+        string? collectionDepot,
+        string? returningTo)
+    {
+        var keys = new List<string>();
+        AddKey(keys, collectionDate, "TRANSPORT", transportPo);
+        AddKey(keys, collectionDate, "CRATEPO", cratePo);
+        AddKey(keys, collectionDate, "LOAD", loadReference);
+        if (!string.IsNullOrWhiteSpace(collectionDepot) || !string.IsNullOrWhiteSpace(returningTo))
+            keys.Add($"IFCO|{collectionDate:yyyy-MM-dd}|ROUTE:{SafeToken(collectionDepot ?? "TBC", 40)}>{SafeToken(returningTo ?? "TBC", 40)}");
+        return keys;
+    }
+
+    private static void AddKey(List<string> keys, DateOnly collectionDate, string label, string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+            keys.Add($"IFCO|{collectionDate:yyyy-MM-dd}|{label}:{SafeToken(value, 60)}");
+    }
 
     private static string BuildReference(string baseReference, string destination)
     {
