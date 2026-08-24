@@ -376,8 +376,16 @@ public sealed class StagingService(TmsDbContext db)
         for (var index = 0; index < sourceLines.Count; index++)
         {
             var line = sourceLines[index];
-            var collectionSite = Text(line, "collectionSite") ?? Text(line, "collectionLocation") ?? Text(payload, "collectionSite") ?? Text(payload, "collectionLocation");
-            var deliverySite = Text(line, "deliverySite") ?? Text(line, "deliveryLocation") ?? Text(payload, "deliverySite") ?? Text(payload, "deliveryLocation");
+            var rawCollectionSite = Text(line, "collectionSite") ?? Text(line, "collectionLocation") ?? Text(payload, "collectionSite") ?? Text(payload, "collectionLocation") ?? Text(payload, "sellerName");
+            var rawDeliverySite = Text(line, "deliverySite") ?? Text(line, "deliveryLocation") ?? Text(payload, "deliverySite") ?? Text(payload, "deliveryLocation") ?? Text(payload, "stallNumber");
+            var lineAlignment = await OrderSiteMasterAlignment.ResolveNamesAsync(
+                db, rawCollectionSite, rawDeliverySite,
+                Text(line, "collectionAddress") ?? Text(payload, "collectionAddress"),
+                Text(line, "deliveryAddress") ?? Text(payload, "deliveryAddress"),
+                Text(line, "mapLink") ?? Text(payload, "mapLink"),
+                Text(line, "driverInstructions") ?? Text(payload, "driverInstructions"), ct);
+            var collectionSite = lineAlignment.CollectionName ?? rawCollectionSite;
+            var deliverySite = lineAlignment.DeliveryName ?? rawDeliverySite;
             var lineCollectionDate = DateOnlyOrNull(line, "collectionDate") ?? DateOnlyOrNull(payload, "collectionDate");
             var lineDeliveryDate = DateOnlyOrNull(line, "deliveryDate") ?? DateOnlyOrNull(payload, "deliveryDate");
             var pallets = IntOrNull(line, "pallets") ?? IntOrNull(line, "palletQuantity") ?? (sourceLines.Count == 1 ? IntOrNull(payload, "pallets") : null);
