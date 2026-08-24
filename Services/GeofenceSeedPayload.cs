@@ -5,10 +5,10 @@ namespace Slh.Tms.Api.Services;
 internal static class GeofenceSeedPayload
 {
     // Canonical operational geofence payload rebuilt from the 15 Falcon category
-    // exports supplied by SLH on 19 August 2026. The three Nature's Way fences below
-    // are supplemental operational fences because they are absent from that export.
-    // Their centres are based on the known factory locations and use conservative
-    // local polygons so RoadTech observations can create visit evidence.
+    // exports supplied by SLH on 19 August 2026. Selsey and Drayton are supplemental
+    // operational fences because they are absent from that export. Runcton already
+    // exists in the approved payload as "Vitacress Runcton", so it must not be
+    // duplicated with an overlapping Nature's Way polygon.
     private static readonly Lazy<string> Payload = new(Build);
 
     internal static string Json => Payload.Value;
@@ -24,13 +24,6 @@ internal static class GeofenceSeedPayload
             {
                 Point(-0.78175, 50.74216), Point(-0.77663, 50.74216),
                 Point(-0.77663, 50.74540), Point(-0.78175, 50.74540)
-            }));
-        AddIfMissing(root, Fence(
-            "Natures Way Foods Runcton",
-            new[]
-            {
-                Point(-0.75004, 50.81435), Point(-0.74492, 50.81435),
-                Point(-0.74492, 50.81759), Point(-0.75004, 50.81759)
             }));
         AddIfMissing(root, Fence(
             "Natures Way Foods Drayton",
