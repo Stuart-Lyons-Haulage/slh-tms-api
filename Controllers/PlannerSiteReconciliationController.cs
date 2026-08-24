@@ -184,7 +184,7 @@ public sealed class PlannerSiteReconciliationController(TmsDbContext db, ILogger
 
     private static IEnumerable<string> Aliases(string? aliases) => string.IsNullOrWhiteSpace(aliases)
         ? []
-        : aliases.Split([',', ';', '|', '\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        : aliases.Split(new[] { ',', ';', '|', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
     private static string ExtractSiteName(string? stopName)
     {

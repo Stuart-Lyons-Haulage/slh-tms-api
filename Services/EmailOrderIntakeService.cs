@@ -4,6 +4,7 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
 namespace Slh.Tms.Api.Services;
@@ -65,7 +66,7 @@ public sealed class EmailOrderIntakeService
 
         foreach (var attachment in request.Attachments ?? [])
         {
-            if (attachment.IsInline == true || string.IsNullOrWhiteSpace(attachment.ContentBase64))
+            if (attachment.IsInline == true || string.IsNullOrWhiteSpace(attachment.EffectiveContentBase64))
                 continue;
 
             var extension = Path.GetExtension(attachment.Name ?? string.Empty).ToLowerInvariant();
@@ -107,7 +108,7 @@ public sealed class EmailOrderIntakeService
         string? rawPo,
         string body)
     {
-        var bytes = DecodeBase64(attachment.ContentBase64!);
+        var bytes = DecodeBase64(attachment.EffectiveContentBase64!);
         using var stream = new MemoryStream(bytes, writable: false);
         using var reader = ExcelReaderFactory.CreateReader(stream);
 
@@ -563,7 +564,12 @@ public sealed record MailboxAttachmentRequest(
     string? ContentBase64,
     bool? IsInline = false,
     string? ContentId = null,
-    long? Size = null);
+    long? Size = null,
+    string? ContentBytes = null)
+{
+    [JsonIgnore]
+    public string? EffectiveContentBase64 => ContentBase64 ?? ContentBytes;
+}
 
 public sealed record MailboxEmailIntakeRequest(
     string MessageId,

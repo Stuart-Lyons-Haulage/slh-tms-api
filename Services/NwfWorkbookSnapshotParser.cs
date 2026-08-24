@@ -23,7 +23,7 @@ public sealed class NwfWorkbookSnapshotParser
         var subject = request.Subject ?? string.Empty;
         var attachment = (request.Attachments ?? []).FirstOrDefault(item =>
             item.IsInline != true &&
-            !string.IsNullOrWhiteSpace(item.ContentBase64) &&
+            !string.IsNullOrWhiteSpace(item.EffectiveContentBase64) &&
             IsWorkbook(item.Name) &&
             (LooksLikeNwfTracker(item.Name) || LooksLikeNwfTracker(subject)));
 
@@ -32,7 +32,7 @@ public sealed class NwfWorkbookSnapshotParser
 
         try
         {
-            var bytes = DecodeBase64(attachment.ContentBase64!);
+            var bytes = DecodeBase64(attachment.EffectiveContentBase64!);
             using var stream = new MemoryStream(bytes, writable: false);
             using var reader = ExcelReaderFactory.CreateReader(stream);
 
