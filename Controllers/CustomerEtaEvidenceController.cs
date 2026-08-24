@@ -101,7 +101,7 @@ public sealed class CustomerEtaEvidenceController(
 
         var (startUtc, endUtc) = OperatingWindow(planningDate);
         var trackingEvents = await SafeList(db.VehicleTrackingEvents.AsNoTracking()
-            .Where(item => item.EventTimeUtc >= startUtc.AddHours(-2) && item.EventTimeUtc < endUtc.AddHours(2))
+            .Where(item => item.EventTimeUtc >= startUtc.AddHours(-2) && item.EventTimeUtc < endUtc.AddHours(12))
             .OrderBy(item => item.EventTimeUtc)
             .Take(30000), ct);
 

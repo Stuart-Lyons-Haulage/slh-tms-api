@@ -87,6 +87,17 @@ public static class EmbeddedGeofenceEngine
                 ExecutionIdentityResolver.MatchesVehicleIdentifier(aliases, item.VehicleIdentifier)))
             .ToList();
 
+        if (vehicles.Count > 0 && matchedEvents.Count > 0)
+        {
+            var repaired = await ExecutionIdentityResolver.RepairDotVehicleMappingsAsync(
+                db,
+                vehicles,
+                matchedEvents.Select(item => item.VehicleIdentifier),
+                ct);
+            if (repaired > 0)
+                aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles, ct);
+        }
+
         // Falcon's current-telemetry endpoint can legitimately return the same provider
         // event while a vehicle is stationary. The event is correctly deduplicated in
         // VehicleTrackingEvents, but VehicleLiveStatus.LastReceivedAtUtc still proves that

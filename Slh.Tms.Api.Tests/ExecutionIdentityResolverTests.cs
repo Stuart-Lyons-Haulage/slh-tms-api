@@ -58,6 +58,41 @@ public sealed class ExecutionIdentityResolverTests
         Assert.Contains("TM71", aliases[vehicle.Id]);
     }
 
+    [Fact]
+    public async Task Unique_dot_provider_identifier_is_persisted_as_vehicle_mapping()
+    {
+        var vehicle = new Vehicle { Id = Guid.NewGuid(), Registration = "KY71 CVP", Active = true };
+        var options = new DbContextOptionsBuilder<TmsDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
+        await using var db = new TmsDbContext(options);
+        db.Vehicles.Add(vehicle);
+        await db.SaveChangesAsync();
+
+        var repaired = await ExecutionIdentityResolver.RepairDotVehicleMappingsAsync(db, new[] { vehicle }, new[] { "71 CVP" }, CancellationToken.None);
+
+        Assert.Equal(1, repaired);
+        var mapping = await db.IntegrationMappings.SingleAsync();
+        Assert.Equal("DotTracking", mapping.Provider);
+        Assert.Equal("71CVP", mapping.ExternalKey);
+        Assert.Equal("Vehicle", mapping.TmsEntityType);
+        Assert.Equal(vehicle.Id, mapping.TmsEntityId);
+    }
+
+    [Fact]
+    public async Task Ambiguous_dot_provider_identifier_is_not_persisted()
+    {
+        var first = new Vehicle { Id = Guid.NewGuid(), Registration = "KY71 CVP", Active = true };
+        var second = new Vehicle { Id = Guid.NewGuid(), Registration = "AB71 CVP", Active = true };
+        var options = new DbContextOptionsBuilder<TmsDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
+        await using var db = new TmsDbContext(options);
+        db.Vehicles.AddRange(first, second);
+        await db.SaveChangesAsync();
+
+        var repaired = await ExecutionIdentityResolver.RepairDotVehicleMappingsAsync(db, new[] { first, second }, new[] { "71 CVP" }, CancellationToken.None);
+
+        Assert.Equal(0, repaired);
+        Assert.Empty(await db.IntegrationMappings.ToListAsync());
+    }
+
     private static VehicleTrackingEvent Tracking(string id, DateTimeOffset at, decimal speed) => new()
     {
         ProviderName = "RoadTech Falcon",

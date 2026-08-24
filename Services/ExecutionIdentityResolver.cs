@@ -43,6 +43,81 @@ public static class ExecutionIdentityResolver
         }
         return result;
     }
+
+    public static async Task<int> RepairDotVehicleMappingsAsync(
+        TmsDbContext db,
+        IReadOnlyCollection<Vehicle> vehicles,
+        IEnumerable<string?> providerIdentifiers,
+        CancellationToken ct)
+    {
+        if (vehicles.Count == 0) return 0;
+
+        var identifiers = providerIdentifiers
+            .Select(NormaliseVehicle)
+            .Where(value => value.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (identifiers.Count == 0) return 0;
+
+        var directAliases = vehicles.ToDictionary(
+            vehicle => vehicle.Id,
+            vehicle => ExpandAliases(new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }));
+
+        List<string> existingKeys;
+        try
+        {
+            existingKeys = await db.IntegrationMappings
+                .Where(mapping => mapping.Active &&
+                                  mapping.Provider == "DotTracking" &&
+                                  mapping.TmsEntityType == "Vehicle" &&
+                                  identifiers.Contains(mapping.ExternalKey))
+                .Select(mapping => mapping.ExternalKey)
+                .ToListAsync(ct);
+        }
+        catch (Exception exception) when (SchemaUnavailable(exception))
+        {
+            db.ChangeTracker.Clear();
+            return 0;
+        }
+        var existing = existingKeys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var added = 0;
+        foreach (var identifier in identifiers.Where(identifier => !existing.Contains(identifier)))
+        {
+            var matches = directAliases
+                .Where(pair => MatchesVehicleIdentifier(pair.Value, identifier))
+                .Select(pair => pair.Key)
+                .Distinct()
+                .Take(2)
+                .ToList();
+
+            if (matches.Count != 1) continue;
+
+            db.IntegrationMappings.Add(new IntegrationMapping
+            {
+                Provider = "DotTracking",
+                ExternalKey = identifier,
+                ExternalLabel = identifier,
+                TmsEntityType = "Vehicle",
+                TmsEntityId = matches[0],
+                Active = true,
+                Notes = "Auto-linked from unique RoadTech/Falcon telemetry identifier matched to the planned vehicle registration/fleet aliases.",
+                UpdatedBy = "RoadTech geofence identity repair"
+            });
+            added++;
+        }
+
+        if (added > 0)
+        {
+            try { await db.SaveChangesAsync(ct); }
+            catch (Exception exception) when (SchemaUnavailable(exception) || exception is DbUpdateException)
+            {
+                db.ChangeTracker.Clear();
+                return 0;
+            }
+        }
+        return added;
+    }
  
     public static IReadOnlyCollection<string> VehicleAliasVariants(string? value)
     {

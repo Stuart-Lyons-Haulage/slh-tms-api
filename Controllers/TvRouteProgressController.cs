@@ -57,6 +57,13 @@ public sealed class TvRouteProgressController(
             ? new List<Vehicle>()
             : await SafeList(db.Vehicles.AsNoTracking().Where(x => vehicleIds.Contains(x.Id)), ct);
         var vehicleById = vehicles.ToDictionary(x => x.Id);
+        if (vehicles.Count > 0 && liveStatuses.Count > 0)
+            await ExecutionIdentityResolver.RepairDotVehicleMappingsAsync(
+                db,
+                vehicles,
+                liveStatuses.Select(status => status.VehicleIdentifier),
+                ct);
+        var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles, ct);
 
         var rows = new List<object>();
         foreach (var load in loads)
@@ -78,7 +85,9 @@ public sealed class TvRouteProgressController(
 
             VehicleLiveStatus? live = null;
             if (load.VehicleId is Guid vehicleId && vehicleById.TryGetValue(vehicleId, out var vehicle))
-                live = MatchLive(vehicle, liveStatuses);
+                live = aliasesByVehicle.TryGetValue(vehicle.Id, out var aliases)
+                    ? ExecutionIdentityResolver.MatchLive(aliases, liveStatuses)
+                    : null;
 
             var freshnessAtUtc = live?.LastReceivedAtUtc;
             var trackingAge = freshnessAtUtc is null ? (TimeSpan?)null : now - freshnessAtUtc.Value;
@@ -288,18 +297,6 @@ public sealed class TvRouteProgressController(
     }
 
     private static double DegreesToRadians(double degrees) => degrees * Math.PI / 180.0;
-
-    private static VehicleLiveStatus? MatchLive(Vehicle vehicle, IReadOnlyCollection<VehicleLiveStatus> statuses)
-    {
-        var aliases = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }
-            .Where(value => !string.IsNullOrWhiteSpace(value))
-            .Select(value => Normalise(value!))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        return statuses
-            .Where(status => aliases.Contains(Normalise(status.VehicleIdentifier)))
-            .OrderByDescending(status => status.LastReceivedAtUtc)
-            .FirstOrDefault();
-    }
 
     private static string Normalise(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
