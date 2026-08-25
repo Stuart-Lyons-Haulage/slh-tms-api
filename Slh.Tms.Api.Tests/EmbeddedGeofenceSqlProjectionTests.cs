@@ -19,6 +19,15 @@ public sealed class EmbeddedGeofenceSqlProjectionTests
         var fence = EmbeddedGeofenceEngine.ApprovedFences.First(x => x.Name.Contains("Selsey", StringComparison.OrdinalIgnoreCase));
         var vehicle = new Vehicle { Id = Guid.NewGuid(), Registration = "TEST123", Active = true };
         db.Vehicles.Add(vehicle);
+        db.SiteGeofences.Add(new SiteGeofence
+        {
+            Id = Guid.NewGuid(),
+            Name = fence.Name,
+            NormalizedName = new string(fence.Name.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray()),
+            SiteNumber = fence.SiteNumber,
+            PolygonJson = "[]",
+            Active = true
+        });
         await db.SaveChangesAsync();
 
         var visit = new DerivedVisit
