@@ -8,9 +8,9 @@ namespace Slh.Tms.Api.Controllers;
 
 /// <summary>
 /// Operational wallboard timing derived from geofence execution.
-/// Dwell starts at first observation inside a geofence. Once a stop is departed,
-/// the ETA for the next stop is anchored to that geofence departure rather than
-/// continuously rebasing from the vehicle's current GPS position.
+/// Dwell starts at first observation inside a geofence. The first-leg ETA starts when
+/// the vehicle leaves Lake Lane; subsequent ETAs are anchored to the previous customer
+/// geofence departure rather than continuously rebasing from current GPS.
 /// </summary>
 [ApiController, Route("api/v1/run-timing")]
 [Authorize]
@@ -60,15 +60,31 @@ public sealed class RunTimingController(
                 .OrderByDescending(visit => visit.ExitedAtUtc)
                 .FirstOrDefault();
 
+            // Before stop 1, Lake Lane is the authoritative run origin. Once a customer
+            // stop has completed, the customer geofence departure becomes authoritative.
+            var lakeLaneDeparture = completedStopIds.Count == 0
+                ? OperationalRunOrigin.LakeLaneDepartureFor(snapshot, load)
+                : null;
+            var timingDeparture = lastDeparture ?? lakeLaneDeparture;
+
             DateTimeOffset? nextEtaUtc = null;
             string etaSource = "Unavailable";
-            if (!completed && currentVisit is null && lastDeparture?.ExitedAtUtc is DateTimeOffset departedAt && nextStop is not null &&
+            if (!completed && currentVisit is null && timingDeparture?.ExitedAtUtc is DateTimeOffset departedAt && nextStop is not null &&
                 nextStop.Longitude is not null && nextStop.Latitude is not null)
             {
-                var previousStop = lastDeparture.LoadStopId is Guid previousStopId
-                    ? orderedStops.FirstOrDefault(stop => stop.Id == previousStopId)
-                    : null;
-                var origin = Origin(previousStop, lastDeparture.Fence);
+                (decimal Longitude, decimal Latitude)? origin;
+                if (lastDeparture is not null)
+                {
+                    var previousStop = lastDeparture.LoadStopId is Guid previousStopId
+                        ? orderedStops.FirstOrDefault(stop => stop.Id == previousStopId)
+                        : null;
+                    origin = Origin(previousStop, lastDeparture.Fence);
+                }
+                else
+                {
+                    origin = OperationalRunOrigin.FenceCentre(timingDeparture.Fence);
+                }
+
                 if (origin is not null)
                 {
                     try
@@ -93,7 +109,7 @@ public sealed class RunTimingController(
                 nextStop?.Name,
                 nextEtaUtc,
                 etaSource,
-                lastDeparture?.ExitedAtUtc,
+                timingDeparture?.ExitedAtUtc,
                 currentVisit?.EnteredAtUtc,
                 currentVisit?.Fence.Name));
         }
@@ -105,8 +121,7 @@ public sealed class RunTimingController(
     {
         if (stop?.Longitude is not null && stop.Latitude is not null)
             return (stop.Longitude.Value, stop.Latitude.Value);
-        if (fence.Points.Count == 0) return null;
-        return ((decimal)fence.Points.Average(point => point.Longitude), (decimal)fence.Points.Average(point => point.Latitude));
+        return OperationalRunOrigin.FenceCentre(fence);
     }
 
     private static DateOnly UkOperatingDate(DateTimeOffset value)
