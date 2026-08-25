@@ -76,6 +76,29 @@ public sealed class RunProgressController(
             // Match on a cloned view so the planner-facing labels remain unchanged.
             var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
             var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, geofenceLoads, ct);
+
+            // The same refresh that reads fresh RoadTech GPS now also publishes the
+            // reconstructed ENTER/EXIT state immediately. This keeps every consumer
+            // (Operations wallboard, TV wallboard and geofence health) on the same
+            // current evidence instead of waiting for the background projection cycle.
+            try
+            {
+                await EmbeddedGeofenceSqlProjection.PersistAsync(db, snapshot, ct);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                db.ChangeTracker.Clear();
+                logger.LogWarning(
+                    exception,
+                    "Fresh RoadTech geofence projection failed for Operations progression on {PlanningDate}; returning the live reconstructed snapshot.",
+                    planningDate);
+                refreshWarning = string.Join(" ", new[]
+                {
+                    refreshWarning,
+                    "Fresh geofence progress could not be written to the shared SQL projection on this refresh."
+                }.Where(value => !string.IsNullOrWhiteSpace(value)));
+            }
+
             var tachoEvidence = await RunTachoEvidenceResolver.ResolveAsync(db, tachoMaster, loads, planningDate, logger, ct);
             var records = loads.Select(load => BuildRecord(load, snapshot, now, tachoEvidence.ByLoadId.GetValueOrDefault(load.Id))).ToList();
 
@@ -84,7 +107,7 @@ public sealed class RunProgressController(
                 planningDate,
                 calculatedAtUtc = now,
                 count = records.Count,
-                source = "PlanningRegister+EmbeddedSLHGeofences",
+                source = "RoadTechCurrent+PlanningRegister+EmbeddedSLHGeofences",
                 geofenceAvailable = snapshot.Fences.Count > 0,
                 geofenceCount = snapshot.Fences.Count,
                 geofenceVisitCount = snapshot.Visits.Count,
