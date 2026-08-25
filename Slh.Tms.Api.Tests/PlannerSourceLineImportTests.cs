@@ -79,6 +79,88 @@ public sealed class PlannerSourceLineImportTests : IClassFixture<CustomWebFactor
         Assert.Equal(24, total);
     }
 
+    [Fact]
+    public async Task Source_import_matches_canonical_trailer_and_site_without_losing_driver_line()
+    {
+        var date = new DateOnly(2026, 8, 26);
+        var selseyFence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences.Where(fence =>
+            fence.Name.Contains("Selsey", StringComparison.OrdinalIgnoreCase) &&
+            fence.Name.Contains("Natures Way", StringComparison.OrdinalIgnoreCase)));
+        var longitude = (decimal)selseyFence.Points.Average(point => point.Longitude);
+        var latitude = (decimal)selseyFence.Points.Average(point => point.Latitude);
+        Guid canonicalTrailerId;
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            var siteId = Guid.NewGuid();
+            canonicalTrailerId = Guid.NewGuid();
+            db.Drivers.Add(new Driver { EmployeeNumber = "T001", DisplayName = "Test Driver", Active = true });
+            db.Vehicles.Add(new Vehicle { Registration = "AB12ABC", Abbreviation = "ABC", Active = true });
+            db.Trailers.Add(new Trailer { Id = canonicalTrailerId, TrailerNumber = "SLH2", Active = true });
+            db.Sites.Add(new Site { Id = siteId, ExternalCode = "NWF-SEL", Name = "Selsey Nature's Way", DriverTextName = "NWF-Selsey", Active = true });
+            db.SiteGeofences.Add(new SiteGeofence
+            {
+                Name = selseyFence.Name,
+                NormalizedName = selseyFence.Name.Trim().ToUpperInvariant(),
+                SiteId = siteId,
+                SiteNumber = "NWF-SEL",
+                PolygonJson = "[]",
+                Active = true
+            });
+            db.StagedImports.Add(new StagedImport
+            {
+                EntityType = "masterdetail:site",
+                IdempotencyKey = "masterdetail:site:nwfsel",
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    externalCode = "NWF-SEL",
+                    aliases = "NWF-Selsey|Selsey (Natures Way)",
+                    latitude,
+                    longitude
+                }),
+                Status = StagingStatus.Promoted,
+                Source = "test"
+            });
+            db.TransportOrders.Add(Order("SEL-10", date, 10, "NWF-Selsey", "Morrisons-Stockton"));
+            await db.SaveChangesAsync();
+        }
+
+        var request = new PlannerPlanImportRequest("slh-planner-plan-v3-source-lines", date, [
+            new PlannerPlanRunRequest("TEST-1", "1", "AM", date, "Test Driver", "ABC", "02", null, true, "Matched",
+                new PlannerPlanSourceRequest("Lyons collections 260826.xlsm", "Collection Plan"), [
+                    Stop(1, 2, "NWF-Selsey", "Morrisons-Stockton", 10, "SEL-10", "05:00:00", "05:30:00")
+                ])
+        ]);
+
+        var client = _factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Access");
+        var response = await client.PostAsJsonAsync("/api/v1/planning/import-source-plan", request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var summary = await response.Content.ReadFromJsonAsync<PlannerPlanImportSummary>();
+        Assert.NotNull(summary);
+        Assert.Empty(summary!.UnresolvedDrivers);
+        Assert.Empty(summary.UnresolvedVehicles);
+        Assert.Empty(summary.UnresolvedTrailers);
+        Assert.DoesNotContain(summary.Warnings, warning =>
+            warning.Contains("NWF-Selsey", StringComparison.OrdinalIgnoreCase) &&
+            (warning.Contains("did not resolve uniquely", StringComparison.OrdinalIgnoreCase) ||
+             warning.Contains("no active linked geofence", StringComparison.OrdinalIgnoreCase)));
+
+        using var finalScope = _factory.Services.CreateScope();
+        var finalDb = finalScope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var load = finalDb.Loads.Single(row => row.Reference == "PLAN-20260826-TEST-1");
+        Assert.Equal(canonicalTrailerId, load.TrailerId);
+        Assert.Equal(LoadStatus.Planned, load.Status);
+
+        var stop = finalDb.LoadStops.Where(row => row.LoadId == load.Id).OrderBy(row => row.Sequence).First();
+        Assert.Equal("Collect · NWF-Selsey", stop.Name);
+        Assert.Contains("10 pallets", stop.Address);
+        Assert.Contains("for Morrisons-Stockton", stop.Address);
+        Assert.Equal(latitude, stop.Latitude);
+        Assert.Equal(longitude, stop.Longitude);
+        Assert.Equal(new DateTimeOffset(2026, 8, 26, 4, 0, 0, TimeSpan.Zero), stop.PlannedArrivalUtc);
+    }
+
     private static TransportOrder Order(string reference, DateOnly date, int pallets, string collection, string delivery) =>
         new() { Reference = reference, CustomerCode = "TEST", CollectionDate = date, Pallets = pallets, SellerName = collection, StallNumber = delivery };
 

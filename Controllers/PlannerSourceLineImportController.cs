@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -29,6 +30,7 @@ public sealed class PlannerSourceLineImportController(TmsDbContext db) : Control
         var vehicles = await db.Vehicles.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
         var trailers = await db.Trailers.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
         var orders = await db.TransportOrders.AsNoTracking().ToListAsync(ct);
+        var siteResolver = await PlannerSourceMasterDataResolver.CreateAsync(db, ct);
 
         var warnings = new List<string>();
         var unresolvedDrivers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -89,14 +91,15 @@ public sealed class PlannerSourceLineImportController(TmsDbContext db) : Control
             load.DriverId = driver?.Id;
             load.VehicleId = vehicle?.Id;
             load.TrailerId = trailer?.Id;
-            load.Status = driver is not null && vehicle is not null ? LoadStatus.Planned : LoadStatus.Draft;
+            var trailerResolved = string.IsNullOrWhiteSpace(run.Trailer) || trailer is not null;
+            load.Status = driver is not null && vehicle is not null && trailerResolved ? LoadStatus.Planned : LoadStatus.Draft;
             load.PalletSpacesUsed = capacity.StandardEquivalentUsed;
             load.TotalPalletSpaces = capacity.StandardEquivalentCapacity;
             load.CapacityType = "Mixed Standard/Euro";
             load.PlannerNotes = PlannerPlanImportRules.BuildPlannerNotes(run, capacity);
 
             if (load.Stops.Count > 0) db.LoadStops.RemoveRange(load.Stops);
-            var replacementStops = BuildStops(load.Id, run, orders);
+            var replacementStops = BuildStops(load.Id, run, orders, siteResolver, warnings);
             db.LoadStops.AddRange(replacementStops);
             load.Stops = replacementStops;
             await db.SaveChangesAsync(ct);
@@ -154,28 +157,40 @@ public sealed class PlannerSourceLineImportController(TmsDbContext db) : Control
             results));
     }
 
-    private static List<LoadStop> BuildStops(Guid loadId, PlannerPlanRunRequest run, IReadOnlyCollection<TransportOrder> orders)
+    private static List<LoadStop> BuildStops(
+        Guid loadId,
+        PlannerPlanRunRequest run,
+        IReadOnlyCollection<TransportOrder> orders,
+        PlannerSourceMasterDataResolver siteResolver,
+        ICollection<string> warnings)
     {
         var sourceRows = run.Stops.OrderBy(stop => stop.Sequence).ToList();
         var result = new List<LoadStop>();
 
         foreach (var row in sourceRows.Where(row => !string.IsNullOrWhiteSpace(row.CollectionSite)))
         {
+            var site = siteResolver.Resolve(row.CollectionSite);
+            AddSiteWarnings(warnings, run.RunRef, row.CollectionSite, site);
             result.Add(new LoadStop
             {
                 Id = Guid.NewGuid(),
                 LoadId = loadId,
                 Sequence = result.Count + 1,
                 Name = Clip($"Collect · {row.CollectionSite}", 200)!,
-                Address = Clip(CollectionDetail(row), 500),
-                PlannerNote = Clip(SourceLine(row), 1000),
+                Address = Clip(WithMasterAddress(CollectionDetail(row), site.Address), 500),
+                PlannerNote = Clip($"{SourceLine(row)} · {site.EvidenceNote}", 1000),
+                Latitude = site.Latitude,
+                Longitude = site.Longitude,
                 PlannedArrivalUtc = ParsePlannerTime(run.PlanningDate, row.CollectFrom ?? row.CollectTo)
             });
         }
 
         foreach (var group in GroupDeliveries(sourceRows))
         {
+            var site = siteResolver.Resolve(group.Site);
+            AddSiteWarnings(warnings, run.RunRef, group.Site, site);
             var firstOrder = group.Rows.Select(row => MatchOrder(row, orders, new HashSet<Guid>(), run.PlanningDate)).FirstOrDefault(order => order is not null);
+            var detail = DeliveryDetail(group.Rows);
             result.Add(new LoadStop
             {
                 Id = Guid.NewGuid(),
@@ -183,14 +198,30 @@ public sealed class PlannerSourceLineImportController(TmsDbContext db) : Control
                 OrderId = firstOrder?.Id,
                 Sequence = result.Count + 1,
                 Name = Clip($"Deliver · {group.Site}", 200)!,
-                Address = Clip(DeliveryDetail(group.Rows), 500),
-                PlannerNote = Clip(DeliveryDetail(group.Rows), 1000),
+                Address = Clip(WithMasterAddress(detail, site.Address), 500),
+                PlannerNote = Clip($"{detail} · {site.EvidenceNote}", 1000),
+                Latitude = site.Latitude,
+                Longitude = site.Longitude,
                 PlannedArrivalUtc = ParsePlannerTime(run.PlanningDate, group.Rows.Select(row => row.Deadline).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)))
             });
         }
 
         return result;
     }
+
+    private static void AddSiteWarnings(ICollection<string> warnings, string runRef, string? label, PlannerSourceSiteResolution site)
+    {
+        string? warning = !site.SiteMatched
+            ? $"{runRef}: site '{label}' did not resolve uniquely to Site Master."
+            : !site.GeofenceLinked
+                ? $"{runRef}: Site {site.SiteNumber} ({site.SiteName}) has no active linked geofence."
+                : null;
+        if (warning is not null && !warnings.Contains(warning)) warnings.Add(warning);
+    }
+
+    private static string WithMasterAddress(string detail, string? masterAddress) => string.IsNullOrWhiteSpace(masterAddress)
+        ? detail
+        : $"{detail} · {masterAddress.Trim()}";
 
     private static List<(Guid OrderId, int Pallets)> BuildAllocations(PlannerPlanRunRequest run, IReadOnlyCollection<TransportOrder> orders)
     {
@@ -263,17 +294,33 @@ public sealed class PlannerSourceLineImportController(TmsDbContext db) : Control
 
     private static DateTimeOffset? ParsePlannerTime(DateOnly date, string? value)
     {
-        if (!TimeOnly.TryParse(value, out var time)) return null;
-        return new DateTimeOffset(date.ToDateTime(time), TimeSpan.Zero);
+        if (string.IsNullOrWhiteSpace(value) || !TimeOnly.TryParse(value, out var time)) return null;
+        var local = DateTime.SpecifyKind(date.ToDateTime(time), DateTimeKind.Unspecified);
+        try
+        {
+            var zone = TimeZoneInfo.FindSystemTimeZoneById(OperatingSystem.IsWindows() ? "GMT Standard Time" : "Europe/London");
+            return new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(local, zone));
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return new DateTimeOffset(local, TimeSpan.Zero);
+        }
     }
 
     private static string? Window(string? from, string? to) => string.IsNullOrWhiteSpace(from) && string.IsNullOrWhiteSpace(to)
         ? null
         : $"collect {from}{(!string.IsNullOrWhiteSpace(from) && !string.IsNullOrWhiteSpace(to) ? "-" : string.Empty)}{to}";
 
-    private static Driver? ResolveDriver(IEnumerable<Driver> rows, string? value) => string.IsNullOrWhiteSpace(value) || IsPlaceholder(value)
-        ? null
-        : rows.FirstOrDefault(row => string.Equals(row.DisplayName.Trim(), value.Trim(), StringComparison.OrdinalIgnoreCase) || string.Equals(row.TachoName?.Trim(), value.Trim(), StringComparison.OrdinalIgnoreCase));
+    private static Driver? ResolveDriver(IEnumerable<Driver> rows, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || IsPlaceholder(value)) return null;
+        var needle = Normalize(value);
+        var matches = rows.Where(row =>
+            Normalize(row.DisplayName) == needle ||
+            Normalize(row.TachoName) == needle ||
+            Normalize(row.EmployeeNumber) == needle).ToList();
+        return matches.Count == 1 ? matches[0] : null;
+    }
 
     private static Vehicle? ResolveVehicle(IEnumerable<Vehicle> rows, string? value)
     {
@@ -285,9 +332,22 @@ public sealed class PlannerSourceLineImportController(TmsDbContext db) : Control
         return suffix.Count == 1 ? suffix[0] : null;
     }
 
-    private static Trailer? ResolveTrailer(IEnumerable<Trailer> rows, string? value) => string.IsNullOrWhiteSpace(value)
-        ? null
-        : rows.FirstOrDefault(row => string.Equals(row.TrailerNumber.Trim(), value.Trim(), StringComparison.OrdinalIgnoreCase));
+    private static Trailer? ResolveTrailer(IEnumerable<Trailer> rows, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var needle = TrailerKey(value);
+        var matches = rows.Where(row => TrailerKey(row.TrailerNumber) == needle).ToList();
+        return matches.Count == 1 ? matches[0] : null;
+    }
+
+    private static string TrailerKey(string? value)
+    {
+        var key = Normalize(value);
+        if (key.StartsWith("SLH", StringComparison.Ordinal)) key = key[3..];
+        return int.TryParse(key, NumberStyles.None, CultureInfo.InvariantCulture, out var number)
+            ? number.ToString(CultureInfo.InvariantCulture)
+            : key;
+    }
 
     private static int NaturalRunNumber(string? value)
     {
