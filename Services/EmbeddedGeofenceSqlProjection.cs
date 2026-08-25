@@ -27,8 +27,14 @@ public static class EmbeddedGeofenceSqlProjection
     {
         if (snapshot.Visits.Count == 0) return;
 
-        await GeofenceRunProgression.EnsureSchemaAsync(db, ct);
-        await GeofenceAutoSeed.EnsureAsync(db, ct);
+        // Production uses Azure SQL and still receives the existing self-repair/seed
+        // safeguards. Tests use EF's in-memory provider, where relational SQL helpers
+        // are intentionally unavailable; the projection itself does not require them.
+        if (db.Database.IsRelational())
+        {
+            await GeofenceRunProgression.EnsureSchemaAsync(db, ct);
+            await GeofenceAutoSeed.EnsureAsync(db, ct);
+        }
 
         var normalizedNames = snapshot.Visits
             .Select(visit => Normalize(visit.Fence.Name))
