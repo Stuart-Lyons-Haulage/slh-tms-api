@@ -34,6 +34,8 @@ public static class ExecutionIdentityResolver
             foreach (var mapping in mappings)
             {
                 if (!result.TryGetValue(mapping.TmsEntityId, out var aliases)) continue;
+                var rawKey = mapping.ExternalKey?.Trim();
+                if (!string.IsNullOrWhiteSpace(rawKey)) aliases.Add(rawKey);
                 foreach (var alias in VehicleAliasVariants(mapping.ExternalKey)) aliases.Add(alias);
             }
         }
@@ -41,6 +43,39 @@ public static class ExecutionIdentityResolver
         {
             db.ChangeTracker.Clear();
         }
+
+        // VehicleTrackingEvents retains the provider's exact Falcon vehicle key. The
+        // canonical aliases above deliberately normalise registrations for correlation,
+        // but an indexed SQL `VehicleIdentifier IN (...)` history query must also carry
+        // the exact provider string (including spaces/punctuation). VehicleLiveStatus is
+        // a tiny one-row-per-provider-vehicle table, so use it to bootstrap those exact
+        // keys without ever scanning the full fleet tracking history.
+        try
+        {
+            var liveIdentifiers = await db.VehicleLiveStatuses.AsNoTracking()
+                .Select(status => status.VehicleIdentifier)
+                .ToListAsync(ct);
+
+            foreach (var identifier in liveIdentifiers.Where(value => !string.IsNullOrWhiteSpace(value)))
+            {
+                var matches = result
+                    .Where(pair => MatchesVehicleIdentifier(pair.Value, identifier))
+                    .Select(pair => pair.Key)
+                    .Distinct()
+                    .Take(2)
+                    .ToList();
+                if (matches.Count != 1) continue;
+
+                var aliases = result[matches[0]];
+                aliases.Add(identifier.Trim());
+                foreach (var alias in VehicleAliasVariants(identifier)) aliases.Add(alias);
+            }
+        }
+        catch (Exception exception) when (SchemaUnavailable(exception))
+        {
+            db.ChangeTracker.Clear();
+        }
+
         return result;
     }
 
@@ -52,9 +87,13 @@ public static class ExecutionIdentityResolver
     {
         if (vehicles.Count == 0) return 0;
 
+        // Keep the exact provider key in IntegrationMappings. Matching continues to use
+        // the canonical normalised variants, while the raw key gives the indexed tracking
+        // history query the exact VehicleIdentifier stored by RoadTech/Falcon.
         var identifiers = providerIdentifiers
-            .Select(NormaliseVehicle)
-            .Where(value => value.Length > 0)
+            .Select(value => value?.Trim())
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value!)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         if (identifiers.Count == 0) return 0;
@@ -101,7 +140,7 @@ public static class ExecutionIdentityResolver
                 TmsEntityType = "Vehicle",
                 TmsEntityId = matches[0],
                 Active = true,
-                Notes = "Auto-linked from unique RoadTech/Falcon telemetry identifier matched to the planned vehicle registration/fleet aliases.",
+                Notes = "Auto-linked from unique RoadTech/Falcon telemetry identifier matched to the planned vehicle registration/fleet aliases. Exact provider key retained for indexed tracking history.",
                 UpdatedBy = "RoadTech geofence identity repair"
             });
             added++;
