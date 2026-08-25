@@ -1,0 +1,4 @@
+- replay historical telemetry
+- rebuild embedded visits
+- persist SQL projection
+- report Lake Lane and NWF site diagnostics
