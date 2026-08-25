@@ -140,10 +140,12 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
                     ?? PickNextStop(stops, now, load.Status);
             var firstStop = stops.FirstOrDefault();
             var finalStop = stops.LastOrDefault();
+            var routeComplete = stops.Count > 0 && completedStopIds.Count >= stops.Count;
+            var etaTarget = routeComplete ? null : finalStop;
 
-            DateTimeOffset? eta = nextStop?.PlannedArrivalUtc;
+            DateTimeOffset? eta = etaTarget?.PlannedArrivalUtc;
             var etaSource = eta is null ? "Unavailable" : "Planned";
-            if (live is not null && nextStop?.Latitude is not null && nextStop.Longitude is not null && now - live.LastEventTimeUtc <= TimeSpan.FromMinutes(30))
+            if (live is not null && etaTarget?.Latitude is not null && etaTarget.Longitude is not null && now - live.LastEventTimeUtc <= TimeSpan.FromMinutes(30))
             {
                 if (useLiveMapEtas)
                 {
@@ -151,7 +153,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
                     {
                         using var mapEta = CancellationTokenSource.CreateLinkedTokenSource(ct);
                         mapEta.CancelAfter(MapEtaBudget);
-                        var travel = await maps.TravelTime((live.Longitude, live.Latitude), (nextStop.Longitude.Value, nextStop.Latitude.Value), mapEta.Token);
+                        var travel = await maps.TravelTime((live.Longitude, live.Latitude), (etaTarget.Longitude.Value, etaTarget.Latitude.Value), mapEta.Token);
                         eta = now + travel;
                         etaSource = "Live";
                     }
@@ -171,7 +173,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
             }
 
             var trackingAgeMinutes = live is null ? (double?)null : Math.Max(0, (now - live.LastEventTimeUtc).TotalMinutes);
-            var state = State(load, driver, vehicle, live, trackingAgeMinutes, eta, nextStop?.PlannedArrivalUtc);
+            var state = State(load, driver, vehicle, live, trackingAgeMinutes, eta, finalStop?.PlannedArrivalUtc);
             if (activeDwell is not null)
             {
                 var minutes = activeDwell.LiveDwellMinutes ?? 0;
@@ -191,6 +193,8 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
                 firstStop?.PlannedArrivalUtc,
                 finalStop?.PlannedArrivalUtc,
                 nextStop?.Name,
+                finalStop?.Name,
+                etaTarget?.Name,
                 eta,
                 etaSource,
                 live is null ? "No live tracking" : TrackingText(live, trackingAgeMinutes ?? 0),
@@ -466,7 +470,7 @@ public sealed record TvDisplayPairRequest(string? Code);
 internal sealed record TvDisplayAccess(string Key, DateTimeOffset CreatedAtUtc);
 internal sealed record TvDisplayPairing(string Code, DateTimeOffset CreatedAtUtc, DateTimeOffset ExpiresAtUtc, DateTimeOffset? UsedAtUtc);
 internal sealed record TvRunDisplayRow(Guid Id, string Reference, string Status, string Driver, string Vehicle, string? Trailer,
-    DateTimeOffset? FirstPlannedUtc, DateTimeOffset? FinalPlannedUtc, string? NextStop, DateTimeOffset? EtaUtc, string EtaSource,
+    DateTimeOffset? FirstPlannedUtc, DateTimeOffset? FinalPlannedUtc, string? NextStop, string? FinalStop, string? EtaTarget, DateTimeOffset? EtaUtc, string EtaSource,
     string Tracking, DateTimeOffset? TrackingUpdatedAtUtc, decimal? SpeedKph, string State, string StateDetail, int Priority,
     DateTimeOffset? SiteArrivalUtc, DateTimeOffset? SiteDepartureUtc, int? LiveDwellMinutes, int? LiveDwellSeconds,
     int? FinalDwellMinutes, int? FinalDwellSeconds, string DwellState, string? LinkageException);
