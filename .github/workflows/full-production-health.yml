@@ -20,6 +20,7 @@ jobs:
     env:
       API_BASE: https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
       PORTAL_BASE: https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+      TV_WALLBOARD_ACCESS_KEY: ${{ secrets.TV_WALLBOARD_ACCESS_KEY }}
     steps:
       - name: Verify API, SQL, schema and live integrations
         shell: bash
@@ -78,22 +79,51 @@ jobs:
             return 1
           }
 
+          probe_run_evidence() {
+            test -n "$TV_WALLBOARD_ACCESS_KEY"
+            local body_file
+            body_file="$(mktemp)"
+            status="$(curl --silent --show-error --output "$body_file" --write-out "%{http_code}" \
+              -H "X-TMS-TV-Key: $TV_WALLBOARD_ACCESS_KEY" \
+              "$API_BASE/api/v1/health/run-evidence" || true)"
+            echo "[Cross-system run evidence] HTTP $status"
+            test "$status" = "200"
+
+            summary="$(jq -c '{planningDate, tracking, geofences, tacho, prioritySites, evidenceGapCount}' "$body_file")"
+            echo "$summary"
+            {
+              echo "### Cross-system run evidence"
+              echo
+              echo '```json'
+              echo "$summary" | jq .
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            observations="$(jq -r '.tracking.observationCount // 0' "$body_file")"
+            planned="$(jq -r '.geofences.plannedRuns // 0' "$body_file")"
+            provider_evidence="$(jq -r '.tacho.providerEvidenceRecords // 0' "$body_file")"
+            if test "$planned" -gt 0 && test "$observations" -lt "$planned"; then
+              echo "::warning title=RoadTech operating-day evidence::Only $observations tracking observations were available for $planned planned runs. Geofence completion/ETA confidence may be incomplete."
+            fi
+            if test "$planned" -gt 0 && test "$provider_evidence" -eq 0; then
+              echo "::warning title=Tacho run evidence::No live TachoMaster duty or Falcon driver-card evidence was returned for $planned planned runs."
+            fi
+            jq -r '.prioritySites[] | select(.plannedStops > 0 and .visits == 0) | "::warning title=Geofence evidence \(.site)::\(.plannedStops) planned stop(s) but zero reconstructed visits today."' "$body_file"
+            rm -f "$body_file"
+          }
+
           probe_200 'Core API' "$API_BASE/api/v1/health"
           probe_200 'Azure SQL' "$API_BASE/api/v1/health/ready"
           probe_200 'Operational data/schema' "$API_BASE/api/v1/diagnostics/data-readiness"
           probe_200 'RoadTech current GPS' "$API_BASE/api/v1/health/tracking"
-          # Vehicle/geofence coverage is introduced by this change. During the PR the
-          # currently deployed revision does not have it yet, so require it after deploy.
           if test "$GITHUB_EVENT_NAME" != "pull_request"; then
             probe_200 'Vehicle geofence coverage' "$API_BASE/api/v1/health/tracking/geofences"
           fi
           probe_tachomaster
           probe_200 'Falcon geofence payload' "$API_BASE/api/v1/health/geofences"
-          # The planner/import health route is introduced by this change. During the PR
-          # the currently deployed revision does not have it yet, so require it only after
-          # deployment (or on a manual health run once the new revision is live).
           if test "$GITHUB_EVENT_NAME" != "pull_request"; then
             probe_200 'Planner and import data path' "$API_BASE/api/v1/health/planner-import"
+            probe_run_evidence
           fi
           probe_200 'Portal' "$PORTAL_BASE/"
 
