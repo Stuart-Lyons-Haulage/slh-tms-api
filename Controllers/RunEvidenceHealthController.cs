@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
@@ -33,6 +34,7 @@ public sealed class RunEvidenceHealthController(
         var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
         var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, geofenceLoads, ct);
         var tacho = await RunTachoEvidenceResolver.ResolveAsync(db, tachoMaster, loads, planningDate, logger, ct);
+        var trackingCoverage = await TrackingCoverageAsync(loads, planningDate, ct);
 
         var runEvidence = loads.Select(load =>
         {
@@ -123,7 +125,12 @@ public sealed class RunEvidenceHealthController(
             tracking = new
             {
                 observationCount = snapshot.TrackingEventCount,
-                snapshot.LatestTrackingUtc
+                snapshot.LatestTrackingUtc,
+                plannedVehicleCount = trackingCoverage.Count,
+                vehiclesWithMultipleSamples = trackingCoverage.Count(item => item.SampleCount > 1),
+                vehiclesWithSingleSample = trackingCoverage.Count(item => item.SampleCount == 1),
+                vehiclesWithNoSamples = trackingCoverage.Count(item => item.SampleCount == 0),
+                vehicleCoverage = trackingCoverage
             },
             geofences = new
             {
@@ -151,6 +158,95 @@ public sealed class RunEvidenceHealthController(
             evidenceGapCount = evidenceGapRuns.Count,
             evidenceGaps = evidenceGapRuns
         });
+    }
+
+    private async Task<List<TrackingVehicleCoverage>> TrackingCoverageAsync(
+        IReadOnlyCollection<Load> loads,
+        DateOnly planningDate,
+        CancellationToken ct)
+    {
+        var vehicleIds = loads
+            .Where(load => load.VehicleId is not null)
+            .Select(load => load.VehicleId!.Value)
+            .Distinct()
+            .ToList();
+        if (vehicleIds.Count == 0) return [];
+
+        var vehicles = await db.Vehicles.AsNoTracking()
+            .Where(vehicle => vehicleIds.Contains(vehicle.Id))
+            .ToListAsync(ct);
+        var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles, ct);
+        var aliases = aliasesByVehicle.Values
+            .SelectMany(value => value)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var (fromUtc, toUtc) = OperatingWindowUtc(planningDate);
+
+        var storedEvents = aliases.Count == 0
+            ? []
+            : await db.VehicleTrackingEvents.AsNoTracking()
+                .Where(item => item.EventTimeUtc >= fromUtc && item.EventTimeUtc < toUtc && aliases.Contains(item.VehicleIdentifier))
+                .OrderBy(item => item.EventTimeUtc)
+                .ToListAsync(ct);
+        var liveStatuses = await db.VehicleLiveStatuses.AsNoTracking().ToListAsync(ct);
+
+        return vehicles
+            .OrderBy(vehicle => vehicle.Registration)
+            .Select(vehicle =>
+            {
+                var vehicleAliases = aliasesByVehicle.GetValueOrDefault(vehicle.Id)
+                    ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var events = storedEvents
+                    .Where(item => ExecutionIdentityResolver.MatchesVehicleIdentifier(vehicleAliases, item.VehicleIdentifier))
+                    .ToList();
+                var live = liveStatuses
+                    .Where(item => ExecutionIdentityResolver.MatchesVehicleIdentifier(vehicleAliases, item.VehicleIdentifier))
+                    .OrderByDescending(item => item.LastReceivedAtUtc)
+                    .FirstOrDefault();
+                var runRefs = loads
+                    .Where(load => load.VehicleId == vehicle.Id)
+                    .Select(load => load.Reference)
+                    .Where(reference => !string.IsNullOrWhiteSpace(reference))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(reference => reference)
+                    .ToList();
+                var distinctPositionCount = events
+                    .Select(item => (item.Latitude, item.Longitude))
+                    .Distinct()
+                    .Count();
+
+                return new TrackingVehicleCoverage(
+                    vehicle.Id,
+                    vehicle.Registration,
+                    runRefs,
+                    events.Count,
+                    distinctPositionCount,
+                    events.FirstOrDefault()?.EventTimeUtc,
+                    events.LastOrDefault()?.EventTimeUtc,
+                    live?.LastEventTimeUtc,
+                    live?.LastReceivedAtUtc,
+                    events.Count == 0 ? "NoStoredSamples" : events.Count == 1 ? "SingleProviderSample" : "SamplesAccumulating");
+            })
+            .ToList();
+    }
+
+    private static (DateTimeOffset FromUtc, DateTimeOffset ToUtc) OperatingWindowUtc(DateOnly planningDate)
+    {
+        try
+        {
+            var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+            var localStart = planningDate.ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
+            var localEnd = planningDate.AddDays(1).ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
+            return (
+                new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(localStart, zone), TimeSpan.Zero),
+                new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(localEnd, zone), TimeSpan.Zero));
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return (
+                new DateTimeOffset(planningDate.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc)),
+                new DateTimeOffset(planningDate.AddDays(1).ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc)));
+        }
     }
 
     private static int PlannedStops(IEnumerable<Load> loads, string site)
@@ -184,3 +280,15 @@ public sealed class RunEvidenceHealthController(
         }
     }
 }
+
+public sealed record TrackingVehicleCoverage(
+    Guid VehicleId,
+    string Registration,
+    IReadOnlyList<string> RunReferences,
+    int SampleCount,
+    int DistinctPositionCount,
+    DateTimeOffset? FirstEventUtc,
+    DateTimeOffset? LastEventUtc,
+    DateTimeOffset? LatestProviderEventUtc,
+    DateTimeOffset? LatestReceiptUtc,
+    string CaptureStatus);

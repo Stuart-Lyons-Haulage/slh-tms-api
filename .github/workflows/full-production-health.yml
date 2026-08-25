@@ -89,7 +89,21 @@ jobs:
             echo "[Cross-system run evidence] HTTP $status"
             test "$status" = "200"
 
-            summary="$(jq -c '{planningDate, tracking, geofences, tacho, prioritySites, evidenceGapCount}' "$body_file")"
+            summary="$(jq -c '{
+              planningDate,
+              tracking: {
+                observationCount: .tracking.observationCount,
+                latestTrackingUtc: .tracking.latestTrackingUtc,
+                plannedVehicleCount: .tracking.plannedVehicleCount,
+                vehiclesWithMultipleSamples: .tracking.vehiclesWithMultipleSamples,
+                vehiclesWithSingleSample: .tracking.vehiclesWithSingleSample,
+                vehiclesWithNoSamples: .tracking.vehiclesWithNoSamples
+              },
+              geofences,
+              tacho,
+              prioritySites,
+              evidenceGapCount
+            }' "$body_file")"
             echo "$summary"
             {
               echo "### Cross-system run evidence"
