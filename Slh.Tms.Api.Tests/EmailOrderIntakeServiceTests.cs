@@ -100,6 +100,57 @@ public sealed class EmailOrderIntakeServiceTests
         Assert.Contains("Requested time: 08:00", order.Payload.GetProperty("driverInstructions").GetString());
     }
 
+    [Fact]
+    public void HallHunterDirectDepotDelivery_UsesSeparateCollectionAndDeliveryDates()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-hhp-waitrose", null, "info@lyonshaulage.com", "chris.benning@primafruit.co.uk", "Chris Benning",
+            "HHP WAITROSE DIRECT DEPOT DELIVERY Wednesday 26/08/26", DateTimeOffset.Parse("2026-08-25T08:36:23Z"),
+            "Please collect 4 pallets from Hall Hunter today Tuesday 25/08/2026.\n* Leyland 4 pallets\nFor Delivery date Wednesday 26/08/2026.\nPO number: A59997. 174 cases of Berries.", null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("WAITROSE", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("2026-08-25", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("2026-08-26", order.Payload.GetProperty("deliveryDate").GetString());
+        Assert.Equal("Hall Hunter", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Leyland", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal(4, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.Equal("A59997", order.Payload.GetProperty("customerPo").GetString());
+    }
+
+    [Fact]
+    public void WaitroseDepotTable_StagesEachDepotRow()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-waitrose-table", null, "info@lyonshaulage.com", "Norbert.Horvath@fowlerwelch.co.uk", "Norbert",
+            "Waitrose 26/08/26", DateTimeOffset.Parse("2026-08-25T05:09:06Z"),
+            "DELIVERY DATE | 26/08/2026\nDEPOT | PO NUMBER | PALLET COUNT\nAYLESFORD | X58797 | 3\nBRACKNELL | J58987 | 2\nBRINKLOW | R58889 | 2\nLEYLAND | Z57709 | 1", null, null, null));
+
+        Assert.Equal(4, result.Orders.Count);
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("stallNumber").GetString() == "Aylesford" && order.Payload.GetProperty("pallets").GetInt32() == 3);
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("stallNumber").GetString() == "Leyland" && order.Payload.GetProperty("pallets").GetInt32() == 1);
+        Assert.All(result.Orders, order => Assert.Equal("2026-08-26", order.Payload.GetProperty("deliveryDate").GetString()));
+    }
+
+    [Fact]
+    public void SimpleTodayTonightSplitBody_StagesEachLine()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-cj-hayward", null, "info@lyonshaulage.com", "debhayward@yahoo.com", "Debbie Hayward",
+            "C & J Hayward", DateTimeOffset.Parse("2026-08-25T07:54:56Z"),
+            "Morning,\nPlease can you pick up the following pallets today for delivery tonight:\n5 to Kemsley - Spitalfields\n1 to Jenni International - Spitalfields\nMany thanks", null, null, null));
+
+        Assert.Equal(2, result.Orders.Count);
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("sellerName").GetString() == "Kemsley" && order.Payload.GetProperty("pallets").GetInt32() == 5);
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("sellerName").GetString() == "Jenni International" && order.Payload.GetProperty("pallets").GetInt32() == 1);
+        Assert.All(result.Orders, order =>
+        {
+            Assert.Equal("2026-08-25", order.Payload.GetProperty("collectionDate").GetString());
+            Assert.Equal("2026-08-25", order.Payload.GetProperty("deliveryDate").GetString());
+            Assert.Equal("Spitalfields", order.Payload.GetProperty("stallNumber").GetString());
+        });
+    }
+
     [Theory]
     [InlineData("Langmeads Aldi booking 26/08", "Please book delivery to Aldi Atherstone. Collection 8 am.", "LANGMEADS", "Aldi Atherstone")]
     [InlineData("Barfoots Morrisons delivery 26/08", "Please find attached correct pallet booking.", "BARFOOTS", "Barfoots")]

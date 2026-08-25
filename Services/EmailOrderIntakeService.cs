@@ -16,7 +16,7 @@ public sealed class EmailOrderIntakeService
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex ExplicitPoRegex = new(
-        @"\b(?:PORD[A-Z0-9/-]*|THE[A-Z0-9/-]+)\b|(?:\b(?:PO|Purchase\s+Order)\b\s*[:#-]\s*(?<po>[A-Z0-9][A-Z0-9/-]{2,}))",
+        @"\b(?:PORD[A-Z0-9/-]*|THE[A-Z0-9/-]+)\b|(?:\b(?:PO(?:\s+number)?|Purchase\s+Order)\b\s*[:#.-]?\s*(?<po>[A-Z0-9][A-Z0-9/-]{2,}))",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex TotalPalletsRegex = new(
@@ -124,6 +124,11 @@ public sealed class EmailOrderIntakeService
 
         if (orders.Count == 0)
         {
+            orders.AddRange(ParseStructuredBodyOrders(request, sourceDate, rawPo, body, sourceText, receivedAt));
+        }
+
+        if (orders.Count == 0)
+        {
             var bodyOrder = ParseBodyOrder(request, sourceDate, rawPo, body, sourceText, masterSiteNames ?? [], globalWarnings);
             if (bodyOrder is not null)
                 orders.Add(bodyOrder);
@@ -133,6 +138,24 @@ public sealed class EmailOrderIntakeService
             return new EmailIntakeParseResult([], globalWarnings, "No transport order could be identified from this email.");
 
         return new EmailIntakeParseResult(orders, globalWarnings, null);
+    }
+
+    private static IEnumerable<ParsedEmailOrder> ParseStructuredBodyOrders(
+        MailboxEmailIntakeRequest request,
+        DateOnly? sourceDate,
+        string? rawPo,
+        string body,
+        string sourceText,
+        DateTimeOffset receivedAt)
+    {
+        var hallHunter = ParseHallHunterDirectDepot(request, rawPo, body, sourceText, receivedAt);
+        if (hallHunter.Count > 0) return hallHunter;
+
+        var waitrose = ParseWaitroseDepotTable(request, rawPo, body, sourceText, sourceDate, receivedAt);
+        if (waitrose.Count > 0) return waitrose;
+
+        var simpleSplit = ParseSimpleSplitBody(request, rawPo, body, receivedAt);
+        return simpleSplit;
     }
 
     private static IEnumerable<ParsedEmailOrder> ParseWorkbook(
@@ -349,6 +372,187 @@ public sealed class EmailOrderIntakeService
         return recognisedCustomerOrSite && (hasReference || hasCollection || hasDestination || hasTime);
     }
 
+    private static List<ParsedEmailOrder> ParseHallHunterDirectDepot(
+        MailboxEmailIntakeRequest request,
+        string? rawPo,
+        string body,
+        string sourceText,
+        DateTimeOffset receivedAt)
+    {
+        if (!sourceText.Contains("Hall Hunter", StringComparison.OrdinalIgnoreCase) &&
+            !sourceText.Contains("Primafruit", StringComparison.OrdinalIgnoreCase))
+            return [];
+        if (!sourceText.Contains("Waitrose", StringComparison.OrdinalIgnoreCase) &&
+            !sourceText.Contains("direct depot delivery", StringComparison.OrdinalIgnoreCase))
+            return [];
+
+        var collectionDate = ExtractDateAfter(body, @"collect[^.\r\n]*?") ?? LocalDate(receivedAt);
+        var deliveryDate = ExtractDateAfter(body, @"delivery\s+date[^.\r\n]*?") ?? ExtractDate(sourceText, receivedAt) ?? collectionDate;
+        var collection = ExtractMatch(new Regex(@"\bfrom\s+(?<site>Hall\s+Hunter)\b", RegexOptions.IgnoreCase), body, "site") ?? "Hall Hunter";
+        var po = rawPo ?? ExtractPo(sourceText);
+        var depotRows = Regex.Matches(body, @"(?im)(?:^|\n|[*\s])(?<depot>Aylesford|Bracknell|Brinklow|Leyland)\s+(?<qty>\d{1,3})\s+pallets?\b")
+            .Cast<Match>()
+            .Select(match => (Depot: CleanSourceLine(match.Groups["depot"].Value), Pallets: int.Parse(match.Groups["qty"].Value, CultureInfo.InvariantCulture)))
+            .GroupBy(row => row.Depot, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToList();
+        if (depotRows.Count == 0)
+        {
+            var pallets = ExtractInt(PalletQuantityRegex, body, "qty") ?? ExtractInt(LabelledQuantityRegex, body, "qty");
+            if (pallets is > 0) depotRows.Add(("Waitrose", pallets.Value));
+        }
+
+        return depotRows
+            .Select((row, index) => BuildStructuredOrder(
+                request,
+                $"hall-hunter-{NormaliseKey(row.Depot)}-{index + 1}",
+                "WAITROSE",
+                po,
+                collectionDate,
+                deliveryDate,
+                row.Pallets,
+                collection,
+                row.Depot,
+                "Hall Hunter direct depot delivery",
+                []))
+            .ToList();
+    }
+
+    private static List<ParsedEmailOrder> ParseWaitroseDepotTable(
+        MailboxEmailIntakeRequest request,
+        string? rawPo,
+        string body,
+        string sourceText,
+        DateOnly? sourceDate,
+        DateTimeOffset receivedAt)
+    {
+        if (!sourceText.Contains("Waitrose", StringComparison.OrdinalIgnoreCase) &&
+            !sourceText.Contains("Weightrose", StringComparison.OrdinalIgnoreCase))
+            return [];
+        if (!sourceText.Contains("Depot", StringComparison.OrdinalIgnoreCase) ||
+            !(sourceText.Contains("Pallet count", StringComparison.OrdinalIgnoreCase) || sourceText.Contains("Pallets", StringComparison.OrdinalIgnoreCase)))
+            return [];
+
+        var deliveryDate = ExtractDateAfter(sourceText, @"delivery\s+date[^A-Z0-9\r\n]*") ?? sourceDate ?? LocalDate(receivedAt);
+        var collection = sourceText.Contains("Hill Brothers", StringComparison.OrdinalIgnoreCase) ||
+                         sourceText.Contains("Hills", StringComparison.OrdinalIgnoreCase)
+            ? "Hill Brothers"
+            : null;
+        var rows = Regex.Matches(sourceText, @"(?im)\b(?<depot>AYLESFORD|BRACKNELL|BRINKLOW|LEYLAND)\b\s*\|?\s*(?<po>[A-Z]\d{5}(?:\s*\+\s*[A-Z]\d{5})*)\s*\|?\s*(?<qty>\d{1,3})\b")
+            .Cast<Match>()
+            .Select(match => (
+                Depot: CultureInfo.InvariantCulture.TextInfo.ToTitleCase(match.Groups["depot"].Value.ToLowerInvariant()),
+                Po: Regex.Replace(match.Groups["po"].Value, @"\s+", string.Empty),
+                Pallets: int.Parse(match.Groups["qty"].Value, CultureInfo.InvariantCulture)))
+            .GroupBy(row => $"{row.Depot}|{row.Po}|{row.Pallets}", StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToList();
+
+        return rows
+            .Select((row, index) => BuildStructuredOrder(
+                request,
+                $"waitrose-{NormaliseKey(row.Depot)}-{index + 1}",
+                "WAITROSE",
+                row.Po ?? rawPo,
+                deliveryDate,
+                deliveryDate,
+                row.Pallets,
+                collection,
+                row.Depot,
+                "Waitrose depot pallet booking",
+                string.IsNullOrWhiteSpace(collection) ? ["Collection site was not explicit in the email."] : []))
+            .ToList();
+    }
+
+    private static List<ParsedEmailOrder> ParseSimpleSplitBody(
+        MailboxEmailIntakeRequest request,
+        string? rawPo,
+        string body,
+        DateTimeOffset receivedAt)
+    {
+        var source = $"{request.Subject} {request.SenderAddress} {body}";
+        if (!source.Contains("C & J Hayward", StringComparison.OrdinalIgnoreCase) &&
+            !source.Contains("debhayward@yahoo.com", StringComparison.OrdinalIgnoreCase))
+            return [];
+
+        var collectionDate = body.Contains("today", StringComparison.OrdinalIgnoreCase) ? LocalDate(receivedAt) : ExtractDate(body, receivedAt);
+        var deliveryDate = body.Contains("tonight", StringComparison.OrdinalIgnoreCase)
+            ? LocalDate(receivedAt)
+            : body.Contains("tomorrow", StringComparison.OrdinalIgnoreCase)
+                ? LocalDate(receivedAt).AddDays(1)
+                : collectionDate;
+        if (collectionDate is null || deliveryDate is null) return [];
+
+        var rows = Regex.Matches(body, @"(?is)(?<qty>\d{1,3})\s+to\s+(?<collection>.+?)\s*-\s*(?<destination>.+?)(?=\s+\d{1,3}\s+to\s+|Many thanks|$)")
+            .Cast<Match>()
+            .Select(match => (
+                Pallets: int.Parse(match.Groups["qty"].Value, CultureInfo.InvariantCulture),
+                Collection: CleanSourceLine(match.Groups["collection"].Value),
+                Destination: CleanSourceLine(match.Groups["destination"].Value)))
+            .Where(row => row.Pallets > 0 && !string.IsNullOrWhiteSpace(row.Collection) && !string.IsNullOrWhiteSpace(row.Destination))
+            .ToList();
+
+        return rows
+            .Select((row, index) => BuildStructuredOrder(
+                request,
+                $"simple-split-{index + 1}-{NormaliseKey(row.Collection)}-{NormaliseKey(row.Destination)}",
+                "CJHAYWARD",
+                rawPo,
+                collectionDate.Value,
+                deliveryDate.Value,
+                row.Pallets,
+                row.Collection,
+                row.Destination,
+                "C & J Hayward pallet collection",
+                string.IsNullOrWhiteSpace(rawPo) ? ["No customer PO/reference was found; a stable email reference was generated and should be checked before approval."] : []))
+            .ToList();
+    }
+
+    private static ParsedEmailOrder BuildStructuredOrder(
+        MailboxEmailIntakeRequest request,
+        string sourceKey,
+        string customer,
+        string? rawPo,
+        DateOnly collectionDate,
+        DateOnly deliveryDate,
+        int pallets,
+        string? collection,
+        string destination,
+        string jobType,
+        IReadOnlyList<string> warnings)
+    {
+        var baseReference = rawPo ?? StableEmailReference(request.MessageId);
+        var orderReference = BuildRowReference(baseReference, customer, destination, deliveryDate, 1);
+        var naturalKey = $"{(request.SenderAddress ?? string.Empty).Trim().ToLowerInvariant()}|{customer}|{collectionDate:yyyy-MM-dd}|{deliveryDate:yyyy-MM-dd}|{NormaliseKey(collection)}|{NormaliseKey(destination)}|{pallets}";
+        var instructions = BuildInstructions(rawPo, null, null, null, request, null, warnings, jobType);
+        var payload = new Dictionary<string, object?>
+        {
+            ["poNumber"] = orderReference,
+            ["customerCode"] = customer,
+            ["collectionDate"] = collectionDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            ["deliveryDate"] = deliveryDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            ["pallets"] = pallets,
+            ["sellerName"] = collection,
+            ["marketName"] = customer,
+            ["stallNumber"] = destination,
+            ["driverInstructions"] = instructions,
+            ["customerPo"] = rawPo,
+            ["jobType"] = jobType,
+            ["sourceMessageId"] = request.MessageId,
+            ["sourceInternetMessageId"] = request.InternetMessageId,
+            ["sourceSender"] = request.SenderAddress,
+            ["sourceSenderName"] = request.SenderName,
+            ["sourceSubject"] = request.Subject,
+            ["sourceReceivedAtUtc"] = request.ReceivedAtUtc,
+            ["sourceWebLink"] = request.WebLink,
+            ["intakeNaturalKey"] = naturalKey,
+            ["intakeConfidence"] = warnings.Count == 0 ? "High" : "Medium",
+            ["intakeWarnings"] = warnings
+        };
+
+        return new ParsedEmailOrder(sourceKey, naturalKey, JsonSerializer.SerializeToElement(payload), warnings);
+    }
+
     private static bool IsBookingHeader(object?[] row)
     {
         var keys = row.Select(value => NormaliseKey(CellText(value))).Where(value => value.Length > 0).ToHashSet();
@@ -433,6 +637,25 @@ public sealed class EmailOrderIntakeService
         var monthNameMatch = MonthNameDateRegex.Match(input ?? string.Empty);
         if (!monthNameMatch.Success) return null;
         return BuildDate(monthNameMatch.Groups["day"].Value, monthNameMatch.Groups["month"].Value, monthNameMatch.Groups["year"].Value, receivedAt);
+    }
+
+    private static DateOnly? ExtractDateAfter(string input, string prefixPattern)
+    {
+        var match = Regex.Match(input ?? string.Empty, $"{prefixPattern}(?<date>\\d{{1,2}}[./-]\\d{{1,2}}(?:[./-](?:20\\d{{2}}|\\d{{2}}))?)", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        return match.Success ? ExtractDate(match.Groups["date"].Value, DateTimeOffset.UtcNow) : null;
+    }
+
+    private static DateOnly LocalDate(DateTimeOffset receivedAt)
+    {
+        try
+        {
+            var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(receivedAt, zone).DateTime);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return DateOnly.FromDateTime(receivedAt.ToOffset(TimeSpan.FromHours(1)).DateTime);
+        }
     }
 
     private static DateOnly? BuildDate(string dayText, string monthText, string yearText, DateTimeOffset receivedAt)
