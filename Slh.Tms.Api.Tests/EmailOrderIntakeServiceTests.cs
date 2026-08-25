@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Slh.Tms.Api.Services;
 using Xunit;
 
@@ -80,6 +81,45 @@ public sealed class EmailOrderIntakeServiceTests
         Assert.Equal("Hams Hall", order.Payload.GetProperty("stallNumber").GetString());
         Assert.Equal("Hill Brothers", order.Payload.GetProperty("sellerName").GetString());
         Assert.Equal(19, order.Payload.GetProperty("pallets").GetInt32());
+    }
+
+    [Fact]
+    public void LangmeadsDeliveryToBody_IsStagedWithCollectionTime()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-langmeads-zenith", null, "info@lyonshaulage.com", "EmiliaMargas@langmeadherbs.co.uk", "Emilia Margas",
+            "Delivery to Zenith Nurseries  26.08.2026", DateTimeOffset.Parse("2026-08-25T07:59:51Z"),
+            "Good morning\nCould you please collect below for delivery to Zenith Nurseries - Station Road, Evesham, WR11 8LW.\n* Wednesday (26.08.2026) collection, the same day delivery - 16 pallets\nCollection 8 am.\nLangmead Herbs Limited\nHam Farm, Main Road, Bosham", null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("LANGMEADS", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("2026-08-26", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("Ham Farm", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Zenith Nurseries", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal(16, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.Contains("Requested time: 08:00", order.Payload.GetProperty("driverInstructions").GetString());
+    }
+
+    [Theory]
+    [InlineData("Langmeads Aldi booking 26/08", "Please book delivery to Aldi Atherstone. Collection 8 am.", "LANGMEADS", "Aldi Atherstone")]
+    [InlineData("Barfoots Morrisons delivery 26/08", "Please find attached correct pallet booking.", "BARFOOTS", "Barfoots")]
+    [InlineData("Natures Way Waitrose 26/08", "Waitrose booking confirmed for tomorrow.", "WAITROSE", "Waitrose")]
+    public void RecognisedSupplierOrSupermarket_WithDateAndNoQuantity_IsStillStagedForReview(
+        string subject,
+        string body,
+        string expectedCustomer,
+        string expectedSite)
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            $"message-low-detail-{expectedCustomer}", null, "info@lyonshaulage.com", "loads@example.com", "Loads",
+            subject, DateTimeOffset.Parse("2026-08-25T07:00:00Z"),
+            body, null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal(expectedCustomer, order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal(expectedSite, order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal(JsonValueKind.Null, order.Payload.GetProperty("pallets").ValueKind);
+        Assert.Contains(order.Warnings, warning => warning.Contains("Pallet quantity was not explicit", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

@@ -256,8 +256,19 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var attachments = string.Join(" ", (request.Attachments ?? []).Select(item => item.Name));
         var value = $"{sender} {subject} {body} {attachments}";
         return sender.EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) ||
+               sender.EndsWith("@langmeadherbs.co.uk", StringComparison.OrdinalIgnoreCase) ||
+               sender.EndsWith("@langmeadfarms.co.uk", StringComparison.OrdinalIgnoreCase) ||
+               sender.EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("NWAY", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("NWF", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Natures Way", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Nature's Way", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Langmead", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Barfoots", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Aldi", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Waitrose", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Weightrose", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Morrisons", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("IFCO", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("crate", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("tray", StringComparison.OrdinalIgnoreCase) ||
@@ -270,8 +281,20 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         if (value.Contains("IFCO", StringComparison.OrdinalIgnoreCase))
             return "IFCO";
         if (value.Contains("NWAY", StringComparison.OrdinalIgnoreCase) || value.Contains("NWF", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("Natures Way", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("Nature's Way", StringComparison.OrdinalIgnoreCase) ||
             (request.SenderAddress ?? string.Empty).EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase))
             return "NWF";
+        if (value.Contains("Langmead", StringComparison.OrdinalIgnoreCase) ||
+            (request.SenderAddress ?? string.Empty).EndsWith("@langmeadherbs.co.uk", StringComparison.OrdinalIgnoreCase) ||
+            (request.SenderAddress ?? string.Empty).EndsWith("@langmeadfarms.co.uk", StringComparison.OrdinalIgnoreCase))
+            return "LANGMEADS";
+        if (value.Contains("Barfoots", StringComparison.OrdinalIgnoreCase) ||
+            (request.SenderAddress ?? string.Empty).EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase))
+            return "BARFOOTS";
+        if (value.Contains("Aldi", StringComparison.OrdinalIgnoreCase)) return "ALDI";
+        if (value.Contains("Waitrose", StringComparison.OrdinalIgnoreCase) || value.Contains("Weightrose", StringComparison.OrdinalIgnoreCase)) return "WAITROSE";
+        if (value.Contains("Morrisons", StringComparison.OrdinalIgnoreCase)) return "MORRISONS";
         return "EMAIL";
     }
 

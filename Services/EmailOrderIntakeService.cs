@@ -36,7 +36,7 @@ public sealed class EmailOrderIntakeService
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex CollectionTimeRegex = new(
-        @"\bCollection\s+time\s*[:=-]?\s*(?<time>[0-2]?\d[:.]\d{2})\b",
+        @"\bCollection(?:\s+time)?\s*[:=-]?\s*(?<time>(?:[01]?\d|2[0-3])(?:[:.]\d{2})?\s*(?:am|pm)?)\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex TemperatureRegex = new(
@@ -47,6 +47,10 @@ public sealed class EmailOrderIntakeService
         @"\bCollect\s+from\s*[:=-]?\s*(?<site>[^\r\n]{2,120})",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    private static readonly Regex DeliveryToRegex = new(
+        @"\bdelivery\s+to\s+(?<site>[^\r\n.]{2,180})",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private static readonly Regex HtmlRegex = new(@"<[^>]+>", RegexOptions.Compiled);
     private static readonly Regex ReFwRegex = new(@"^(?:(?:RE|FW|FWD)\s*:\s*)+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly IReadOnlyList<KnownIntakeSignal> KnownSignals =
@@ -55,6 +59,7 @@ public sealed class EmailOrderIntakeService
         new("WAITROSE", "Waitrose", ["WAITROSE", "WEIGHTROSE"]),
         new("NWF", "Natures Way", ["NATURES WAY", "NATURE'S WAY", "NWF", "NWAY"]),
         new("BARFOOTS", "Barfoots", ["BARFOOTS", "BARFOOT"]),
+        new("LANGMEADS", "Langmeads", ["LANGMEAD", "LANGMEADS", "LANGMEAD HERBS", "HAM FARM"]),
         new("MORRISONS", "Morrisons", ["MORRISONS", "MORRISON'S"]),
         new("ALDI", "Aldi", ["ALDI"]),
         new("COOP", "COOP", ["COOP", "CO-OP", "CO OP"]),
@@ -268,11 +273,11 @@ public sealed class EmailOrderIntakeService
         var customer = signal?.CustomerCode ?? InferCustomerCode(request.Subject, request.SenderAddress, sourceText);
         var jobType = InferJobType(request.Subject, body);
         var collection = InferCollectionSite(request.Subject, body, jobType);
-        var destination = InferDestination(request.Subject, jobType) ?? signal?.SiteName;
+        var destination = InferDestination(request.Subject, body, jobType) ?? signal?.SiteName;
         var pallets = ExtractInt(TotalPalletsRegex, body, "qty")
             ?? ExtractInt(LabelledQuantityRegex, sourceText, "qty")
             ?? ExtractInt(PalletQuantityRegex, sourceText, "qty");
-        var requestedTime = ExtractMatch(CollectionTimeRegex, body, "time")?.Replace('.', ':');
+        var requestedTime = NormaliseTime(ExtractMatch(CollectionTimeRegex, body, "time"));
         if (!HasEnoughBodyOrderEvidence(rawPo, collection, destination, pallets, requestedTime, jobType, signal is not null))
         {
             globalWarnings.Add("Email body contained a date but not enough order detail to stage a transport order.");
@@ -339,7 +344,9 @@ public sealed class EmailOrderIntakeService
         var hasTime = !string.IsNullOrWhiteSpace(requestedTime);
         if (jobType.Contains("Tray", StringComparison.OrdinalIgnoreCase))
             return hasReference && (hasCollection || hasDestination);
-        return hasQuantity && (hasReference || hasCollection || hasDestination || hasTime || recognisedCustomerOrSite);
+        if (hasQuantity && (hasReference || hasCollection || hasDestination || hasTime || recognisedCustomerOrSite))
+            return true;
+        return recognisedCustomerOrSite && (hasReference || hasCollection || hasDestination || hasTime);
     }
 
     private static bool IsBookingHeader(object?[] row)
@@ -478,7 +485,7 @@ public sealed class EmailOrderIntakeService
     private static string InferCustomerCode(string? subject, string? senderAddress, string? depot)
     {
         var source = $"{subject} {depot}".ToUpperInvariant();
-        foreach (var brand in new[] { "MORRISONS", "ALDI", "WAITROSE", "WEIGHTROSE", "COOP", "CO-OP", "OCADO", "SAINSBURYS", "SAINSBURY", "NATURES WAY", "NATURE'S WAY", "NWF", "NWAY", "BARFOOTS" })
+        foreach (var brand in new[] { "MORRISONS", "ALDI", "WAITROSE", "WEIGHTROSE", "COOP", "CO-OP", "OCADO", "SAINSBURYS", "SAINSBURY", "NATURES WAY", "NATURE'S WAY", "NWF", "NWAY", "BARFOOTS", "LANGMEADS", "LANGMEAD", "LANGMEAD HERBS" })
         {
             if (source.Contains(brand, StringComparison.OrdinalIgnoreCase))
                 return brand
@@ -488,11 +495,16 @@ public sealed class EmailOrderIntakeService
                     .Replace("NATURE'S WAY", "NWF", StringComparison.OrdinalIgnoreCase)
                     .Replace("NATURES WAY", "NWF", StringComparison.OrdinalIgnoreCase)
                     .Replace("NWAY", "NWF", StringComparison.OrdinalIgnoreCase)
-                    .Replace("BARFOOTS", "BARFOOTS", StringComparison.OrdinalIgnoreCase);
+                    .Replace("BARFOOTS", "BARFOOTS", StringComparison.OrdinalIgnoreCase)
+                    .Replace("LANGMEAD HERBS", "LANGMEADS", StringComparison.OrdinalIgnoreCase)
+                    .Replace("LANGMEAD", "LANGMEADS", StringComparison.OrdinalIgnoreCase);
         }
         if ((senderAddress ?? string.Empty).EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase)) return "NWF";
         if ((senderAddress ?? string.Empty).EndsWith("@summerberry.co.uk", StringComparison.OrdinalIgnoreCase)) return "TSBC";
         if ((senderAddress ?? string.Empty).EndsWith("@hillsplants.com", StringComparison.OrdinalIgnoreCase)) return "HILLBROTHERS";
+        if ((senderAddress ?? string.Empty).EndsWith("@langmeadherbs.co.uk", StringComparison.OrdinalIgnoreCase) ||
+            (senderAddress ?? string.Empty).EndsWith("@langmeadfarms.co.uk", StringComparison.OrdinalIgnoreCase)) return "LANGMEADS";
+        if ((senderAddress ?? string.Empty).EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase)) return "BARFOOTS";
         var domain = (senderAddress ?? string.Empty).Split('@').LastOrDefault();
         var stem = domain?.Split('.').FirstOrDefault();
         var clean = new string((stem ?? "EMAIL").Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
@@ -522,6 +534,9 @@ public sealed class EmailOrderIntakeService
         if (body.Contains("Hills collection", StringComparison.OrdinalIgnoreCase) ||
             body.Contains("Hill Brothers", StringComparison.OrdinalIgnoreCase))
             return "Hill Brothers";
+        if (body.Contains("Langmead Herbs", StringComparison.OrdinalIgnoreCase) ||
+            body.Contains("Ham Farm", StringComparison.OrdinalIgnoreCase))
+            return "Ham Farm";
         if (jobType == "Tray collection")
         {
             var match = Regex.Match(subject ?? string.Empty, @"Tray\s+collection\s+(?<site>.+?)(?:\s+\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)?$", RegexOptions.IgnoreCase);
@@ -530,13 +545,27 @@ public sealed class EmailOrderIntakeService
         return null;
     }
 
-    private static string? InferDestination(string? subject, string jobType)
+    private static string? InferDestination(string? subject, string body, string jobType)
     {
         var clean = ReFwRegex.Replace(subject ?? string.Empty, string.Empty).Trim();
         if (jobType == "Tray collection") return null;
         if (clean.Contains("COOP", StringComparison.OrdinalIgnoreCase) || clean.Contains("CO-OP", StringComparison.OrdinalIgnoreCase)) return "COOP";
+        var subjectDeliveryTo = Regex.Match(clean, @"^Delivery\s+to\s+(?<dest>.+?)(?:\s+\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)?$", RegexOptions.IgnoreCase);
+        if (subjectDeliveryTo.Success) return CleanSourceLine(subjectDeliveryTo.Groups["dest"].Value.Trim(' ', '-', '–', '—'));
+        var bodyDeliveryTo = ExtractMatch(DeliveryToRegex, body, "site");
+        if (!string.IsNullOrWhiteSpace(bodyDeliveryTo))
+            return CleanSourceLine(bodyDeliveryTo.Trim(' ', '-', '–', '—'));
         var delivery = Regex.Match(clean, @"^(?:\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\s*)?(?<dest>.+?)\s+delivery$", RegexOptions.IgnoreCase);
         return delivery.Success ? delivery.Groups["dest"].Value.Trim() : null;
+    }
+
+    private static string? NormaliseTime(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var clean = value.Trim().Replace('.', ':');
+        if (DateTime.TryParseExact(clean, ["h tt", "htt", "h:mm tt", "hh:mm tt", "H:mm", "HH:mm", "H"], CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed))
+            return parsed.ToString("HH:mm", CultureInfo.InvariantCulture);
+        return clean;
     }
 
     private static KnownIntakeSignal? DetectKnownSignal(string sourceText, IReadOnlyCollection<string> masterSiteNames)
