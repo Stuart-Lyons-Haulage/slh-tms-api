@@ -56,8 +56,16 @@ public static class RunStopDwellProjection
     public static RunGeofenceLinkException? LinkExceptionFor(Load load, EmbeddedGeofenceSnapshot snapshot)
     {
         if (load.VehicleId is not Guid vehicleId) return null;
+        var stops = (load.Stops ?? []).ToList();
+        if (stops.Count == 0) return null;
+
+        // A vehicle can legitimately be parked in an SLH yard/depot geofence before
+        // starting its route. Only surface a linkage exception when the active fence
+        // can plausibly represent one of this run's planned stops; unrelated known
+        // geofences must not make a healthy pre-departure run look broken.
         var unlinked = snapshot.ActiveVisits
             .Where(visit => visit.VehicleId == vehicleId && visit.LoadId is null)
+            .Where(visit => stops.Any(stop => GeofencePlanningMatch.SamePhysicalSite(stop, visit.Fence)))
             .OrderByDescending(visit => visit.EnteredAtUtc)
             .FirstOrDefault();
 
@@ -68,7 +76,7 @@ public static class RunStopDwellProjection
                 unlinked.Fence.Id,
                 unlinked.Fence.Name,
                 unlinked.EnteredAtUtc,
-                "Vehicle is inside a recognised geofence, but it could not be safely linked to the current run stop. Time on site has not been started for this run.");
+                "Vehicle is inside the recognised geofence for a planned run stop, but the visit could not be safely assigned to that stop. Time on site has not been started for this run.");
     }
 
     public static async Task<int> TryPersistAsync(TmsDbContext db, EmbeddedGeofenceSnapshot snapshot, CancellationToken ct)
