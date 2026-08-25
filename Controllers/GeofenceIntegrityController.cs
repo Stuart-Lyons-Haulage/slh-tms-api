@@ -23,6 +23,14 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
             catch { loads = []; db.ChangeTracker.Clear(); }
 
             var fences = await EmbeddedGeofenceEngine.FenceStatusesAsync(db, ct);
+            List<Site> sites;
+            try { sites = await GeofenceSiteResolver.LoadActiveSitesAsync(db, ct); }
+            catch { sites = []; db.ChangeTracker.Clear(); }
+
+            var linkDiagnostics = fences.ToDictionary(
+                item => item.Fence.Id,
+                item => GeofenceLinkDiagnostics.Analyze(item.Fence, sites));
+
             var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, loads, ct);
             var latestTracking = await db.VehicleTrackingEvents.AsNoTracking()
                 .OrderByDescending(x => x.EventTimeUtc)
@@ -54,24 +62,44 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
                     valid = fences.Count,
                     linked,
                     unlinked = fences.Count - linked,
-                    invalid = 0
+                    invalid = 0,
+                    reconciliation = new
+                    {
+                        safeCandidates = linkDiagnostics.Values.Count(item => item.SafeToAutoLink),
+                        exactCode = linkDiagnostics.Values.Count(item => item.Reason == "ExactCode"),
+                        exactNameOrAlias = linkDiagnostics.Values.Count(item => item.Reason == "ExactNameOrAlias"),
+                        uniqueFuzzy = linkDiagnostics.Values.Count(item => item.Reason == "UniqueFuzzy"),
+                        ambiguous = linkDiagnostics.Values.Count(item => item.Reason.StartsWith("Ambiguous", StringComparison.Ordinal)),
+                        noCandidate = linkDiagnostics.Values.Count(item => item.Reason == "NoCandidate")
+                    }
                 },
-                records = fences.Select(x => new
+                records = fences.Select(x =>
                 {
-                    id = x.Fence.Id,
-                    name = x.Fence.Name,
-                    category = x.Fence.Category,
-                    categoryMaxWaitMinutes = x.Fence.CategoryMaxWaitMinutes,
-                    maxWaitMinutes = x.Fence.MaxWaitMinutes,
-                    pendingEntryMinutes = x.Fence.PendingEntryMinutes,
-                    pendingExitMinutes = x.Fence.PendingExitMinutes,
-                    siteNumber = x.Fence.SiteNumber,
-                    siteId = x.SiteId,
-                    active = true,
-                    polygonValid = true,
-                    geofenceAvailable = true,
-                    siteLinked = x.SiteId != null,
-                    validationStatus = x.SiteId == null ? "Unlinked" : "Valid"
+                    var diagnostic = linkDiagnostics[x.Fence.Id];
+                    return new
+                    {
+                        id = x.Fence.Id,
+                        name = x.Fence.Name,
+                        category = x.Fence.Category,
+                        categoryMaxWaitMinutes = x.Fence.CategoryMaxWaitMinutes,
+                        maxWaitMinutes = x.Fence.MaxWaitMinutes,
+                        pendingEntryMinutes = x.Fence.PendingEntryMinutes,
+                        pendingExitMinutes = x.Fence.PendingExitMinutes,
+                        siteNumber = x.Fence.SiteNumber,
+                        siteId = x.SiteId,
+                        siteName = x.SiteName,
+                        active = true,
+                        polygonValid = true,
+                        geofenceAvailable = true,
+                        siteLinked = x.SiteId != null,
+                        validationStatus = x.SiteId == null ? "Unlinked" : "Valid",
+                        linkReason = diagnostic.Reason,
+                        diagnostic.SafeToAutoLink,
+                        diagnostic.SuggestedSiteId,
+                        diagnostic.SuggestedSiteName,
+                        diagnostic.CandidateCount,
+                        candidates = diagnostic.Candidates
+                    };
                 }),
                 latestTracking,
                 latestGeofenceHit = Visit(latestVisit),
