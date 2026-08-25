@@ -41,7 +41,8 @@ public sealed record DotTelemetryRecord(
         var latitude = ReadDecimal(gps, "latitude", "lat");
         var longitude = ReadDecimal(gps, "longitude", "long", "lon", "lng");
         var speed = ReadDecimal(gps, "speedKph", "speed", "speedkmh", "kmh");
-        var timestamp = ReadString(gps, "eventTimeUtc", "timestamp", "time", "datetime", "t");
+        var timestamp = ReadString(gps, "eventTimeUtc", "eventTime", "gpsTime", "positionTime", "timestamp", "time", "datetime", "dateTimeUtc", "t")
+            ?? ReadExtraString(item.Extra, "eventTimeUtc", "eventTime", "gpsTime", "positionTime", "timestamp", "time", "datetime", "dateTimeUtc", "t");
         var eventTime = ParseRoadTechTimestamp(timestamp);
         var moving = item.Moving ?? ReadBoolean(gps, "isMoving", "moving");
         var ignitionOn = item.Ign
