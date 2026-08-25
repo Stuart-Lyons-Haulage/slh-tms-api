@@ -41,6 +41,18 @@ public sealed class DotTrackingHealthController(
             var gpsRecords = records
                 .Where(record => record.Latitude is not null && record.Longitude is not null)
                 .ToList();
+            var driverNameRecords = records.Count(record => !string.IsNullOrWhiteSpace(record.DriverName));
+            var driverCardRecords = records.Count(record => !string.IsNullOrWhiteSpace(record.DriverCardNumber));
+            var driverEvidenceRecords = records.Count(record =>
+                !string.IsNullOrWhiteSpace(record.DriverName) ||
+                !string.IsNullOrWhiteSpace(record.DriverCardNumber));
+            var extraPayloadSections = providerRows
+                .SelectMany(row => row.Extra.Keys)
+                .Where(key => !string.IsNullOrWhiteSpace(key))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(key => key, StringComparer.OrdinalIgnoreCase)
+                .Take(50)
+                .ToList();
 
             if (gpsRecords.Count == 0)
             {
@@ -51,6 +63,10 @@ public sealed class DotTrackingHealthController(
                     dataMask = options.DataMask,
                     providerRecords = records.Count,
                     gpsRecords = 0,
+                    driverEvidenceRecords,
+                    driverNameRecords,
+                    driverCardRecords,
+                    extraPayloadSections,
                     checkedAtUtc,
                     message = "RoadTech current telemetry returned no GPS coordinates."
                 });
@@ -59,6 +75,7 @@ public sealed class DotTrackingHealthController(
             // Health probes are deliberately read-only. The one-minute ingestion worker owns
             // persistence/live-status freshness; writing here could race the worker and make a
             // healthy RoadTech feed fail its own diagnostic because of a SQL write collision.
+            // Driver diagnostics remain aggregate-only: do not expose names/card numbers here.
             return Ok(new
             {
                 status = "healthy",
@@ -67,6 +84,10 @@ public sealed class DotTrackingHealthController(
                 pollIntervalMinutes = options.PollIntervalMinutes,
                 providerRecords = records.Count,
                 gpsRecords = gpsRecords.Count,
+                driverEvidenceRecords,
+                driverNameRecords,
+                driverCardRecords,
+                extraPayloadSections,
                 newestProviderEventUtc = gpsRecords.Max(record => record.EventTimeUtc),
                 checkedAtUtc
             });
