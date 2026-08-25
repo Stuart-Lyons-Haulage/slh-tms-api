@@ -31,7 +31,7 @@ public static class EmbeddedGeofenceSqlProjection
         await GeofenceAutoSeed.EnsureAsync(db, ct);
 
         var normalizedNames = snapshot.Visits
-            .Select(visit => NormalizeName(visit.Fence.Name))
+            .Select(visit => Normalize(visit.Fence.Name))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
@@ -50,7 +50,7 @@ public static class EmbeddedGeofenceSqlProjection
         var now = DateTimeOffset.UtcNow;
         foreach (var derived in snapshot.Visits)
         {
-            if (!fenceByName.TryGetValue(NormalizeName(derived.Fence.Name), out var fence)) continue;
+            if (!fenceByName.TryGetValue(Normalize(derived.Fence.Name), out var fence)) continue;
 
             if (!existing.TryGetValue(derived.Id, out var row))
             {
@@ -122,6 +122,6 @@ public static class EmbeddedGeofenceSqlProjection
         ? "Departed"
         : visit.ConfirmedAtUtc is not null ? "OnSiteConfirmed" : "Arrived";
 
-    private static string NormalizeName(string value) =>
-        string.Join(' ', value.Trim().ToUpperInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries));
+    private static string Normalize(string? value) =>
+        new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 }
