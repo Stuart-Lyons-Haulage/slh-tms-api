@@ -7,10 +7,11 @@ namespace Slh.Tms.Api.Services;
 public static class GeofenceAutoSeed
 {
     private static readonly SemaphoreSlim Gate = new(1, 1);
-    private const int SupplementalFenceCount = 2;
+    private const int SupplementalFenceCount = 3;
     private static readonly string[] SupplementalFenceNames =
     [
         "Natures Way Foods Selsey",
+        "Natures Way Foods Merston",
         "Natures Way Foods Drayton"
     ];
 

@@ -68,14 +68,14 @@ public sealed class RunStopDwellProjectionTests
     }
 
     [Fact]
-    public void Unlinked_active_geofence_surfaces_linkage_exception_without_starting_run_dwell()
+    public void Unrelated_active_geofence_does_not_surface_run_linkage_exception()
     {
         var now = DateTimeOffset.Parse("2026-08-24T11:00:00Z");
         var vehicleId = Guid.NewGuid();
         var load = new Load
         {
             Id = Guid.NewGuid(),
-            Reference = "RUN-UNLINKED",
+            Reference = "RUN-UNRELATED",
             PlanningDate = DateOnly.FromDateTime(now.UtcDateTime),
             Status = LoadStatus.InProgress,
             VehicleId = vehicleId,
@@ -88,6 +88,28 @@ public sealed class RunStopDwellProjectionTests
         var exception = RunStopDwellProjection.LinkExceptionFor(load, snapshot);
 
         Assert.Equal("EnRoute", dwell.State);
+        Assert.Null(exception);
+    }
+
+    [Fact]
+    public void Planned_stop_geofence_still_surfaces_linkage_exception_when_assignment_is_missing()
+    {
+        var now = DateTimeOffset.Parse("2026-08-24T11:00:00Z");
+        var vehicleId = Guid.NewGuid();
+        var load = new Load
+        {
+            Id = Guid.NewGuid(),
+            Reference = "RUN-UNLINKED",
+            PlanningDate = DateOnly.FromDateTime(now.UtcDateTime),
+            Status = LoadStatus.InProgress,
+            VehicleId = vehicleId,
+            Stops = [new LoadStop { Id = Guid.NewGuid(), Sequence = 1, Name = "Aldi Swindon" }]
+        };
+        var visit = Visit(null, null, now.AddMinutes(-10), null, vehicleId);
+        var snapshot = new EmbeddedGeofenceSnapshot([visit.Fence], [visit], [visit], [], 1, now);
+
+        var exception = RunStopDwellProjection.LinkExceptionFor(load, snapshot);
+
         Assert.NotNull(exception);
         Assert.Equal("Unlinked", exception!.State);
     }
