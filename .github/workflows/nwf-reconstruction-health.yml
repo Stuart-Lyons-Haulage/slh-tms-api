@@ -29,8 +29,8 @@ jobs:
           cat "$body_file"
           echo
           test "$status" = "200"
-          grep -Eq '"geofenceCount"[[:space:]]*:[[:space:]]*317' "$body_file"
-          grep -Eq '"expectedGeofenceCount"[[:space:]]*:[[:space:]]*317' "$body_file"
+          grep -Eq '"geofenceCount"[[:space:]]*:[[:space:]]*736' "$body_file"
+          grep -Eq '"expectedGeofenceCount"[[:space:]]*:[[:space:]]*736' "$body_file"
           rm -f "$body_file"
 
       - name: Check Site Master geofence linkage
