@@ -35,7 +35,7 @@ public sealed class DailyComplianceController(
     {
         var report = await BuildReport(date, ct);
         var csv = new StringBuilder();
-        csv.AppendLine("Date,Asset Type,Asset,Run,Driver,Employment Type,Tacho Duty Start,Tacho First Drive,Other Work Before First Drive Minutes,First Movement,Fleetio Form,Fleetio Submitted,Fleetio User,Fleetio Driver Match,Failed Items,Status,Reason");
+        csv.AppendLine("Date,Asset Type,Asset,Run,Driver,Employment Type,Tacho Duty Start,Tacho First Drive,Other Work Before First Drive Minutes,Tacho Work Minutes,Tacho Drive Minutes,Tacho Rest Minutes,Tacho Available Minutes,Tacho Break Minutes,First Movement,Fleetio Form,Fleetio Submitted,Fleetio User,Fleetio Driver Match,Failed Items,Status,Reason");
         foreach (var row in report.Rows)
         {
             csv.AppendLine(string.Join(',', new[]
@@ -43,7 +43,13 @@ public sealed class DailyComplianceController(
                 report.Date.ToString("yyyy-MM-dd"), row.AssetType, row.AssetName, row.RunReference, row.DriverName,
                 row.EmploymentType, row.TachoDutyStartUtc?.ToString("O") ?? string.Empty,
                 row.TachoFirstDriveUtc?.ToString("O") ?? string.Empty,
-                row.TachoPreUseOtherWorkMinutes?.ToString() ?? string.Empty, row.FirstMovementUtc?.ToString("O") ?? string.Empty,
+                row.TachoPreUseOtherWorkMinutes?.ToString() ?? string.Empty,
+                row.TachoWorkMinutes?.ToString() ?? string.Empty,
+                row.TachoDriveMinutes?.ToString() ?? string.Empty,
+                row.TachoRestMinutes?.ToString() ?? string.Empty,
+                row.TachoAvailableMinutes?.ToString() ?? string.Empty,
+                row.TachoBreakMinutes?.ToString() ?? string.Empty,
+                row.FirstMovementUtc?.ToString("O") ?? string.Empty,
                 row.FleetioForm ?? string.Empty, row.FleetioSubmittedAtUtc?.ToString("O") ?? string.Empty,
                 row.FleetioUser ?? string.Empty, row.FleetioDriverMatched?.ToString() ?? string.Empty,
                 row.FleetioFailedItems?.ToString() ?? string.Empty, row.Status, row.Reason
@@ -89,7 +95,7 @@ public sealed class DailyComplianceController(
         // vehicle so genuine vehicle use remains visible even when no run was allocated in TMS.
         foreach (var duty in duties.OrderBy(x => x.DutyStartUtc))
         {
-            var vehicle = vehicles.FirstOrDefault(v => VehicleKeys(v).Contains(Normalise(duty.VehicleCode), StringComparer.OrdinalIgnoreCase));
+            var vehicle = vehicles.FirstOrDefault(v => VehicleAliases(v).Contains(Normalise(duty.VehicleCode), StringComparer.OrdinalIgnoreCase));
             if (vehicle is null) continue;
             var driver = drivers.FirstOrDefault(d => DriverMatches(d, duty));
             if (driver is null) continue;
@@ -279,7 +285,9 @@ public sealed class DailyComplianceController(
         };
 
         return new ComplianceRow(assetType, assetId, assetName, runReference, driver.Id, driver.DisplayName, employment,
-            duty?.DutyStartUtc, firstDrive, preUseMinutes, firstMovement, inspection.Evidence?.Id, inspection.Evidence?.Form,
+            duty?.DutyStartUtc, firstDrive, preUseMinutes,
+            duty?.WorkMinutes, duty?.DriveMinutes, duty?.RestMinutes, duty?.AvailableMinutes, duty?.BreakMinutes,
+            firstMovement, inspection.Evidence?.Id, inspection.Evidence?.Form,
             inspection.Evidence?.SubmittedAtUtc, inspection.Evidence?.User, inspection.DriverMatched,
             inspection.Evidence?.FailedItems, status, reason);
     }
@@ -288,13 +296,13 @@ public sealed class DailyComplianceController(
         FleetioInspectionEvidence inspection, DateTimeOffset? firstMovement)
         => new(assetType, assetId, assetName, string.Empty, Guid.Empty,
             string.IsNullOrWhiteSpace(inspection.User) ? "Unmatched Fleetio user" : inspection.User!, "Unknown",
-            null, null, null, firstMovement, inspection.Id, inspection.Form, inspection.SubmittedAtUtc, inspection.User,
+            null, null, null, null, null, null, null, null, firstMovement, inspection.Id, inspection.Form, inspection.SubmittedAtUtc, inspection.User,
             false, inspection.FailedItems, "Review",
             "Fleetio walkround is present, but its submitter could not be matched to an active TMS driver. Run allocation is intentionally not inferred.");
 
     private static ComplianceRow BuildTrackerOnlyRow(Vehicle vehicle, DateTimeOffset firstMovement)
         => new("Vehicle", vehicle.Id, vehicle.Registration, string.Empty, Guid.Empty,
-            "Driver not identified", "Unknown", null, null, null, firstMovement, null, null, null, null, null, null,
+            "Driver not identified", "Unknown", null, null, null, null, null, null, null, null, firstMovement, null, null, null, null, null, null,
             "Review", "DOT/Falcon movement proves this vehicle was used, but no matching Tacho duty or Fleetio walkround identified the driver. Investigate the missing pre-use evidence.");
 
     private static string RunReferenceFor(IEnumerable<Load> loads, Guid driverId, Guid vehicleId)
@@ -425,8 +433,8 @@ public sealed class DailyComplianceController(
                 request.Headers.Add("SID", sid);
                 request.Content = JsonContent.Create(new
                 {
-                    From = date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc).ToString("O"),
-                    To = date.AddDays(1).ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc).ToString("O"),
+                    From = OperatingWindowUtc(date).StartUtc.ToString("O"),
+                    To = OperatingWindowUtc(date).EndUtc.ToString("O"),
                     Offset = offset,
                     WithWtd = true
                 });
@@ -487,18 +495,18 @@ public sealed class DailyComplianceController(
     }
 
     private static TachoDriverDutyStatus? FindDuty(IEnumerable<TachoDriverDutyStatus> duties, Driver driver, Vehicle vehicle)
-        => duties.Where(duty => DriverMatches(driver, duty) && VehicleKeys(vehicle).Contains(Normalise(duty.VehicleCode), StringComparer.OrdinalIgnoreCase))
+        => duties.Where(duty => DriverMatches(driver, duty) && VehicleAliases(vehicle).Contains(Normalise(duty.VehicleCode), StringComparer.OrdinalIgnoreCase))
             .OrderBy(duty => duty.DutyStartUtc).FirstOrDefault();
 
     private static PreUseEvidence? FindPreUse(IEnumerable<PreUseEvidence> items, TachoDriverDutyStatus duty, Vehicle vehicle)
         => items.Where(item => item.MemberCode == duty.MemberCode)
-            .Where(item => VehicleKeys(vehicle).Contains(item.VehicleCode, StringComparer.OrdinalIgnoreCase))
+            .Where(item => VehicleAliases(vehicle).Contains(item.VehicleCode, StringComparer.OrdinalIgnoreCase))
             .OrderBy(item => Math.Abs((item.DutyStartUtc - duty.DutyStartUtc).TotalMinutes))
             .FirstOrDefault(item => Math.Abs((item.DutyStartUtc - duty.DutyStartUtc).TotalMinutes) <= 5);
 
     private static DateTimeOffset? FirstMovement(IEnumerable<VehicleTrackingEvent> tracking, Vehicle vehicle, DateTimeOffset? dutyStart, DateTimeOffset dayEnd)
     {
-        var ids = VehicleKeys(vehicle).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var ids = VehicleAliases(vehicle).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var from = dutyStart ?? dayEnd.AddDays(-1);
         return tracking.Where(item => item.EventTimeUtc >= from && item.EventTimeUtc < dayEnd)
             .Where(item => ids.Contains(Normalise(item.VehicleIdentifier)))
@@ -541,11 +549,32 @@ public sealed class DailyComplianceController(
         return "Employed";
     }
 
-    private static IEnumerable<string> VehicleKeys(Vehicle vehicle)
-        => new[] { vehicle.Registration, vehicle.Abbreviation, vehicle.FleetNumber }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => Normalise(value!)).Where(value => value.Length > 0);
+    internal static IReadOnlyList<string> VehicleAliases(Vehicle vehicle)
+    {
+        var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var raw in new[] { vehicle.Registration, vehicle.Abbreviation, vehicle.FleetNumber })
+        {
+            var key = Normalise(raw ?? string.Empty);
+            if (key.Length == 0) continue;
+            aliases.Add(key);
+            for (var length = 3; length <= Math.Min(6, key.Length); length++) aliases.Add(key[^length..]);
+            if (key.Length == 7 && char.IsLetter(key[0]) && char.IsLetter(key[1]) && char.IsDigit(key[2]) && char.IsDigit(key[3])) aliases.Add(key[2..]);
+            if (key.EndsWith("H", StringComparison.OrdinalIgnoreCase) && key.Length > 4) aliases.Add(key[..^1]);
+            if (key.Length >= 2 && raw == vehicle.FleetNumber) aliases.Add(key);
+        }
+        return aliases.Where(value => value.Length > 0).ToList();
+    }
+
     private static string? MappingExternalKey(IEnumerable<IntegrationMapping> mappings, string entityType, Guid entityId)
         => mappings.FirstOrDefault(mapping => mapping.TmsEntityId == entityId && mapping.TmsEntityType.Equals(entityType, StringComparison.OrdinalIgnoreCase))?.ExternalKey;
     private static string Normalise(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static (DateTimeOffset StartUtc, DateTimeOffset EndUtc) OperatingWindowUtc(DateOnly date)
+    {
+        var startLocal = DateTime.SpecifyKind(date.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
+        var endLocal = DateTime.SpecifyKind(date.AddDays(1).ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
+        return (new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(startLocal, London)), new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(endLocal, London)));
+    }
+
     private static string NormaliseBaseUrl(string value) { var trimmed = value.Trim().TrimEnd('/'); return trimmed.EndsWith("/api", StringComparison.OrdinalIgnoreCase) ? $"{trimmed}/" : $"{trimmed}/api/"; }
     private static IReadOnlyList<string> PasswordAttempts(string password) { var trimmed = password.Trim(); return trimmed.All(Uri.IsHexDigit) && trimmed.Length is 32 or 40 or 64 ? [trimmed] : [trimmed, Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(trimmed))).ToLowerInvariant()]; }
     private static bool Try(JsonElement element, string name, out JsonElement value) { if (element.ValueKind == JsonValueKind.Object) foreach (var property in element.EnumerateObject()) if (property.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) { value = property.Value; return true; } value = default; return false; }
@@ -563,7 +592,7 @@ public sealed class DailyComplianceController(
     public sealed record SourceStatus(string TachoMaster, string Fleetio, string DotFalcon, string Tms);
     public sealed record ComplianceSummary(int AssetsOperated, int Green, int Amber, int Red, int Vehicles, int Trailers, int FleetioChecks, int TachoPreUseConfirmed);
     public sealed record ComplianceRow(string AssetType, Guid AssetId, string AssetName, string RunReference, Guid DriverId, string DriverName, string EmploymentType,
-        DateTimeOffset? TachoDutyStartUtc, DateTimeOffset? TachoFirstDriveUtc, int? TachoPreUseOtherWorkMinutes, DateTimeOffset? FirstMovementUtc, string? FleetioInspectionId, string? FleetioForm,
+        DateTimeOffset? TachoDutyStartUtc, DateTimeOffset? TachoFirstDriveUtc, int? TachoPreUseOtherWorkMinutes, int? TachoWorkMinutes, int? TachoDriveMinutes, int? TachoRestMinutes, int? TachoAvailableMinutes, int? TachoBreakMinutes, DateTimeOffset? FirstMovementUtc, string? FleetioInspectionId, string? FleetioForm,
         DateTimeOffset? FleetioSubmittedAtUtc, string? FleetioUser, bool? FleetioDriverMatched, int? FleetioFailedItems, string Status, string Reason);
     public sealed record ComplianceReport(DateOnly Date, DateTimeOffset GeneratedAtUtc, CompliancePolicy Policy, SourceStatus SourceStatus, ComplianceSummary Summary, IReadOnlyList<ComplianceRow> Rows);
 }
