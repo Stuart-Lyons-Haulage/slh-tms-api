@@ -159,7 +159,10 @@ public static class EmbeddedGeofenceEngine
                     ProviderName = "RoadTech Falcon live observation",
                     ProviderEventId = $"live-{live.Id}-{live.LastReceivedAtUtc:O}",
                     VehicleIdentifier = live.VehicleIdentifier,
-                    EventTimeUtc = live.LastReceivedAtUtc,
+                    // Receipt time proves freshness only. The provider event timestamp is
+                    // the operational evidence for when this position was actually observed,
+                    // so a wallboard refresh must never manufacture a new ARRIVED time.
+                    EventTimeUtc = live.LastEventTimeUtc,
                     Latitude = live.Latitude,
                     Longitude = live.Longitude,
                     SpeedKph = live.SpeedKph,
