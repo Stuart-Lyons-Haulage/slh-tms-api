@@ -56,4 +56,32 @@ public sealed class OrderIntakeMappingExceptionTests : IClassFixture<CustomWebFa
         Assert.Equal("D_StuartLyonsPalletOrdering@nwfltd.co.uk", root.GetProperty("sourceSender").GetString());
         Assert.Contains("NWAY Pallet Order 25-08-2026.csv", root.GetProperty("sourceAttachmentNames").EnumerateArray().Select(item => item.GetString()));
     }
+
+    [Fact]
+    public async Task Monarch_available_loads_mailshot_is_ignored_not_staged_as_mapping_exception()
+    {
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
+        var payload = JsonSerializer.Serialize(new
+        {
+            messageId = $"monarch-loads-{Guid.NewGuid():N}",
+            internetMessageId = "<monarch-loads@example.test>",
+            mailbox = "info@lyonshaulage.com",
+            senderAddress = "mailshot@monarchtransport.co.uk",
+            senderName = "Monarch Transport",
+            subject = "URGENT - Monarch Transport Available Loads",
+            receivedAtUtc = "2026-08-25T06:16:39Z",
+            bodyText = "Monarch Available Loads. Can you cover the below loads? You are receiving this email because you opted in via our site.",
+            webLink = "https://outlook.office.com/mail/test"
+        });
+
+        var response = await client.PostAsync("/api/v1/order-intake/email", new StringContent(payload, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("\"ignored\":true", body);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        Assert.DoesNotContain(db.StagedImports, item => item.IdempotencyKey.Contains("monarch-loads", StringComparison.OrdinalIgnoreCase));
+    }
 }

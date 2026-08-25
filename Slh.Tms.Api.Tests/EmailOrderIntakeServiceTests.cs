@@ -119,4 +119,17 @@ public sealed class EmailOrderIntakeServiceTests
         Assert.Empty(result.Orders);
         Assert.Contains("Operational request", result.IgnoredReason);
     }
+
+    [Fact]
+    public void AvailableLoadsMailshot_IsIgnoredAsOperationalNoise()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-monarch-loads", null, "info@lyonshaulage.com", "mailshot@monarchtransport.co.uk", "Monarch Transport",
+            "URGENT - Monarch Transport Available Loads", DateTimeOffset.Parse("2026-08-25T06:16:39Z"),
+            "Monarch Available Loads. Can you cover the below loads? You are receiving this email because you opted in via our site.",
+            null, null, null));
+
+        Assert.Empty(result.Orders);
+        Assert.Contains("Operational request", result.IgnoredReason);
+    }
 }

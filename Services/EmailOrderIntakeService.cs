@@ -599,6 +599,12 @@ public sealed class EmailOrderIntakeService
     {
         var value = $"{subject} {body}";
         return value.Contains("night shunting", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("available loads", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("loads available", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("Monarch Available Loads", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("Can you cover the below loads", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("let us know if you are interested", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("You are receiving this email because you opted in", StringComparison.OrdinalIgnoreCase)
             || value.Contains("current stock levels", StringComparison.OrdinalIgnoreCase)
             || value.Contains("ETA for tonight", StringComparison.OrdinalIgnoreCase)
             || value.Contains("missing PO request log", StringComparison.OrdinalIgnoreCase)

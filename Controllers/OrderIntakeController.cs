@@ -261,8 +261,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                value.Contains("IFCO", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("crate", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("tray", StringComparison.OrdinalIgnoreCase) ||
-               (value.Contains("pallet", StringComparison.OrdinalIgnoreCase) && value.Contains("order", StringComparison.OrdinalIgnoreCase)) ||
-               value.Contains("transport", StringComparison.OrdinalIgnoreCase);
+               (value.Contains("pallet", StringComparison.OrdinalIgnoreCase) && value.Contains("order", StringComparison.OrdinalIgnoreCase));
     }
 
     private static string InferMappingCustomer(MailboxEmailIntakeRequest request)
