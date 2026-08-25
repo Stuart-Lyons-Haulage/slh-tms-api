@@ -84,4 +84,62 @@ public sealed class OrderIntakeMappingExceptionTests : IClassFixture<CustomWebFa
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
         Assert.DoesNotContain(db.StagedImports, item => item.IdempotencyKey.Contains("monarch-loads", StringComparison.OrdinalIgnoreCase));
     }
+
+    [Fact]
+    public async Task Recognised_customer_name_without_quantity_or_attachment_is_ignored_not_zero_pallet_staged()
+    {
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
+        var messageId = $"waitrose-low-detail-{Guid.NewGuid():N}";
+        var payload = JsonSerializer.Serialize(new
+        {
+            messageId,
+            internetMessageId = "<waitrose-low-detail@example.test>",
+            mailbox = "info@lyonshaulage.com",
+            senderAddress = "loads@example.com",
+            senderName = "Loads",
+            subject = "Re: WAITROSE PALLET ESTIMATE for 26.08.2026",
+            receivedAtUtc = "2026-08-25T10:47:00Z",
+            bodyText = "Please check these for tomorrow. Waitrose Leythorne.",
+            webLink = "https://outlook.office.com/mail/test"
+        });
+
+        var response = await client.PostAsync("/api/v1/order-intake/email", new StringContent(payload, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("\"ignored\":true", body);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        Assert.DoesNotContain(db.StagedImports, item => item.IdempotencyKey.Contains(messageId, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Bartrums_available_loads_is_ignored_not_mapping_exception()
+    {
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
+        var messageId = $"bartrums-loads-{Guid.NewGuid():N}";
+        var payload = JsonSerializer.Serialize(new
+        {
+            messageId,
+            internetMessageId = "<bartrums-loads@example.test>",
+            mailbox = "info@lyonshaulage.com",
+            senderAddress = "traffic@bartrums.com",
+            senderName = "Bartrums Haulage & Storage",
+            subject = "BARTRUMS AVAILABLE LOADS",
+            receivedAtUtc = "2026-08-25T10:46:51Z",
+            bodyText = "We currently have the following full load work available. If you are interested and able to assist, please contact us.",
+            webLink = "https://outlook.office.com/mail/test"
+        });
+
+        var response = await client.PostAsync("/api/v1/order-intake/email", new StringContent(payload, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("\"ignored\":true", body);
+
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        Assert.DoesNotContain(db.StagedImports, item => item.IdempotencyKey.Contains(messageId, StringComparison.OrdinalIgnoreCase));
+    }
 }

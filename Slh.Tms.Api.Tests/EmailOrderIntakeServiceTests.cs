@@ -152,25 +152,22 @@ public sealed class EmailOrderIntakeServiceTests
     }
 
     [Theory]
-    [InlineData("Langmeads Aldi booking 26/08", "Please book delivery to Aldi Atherstone. Collection 8 am.", "LANGMEADS", "Aldi Atherstone")]
-    [InlineData("Barfoots Morrisons delivery 26/08", "Please find attached correct pallet booking.", "BARFOOTS", "Barfoots")]
-    [InlineData("Natures Way Waitrose 26/08", "Waitrose booking confirmed for tomorrow.", "WAITROSE", "Waitrose")]
-    public void RecognisedSupplierOrSupermarket_WithDateAndNoQuantity_IsStillStagedForReview(
+    [InlineData("Langmeads Aldi booking 26/08", "Please book delivery to Aldi Atherstone. Collection 8 am.", "LANGMEADS")]
+    [InlineData("Barfoots Morrisons delivery 26/08", "Please find attached correct pallet booking.", "BARFOOTS")]
+    [InlineData("Natures Way Waitrose 26/08", "Waitrose booking confirmed for tomorrow.", "WAITROSE")]
+    public void RecognisedSupplierOrSupermarket_WithDateAndNoQuantity_IsNotStagedAsZeroPalletOrder(
         string subject,
         string body,
-        string expectedCustomer,
-        string expectedSite)
+        string expectedCustomer)
     {
         var result = service.Parse(new MailboxEmailIntakeRequest(
             $"message-low-detail-{expectedCustomer}", null, "info@lyonshaulage.com", "loads@example.com", "Loads",
             subject, DateTimeOffset.Parse("2026-08-25T07:00:00Z"),
             body, null, null, null));
 
-        var order = Assert.Single(result.Orders);
-        Assert.Equal(expectedCustomer, order.Payload.GetProperty("customerCode").GetString());
-        Assert.Equal(expectedSite, order.Payload.GetProperty("stallNumber").GetString());
-        Assert.Equal(JsonValueKind.Null, order.Payload.GetProperty("pallets").ValueKind);
-        Assert.Contains(order.Warnings, warning => warning.Contains("Pallet quantity was not explicit", StringComparison.OrdinalIgnoreCase));
+        Assert.Empty(result.Orders);
+        Assert.Contains("No transport order", result.IgnoredReason);
+        Assert.Contains(result.Warnings, warning => warning.Contains("not enough order detail", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -250,6 +247,21 @@ public sealed class EmailOrderIntakeServiceTests
             "URGENT - Monarch Transport Available Loads", DateTimeOffset.Parse("2026-08-25T06:16:39Z"),
             "Monarch Available Loads. Can you cover the below loads? You are receiving this email because you opted in via our site.",
             null, null, null));
+
+        Assert.Empty(result.Orders);
+        Assert.Contains("Operational request", result.IgnoredReason);
+    }
+
+    [Theory]
+    [InlineData("BARTRUMS AVAILABLE LOADS", "We currently have the following full load work available. If you are interested and able to assist, please contact us.")]
+    [InlineData("Inbound ETA's - 25-08-2026", "Good morning, Please find attached ETA's.")]
+    [InlineData("LOADS AVAILABLE  - MUST BE OWN VEHICLE", "Please see below load available - please let us know if you can assist.")]
+    public void OperationalNoiseSubjects_AreIgnored(string subject, string body)
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            $"message-noise-{subject}", null, "info@lyonshaulage.com", "loads@example.com", "Loads",
+            subject, DateTimeOffset.Parse("2026-08-25T08:00:00Z"),
+            body, null, null, null));
 
         Assert.Empty(result.Orders);
         Assert.Contains("Operational request", result.IgnoredReason);

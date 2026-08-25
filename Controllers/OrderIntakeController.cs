@@ -257,7 +257,10 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var body = $"{request.BodyText} {request.BodyHtml}";
         var attachments = string.Join(" ", (request.Attachments ?? []).Select(item => item.Name));
         var value = $"{sender} {subject} {body} {attachments}";
-        return sender.EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) ||
+        if (LooksOperationalNoise(value))
+            return false;
+
+        var recognisedSource = sender.EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) ||
                sender.EndsWith("@langmeadherbs.co.uk", StringComparison.OrdinalIgnoreCase) ||
                sender.EndsWith("@langmeadfarms.co.uk", StringComparison.OrdinalIgnoreCase) ||
                sender.EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) ||
@@ -273,9 +276,54 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                value.Contains("Morrisons", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("IFCO", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("crate", StringComparison.OrdinalIgnoreCase) ||
-               value.Contains("tray", StringComparison.OrdinalIgnoreCase) ||
-               (value.Contains("pallet", StringComparison.OrdinalIgnoreCase) && value.Contains("order", StringComparison.OrdinalIgnoreCase));
+               value.Contains("tray", StringComparison.OrdinalIgnoreCase);
+
+        return recognisedSource && LooksLikeOrderIntent(request, value);
     }
+
+    private static bool LooksLikeOrderIntent(MailboxEmailIntakeRequest request, string value)
+    {
+        var hasAttachment = (request.Attachments ?? []).Any(item => item.IsInline != true);
+        if (value.Contains("pallet order", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("order ref", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("purchase order", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("delivery quantities", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("booking form", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("confirmed collection", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("confirmed collections", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("confirmed ALDI", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("collection for", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("delivery to", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return hasAttachment &&
+               (value.Contains("order", StringComparison.OrdinalIgnoreCase) ||
+                value.Contains("booking", StringComparison.OrdinalIgnoreCase) ||
+                value.Contains("pallet", StringComparison.OrdinalIgnoreCase) ||
+                value.Contains("pallets", StringComparison.OrdinalIgnoreCase) ||
+                value.Contains("tray", StringComparison.OrdinalIgnoreCase) ||
+                value.Contains("trays", StringComparison.OrdinalIgnoreCase) ||
+                value.Contains("crate", StringComparison.OrdinalIgnoreCase) ||
+                value.Contains("crates", StringComparison.OrdinalIgnoreCase) ||
+                value.Contains("transport", StringComparison.OrdinalIgnoreCase) ||
+                value.Contains("collection", StringComparison.OrdinalIgnoreCase) ||
+                value.Contains("delivery", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool LooksOperationalNoise(string value) =>
+        value.Contains("available loads", StringComparison.OrdinalIgnoreCase) ||
+        value.Contains("loads available", StringComparison.OrdinalIgnoreCase) ||
+        value.Contains("load work available", StringComparison.OrdinalIgnoreCase) ||
+        value.Contains("loads tipping", StringComparison.OrdinalIgnoreCase) ||
+        value.Contains("rates negotiable", StringComparison.OrdinalIgnoreCase) ||
+        value.Contains("must be own vehicle", StringComparison.OrdinalIgnoreCase) ||
+        value.Contains("let us know if you are interested", StringComparison.OrdinalIgnoreCase) ||
+        value.Contains("let us know if you can assist", StringComparison.OrdinalIgnoreCase) ||
+        value.Contains("you opted in", StringComparison.OrdinalIgnoreCase) ||
+        value.Contains("inbound eta", StringComparison.OrdinalIgnoreCase) ||
+        value.Contains("please find attached eta", StringComparison.OrdinalIgnoreCase) ||
+        value.Contains("github", StringComparison.OrdinalIgnoreCase) ||
+        value.Contains("microsoft support", StringComparison.OrdinalIgnoreCase);
 
     private static string InferMappingCustomer(MailboxEmailIntakeRequest request)
     {

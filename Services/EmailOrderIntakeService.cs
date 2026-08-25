@@ -301,7 +301,8 @@ public sealed class EmailOrderIntakeService
             ?? ExtractInt(LabelledQuantityRegex, sourceText, "qty")
             ?? ExtractInt(PalletQuantityRegex, sourceText, "qty");
         var requestedTime = NormaliseTime(ExtractMatch(CollectionTimeRegex, body, "time"));
-        if (!HasEnoughBodyOrderEvidence(rawPo, collection, destination, pallets, requestedTime, jobType, signal is not null))
+        var recognisedCustomerOrSite = signal is not null || !string.Equals(customer, "EMAIL", StringComparison.OrdinalIgnoreCase);
+        if (!HasEnoughBodyOrderEvidence(rawPo, collection, destination, pallets, requestedTime, jobType, recognisedCustomerOrSite))
         {
             globalWarnings.Add("Email body contained a date but not enough order detail to stage a transport order.");
             return null;
@@ -367,9 +368,14 @@ public sealed class EmailOrderIntakeService
         var hasTime = !string.IsNullOrWhiteSpace(requestedTime);
         if (jobType.Contains("Tray", StringComparison.OrdinalIgnoreCase))
             return hasReference && (hasCollection || hasDestination);
-        if (hasQuantity && (hasReference || hasCollection || hasDestination || hasTime || recognisedCustomerOrSite))
-            return true;
-        return recognisedCustomerOrSite && (hasReference || hasCollection || hasDestination || hasTime);
+
+        // A customer/supplier name plus a date is only evidence that the email
+        // may need review; it is not enough to create a transport order. Body
+        // fallback orders must carry an actual quantity and at least one route
+        // side before they are staged.
+        return hasQuantity &&
+               (hasCollection || hasDestination) &&
+               (hasReference || hasTime || recognisedCustomerOrSite);
     }
 
     private static List<ParsedEmailOrder> ParseHallHunterDirectDepot(
@@ -895,12 +901,19 @@ public sealed class EmailOrderIntakeService
         return value.Contains("night shunting", StringComparison.OrdinalIgnoreCase)
             || value.Contains("available loads", StringComparison.OrdinalIgnoreCase)
             || value.Contains("loads available", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("load work available", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("loads tipping", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("rates negotiable", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("must be own vehicle", StringComparison.OrdinalIgnoreCase)
             || value.Contains("Monarch Available Loads", StringComparison.OrdinalIgnoreCase)
             || value.Contains("Can you cover the below loads", StringComparison.OrdinalIgnoreCase)
             || value.Contains("let us know if you are interested", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("let us know if you can assist", StringComparison.OrdinalIgnoreCase)
             || value.Contains("You are receiving this email because you opted in", StringComparison.OrdinalIgnoreCase)
             || value.Contains("current stock levels", StringComparison.OrdinalIgnoreCase)
             || value.Contains("ETA for tonight", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("Inbound ETA", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("Please find attached ETA", StringComparison.OrdinalIgnoreCase)
             || value.Contains("missing PO request log", StringComparison.OrdinalIgnoreCase)
             || value.Contains("fleetio.com", StringComparison.OrdinalIgnoreCase)
             || value.Contains("notifications@fleetio.com", StringComparison.OrdinalIgnoreCase)
