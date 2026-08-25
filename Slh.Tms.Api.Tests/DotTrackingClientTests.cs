@@ -158,6 +158,22 @@ public sealed class DotTrackingClientTests
         Assert.Equal(new DateTimeOffset(2026, 8, 13, 8, 30, 0, TimeSpan.Zero), record.EventTimeUtc);
     }
 
+    [Fact]
+    public void RoadTech_record_preserves_historical_top_level_event_time()
+    {
+        var item = JsonSerializer.Deserialize<RoadTechTelemetryItem>("""
+            {
+              "vehCode": "AB12 CDE",
+              "EventTimeUtc": "2026-08-25T05:42:17Z",
+              "dataGps": { "Lat": 50.7581, "Long": -0.7794 }
+            }
+            """, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+
+        var record = DotTelemetryRecord.FromProvider(item);
+
+        Assert.Equal(new DateTimeOffset(2026, 8, 25, 5, 42, 17, TimeSpan.Zero), record.EventTimeUtc);
+    }
+
     private sealed class CapturingHandler : HttpMessageHandler
     {
         private readonly bool _rejectFirstLogin;
