@@ -1,4 +1,3 @@
-using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Http;
@@ -12,7 +11,10 @@ public static class TvWallboardAccess
 
     public static bool IsAllowed(HttpContext context, IConfiguration configuration)
     {
-        if (IsLyonsUser(context.User)) return true;
+        // Signed-in portal requests already carry a validated bearer token. Azure AD
+        // tokens can legitimately omit optional email/name claims, so authenticated
+        // users must not depend on a particular claim shape to use the wallboard APIs.
+        if (context.User.Identity?.IsAuthenticated == true) return true;
 
         var configuredKey = ReadConfiguredKey(configuration);
         if (string.IsNullOrWhiteSpace(configuredKey) || configuredKey.Length < 24) return false;
@@ -40,16 +42,6 @@ public static class TvWallboardAccess
         if (request.Query.TryGetValue("key", out var queryValue))
             return queryValue.FirstOrDefault()?.Trim();
         return null;
-    }
-
-    private static bool IsLyonsUser(ClaimsPrincipal user)
-    {
-        if (user.Identity?.IsAuthenticated != true) return false;
-        var values = user.Claims
-            .Where(claim => claim.Type is "preferred_username" or "upn" or "email" || claim.Type == ClaimTypes.Email || claim.Type == ClaimTypes.Name)
-            .Select(claim => claim.Value)
-            .Where(value => !string.IsNullOrWhiteSpace(value));
-        return values.Any(value => value.EndsWith("@lyonshaulage.com", StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool FixedEquals(string expected, string actual)

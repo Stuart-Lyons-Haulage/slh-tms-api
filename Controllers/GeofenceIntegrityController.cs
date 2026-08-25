@@ -22,6 +22,7 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
             try { loads = await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct); }
             catch { loads = []; db.ChangeTracker.Clear(); }
 
+            var preparedLoads = GeofencePlanningMatch.PrepareLoads(loads);
             var fences = await EmbeddedGeofenceEngine.FenceStatusesAsync(db, ct);
             List<Site> sites;
             try { sites = await GeofenceSiteResolver.LoadActiveSitesAsync(db, ct); }
@@ -31,7 +32,10 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
                 item => item.Fence.Id,
                 item => GeofenceLinkDiagnostics.Analyze(item.Fence, sites));
 
-            var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, loads, ct);
+            // Use the same canonical planner-stop names as Run Progress, Run Timing and TV.
+            // This keeps NWF Drayton/Merston/Selsey/Runcton evidence consistent across all
+            // operational screens instead of comparing raw planner shorthand here.
+            var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, preparedLoads, ct);
             var latestTracking = await db.VehicleTrackingEvents.AsNoTracking()
                 .OrderByDescending(x => x.EventTimeUtc)
                 .Select(x => new { x.VehicleIdentifier, x.EventTimeUtc, x.Latitude, x.Longitude, x.ProviderName })
