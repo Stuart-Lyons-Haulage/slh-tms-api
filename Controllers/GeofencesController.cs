@@ -78,13 +78,17 @@ public sealed class GeofencesController(TmsDbContext db) : ControllerBase
                 category = x.Fence.Category,
                 maxWaitMinutes = x.Fence.MaxWaitMinutes,
                 categoryMaxWaitMinutes = x.Fence.CategoryMaxWaitMinutes,
-                siteNumber = x.Fence.SiteNumber,
+                siteNumber = x.SiteCode ?? (x.ManualOverride && x.SiteId is null ? null : x.Fence.SiteNumber),
                 siteId = x.SiteId,
+                siteName = x.SiteName,
+                siteCode = x.SiteCode,
+                manualOverride = x.ManualOverride,
+                locationOnly = x.ManualOverride && x.SiteId is null,
                 active = true,
                 polygonValid = true,
                 geofenceAvailable = true,
                 siteLinked = x.SiteId != null,
-                validationStatus = x.SiteId == null ? "Unlinked" : "Valid"
+                validationStatus = x.ManualOverride && x.SiteId is null ? "Location only" : x.SiteId == null ? "Unlinked" : "Valid"
             }).ToList();
         return Ok(new { count = records.Count, source = "EmbeddedSLHGeofences", records });
     }

@@ -194,11 +194,33 @@ public static class EmbeddedGeofenceEngine
         List<Site> sites;
         try { sites = await GeofenceSiteResolver.LoadActiveSitesAsync(db, ct); }
         catch { sites = new List<Site>(); db.ChangeTracker.Clear(); }
+        List<SiteGeofence> overrides;
+        try
+        {
+            var names = Fences.Value.Select(fence => NormalizeName(fence.Name)).ToList();
+            overrides = await db.SiteGeofences.AsNoTracking()
+                .Where(x => names.Contains(x.NormalizedName))
+                .ToListAsync(ct);
+        }
+        catch
+        {
+            overrides = new List<SiteGeofence>();
+            db.ChangeTracker.Clear();
+        }
+        var overridesByName = overrides
+            .GroupBy(x => x.NormalizedName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(x => x.Key, x => x.OrderByDescending(item => item.UpdatedAtUtc).First(), StringComparer.OrdinalIgnoreCase);
 
         return Fences.Value.Select(fence =>
         {
-            var site = MatchSite(fence, sites);
-            return new EmbeddedFenceStatus(fence, site?.Id, site?.Name);
+            overridesByName.TryGetValue(NormalizeName(fence.Name), out var linked);
+            if (IsLocationOnly(linked)) return new EmbeddedFenceStatus(fence, null, null, null, true);
+
+            var fenceForMatch = string.IsNullOrWhiteSpace(linked?.SiteNumber) ? fence : fence with { SiteNumber = linked.SiteNumber };
+            var site = linked?.SiteId is null
+                ? MatchSite(fenceForMatch, sites)
+                : sites.FirstOrDefault(x => x.Id == linked.SiteId.Value) ?? MatchSite(fence with { SiteNumber = linked.SiteNumber }, sites);
+            return new EmbeddedFenceStatus(fence, site?.Id, site?.Name, site?.ExternalCode, linked is not null);
         }).ToList();
     }
 
@@ -411,6 +433,8 @@ public static class EmbeddedGeofenceEngine
 
     private static Guid StableId(string value) => new(System.Security.Cryptography.MD5.HashData(System.Text.Encoding.UTF8.GetBytes(value)));
     private static string Normalize(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static string NormalizeName(string value) => string.Join(' ', value.Trim().ToUpperInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries));
+    private static bool IsLocationOnly(SiteGeofence? value) => string.Equals(value?.SiteNumber, "LOCATION_ONLY", StringComparison.OrdinalIgnoreCase);
     private static string? Text(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined ? value.ToString() : null;
     private static int? Int(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number) ? number : null;
     private static double? Double(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var number) ? number : null;
@@ -418,7 +442,7 @@ public static class EmbeddedGeofenceEngine
 
 public sealed record GeoPoint(double Longitude, double Latitude);
 public sealed record EmbeddedFence(Guid Id, string Name, string? Category, int? CategoryMaxWaitMinutes, int? MaxWaitMinutes, int PendingEntryMinutes, int PendingExitMinutes, string? SiteNumber, IReadOnlyList<GeoPoint> Points);
-public sealed record EmbeddedFenceStatus(EmbeddedFence Fence, Guid? SiteId, string? SiteName);
+public sealed record EmbeddedFenceStatus(EmbeddedFence Fence, Guid? SiteId, string? SiteName, string? SiteCode = null, bool ManualOverride = false);
 public sealed record EmbeddedGeofenceSnapshot(IReadOnlyList<EmbeddedFence> Fences, IReadOnlyList<DerivedVisit> Visits, IReadOnlyList<DerivedVisit> ActiveVisits, IReadOnlyList<DerivedVisit> ConfirmedVisits, int TrackingEventCount, DateTimeOffset? LatestTrackingUtc);
 public sealed class DerivedVisit
 {

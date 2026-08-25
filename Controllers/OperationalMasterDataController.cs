@@ -227,22 +227,36 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
     [HttpPut("geofences/{id:guid}"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> UpdateGeofence(Guid id, GeofenceUpdateRequest request, CancellationToken ct)
     {
-        var item = await db.SiteGeofences.FirstOrDefaultAsync(x => x.Id == id, ct);
-        if (item is null) return NotFound();
+        var name = CleanRequired(request.Name, EmbeddedGeofenceEngine.ApprovedFences.FirstOrDefault(x => x.Id == id)?.Name ?? string.Empty);
+        if (string.IsNullOrWhiteSpace(name)) return NotFound();
+        var item = await ResolveEditableGeofence(id, name, request.PolygonJson, ct);
         var before = Snapshot(item);
-        item.Name = CleanRequired(request.Name, item.Name);
+        item.Name = name;
         item.NormalizedName = NormalizeName(item.Name);
         item.Category = Clean(request.Category);
         item.CategoryMaxWaitMinutes = request.CategoryMaxWaitMinutes;
         item.MaxWaitMinutes = request.MaxWaitMinutes;
         item.PendingEntryMinutes = Math.Max(0, request.PendingEntryMinutes);
         item.PendingExitMinutes = Math.Max(0, request.PendingExitMinutes);
-        item.SiteNumber = Clean(request.SiteNumber);
-        item.SiteId = request.SiteId;
+        ApplySiteLink(item, request.SiteNumber, request.SiteId, request.LocationOnly);
         if (!string.IsNullOrWhiteSpace(request.PolygonJson)) item.PolygonJson = request.PolygonJson.Trim();
         item.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await Audit("Geofence", id, "Updated", before, Snapshot(item), ct);
-        return Ok(item);
+        return Ok(await GeofenceResponse(item, ct));
+    }
+
+    [HttpPost("geofences/{id:guid}/sync-site"), Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> SyncGeofenceSite(Guid id, GeofenceSiteSyncRequest request, CancellationToken ct)
+    {
+        var embedded = EmbeddedGeofenceEngine.ApprovedFences.FirstOrDefault(x => x.Id == id);
+        var name = CleanRequired(request.Name, embedded?.Name ?? string.Empty);
+        if (string.IsNullOrWhiteSpace(name)) return NotFound();
+        var item = await ResolveEditableGeofence(id, name, request.PolygonJson, ct);
+        var before = Snapshot(item);
+        ApplySiteLink(item, request.SiteNumber, request.SiteId, request.LocationOnly);
+        item.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await Audit("Geofence", id, request.LocationOnly == true ? "MarkedLocationOnly" : "SyncedSiteLink", before, Snapshot(item), ct);
+        return Ok(await GeofenceResponse(item, ct));
     }
 
     [HttpPost("geofences/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
@@ -306,6 +320,92 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
     private static string CleanRequired(string? value, string fallback) => string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
     private static string NormalizeReg(string value) => value.Replace(" ", string.Empty).Replace("-", string.Empty).Trim().ToUpperInvariant();
     private static string NormalizeName(string value) => string.Join(' ', value.Trim().ToUpperInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries));
+    private static string NormalizeCode(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static string NumericCode(string? value) => NormalizeCode(value).TrimStart('0');
+
+    private async Task<SiteGeofence> ResolveEditableGeofence(Guid id, string name, string? polygonJson, CancellationToken ct)
+    {
+        var normalizedName = NormalizeName(name);
+        var item = await db.SiteGeofences.FirstOrDefaultAsync(x => x.Id == id, ct)
+            ?? await db.SiteGeofences.FirstOrDefaultAsync(x => x.NormalizedName == normalizedName, ct);
+        if (item is not null) return item;
+
+        var embedded = EmbeddedGeofenceEngine.ApprovedFences.FirstOrDefault(x => x.Id == id || NormalizeName(x.Name) == normalizedName);
+        item = new SiteGeofence
+        {
+            Id = id,
+            Name = name,
+            NormalizedName = normalizedName,
+            Category = embedded?.Category,
+            CategoryMaxWaitMinutes = embedded?.CategoryMaxWaitMinutes,
+            MaxWaitMinutes = embedded?.MaxWaitMinutes,
+            PendingEntryMinutes = embedded?.PendingEntryMinutes ?? 0,
+            PendingExitMinutes = embedded?.PendingExitMinutes ?? 0,
+            SiteNumber = embedded?.SiteNumber,
+            PolygonJson = string.IsNullOrWhiteSpace(polygonJson) ? PolygonJson(embedded) : polygonJson.Trim()
+        };
+        db.SiteGeofences.Add(item);
+        return item;
+    }
+
+    private void ApplySiteLink(SiteGeofence item, string? siteNumber, Guid? siteId, bool? locationOnly)
+    {
+        if (locationOnly == true)
+        {
+            item.SiteNumber = "LOCATION_ONLY";
+            item.SiteId = null;
+            return;
+        }
+
+        var cleanSiteNumber = Clean(siteNumber);
+        var site = ResolveSite(cleanSiteNumber, siteId);
+        item.SiteNumber = site?.ExternalCode ?? cleanSiteNumber;
+        item.SiteId = site?.Id ?? siteId;
+    }
+
+    private Site? ResolveSite(string? siteNumber, Guid? siteId)
+    {
+        if (siteId is not null)
+        {
+            var byId = db.Sites.Local.FirstOrDefault(x => x.Id == siteId.Value)
+                ?? db.Sites.FirstOrDefault(x => x.Id == siteId.Value);
+            if (byId is not null) return byId;
+        }
+
+        var normalized = NormalizeCode(siteNumber);
+        if (normalized.Length == 0) return null;
+        var numeric = NumericCode(siteNumber);
+        return db.Sites
+            .Where(x => x.Active)
+            .AsEnumerable()
+            .FirstOrDefault(x => NormalizeCode(x.ExternalCode) == normalized || (numeric.Length > 0 && NumericCode(x.ExternalCode) == numeric));
+    }
+
+    private async Task<object> GeofenceResponse(SiteGeofence item, CancellationToken ct)
+    {
+        var site = item.SiteId is null ? null : await db.Sites.AsNoTracking().FirstOrDefaultAsync(x => x.Id == item.SiteId.Value, ct);
+        var locationOnly = string.Equals(item.SiteNumber, "LOCATION_ONLY", StringComparison.OrdinalIgnoreCase);
+        return new
+        {
+            item.Id,
+            item.Name,
+            item.Category,
+            item.CategoryMaxWaitMinutes,
+            item.MaxWaitMinutes,
+            item.PendingEntryMinutes,
+            item.PendingExitMinutes,
+            siteNumber = locationOnly ? null : item.SiteNumber,
+            item.SiteId,
+            siteCode = site?.ExternalCode,
+            siteName = site?.Name,
+            locationOnly,
+            item.Active,
+            item.UpdatedAtUtc
+        };
+    }
+
+    private static string PolygonJson(EmbeddedFence? fence) =>
+        fence is null ? "[]" : JsonSerializer.Serialize(fence.Points.Select(point => new[] { point.Longitude, point.Latitude }));
 }
 
 public sealed record DriverUpdateRequest(string? DisplayName, string? EmployeeNumber, string? TachoName, string? MobileNumber, string? DriverType, string? DriverGroup, string? Skills);
@@ -313,4 +413,5 @@ public sealed record VehicleUpdateRequest(string? Registration, string? FleetNum
 public sealed record TrailerUpdateRequest(string? TrailerNumber, string? Type, int? StandardCapacity, int? EuroCapacity);
 public sealed record SiteUpdateRequest(string? ExternalCode, string? Name, string? DriverTextName, string? CollectionAddress, string? CollectionInstructions, string? MapLink);
 public sealed record CustomerUpdateRequest(string? Code, string? Name);
-public sealed record GeofenceUpdateRequest(string? Name, string? Category, int? CategoryMaxWaitMinutes, int? MaxWaitMinutes, int PendingEntryMinutes, int PendingExitMinutes, string? SiteNumber, Guid? SiteId, string? PolygonJson);
+public sealed record GeofenceUpdateRequest(string? Name, string? Category, int? CategoryMaxWaitMinutes, int? MaxWaitMinutes, int PendingEntryMinutes, int PendingExitMinutes, string? SiteNumber, Guid? SiteId, bool? LocationOnly, string? PolygonJson);
+public sealed record GeofenceSiteSyncRequest(string? Name, string? SiteNumber, Guid? SiteId, bool? LocationOnly, string? PolygonJson);
