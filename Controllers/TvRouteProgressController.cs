@@ -89,6 +89,13 @@ public sealed class TvRouteProgressController(
             if (currentStop is null)
                 nextStop = stops.FirstOrDefault(x => !completedStopIds.Contains(x.Id));
 
+            // Lake Lane is the depot origin. Its departure proves the run has started
+            // before the first customer geofence has been reached.
+            var lakeLaneDeparture = completedStopIds.Count == 0
+                ? OperationalRunOrigin.LakeLaneDepartureFor(snapshot, load)
+                : null;
+            var departedLakeLane = lakeLaneDeparture?.ExitedAtUtc is not null;
+
             VehicleLiveStatus? live = null;
             if (load.VehicleId is Guid vehicleId && vehicleById.TryGetValue(vehicleId, out var vehicle))
                 live = aliasesByVehicle.TryGetValue(vehicle.Id, out var aliases)
@@ -100,16 +107,22 @@ public sealed class TvRouteProgressController(
             var trackingAge = freshnessAtUtc is null ? (TimeSpan?)null : now - freshnessAtUtc.Value;
             var trackingFresh = trackingAge is not null && trackingAge.Value >= TimeSpan.Zero && trackingAge.Value <= LiveTrackingThreshold;
             var trackingMoving = trackingFresh && live is not null && (live.IsMoving == true || (live.SpeedKph ?? 0) > 2);
+            var geofenceStarted = departedLakeLane || currentStop is not null || completedStopIds.Count > 0;
 
             // Only fresh RoadTech coordinates may influence the visible vehicle marker.
-            // A stale speed/position must never continue looking live on the wallboard.
-            var truckPosition = TruckPositionPercent(stops, completedStopIds, activeVisit, trackingFresh ? live : null);
+            // Lake Lane departure supplies the trustworthy origin for the first leg.
+            var truckPosition = TruckPositionPercent(
+                stops,
+                completedStopIds,
+                activeVisit,
+                trackingFresh ? live : null,
+                lakeLaneDeparture);
             var complete = stops.Count > 0 && completedStopIds.Count >= stops.Count;
             var phase = complete
                 ? "Complete"
                 : currentStop is not null
                     ? "On site"
-                    : completedStopIds.Count > 0 || load.Status is LoadStatus.InProgress or LoadStatus.Dispatched || trackingMoving
+                    : geofenceStarted
                         ? "Heading to"
                         : "Next job";
             var focusStop = currentStop ?? nextStop;
@@ -120,7 +133,7 @@ public sealed class TvRouteProgressController(
                     ? "completed"
                     : currentStop?.Id == stop.Id
                         ? "onsite"
-                        : nextStop?.Id == stop.Id
+                        : nextStop?.Id == stop.Id && geofenceStarted
                             ? "heading"
                             : "upcoming";
                 return new
@@ -144,6 +157,8 @@ public sealed class TvRouteProgressController(
                 focusStop = focusStop?.Name,
                 phase,
                 truckPositionPercent = truckPosition,
+                originDepartureUtc = lakeLaneDeparture?.ExitedAtUtc,
+                originGeofence = lakeLaneDeparture?.Fence.Name,
                 geofenceOnSite = currentStop is not null,
                 currentVisit = activeVisit is null ? null : new
                 {
@@ -288,13 +303,11 @@ public sealed class TvRouteProgressController(
         IReadOnlyList<LoadStop> stops,
         IReadOnlySet<Guid> completedStopIds,
         DerivedVisit? activeVisit,
-        VehicleLiveStatus? live)
+        VehicleLiveStatus? live,
+        DerivedVisit? lakeLaneDeparture)
     {
         if (stops.Count == 0) return 0m;
 
-        // The TV timeline has an implicit START at 0%; each planned stop then occupies
-        // an equal sequence point through to 100%. This avoids placing a moving vehicle
-        // beyond stop 1 before the first geofence has actually been reached.
         if (activeVisit?.LoadStopId is Guid activeStopId)
         {
             var activeIndex = IndexOf(stops, activeStopId);
@@ -307,10 +320,30 @@ public sealed class TvRouteProgressController(
 
         if (lastCompletedIndex >= stops.Count - 1) return 100m;
 
-        // Before the first geofence there is no trustworthy route-origin coordinate in
-        // the planning model. Do not invent a percentage. The TV still shows fresh speed
-        // and a moving marker at START until the first site arrival proves progression.
-        if (lastCompletedIndex < 0) return 0m;
+        // First leg: START is the Lake Lane geofence. Once the vehicle leaves it, use
+        // the same live-coordinate interpolation as later legs so the truck visibly moves
+        // toward stop 1 before any customer geofence has been completed.
+        if (lastCompletedIndex < 0)
+        {
+            if (lakeLaneDeparture?.ExitedAtUtc is null) return 0m;
+            var first = stops[0];
+            var firstPercent = StopPercent(0, stops.Count);
+            var origin = OperationalRunOrigin.FenceCentre(lakeLaneDeparture.Fence);
+            if (live is not null && origin is not null && first.Latitude is not null && first.Longitude is not null)
+            {
+                var fromOrigin = DistanceKm(origin.Value.Latitude, origin.Value.Longitude, live.Latitude, live.Longitude);
+                var toFirst = DistanceKm(live.Latitude, live.Longitude, first.Latitude.Value, first.Longitude.Value);
+                var total = fromOrigin + toFirst;
+                if (total > 0.05)
+                {
+                    var fraction = Math.Clamp((decimal)(fromOrigin / total), 0.02m, 0.98m);
+                    return Math.Round(firstPercent * fraction, 1);
+                }
+            }
+
+            // Departure itself is enough to show that the run is no longer parked.
+            return Math.Min(1m, firstPercent);
+        }
 
         var nextIndex = lastCompletedIndex + 1;
         while (nextIndex < stops.Count && completedStopIds.Contains(stops[nextIndex].Id)) nextIndex++;
