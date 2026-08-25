@@ -10,10 +10,11 @@ public sealed class OperationalGeofencePayloadTests
     {
         var fences = EmbeddedGeofenceEngine.ApprovedFences;
 
-        Assert.Equal(OperationalGeofencePayload.ExpectedFenceCount + 3, fences.Count);
-        Assert.Contains(fences, fence => fence.Name == "Natures Way Foods Selsey");
-        Assert.Contains(fences, fence => fence.Name == "Natures Way Foods Merston");
-        Assert.Contains(fences, fence => fence.Name == "Natures Way Foods Drayton");
+        Assert.Equal(OperationalGeofencePayload.ExpectedFenceCount, fences.Count);
+        Assert.Contains(fences, fence => fence.Name == "Selsey (Natures Way)");
+        Assert.Contains(fences, fence => fence.Name == "Merston (Natures Way)");
+        Assert.Contains(fences, fence => fence.Name == "Drayton (Natures Way)");
+        Assert.Contains(fences, fence => fence.Name == "Runcton (Natures Way)");
         Assert.Contains(fences, fence => fence.Name == "Vitacress Runcton");
         Assert.All(fences, fence =>
         {

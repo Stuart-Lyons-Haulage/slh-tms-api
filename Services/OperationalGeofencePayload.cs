@@ -6,8 +6,8 @@ namespace Slh.Tms.Api.Services;
 
 internal static class OperationalGeofencePayload
 {
-    internal const int ExpectedFenceCount = 314;
-    internal const string ExpectedJsonSha256 = "f4622cdfba2d35e20596398ab4fe6d02a9f3946f888ed9675ae7ff4491a329a9";
+    internal const int ExpectedFenceCount = 736;
+    internal const string ExpectedJsonSha256 = "d46a8ecfdd8bd609ae611dbbf334821b32f21b91dd7ff2506267dd47db56180d";
 
     private static readonly Lazy<string> Payload = new(DecodeAndValidate);
 

@@ -7,12 +7,9 @@ namespace Slh.Tms.Api.Services;
 public static class GeofenceAutoSeed
 {
     private static readonly SemaphoreSlim Gate = new(1, 1);
-    private const int SupplementalFenceCount = 3;
+    private const int SupplementalFenceCount = 0;
     private static readonly string[] SupplementalFenceNames =
     [
-        "Natures Way Foods Selsey",
-        "Natures Way Foods Merston",
-        "Natures Way Foods Drayton"
     ];
 
     public static async Task<GeofenceAutoSeedResult> EnsureAsync(TmsDbContext db, CancellationToken ct)
@@ -74,6 +71,7 @@ public static class GeofenceAutoSeed
     private static async Task<bool> IsCompleteAsync(TmsDbContext db, int active, CancellationToken ct)
     {
         if (active < OperationalGeofencePayload.ExpectedFenceCount + SupplementalFenceCount) return false;
+        if (SupplementalFenceNames.Length == 0) return true;
         var required = SupplementalFenceNames.Select(Normalize).ToList();
         var present = await db.SiteGeofences.AsNoTracking()
             .Where(x => x.Active && required.Contains(x.NormalizedName))

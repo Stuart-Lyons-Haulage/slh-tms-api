@@ -9,7 +9,7 @@ public sealed class EmbeddedGeofenceEngineTests
     public void Operational_falcon_payload_loads_all_unique_run_fences_plus_approved_supplements()
     {
         var fences = EmbeddedGeofenceEngine.ApprovedFences;
-        var expected = OperationalGeofencePayload.ExpectedFenceCount + 3;
+        var expected = OperationalGeofencePayload.ExpectedFenceCount;
 
         Assert.Equal(expected, fences.Count);
         Assert.Equal(expected, fences.Select(x => x.Id).Distinct().Count());
@@ -32,20 +32,23 @@ public sealed class EmbeddedGeofenceEngineTests
         var fences = EmbeddedGeofenceEngine.ApprovedFences;
         var counts = fences.GroupBy(x => x.Category).ToDictionary(x => x.Key ?? string.Empty, x => x.Count(), StringComparer.OrdinalIgnoreCase);
 
+        Assert.Equal(180, counts["Service Station"]);
+        Assert.Equal(174, counts["Collection"]);
         Assert.Equal(169, counts["Delivery"]);
         Assert.Equal(43, counts["Traywash"]);
         Assert.Equal(29, counts["NWF Collection"]);
+        Assert.Equal(25, counts["Parking"]);
+        Assert.Equal(21, counts["Restricted Access"]);
         Assert.Equal(20, counts["Reload Customer"]);
         Assert.Equal(18, counts["RDC"]);
-        Assert.Equal(13, counts["Market Delivery"]);
-        Assert.Equal(12, counts["Customer"]);
+        Assert.Equal(14, counts["Market Delivery"]);
+        Assert.Equal(13, counts["Customer"]);
+        Assert.Equal(10, counts["Service Centre"]);
+        Assert.Equal(6, counts["DVS"]);
         Assert.Equal(5, counts["FWC Collection"]);
         Assert.Equal(4, counts["Roundstone Collection"]);
+        Assert.Equal(4, counts["DVSA Checkpoint"]);
         Assert.Equal(1, counts["SLH DEPOT"]);
-        Assert.Equal(3, counts["SLH supplemental"]);
-
-        var excluded = new[] { "DVS", "DVSA Checkpoint", "Restricted Access", "Service Centre", "Service Station" };
-        Assert.DoesNotContain(fences, fence => excluded.Contains(fence.Category, StringComparer.OrdinalIgnoreCase));
     }
 
     [Fact]

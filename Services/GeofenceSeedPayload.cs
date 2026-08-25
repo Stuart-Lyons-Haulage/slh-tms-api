@@ -4,12 +4,9 @@ namespace Slh.Tms.Api.Services;
 
 internal static class GeofenceSeedPayload
 {
-    // Canonical operational geofence payload rebuilt from the 15 Falcon category
-    // exports supplied by SLH on 19 August 2026. Selsey, Merston and Drayton are
-    // supplemental operational fences because they are absent from that export.
-    // Runcton already exists in the approved payload as "Vitacress Runcton", so it
-    // must not be duplicated with an overlapping Nature's Way polygon.
-    internal const int SupplementalFenceCount = 3;
+    // Canonical operational geofence payload rebuilt from the reviewed DOT/Falcon
+    // category exports and master-data alignment completed on 25 August 2026.
+    internal const int SupplementalFenceCount = 0;
     internal static int ExpectedFenceCount => OperationalGeofencePayload.ExpectedFenceCount + SupplementalFenceCount;
 
     private static readonly Lazy<string> Payload = new(Build);
@@ -18,35 +15,7 @@ internal static class GeofenceSeedPayload
 
     private static string Build()
     {
-        var root = JsonNode.Parse(OperationalGeofencePayload.Json)?.AsArray()
-            ?? throw new InvalidDataException("Operational geofence payload was not a JSON array.");
-
-        AddIfMissing(root, Fence(
-            "Natures Way Foods Selsey",
-            new[]
-            {
-                Point(-0.78175, 50.74216), Point(-0.77663, 50.74216),
-                Point(-0.77663, 50.74540), Point(-0.78175, 50.74540)
-            }));
-        AddIfMissing(root, Fence(
-            "Natures Way Foods Merston",
-            new[]
-            {
-                // Merston sits immediately south of the Drayton unit at Chichester
-                // Food Park. Keep the supplemental polygons non-overlapping so a
-                // RoadTech point can resolve to only one physical NWF site.
-                Point(-0.74465, 50.82020), Point(-0.74225, 50.82020),
-                Point(-0.74225, 50.82135), Point(-0.74465, 50.82135)
-            }));
-        AddIfMissing(root, Fence(
-            "Natures Way Foods Drayton",
-            new[]
-            {
-                Point(-0.74706, 50.82140), Point(-0.74194, 50.82140),
-                Point(-0.74194, 50.82464), Point(-0.74706, 50.82464)
-            }));
-
-        return root.ToJsonString();
+        return OperationalGeofencePayload.Json;
     }
 
     private static JsonObject Fence(string name, JsonObject[] points) => new()

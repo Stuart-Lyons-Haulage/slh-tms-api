@@ -52,7 +52,7 @@ public sealed class LiveGeofenceProgressionTests
     [Fact]
     public async Task Run1am_style_nwf_visit_links_and_clears_consecutive_same_site_jobs()
     {
-        var fence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences.Where(x => x.Name.Contains("Runcton", StringComparison.OrdinalIgnoreCase)));
+        var fence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences.Where(x => string.Equals(x.Name, "Runcton (Natures Way)", StringComparison.OrdinalIgnoreCase)));
         var longitude = fence.Points.Average(x => x.Longitude);
         var latitude = fence.Points.Average(x => x.Latitude);
         var vehicleId = Guid.NewGuid();
@@ -101,7 +101,7 @@ public sealed class LiveGeofenceProgressionTests
     [Fact]
     public async Task Full_day_reconstruction_does_not_drop_planned_vehicle_after_twenty_thousand_unrelated_events()
     {
-        var fence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences.Where(x => x.Name.Contains("Runcton", StringComparison.OrdinalIgnoreCase)));
+        var fence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences.Where(x => string.Equals(x.Name, "Runcton (Natures Way)", StringComparison.OrdinalIgnoreCase)));
         var longitude = fence.Points.Average(x => x.Longitude);
         var latitude = fence.Points.Average(x => x.Latitude);
         var vehicleId = Guid.NewGuid();

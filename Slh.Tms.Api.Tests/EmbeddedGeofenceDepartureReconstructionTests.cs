@@ -12,7 +12,7 @@ public sealed class EmbeddedGeofenceDepartureReconstructionTests
     [Fact]
     public async Task Departure_reconstructs_stationary_dwell_and_completes_stop_without_repeated_provider_event()
     {
-        var fence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences.Where(x => x.Name.Contains("Runcton", StringComparison.OrdinalIgnoreCase)));
+        var fence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences.Where(x => string.Equals(x.Name, "Runcton (Natures Way)", StringComparison.OrdinalIgnoreCase)));
         var longitude = fence.Points.Average(x => x.Longitude);
         var latitude = fence.Points.Average(x => x.Latitude);
         var now = DateTimeOffset.UtcNow;
