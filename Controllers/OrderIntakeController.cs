@@ -22,6 +22,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     private readonly NwfDailyTrackerParser nwfParser = new();
     private readonly NwfWorkbookSnapshotParser nwfWorkbookParser = new();
     private readonly NwfPalletOrderCsvParser nwfCsvParser = new();
+    private readonly NwfQuantityChangeParser nwfQuantityChangeParser = new();
     private static readonly Regex DateRegex = new(
         @"\b(?<day>0?[1-9]|[12]\d|3[01])[./-](?<month>0?[1-9]|1[0-2])(?:[./-](?<year>20\d{2}|\d{2}))?\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -127,7 +128,8 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     }
 
     private async Task<EmailIntakeParseResult> ParseEmail(MailboxEmailIntakeRequest request, CancellationToken ct) =>
-        nwfCsvParser.TryParse(request)
+        nwfQuantityChangeParser.TryParse(request)
+        ?? nwfCsvParser.TryParse(request)
         ?? nwfWorkbookParser.TryParse(request)
         ?? nwfParser.TryParse(request)
         ?? sainsburyParser.TryParse(request)
