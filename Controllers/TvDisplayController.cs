@@ -283,7 +283,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
     {
         try
         {
-            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, TimeZoneInfo.FindSystemTimeZoneId("Europe/London")).DateTime);
+            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime);
         }
         catch (TimeZoneNotFoundException)
         {
