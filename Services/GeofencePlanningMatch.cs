@@ -113,12 +113,21 @@ public static class GeofencePlanningMatch
     {
         if (StopInsideFence(stop, fence)) return true;
 
-        // NWF planner shorthand is resolved to one canonical approved DOT/Falcon fence.
-        // Compare against that canonical name exactly instead of generic locality fuzzing:
-        // this permits the historic Vitacress Runcton exception while preventing
-        // "NWF Drayton" from linking to an unrelated Drayton business.
         if (IsNwfPlannerLabel(stop.Name))
         {
+            var plannerLocality = NaturesWayLocalityTokens(stop.Name);
+
+            // Accept DOT naming variants only when the fence explicitly identifies
+            // Nature's Way and the locality matches. This safely covers forms such as
+            // "Drayton (Natures Way)" without matching other Drayton businesses.
+            if (IsNaturesWayFence(fence.Name))
+            {
+                var fenceLocality = NaturesWayLocalityTokens(fence.Name);
+                if (plannerLocality.Count > 0 && plannerLocality.SetEquals(fenceLocality)) return true;
+            }
+
+            // Also accept the single canonical approved fence selected by MatchText.
+            // This preserves the historic Vitacress Runcton mapping.
             var canonical = MatchText(stop.Name);
             return NormalizeName(canonical) == NormalizeName(fence.Name);
         }
