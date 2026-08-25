@@ -19,6 +19,8 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
         try { await LoadCommercialStore.EnrichAsync(db, new[] { load }, ct); }
         catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); }
 
+        var now = DateTimeOffset.UtcNow;
+        var today = UkDate(now);
         var orderedStops = load.Stops.OrderBy(x => x.Sequence).ToList();
         var firstStop = orderedStops.FirstOrDefault();
         var lastStop = orderedStops.LastOrDefault();
@@ -31,12 +33,20 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
 
         IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> tacho = new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
         try { tacho = await tachoMaster.GetOpenDriverStatusesByVehicleAsync(load.PlanningDate, ct); }
-        catch (Exception ex) when (ex is not OperationCanceledException) { logger.LogWarning(ex, "TachoMaster planning enrichment unavailable for {LoadId}", id); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { logger.LogWarning(ex, "TachoMaster current-duty enrichment unavailable for {LoadId}", id); }
+
+        IReadOnlyList<TachoDriverProfile> tachoProfiles = [];
+        try { tachoProfiles = await tachoMaster.GetDriverProfilesAsync(ct); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { logger.LogWarning(ex, "TachoMaster planning-date profile enrichment unavailable for {LoadId}", id); }
 
         List<Driver> drivers;
         List<Vehicle> vehicles;
         List<VehicleLiveStatus> live;
-        try { drivers = await db.Drivers.AsNoTracking().Where(x => x.Active).OrderBy(x => x.DisplayName).ToListAsync(ct); }
+        try
+        {
+            drivers = await db.Drivers.AsNoTracking().Where(x => x.Active).OrderBy(x => x.DisplayName).ToListAsync(ct);
+            await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
+        }
         catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); drivers = []; }
         try { vehicles = await db.Vehicles.AsNoTracking().Where(x => x.Active).OrderBy(x => x.Registration).ToListAsync(ct); }
         catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); vehicles = []; }
@@ -50,14 +60,15 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
         var driverSuggestions = drivers.Select(driver =>
         {
             var tachoMatch = tacho.Values.SelectMany(status => status).FirstOrDefault(status => DriverMatches(driver, status));
+            var profile = MatchTachoProfile(driver, tachoProfiles);
             var previous = previousLoads.FirstOrDefault(x => x.DriverId == driver.Id);
             var final = previous?.Stops.OrderByDescending(x => x.Sequence).FirstOrDefault(x => x.Latitude is not null && x.Longitude is not null);
             decimal? reposition = firstPoint is not null && final?.Latitude is not null && final.Longitude is not null
                 ? EstimatedRoadMiles((final.Latitude.Value, final.Longitude.Value), firstPoint.Value)
                 : null;
-            var daily = tachoMatch?.DriveAvailableTodayMinutes ?? driver.TachoDriveAvailableTodayMinutes;
-            var weekly = tachoMatch?.DriveAvailableWeekMinutes ?? driver.TachoDriveAvailableWeekMinutes;
-            var weeklyWork = tachoMatch?.WorkAvailableWeekMinutes ?? driver.TachoWorkAvailableWeekMinutes;
+            var daily = PlanningDateDriveMinutes(driver, profile, tachoMatch, load.PlanningDate, today);
+            var weekly = profile?.DriveAvailableWeekMinutes ?? driver.TachoDriveAvailableWeekMinutes;
+            var weeklyWork = profile?.WorkAvailableWeekMinutes ?? driver.TachoWorkAvailableWeekMinutes;
             var score = 100m - Math.Min(reposition ?? 40m, 40m);
             if (weekly is int weeklyMinutes && weeklyMinutes < 600) score -= 25;
             if (daily is int dailyMinutes && dailyMinutes < 240) score -= 35;
@@ -72,9 +83,11 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
                 driver.EmployeeNumber,
                 driver.TachoName,
                 dailyRemainingMinutes = daily,
+                driveAvailabilityDate = daily is null ? (DateOnly?)null : load.PlanningDate,
+                driveAvailabilitySource = PlanningDateTachoSource(driver, profile, tachoMatch, load.PlanningDate, today),
                 weeklyRemainingMinutes = weekly,
                 weeklyWorkRemainingMinutes = weeklyWork,
-                tachoStatus = tachoMatch is null ? "NotSignedOn" : "SignedOn",
+                tachoStatus = tachoMatch is null ? "NoCurrentDuty" : "CurrentDuty",
                 tachoSignOnUtc = tachoMatch?.DutyStartUtc,
                 tachoVehicle = tachoMatch?.VehicleCode,
                 previousRun = previous?.Reference,
@@ -85,7 +98,7 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
                 projectedShiftRisk,
                 score = Math.Round(score, 1),
                 shiftRisk = combinedRisk,
-                reason = DriverReason(previous, final, reposition, tachoMatch, projectedShiftMinutes)
+                reason = DriverReason(previous, final, reposition, tachoMatch, projectedShiftMinutes, daily, load.PlanningDate)
             };
         }).OrderByDescending(x => x.score).ThenBy(x => x.estimatedRepositionMiles ?? 999m).Take(12).ToList();
 
@@ -102,7 +115,7 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
             var currentDuty = tacho
                 .Where(pair => ExecutionIdentityResolver.MatchesVehicleIdentifier(keys, pair.Key))
                 .SelectMany(pair => pair.Value)
-                .OrderByDescending(status => status.DutyStartUtc)
+                .OrderByDescending(item => item.DutyStartUtc)
                 .FirstOrDefault();
             var score = 100m - Math.Min(reposition ?? 40m, 40m) + (status?.IsMoving == true ? 5 : 0);
             return new
@@ -115,7 +128,7 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
                 status?.IsMoving,
                 status?.LastKnownStatus,
                 currentDriver = currentDuty?.DriverName,
-                tachoStatus = currentDuty is null ? "NotSignedOn" : "SignedOn",
+                tachoStatus = currentDuty is null ? "NoCurrentDuty" : "CurrentDuty",
                 tachoSignOnUtc = currentDuty?.DutyStartUtc,
                 previousRun = previous?.Reference,
                 previousEnd = final?.Name,
@@ -130,6 +143,11 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
             load.Id,
             load.Reference,
             load.PlanningDate,
+            tachoAvailabilityPolicy = load.PlanningDate == today
+                ? "Current duty when present plus TachoMaster today metric"
+                : load.PlanningDate == today.AddDays(1)
+                    ? "TachoMaster tomorrow metric; current duty is identity evidence only"
+                    : "No future legal-hours estimate beyond tomorrow",
             firstStop = firstStop is null ? null : new { firstStop.Id, firstStop.Name, firstStop.Latitude, firstStop.Longitude, firstStop.PlannedArrivalUtc },
             lastStop = lastStop is null ? null : new { lastStop.Id, lastStop.Name, lastStop.Latitude, lastStop.Longitude, lastStop.PlannedArrivalUtc },
             projectedShiftMinutes,
@@ -208,6 +226,57 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
         return Ok(new { from, to, rows, counts = rows.Where(x => x.requested).GroupBy(x => x.driverName ?? "Unknown").Select(g => new { driver = g.Key, nights = g.Count() }).OrderByDescending(x => x.nights) });
     }
 
+    private static int? PlanningDateDriveMinutes(Driver driver, TachoDriverProfile? profile, TachoVehicleDriverStatus? currentDuty, DateOnly planningDate, DateOnly today)
+    {
+        if (planningDate == today)
+            return currentDuty?.DriveAvailableTodayMinutes ?? profile?.DriveAvailableTodayMinutes ?? driver.TachoDriveAvailableTodayMinutes;
+        if (planningDate == today.AddDays(1))
+            return profile?.DriveAvailableTomorrowMinutes;
+        return null;
+    }
+
+    private static string PlanningDateTachoSource(Driver driver, TachoDriverProfile? profile, TachoVehicleDriverStatus? currentDuty, DateOnly planningDate, DateOnly today)
+    {
+        if (planningDate == today && currentDuty?.DriveAvailableTodayMinutes is not null) return "Current TachoMaster duty";
+        if (planningDate == today && profile?.DriveAvailableTodayMinutes is not null) return "TachoMaster live profile · today";
+        if (planningDate == today && driver.TachoDriveAvailableTodayMinutes is not null) return "TachoMaster synced profile · today";
+        if (planningDate == today.AddDays(1) && profile?.DriveAvailableTomorrowMinutes is not null) return "TachoMaster live profile · tomorrow";
+        return "Unconfirmed";
+    }
+
+    private static TachoDriverProfile? MatchTachoProfile(Driver driver, IEnumerable<TachoDriverProfile> profiles)
+    {
+        if (int.TryParse(driver.TachoMasterDriverId, out var memberCode) && memberCode > 0)
+        {
+            var byMember = profiles.FirstOrDefault(profile => profile.MemberCode == memberCode);
+            if (byMember is not null) return byMember;
+        }
+        if (!string.IsNullOrWhiteSpace(driver.TachoCardNumber))
+        {
+            var byCard = profiles.FirstOrDefault(profile => CardsMatch(driver.TachoCardNumber, profile.CardNumber));
+            if (byCard is not null) return byCard;
+        }
+        if (!string.IsNullOrWhiteSpace(driver.EmployeeNumber))
+        {
+            var employee = Normalise(driver.EmployeeNumber);
+            var byEmployee = profiles.FirstOrDefault(profile => !string.IsNullOrWhiteSpace(profile.EmployeeNumber) && Normalise(profile.EmployeeNumber!) == employee);
+            if (byEmployee is not null) return byEmployee;
+        }
+        var names = new[] { driver.TachoName, driver.DisplayName }
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => ExecutionIdentityResolver.NormalisePerson(value))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return profiles.FirstOrDefault(profile => names.Contains(ExecutionIdentityResolver.NormalisePerson(profile.DriverName)));
+    }
+
+    private static bool CardsMatch(string? left, string? right)
+    {
+        var a = Normalise(left ?? string.Empty);
+        var b = Normalise(right ?? string.Empty);
+        return a.Length >= 8 && b.Length >= 8 &&
+               (a == b || a.EndsWith(b, StringComparison.OrdinalIgnoreCase) || b.EndsWith(a, StringComparison.OrdinalIgnoreCase));
+    }
+
     private static int? PlannedSpanMinutes(IReadOnlyList<LoadStop> stops)
     {
         var timed = stops.Where(x => x.PlannedArrivalUtc is not null).OrderBy(x => x.Sequence).ToList();
@@ -239,19 +308,21 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
         return Rank(a) >= Rank(b) ? a : b;
     }
 
-    private static string DriverReason(Load? previous, LoadStop? final, decimal? miles, TachoVehicleDriverStatus? tacho, int? projectedShiftMinutes)
+    private static string DriverReason(Load? previous, LoadStop? final, decimal? miles, TachoVehicleDriverStatus? tacho, int? projectedShiftMinutes, int? planningDriveMinutes, DateOnly planningDate)
     {
         var parts = new List<string>();
         if (previous is not null) parts.Add($"Last planned on {previous.Reference}{(final is null ? string.Empty : $" ending at {final.Name}")}");
         if (miles is not null) parts.Add($"about {miles:0} reposition miles to the first stop");
-        if (tacho is not null) parts.Add($"TachoMaster live duty is in vehicle {tacho.VehicleCode}");
+        if (tacho is not null) parts.Add($"current TachoMaster duty is in vehicle {tacho.VehicleCode}");
+        if (planningDriveMinutes is int drive) parts.Add($"Tacho drive available for {planningDate:yyyy-MM-dd} is {drive / 60}h {drive % 60:00}");
         if (projectedShiftMinutes is int shift) parts.Add($"planned run span is about {shift / 60}h {shift % 60:00}m");
-        return parts.Count == 0 ? "No recent run position or TachoMaster duty was matched." : string.Join("; ", parts) + ".";
+        return parts.Count == 0 ? "No recent run position or planning-date Tacho availability was matched." : string.Join("; ", parts) + ".";
     }
 
     private static bool DriverMatches(Driver driver, TachoVehicleDriverStatus status)
     {
-        var names = new[] { driver.DisplayName, driver.TachoName, driver.EmployeeNumber }.Where(x => !string.IsNullOrWhiteSpace(x)).Select(Normalise).ToHashSet();
+        if (ExecutionIdentityResolver.DriverMatches(driver, status)) return true;
+        var names = new[] { driver.DisplayName, driver.TachoName, driver.EmployeeNumber }.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => Normalise(x!)).ToHashSet();
         return names.Contains(Normalise(status.DriverName)) || (!string.IsNullOrWhiteSpace(status.EmployeeNumber) && names.Contains(Normalise(status.EmployeeNumber)));
     }
 
@@ -266,6 +337,20 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
     }
     private static double DegreesToRadians(double degrees) => degrees * Math.PI / 180d;
     private static string Normalise(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
+    private static DateOnly UkDate(DateTimeOffset value)
+    {
+        try
+        {
+            var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, zone).DateTime);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return DateOnly.FromDateTime(value.UtcDateTime);
+        }
+    }
+
     private static bool? ReadNightOut(string? notes)
     {
         var value = (notes ?? string.Empty).Split('·').Select(x => x.Trim()).FirstOrDefault(x => x.StartsWith("Night out:", StringComparison.OrdinalIgnoreCase));

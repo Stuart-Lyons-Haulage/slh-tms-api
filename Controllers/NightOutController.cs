@@ -11,6 +11,8 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController, Route("api/v1/night-outs"), Authorize]
 public sealed class NightOutController(TmsDbContext db, TachoMasterClient tachoMaster, ILogger<NightOutController> logger) : ControllerBase
 {
+    private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+
     [HttpGet("report")]
     public async Task<IActionResult> Report([FromQuery] DateOnly from, [FromQuery] DateOnly to, CancellationToken ct)
     {
@@ -25,23 +27,25 @@ public sealed class NightOutController(TmsDbContext db, TachoMasterClient tachoM
         var driverIds = loads.Select(x => x.DriverId!.Value).Distinct().ToList();
         var vehicleIds = loads.Where(x => x.VehicleId != null).Select(x => x.VehicleId!.Value).Distinct().ToList();
         var drivers = await db.Drivers.AsNoTracking().Where(x => driverIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        await MasterDetailStore.EnrichDriversAsync(db, drivers.Values.ToList(), ct);
         var vehicles = await db.Vehicles.AsNoTracking().Where(x => vehicleIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, ct);
+        var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles.Values.ToList(), ct);
 
-        var allIdentifiers = vehicles.Values.SelectMany(VehicleIdentifiers).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        var startUtc = new DateTimeOffset(from.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
-        var endUtc = new DateTimeOffset(to.AddDays(1).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+        var allIdentifiers = aliasesByVehicle.Values.SelectMany(aliases => aliases).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var startUtc = StartOfUkDay(from);
+        var endUtc = StartOfUkDay(to.AddDays(1));
         var trackingEvents = allIdentifiers.Count == 0 ? new List<VehicleTrackingEvent>() : await db.VehicleTrackingEvents.AsNoTracking()
             .Where(x => x.EventTimeUtc >= startUtc && x.EventTimeUtc < endUtc && allIdentifiers.Contains(x.VehicleIdentifier))
-            .OrderByDescending(x => x.EventTimeUtc).Take(20000).ToListAsync(ct);
+            .OrderByDescending(x => x.EventTimeUtc).Take(50000).ToListAsync(ct);
 
-        var tachoByDate = new Dictionary<DateOnly, IReadOnlyDictionary<string, TachoVehicleDriverStatus>>();
+        var tachoByDate = new Dictionary<DateOnly, IReadOnlyList<TachoDriverDutyStatus>>();
         foreach (var date in loads.Select(x => x.PlanningDate).Distinct())
         {
-            try { tachoByDate[date] = await tachoMaster.GetCurrentDriverStatusesByVehicleAsync(date, ct); }
+            try { tachoByDate[date] = await tachoMaster.GetDriverDutyStatusesAsync(date, ct); }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger.LogWarning(ex, "TachoMaster night-out validation unavailable for {Date}", date);
-                tachoByDate[date] = new Dictionary<string, TachoVehicleDriverStatus>();
+                tachoByDate[date] = [];
             }
         }
 
@@ -49,15 +53,28 @@ public sealed class NightOutController(TmsDbContext db, TachoMasterClient tachoM
         {
             drivers.TryGetValue(load.DriverId!.Value, out var driver);
             var vehicle = load.VehicleId is Guid vehicleId && vehicles.TryGetValue(vehicleId, out var foundVehicle) ? foundVehicle : null;
-            var ids = vehicle is null ? new HashSet<string>() : VehicleIdentifiers(vehicle).Select(Normalise).ToHashSet();
-            var dayStart = new DateTimeOffset(load.PlanningDate.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
-            var dayEnd = dayStart.AddDays(1);
-            var lastTrack = trackingEvents.FirstOrDefault(x => x.EventTimeUtc >= dayStart && x.EventTimeUtc < dayEnd && ids.Contains(Normalise(x.VehicleIdentifier)));
-            var duties = tachoByDate.TryGetValue(load.PlanningDate, out var dayDuties) ? dayDuties.Values : Array.Empty<TachoVehicleDriverStatus>();
-            var duty = duties.FirstOrDefault(x => ids.Contains(Normalise(x.VehicleCode)) || (driver is not null && DriverMatches(driver, x)));
+            var aliases = vehicle is not null && aliasesByVehicle.TryGetValue(vehicle.Id, out var knownAliases)
+                ? knownAliases
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var dayStart = StartOfUkDay(load.PlanningDate);
+            var dayEnd = StartOfUkDay(load.PlanningDate.AddDays(1));
+            var lastTrack = trackingEvents.FirstOrDefault(x =>
+                x.EventTimeUtc >= dayStart && x.EventTimeUtc < dayEnd &&
+                ExecutionIdentityResolver.MatchesVehicleIdentifier(aliases, x.VehicleIdentifier));
+
+            var duties = tachoByDate.TryGetValue(load.PlanningDate, out var dayDuties) ? dayDuties : [];
+            var duty = duties
+                .Where(candidate => driver is null || DriverMatches(driver, candidate))
+                .Where(candidate => vehicle is null || ExecutionIdentityResolver.MatchesVehicleIdentifier(aliases, candidate.VehicleCode))
+                .OrderByDescending(candidate => candidate.DutyStartUtc)
+                .FirstOrDefault();
             var requested = ReadNightOut(load.PlannerNotes) == true;
             var final = load.Stops.OrderByDescending(x => x.Sequence).FirstOrDefault();
-            var evidenceStatus = !requested ? "No night out" : lastTrack is not null && duty is not null ? "DOT + Tacho evidence captured" : lastTrack is not null ? "DOT evidence captured" : duty is not null ? "Tacho evidence captured" : "Planner confirmation only";
+            var evidenceStatus = !requested ? "No night out"
+                : lastTrack is not null && duty is not null ? "DOT + Tacho evidence captured"
+                : lastTrack is not null ? "DOT evidence captured"
+                : duty is not null ? "Tacho evidence captured"
+                : "Planner confirmation only";
             return new
             {
                 load.Id,
@@ -91,16 +108,35 @@ public sealed class NightOutController(TmsDbContext db, TachoMasterClient tachoM
         });
     }
 
-    private static IEnumerable<string> VehicleIdentifiers(Vehicle vehicle)
-        => new[] { vehicle.Registration, vehicle.Abbreviation, vehicle.FleetNumber }.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x!.Trim());
-
-    private static bool DriverMatches(Driver driver, TachoVehicleDriverStatus duty)
+    private static bool DriverMatches(Driver driver, TachoDriverDutyStatus duty)
     {
-        var values = new[] { driver.DisplayName, driver.TachoName, driver.EmployeeNumber }.Where(x => !string.IsNullOrWhiteSpace(x)).Select(Normalise).ToHashSet();
-        return values.Contains(Normalise(duty.DriverName)) || (!string.IsNullOrWhiteSpace(duty.EmployeeNumber) && values.Contains(Normalise(duty.EmployeeNumber)));
+        if (int.TryParse(driver.TachoMasterDriverId, out var memberCode) && memberCode > 0 && memberCode == duty.MemberCode) return true;
+        if (CardsMatch(driver.TachoCardNumber, duty.CardNumber)) return true;
+        if (!string.IsNullOrWhiteSpace(driver.EmployeeNumber) && !string.IsNullOrWhiteSpace(duty.EmployeeNumber) &&
+            Normalise(driver.EmployeeNumber) == Normalise(duty.EmployeeNumber)) return true;
+        var names = new[] { driver.DisplayName, driver.TachoName }
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => Normalise(value!))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return names.Contains(Normalise(duty.DriverName));
     }
 
-    private static string Normalise(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    private static bool CardsMatch(string? left, string? right)
+    {
+        var a = Normalise(left);
+        var b = Normalise(right);
+        return a.Length >= 8 && b.Length >= 8 &&
+               (a == b || a.EndsWith(b, StringComparison.OrdinalIgnoreCase) || b.EndsWith(a, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static DateTimeOffset StartOfUkDay(DateOnly date)
+    {
+        var local = date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
+        return new DateTimeOffset(local, London.GetUtcOffset(local)).ToUniversalTime();
+    }
+
+    private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
     private static bool? ReadNightOut(string? notes)
     {
         var value = (notes ?? string.Empty).Split('·').Select(x => x.Trim()).FirstOrDefault(x => x.StartsWith("Night out:", StringComparison.OrdinalIgnoreCase));

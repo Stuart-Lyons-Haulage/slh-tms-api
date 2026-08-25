@@ -9,14 +9,15 @@ using Slh.Tms.Api.Services;
 namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/planning"), Authorize]
-public sealed class PlannerSuggestionsController(TmsDbContext db, ILogger<PlannerSuggestionsController> logger) : ControllerBase
+public sealed class PlannerSuggestionsController(TmsDbContext db, TachoMasterClient tachoMaster, ILogger<PlannerSuggestionsController> logger) : ControllerBase
 {
     [HttpGet("day-suggestions")]
     public async Task<IActionResult> DaySuggestions([FromQuery] DateOnly? date, CancellationToken ct)
     {
-        var planningDate = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
-        var previousDate = planningDate.AddDays(-1);
         var now = DateTimeOffset.UtcNow;
+        var today = UkDate(now);
+        var planningDate = date ?? today;
+        var previousDate = planningDate.AddDays(-1);
 
         var orders = await ReadOrders(planningDate, ct);
         var loads = await ReadLoads(planningDate, ct);
@@ -43,6 +44,16 @@ public sealed class PlannerSuggestionsController(TmsDbContext db, ILogger<Planne
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
         var driverById = drivers.ToDictionary(driver => driver.Id);
 
+        IReadOnlyList<TachoDriverProfile> tachoProfiles = [];
+        try { tachoProfiles = await tachoMaster.GetDriverProfilesAsync(ct); }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "TachoMaster planning-date availability is unavailable for route suggestions on {PlanningDate}.", planningDate);
+        }
+        var profileByDriver = drivers.ToDictionary(
+            driver => driver.Id,
+            driver => MatchTachoProfile(driver, tachoProfiles));
+
         var sites = await SafeList(db.Sites.AsNoTracking().Where(site => site.Active), ct);
         await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
 
@@ -64,6 +75,9 @@ public sealed class PlannerSuggestionsController(TmsDbContext db, ILogger<Planne
         foreach (var position in positions)
         {
             var driver = position.Driver;
+            profileByDriver.TryGetValue(driver.Id, out var profile);
+            var planningDriveMinutes = PlanningDateDriveMinutes(driver, profile, planningDate, today);
+            var tachoSource = PlanningDateTachoSource(driver, profile, planningDate, today);
             if (position.Latitude is null || position.Longitude is null) continue;
 
             var scored = unplanned.Select(order =>
@@ -97,8 +111,10 @@ public sealed class PlannerSuggestionsController(TmsDbContext db, ILogger<Planne
                 if (distance > 120d) score -= 35d;
                 if (distance > 180d) score -= 50d;
 
-                // Tacho is evidence, not the allocator. Penalise low remaining drive but do not auto-block a planner suggestion.
-                if (driver.TachoDriveAvailableTodayMinutes is int available)
+                // Tacho is evidence, not the allocator. Use the metric for the date being
+                // planned (today or TachoMaster's explicit tomorrow value), never today's
+                // remaining drive as if it described a future duty.
+                if (planningDriveMinutes is int available)
                 {
                     var approximateRepositionMinutes = distance is null ? 0 : (int)Math.Ceiling(distance.Value / 45d * 60d);
                     if (available < approximateRepositionMinutes + 60) score -= 80d;
@@ -131,9 +147,9 @@ public sealed class PlannerSuggestionsController(TmsDbContext db, ILogger<Planne
                         ? " Same-day continuation from the driver's current run/position."
                         : " Previous-day positioning fallback.";
                 var crateText = item.orderType == "Crates" ? " Potential crate/backhaul work." : string.Empty;
-                var tachoText = driver.TachoDriveAvailableTodayMinutes is int minutes
-                    ? $" Tacho drive available: {minutes / 60}h {minutes % 60:00}; confirm any required statutory break before allocation."
-                    : " Tacho hours are not currently available, so legal availability must still be confirmed.";
+                var tachoText = planningDriveMinutes is int minutes
+                    ? $" Tacho drive available for {planningDate:yyyy-MM-dd}: {minutes / 60}h {minutes % 60:00} ({tachoSource}); confirm any required statutory break before allocation."
+                    : $" Tacho drive availability for {planningDate:yyyy-MM-dd} is unconfirmed, so legal availability must still be checked.";
                 var vehicleText = string.IsNullOrWhiteSpace(position.VehicleRegistration)
                     ? string.Empty
                     : $" Keep vehicle {position.VehicleRegistration} with the driver where practical.";
@@ -157,6 +173,9 @@ public sealed class PlannerSuggestionsController(TmsDbContext db, ILogger<Planne
                     item.order.Pallets,
                     item.distance is null ? null : Math.Round(item.distance.Value, 1),
                     driver.TachoDriveAvailableTodayMinutes,
+                    planningDriveMinutes,
+                    planningDriveMinutes is null ? null : planningDate,
+                    tachoSource,
                     item.score,
                     $"{driver.DisplayName} is positioned at {position.LastLocation}. {item.direction} collection at {item.collectionName} is about {item.distance:0.0} miles away.{continuationText}{vehicleText}{crateText}{tachoText}"));
             }
@@ -167,6 +186,11 @@ public sealed class PlannerSuggestionsController(TmsDbContext db, ILogger<Planne
             planningDate,
             previousDate,
             generatedAtUtc = now,
+            tachoAvailabilityPolicy = planningDate == today
+                ? "Current TachoMaster today metric"
+                : planningDate == today.AddDays(1)
+                    ? "TachoMaster tomorrow metric"
+                    : "No future legal-hours estimate beyond tomorrow",
             unplannedOrders = unplanned.Count,
             sameDayDrivers = sameDayLoads.Select(load => load.DriverId).Where(id => id is not null).Distinct().Count(),
             previousDayDrivers = previousLoads.Select(load => load.DriverId).Where(id => id is not null).Distinct().Count(),
@@ -221,7 +245,7 @@ public sealed class PlannerSuggestionsController(TmsDbContext db, ILogger<Planne
                         .OrderByDescending(status => status.LastEventTimeUtc)
                         .FirstOrDefault();
 
-                    var freshness = sameDay ? TimeSpan.FromMinutes(10) : TimeSpan.FromHours(18);
+                    var freshness = sameDay && planningDate == UkDate(now) ? TimeSpan.FromMinutes(10) : TimeSpan.FromHours(18);
                     if (live is not null && now - live.LastEventTimeUtc <= freshness)
                     {
                         latitude = live.Latitude;
@@ -277,6 +301,59 @@ public sealed class PlannerSuggestionsController(TmsDbContext db, ILogger<Planne
     {
         try { return await query.ToListAsync(ct); }
         catch { return []; }
+    }
+
+    private static TachoDriverProfile? MatchTachoProfile(Driver driver, IEnumerable<TachoDriverProfile> profiles)
+    {
+        if (int.TryParse(driver.TachoMasterDriverId, out var memberCode) && memberCode > 0)
+        {
+            var byMember = profiles.FirstOrDefault(profile => profile.MemberCode == memberCode);
+            if (byMember is not null) return byMember;
+        }
+
+        if (!string.IsNullOrWhiteSpace(driver.TachoCardNumber))
+        {
+            var byCard = profiles.FirstOrDefault(profile => CardsMatch(driver.TachoCardNumber, profile.CardNumber));
+            if (byCard is not null) return byCard;
+        }
+
+        if (!string.IsNullOrWhiteSpace(driver.EmployeeNumber))
+        {
+            var employee = Normalise(driver.EmployeeNumber);
+            var byEmployee = profiles.FirstOrDefault(profile => !string.IsNullOrWhiteSpace(profile.EmployeeNumber) && Normalise(profile.EmployeeNumber) == employee);
+            if (byEmployee is not null) return byEmployee;
+        }
+
+        var names = new[] { driver.TachoName, driver.DisplayName }
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => ExecutionIdentityResolver.NormalisePerson(value))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return profiles.FirstOrDefault(profile => names.Contains(ExecutionIdentityResolver.NormalisePerson(profile.DriverName)));
+    }
+
+    private static int? PlanningDateDriveMinutes(Driver driver, TachoDriverProfile? profile, DateOnly planningDate, DateOnly today)
+    {
+        if (planningDate == today)
+            return profile?.DriveAvailableTodayMinutes ?? driver.TachoDriveAvailableTodayMinutes;
+        if (planningDate == today.AddDays(1))
+            return profile?.DriveAvailableTomorrowMinutes;
+        return null;
+    }
+
+    private static string PlanningDateTachoSource(Driver driver, TachoDriverProfile? profile, DateOnly planningDate, DateOnly today)
+    {
+        if (planningDate == today && profile?.DriveAvailableTodayMinutes is not null) return "TachoMaster live profile · today";
+        if (planningDate == today && driver.TachoDriveAvailableTodayMinutes is not null) return "TachoMaster synced profile · today";
+        if (planningDate == today.AddDays(1) && profile?.DriveAvailableTomorrowMinutes is not null) return "TachoMaster live profile · tomorrow";
+        return "unconfirmed";
+    }
+
+    private static bool CardsMatch(string? left, string? right)
+    {
+        var a = Normalise(left);
+        var b = Normalise(right);
+        return a.Length >= 8 && b.Length >= 8 &&
+               (a == b || a.EndsWith(b, StringComparison.OrdinalIgnoreCase) || b.EndsWith(a, StringComparison.OrdinalIgnoreCase));
     }
 
     private static Site? FindSite(IEnumerable<Site> sites, string? value)
@@ -349,6 +426,19 @@ public sealed class PlannerSuggestionsController(TmsDbContext db, ILogger<Planne
         return earthMiles * 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
     }
 
+    private static DateOnly UkDate(DateTimeOffset value)
+    {
+        try
+        {
+            var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, zone).DateTime);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return DateOnly.FromDateTime(value.UtcDateTime);
+        }
+    }
+
     private static string Normalise(string? value) =>
         new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
@@ -391,5 +481,8 @@ public sealed record PlannerDaySuggestion(
     int? Quantity,
     double? RepositionMiles,
     int? DriveAvailableTodayMinutes,
+    int? DriveAvailablePlanningDateMinutes,
+    DateOnly? DriveAvailabilityDate,
+    string DriveAvailabilitySource,
     double Score,
     string Reason);
