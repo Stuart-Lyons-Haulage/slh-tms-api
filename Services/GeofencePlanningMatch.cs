@@ -110,14 +110,15 @@ public static class GeofencePlanningMatch
     {
         if (StopInsideFence(stop, fence)) return true;
 
-        // Explicitly bridge planner shorthand to the uploaded DOT name. This is more
-        // deterministic than generic fuzzy matching and does not match unrelated sites
-        // that happen to share a locality token.
-        if (IsNwfPlannerLabel(stop.Name) && IsNaturesWayFence(fence.Name))
+        // NWF is a deliberate planner shorthand for Nature's Way. Do not let it fall
+        // through to the generic locality matcher: "NWF Drayton" must never link to an
+        // unrelated Drayton business simply because the locality token is specific.
+        if (IsNwfPlannerLabel(stop.Name))
         {
+            if (!IsNaturesWayFence(fence.Name)) return false;
             var plannerLocality = NaturesWayLocalityTokens(stop.Name);
             var fenceLocality = NaturesWayLocalityTokens(fence.Name);
-            if (plannerLocality.Count > 0 && plannerLocality.SetEquals(fenceLocality)) return true;
+            return plannerLocality.Count > 0 && plannerLocality.SetEquals(fenceLocality);
         }
 
         var left = MeaningfulTokens(MatchText(stop.Name));
