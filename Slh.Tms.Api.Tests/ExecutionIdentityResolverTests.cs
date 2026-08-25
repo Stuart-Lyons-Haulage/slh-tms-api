@@ -54,8 +54,36 @@ public sealed class ExecutionIdentityResolverTests
 
         var aliases = await ExecutionIdentityResolver.VehicleAliasesAsync(db, new[] { vehicle }, CancellationToken.None);
         Assert.Contains("KY71CVP", aliases[vehicle.Id]);
+        Assert.Contains("FALCON-001", aliases[vehicle.Id]);
         Assert.Contains("FALCON001", aliases[vehicle.Id]);
+        Assert.Contains("TM-71", aliases[vehicle.Id]);
         Assert.Contains("TM71", aliases[vehicle.Id]);
+    }
+
+    [Fact]
+    public async Task Current_live_provider_identifier_is_retained_for_exact_tracking_history_query()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var vehicle = new Vehicle { Id = Guid.NewGuid(), Registration = "KY71CVP", Active = true };
+        var options = new DbContextOptionsBuilder<TmsDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
+        await using var db = new TmsDbContext(options);
+        db.Vehicles.Add(vehicle);
+        db.VehicleLiveStatuses.Add(new VehicleLiveStatus
+        {
+            VehicleIdentifier = "KY71 CVP",
+            LastEventTimeUtc = now,
+            LastReceivedAtUtc = now,
+            Latitude = 50.8m,
+            Longitude = -1.1m,
+            LastKnownStatus = "Received"
+        });
+        await db.SaveChangesAsync();
+
+        var aliases = await ExecutionIdentityResolver.VehicleAliasesAsync(db, new[] { vehicle }, CancellationToken.None);
+
+        Assert.Contains("KY71 CVP", aliases[vehicle.Id]);
+        Assert.Contains("KY71CVP", aliases[vehicle.Id]);
+        Assert.True(ExecutionIdentityResolver.MatchesVehicleIdentifier(aliases[vehicle.Id], "KY71 CVP"));
     }
 
     [Fact]
@@ -72,7 +100,7 @@ public sealed class ExecutionIdentityResolverTests
         Assert.Equal(1, repaired);
         var mapping = await db.IntegrationMappings.SingleAsync();
         Assert.Equal("DotTracking", mapping.Provider);
-        Assert.Equal("71CVP", mapping.ExternalKey);
+        Assert.Equal("71 CVP", mapping.ExternalKey);
         Assert.Equal("Vehicle", mapping.TmsEntityType);
         Assert.Equal(vehicle.Id, mapping.TmsEntityId);
     }
