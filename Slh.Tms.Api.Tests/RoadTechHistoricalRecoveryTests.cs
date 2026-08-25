@@ -1,7 +1,10 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
 using Xunit;
@@ -38,6 +41,29 @@ public sealed class RoadTechHistoricalRecoveryTests
         Assert.Equal(0, firstPage.RootElement.GetProperty("Offset").GetInt32());
         Assert.Equal(2, secondPage.RootElement.GetProperty("Offset").GetInt32());
         Assert.Equal("2026-08-21", firstPage.RootElement.GetProperty("T").GetString());
+    }
+
+    [Fact]
+    public async Task Ingestion_identity_learning_persists_exact_history_vehicle_key()
+    {
+        var options = new DbContextOptionsBuilder<TmsDbContext>()
+            .UseInMemoryDatabase($"roadtech-history-identities-{Guid.NewGuid()}")
+            .Options;
+        await using var db = new TmsDbContext(options);
+        var vehicle = new Vehicle { Id = Guid.NewGuid(), Registration = "KY71CVP", Active = true };
+        db.Vehicles.Add(vehicle);
+        await db.SaveChangesAsync();
+
+        var repaired = await DotTrackingIngestionService.RepairProviderVehicleMappingsAsync(
+            db,
+            new[] { "KY71 CVP", "KY71 CVP" },
+            CancellationToken.None);
+
+        Assert.Equal(1, repaired);
+        var mapping = await db.IntegrationMappings.SingleAsync();
+        Assert.Equal("DotTracking", mapping.Provider);
+        Assert.Equal("KY71 CVP", mapping.ExternalKey);
+        Assert.Equal(vehicle.Id, mapping.TmsEntityId);
     }
 
     [Fact]

@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models.Tracking;
 
@@ -24,8 +25,11 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
                 var operatingDays = RecoveryDays(now);
                 var projectionDays = new HashSet<DateOnly> { operatingDays[0] };
 
-                var records = (await client.GetLatestVehicleEventsAsync(stoppingToken)).Select(DotTelemetryRecord.FromProvider);
+                var records = (await client.GetLatestVehicleEventsAsync(stoppingToken))
+                    .Select(DotTelemetryRecord.FromProvider)
+                    .ToList();
                 await store.PersistAsync(records, stoppingToken, markAsLiveReceipt: true);
+                await TryRepairProviderVehicleMappingsAsync(db, records.Select(record => record.VehicleIdentifier), "current", stoppingToken);
 
                 if (now >= nextRecoveryAtUtc)
                 {
@@ -37,6 +41,18 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
                                 .Select(DotTelemetryRecord.FromProvider)
                                 .ToList();
                             await store.PersistAsync(recovered, stoppingToken, markAsLiveReceipt: false);
+
+                            // Historical Falcon pages can use provider vehicle keys that differ
+                            // in formatting from the latest/live key. Teach the canonical identity
+                            // resolver every uniquely matchable exact key before geofence replay,
+                            // so the indexed VehicleTrackingEvents query can retrieve the same
+                            // multi-sample trail that the bounded health diagnostic sees in memory.
+                            await TryRepairProviderVehicleMappingsAsync(
+                                db,
+                                recovered.Select(record => record.VehicleIdentifier),
+                                $"history {recoveryDay:yyyy-MM-dd}",
+                                stoppingToken);
+
                             projectionDays.Add(recoveryDay);
                             logger.LogInformation(
                                 "DOT historical recovery persisted {RecordCount} RoadTech record(s) for {RecoveryDay}; linked geofences will be replayed immediately.",
@@ -76,6 +92,48 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
             catch (Exception exception) when (!stoppingToken.IsCancellationRequested) { logger.LogWarning(exception, "DOT tracking ingestion failed; retrying in {Minutes} minute(s).", pollInterval.TotalMinutes); }
             await Task.Delay(pollInterval, stoppingToken);
         }
+    }
+
+    private async Task TryRepairProviderVehicleMappingsAsync(
+        TmsDbContext db,
+        IEnumerable<string?> providerIdentifiers,
+        string source,
+        CancellationToken ct)
+    {
+        try
+        {
+            var repaired = await RepairProviderVehicleMappingsAsync(db, providerIdentifiers, ct);
+            if (repaired > 0)
+                logger.LogInformation("Learned {MappingCount} exact RoadTech vehicle key mapping(s) from {Source} telemetry before geofence replay.", repaired, source);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // Identity learning is supplementary to GPS capture. A schema or matching
+            // problem must not interrupt current telemetry; projection will remain fail-safe
+            // and retry after the next poll/history recovery.
+            db.ChangeTracker.Clear();
+            logger.LogWarning(exception, "RoadTech vehicle identity learning failed for {Source}; tracking ingestion will continue.", source);
+        }
+    }
+
+    internal static async Task<int> RepairProviderVehicleMappingsAsync(
+        TmsDbContext db,
+        IEnumerable<string?> providerIdentifiers,
+        CancellationToken ct)
+    {
+        var identifiers = providerIdentifiers
+            .Where(identifier => !string.IsNullOrWhiteSpace(identifier))
+            .Select(identifier => identifier!.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (identifiers.Count == 0) return 0;
+
+        var vehicles = await db.Vehicles.AsNoTracking()
+            .Where(vehicle => vehicle.Active)
+            .ToListAsync(ct);
+        if (vehicles.Count == 0) return 0;
+
+        return await ExecutionIdentityResolver.RepairDotVehicleMappingsAsync(db, vehicles, identifiers, ct);
     }
 
     internal static TimeSpan HistoryRecoveryInterval(DotTrackingOptions options)
