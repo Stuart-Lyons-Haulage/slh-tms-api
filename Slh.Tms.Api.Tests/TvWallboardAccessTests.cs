@@ -31,14 +31,14 @@ public sealed class TvWallboardAccessTests
     }
 
     [Fact]
-    public void Lyons_user_is_allowed_without_display_key()
+    public void Authenticated_portal_user_is_allowed_without_optional_email_claims()
     {
         var context = new DefaultHttpContext
         {
             User = new ClaimsPrincipal(new ClaimsIdentity(
             [
-                new Claim("preferred_username", "planner@lyonshaulage.com")
-            ], "Test"))
+                new Claim("oid", "test-user-object-id")
+            ], "Bearer"))
         };
 
         Assert.True(TvWallboardAccess.IsAllowed(context, Configuration(null)));
