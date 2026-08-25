@@ -110,6 +110,68 @@ public sealed class TvWallboardAccessTests
         Assert.Equal(new DateTimeOffset(2026, 8, 24, 12, 30, 0, TimeSpan.Zero), run.GetProperty("etaUtc").GetDateTimeOffset());
     }
 
+    [Fact]
+    public async Task Tv_live_runs_keeps_live_table_runs_when_planning_register_also_has_rows()
+    {
+        await using var factory = new CustomWebFactory();
+        var day = new DateOnly(2026, 8, 24);
+        var liveLoadId = Guid.NewGuid();
+        var registerLoadId = Guid.NewGuid();
+        var liveLoad = new Load
+        {
+            Id = liveLoadId,
+            Reference = "LIVE-TABLE-RUN",
+            PlanningDate = day,
+            Status = LoadStatus.Planned,
+            Stops =
+            [
+                new LoadStop { Id = Guid.NewGuid(), LoadId = liveLoadId, Sequence = 1, Name = "Live collection", PlannedArrivalUtc = new DateTimeOffset(2026, 8, 24, 9, 0, 0, TimeSpan.Zero) },
+                new LoadStop { Id = Guid.NewGuid(), LoadId = liveLoadId, Sequence = 2, Name = "Live final", PlannedArrivalUtc = new DateTimeOffset(2026, 8, 24, 13, 0, 0, TimeSpan.Zero) }
+            ]
+        };
+        var registerLoad = new Load
+        {
+            Id = registerLoadId,
+            Reference = "REGISTER-RUN",
+            PlanningDate = day,
+            Status = LoadStatus.Planned,
+            Stops =
+            [
+                new LoadStop { Id = Guid.NewGuid(), LoadId = registerLoadId, Sequence = 1, Name = "Register collection", PlannedArrivalUtc = new DateTimeOffset(2026, 8, 24, 10, 0, 0, TimeSpan.Zero) },
+                new LoadStop { Id = Guid.NewGuid(), LoadId = registerLoadId, Sequence = 2, Name = "Register final", PlannedArrivalUtc = new DateTimeOffset(2026, 8, 24, 14, 0, 0, TimeSpan.Zero) }
+            ]
+        };
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.Loads.Add(liveLoad);
+            db.StagedImports.Add(new StagedImport
+            {
+                EntityType = "planningload",
+                IdempotencyKey = $"planningload:{registerLoadId:N}",
+                PayloadJson = JsonSerializer.Serialize(registerLoad, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+                Source = "test planning register",
+                Status = StagingStatus.Promoted
+            });
+            await db.SaveChangesAsync();
+        }
+
+        using var client = factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/api/v1/tv-display/live-runs?date={day:yyyy-MM-dd}");
+        request.Headers.Add(TvWallboardAccess.HeaderName, TestEndpointKey);
+
+        using var response = await client.SendAsync(request);
+        var json = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var document = JsonDocument.Parse(json);
+        Assert.Equal(2, document.RootElement.GetProperty("runCount").GetInt32());
+        var ids = document.RootElement.GetProperty("runs").EnumerateArray().Select(run => run.GetProperty("id").GetGuid()).ToHashSet();
+        Assert.Contains(liveLoadId, ids);
+        Assert.Contains(registerLoadId, ids);
+    }
+
     private static IConfiguration Configuration(string? displayKey) =>
         new ConfigurationBuilder()
             .AddInMemoryCollection(displayKey is null
