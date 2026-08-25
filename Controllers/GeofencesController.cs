@@ -73,27 +73,35 @@ public sealed class GeofencesController(TmsDbContext db) : ControllerBase
     public async Task<IActionResult> List(CancellationToken ct)
     {
         var statuses = await EmbeddedGeofenceEngine.FenceStatusesAsync(db, ct);
+        var overrides = await ActiveOverridesByName(ct);
         var records = statuses
             .OrderBy(x => x.Fence.Category)
             .ThenBy(x => x.Fence.Name)
-            .Select(x => new
+            .Select(x =>
             {
-                id = x.Fence.Id,
-                name = x.Fence.Name,
-                category = x.Fence.Category,
-                maxWaitMinutes = x.Fence.MaxWaitMinutes,
-                categoryMaxWaitMinutes = x.Fence.CategoryMaxWaitMinutes,
-                siteNumber = x.SiteCode ?? (x.ManualOverride && x.SiteId is null ? null : x.Fence.SiteNumber),
-                siteId = x.SiteId,
-                siteName = x.SiteName,
-                siteCode = x.SiteCode,
-                manualOverride = x.ManualOverride,
-                locationOnly = x.ManualOverride && x.SiteId is null,
-                active = true,
-                polygonValid = true,
-                geofenceAvailable = true,
-                siteLinked = x.SiteId != null,
-                validationStatus = x.ManualOverride && x.SiteId is null ? "Location only" : x.SiteId == null ? "Unlinked" : "Valid"
+                overrides.TryGetValue(NormalizeName(x.Fence.Name), out var manual);
+                var locationOnly = string.Equals(manual?.SiteNumber, "LOCATION_ONLY", StringComparison.OrdinalIgnoreCase);
+                var siteNumber = x.SiteCode ?? (locationOnly ? null : manual?.SiteNumber ?? x.Fence.SiteNumber);
+                var codedUnlinked = x.SiteId is null && !locationOnly && !string.IsNullOrWhiteSpace(siteNumber);
+                return new
+                {
+                    id = x.Fence.Id,
+                    name = x.Fence.Name,
+                    category = x.Fence.Category,
+                    maxWaitMinutes = x.Fence.MaxWaitMinutes,
+                    categoryMaxWaitMinutes = x.Fence.CategoryMaxWaitMinutes,
+                    siteNumber,
+                    siteId = x.SiteId,
+                    siteName = x.SiteName,
+                    siteCode = x.SiteCode,
+                    manualOverride = x.ManualOverride,
+                    locationOnly,
+                    active = true,
+                    polygonValid = true,
+                    geofenceAvailable = true,
+                    siteLinked = x.SiteId != null,
+                    validationStatus = locationOnly ? "Location only" : x.SiteId != null ? "Valid" : codedUnlinked ? "Coded / needs Site promotion" : "Unlinked"
+                };
             }).ToList();
         return Ok(new { count = records.Count, source = "EmbeddedSLHGeofences", records });
     }
@@ -127,6 +135,21 @@ public sealed class GeofencesController(TmsDbContext db) : ControllerBase
                     : "Vehicle currently inside geofence."
         }).ToList();
         return Ok(new { date = day, count = records.Count, source = "RoadTechDerived", records });
+    }
+
+    private async Task<Dictionary<string, SiteGeofence>> ActiveOverridesByName(CancellationToken ct)
+    {
+        try
+        {
+            var rows = await db.SiteGeofences.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
+            return rows.GroupBy(x => NormalizeName(x.Name), StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.OrderByDescending(x => x.UpdatedAtUtc).First(), StringComparer.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            return new Dictionary<string, SiteGeofence>(StringComparer.OrdinalIgnoreCase);
+        }
     }
 
     private async Task<SitePromotionResult> PromoteCodedGeofencesAsync(CancellationToken ct)
@@ -241,6 +264,7 @@ public sealed class GeofencesController(TmsDbContext db) : ControllerBase
         .ToArray());
 
     private static string NumericCode(string? value) => NormalizeCode(value).TrimStart('0');
+    private static string NormalizeName(string value) => string.Join(' ', value.Trim().ToUpperInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries));
 
     private static DateOnly UkOperatingDate(DateTimeOffset value)
     {
