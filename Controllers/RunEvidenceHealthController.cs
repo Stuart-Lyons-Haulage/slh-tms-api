@@ -34,7 +34,8 @@ public sealed class RunEvidenceHealthController(
         var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
         var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, geofenceLoads, ct);
         var tacho = await RunTachoEvidenceResolver.ResolveAsync(db, tachoMaster, loads, planningDate, logger, ct);
-        var trackingCoverage = await TrackingCoverageAsync(loads, planningDate, ct);
+        var trackingCoverageResult = await TrackingCoverageAsync(loads, planningDate, ct);
+        var trackingCoverage = trackingCoverageResult.Vehicles;
 
         var runEvidence = loads.Select(load =>
         {
@@ -130,6 +131,7 @@ public sealed class RunEvidenceHealthController(
                 vehiclesWithMultipleSamples = trackingCoverage.Count(item => item.SampleCount > 1),
                 vehiclesWithSingleSample = trackingCoverage.Count(item => item.SampleCount == 1),
                 vehiclesWithNoSamples = trackingCoverage.Count(item => item.SampleCount == 0),
+                coverageWarning = trackingCoverageResult.Warning,
                 vehicleCoverage = trackingCoverage
             },
             geofences = new
@@ -160,7 +162,7 @@ public sealed class RunEvidenceHealthController(
         });
     }
 
-    private async Task<List<TrackingVehicleCoverage>> TrackingCoverageAsync(
+    private async Task<TrackingCoverageResult> TrackingCoverageAsync(
         IReadOnlyCollection<Load> loads,
         DateOnly planningDate,
         CancellationToken ct)
@@ -170,27 +172,62 @@ public sealed class RunEvidenceHealthController(
             .Select(load => load.VehicleId!.Value)
             .Distinct()
             .ToList();
-        if (vehicleIds.Count == 0) return [];
+        if (vehicleIds.Count == 0) return new TrackingCoverageResult([], null);
 
         var vehicles = await db.Vehicles.AsNoTracking()
             .Where(vehicle => vehicleIds.Contains(vehicle.Id))
             .ToListAsync(ct);
         var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles, ct);
-        var aliases = aliasesByVehicle.Values
-            .SelectMany(value => value)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
         var (fromUtc, toUtc) = OperatingWindowUtc(planningDate);
 
-        var storedEvents = aliases.Count == 0
-            ? []
-            : await db.VehicleTrackingEvents.AsNoTracking()
-                .Where(item => item.EventTimeUtc >= fromUtc && item.EventTimeUtc < toUtc && aliases.Contains(item.VehicleIdentifier))
+        List<TrackingStoredSample> storedEvents;
+        string? warning = null;
+        try
+        {
+            // Keep this query bounded and index-friendly. The previous version generated a
+            // large SQL IN predicate from every registration/fleet alias. On production data
+            // that could exceed the health request window before any coverage was returned.
+            // Read the operating-day sample fields once, then apply canonical alias matching
+            // in memory using exactly the same resolver as run execution.
+            storedEvents = await db.VehicleTrackingEvents.AsNoTracking()
+                .Where(item => item.EventTimeUtc >= fromUtc && item.EventTimeUtc < toUtc)
                 .OrderBy(item => item.EventTimeUtc)
+                .Select(item => new TrackingStoredSample(
+                    item.VehicleIdentifier,
+                    item.EventTimeUtc,
+                    item.Latitude,
+                    item.Longitude))
                 .ToListAsync(ct);
-        var liveStatuses = await db.VehicleLiveStatuses.AsNoTracking().ToListAsync(ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            logger.LogWarning(exception, "RoadTech stored-sample coverage query failed; returning live receipt evidence without pretending stored history is healthy.");
+            storedEvents = [];
+            warning = "Stored RoadTech sample coverage could not be read. Live receipt freshness remains visible, but history/geofence confidence is incomplete.";
+        }
 
-        return vehicles
+        List<TrackingLiveSample> liveStatuses;
+        try
+        {
+            liveStatuses = await db.VehicleLiveStatuses.AsNoTracking()
+                .Select(item => new TrackingLiveSample(
+                    item.VehicleIdentifier,
+                    item.LastEventTimeUtc,
+                    item.LastReceivedAtUtc))
+                .ToListAsync(ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            logger.LogWarning(exception, "RoadTech live-status coverage query failed while building cross-system evidence.");
+            liveStatuses = [];
+            warning = warning is null
+                ? "RoadTech live receipt coverage could not be read; tracking confidence is incomplete."
+                : warning + " Live receipt coverage was also unavailable.";
+        }
+
+        var coverage = vehicles
             .OrderBy(vehicle => vehicle.Registration)
             .Select(vehicle =>
             {
@@ -225,9 +262,17 @@ public sealed class RunEvidenceHealthController(
                     events.LastOrDefault()?.EventTimeUtc,
                     live?.LastEventTimeUtc,
                     live?.LastReceivedAtUtc,
-                    events.Count == 0 ? "NoStoredSamples" : events.Count == 1 ? "SingleProviderSample" : "SamplesAccumulating");
+                    warning is not null && events.Count == 0
+                        ? "CoverageUnavailable"
+                        : events.Count == 0
+                            ? "NoStoredSamples"
+                            : events.Count == 1
+                                ? "SingleProviderSample"
+                                : "SamplesAccumulating");
             })
             .ToList();
+
+        return new TrackingCoverageResult(coverage, warning);
     }
 
     private static (DateTimeOffset FromUtc, DateTimeOffset ToUtc) OperatingWindowUtc(DateOnly planningDate)
@@ -292,3 +337,18 @@ public sealed record TrackingVehicleCoverage(
     DateTimeOffset? LatestProviderEventUtc,
     DateTimeOffset? LatestReceiptUtc,
     string CaptureStatus);
+
+internal sealed record TrackingCoverageResult(
+    IReadOnlyList<TrackingVehicleCoverage> Vehicles,
+    string? Warning);
+
+internal sealed record TrackingStoredSample(
+    string VehicleIdentifier,
+    DateTimeOffset EventTimeUtc,
+    decimal Latitude,
+    decimal Longitude);
+
+internal sealed record TrackingLiveSample(
+    string VehicleIdentifier,
+    DateTimeOffset LastEventTimeUtc,
+    DateTimeOffset LastReceivedAtUtc);
