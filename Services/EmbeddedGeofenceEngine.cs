@@ -300,7 +300,10 @@ public static class EmbeddedGeofenceEngine
             var candidate = loads
                 .Where(load => load.VehicleId == visit.VehicleId && load.Status != LoadStatus.Cancelled)
                 .SelectMany(load => (load.Stops ?? []).Where(stop => !usedStops.Contains(stop.Id)).Select(stop => new { load, stop }))
-                .Where(x => NamesOverlap(x.stop.Name, visit.Fence.Name) || NamesOverlap(x.stop.Address, visit.Fence.Name))
+                .Where(x =>
+                    GeofencePlanningMatch.SamePhysicalSite(x.stop, visit.Fence) ||
+                    NamesOverlap(x.stop.Name, visit.Fence.Name) ||
+                    NamesOverlap(x.stop.Address, visit.Fence.Name))
                 .Select(x => new { x.load, x.stop, delta = x.stop.PlannedArrivalUtc is null ? double.MaxValue : Math.Abs((x.stop.PlannedArrivalUtc.Value - visit.EnteredAtUtc).TotalMinutes) })
                 .OrderBy(x => x.delta)
                 .ThenBy(x => x.stop.Sequence)

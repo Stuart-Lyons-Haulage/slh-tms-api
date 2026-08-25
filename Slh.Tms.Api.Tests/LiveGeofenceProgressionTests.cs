@@ -99,6 +99,42 @@ public sealed class LiveGeofenceProgressionTests
     }
 
     [Fact]
+    public async Task Nwf_selsey_plan_links_when_vehicle_hits_selsey_despatch_fence()
+    {
+        var fence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences.Where(x => string.Equals(x.Name, "Selsey Despatch", StringComparison.OrdinalIgnoreCase)));
+        var longitude = fence.Points.Average(x => x.Longitude);
+        var latitude = fence.Points.Average(x => x.Latitude);
+        var vehicleId = Guid.NewGuid();
+        var loadId = Guid.NewGuid();
+        var stopId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        var planningDate = UkDate(now);
+
+        var options = new DbContextOptionsBuilder<TmsDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
+        await using var db = new TmsDbContext(options);
+        db.Vehicles.Add(new Vehicle { Id = vehicleId, Registration = "SLH123", Active = true });
+        db.VehicleTrackingEvents.AddRange(
+            Tracking("selsey-entry", "SLH123", now.AddMinutes(-35), latitude, longitude),
+            Tracking("selsey-confirm", "SLH123", now.AddMinutes(-20), latitude, longitude),
+            Tracking("selsey-exit", "SLH123", now.AddMinutes(-10), 0d, 0d));
+        await db.SaveChangesAsync();
+
+        var load = new Load
+        {
+            Id = loadId, Reference = "RUN-SELSEY", PlanningDate = planningDate, Status = LoadStatus.Planned, VehicleId = vehicleId,
+            Stops = [new LoadStop { Id = stopId, LoadId = loadId, Sequence = 1, Name = "NWF-Selsey", PlannedArrivalUtc = now.AddMinutes(-30) }]
+        };
+
+        var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, GeofencePlanningMatch.PrepareLoads([load]), CancellationToken.None);
+        var visit = Assert.Single(snapshot.Visits);
+        Assert.Equal(loadId, visit.LoadId);
+        Assert.Equal(stopId, visit.LoadStopId);
+        Assert.NotNull(visit.ConfirmedAtUtc);
+        Assert.NotNull(visit.ExitedAtUtc);
+        Assert.Contains(stopId, GeofencePlanningMatch.CompletedStopIds(load, snapshot.Visits));
+    }
+
+    [Fact]
     public async Task Full_day_reconstruction_does_not_drop_planned_vehicle_after_twenty_thousand_unrelated_events()
     {
         var fence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences.Where(x => string.Equals(x.Name, "Runcton (Natures Way)", StringComparison.OrdinalIgnoreCase)));
