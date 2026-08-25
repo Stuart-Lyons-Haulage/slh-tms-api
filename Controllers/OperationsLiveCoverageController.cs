@@ -79,16 +79,17 @@ public sealed class OperationsLiveCoverageController(
         foreach (var record in movingRecords.OrderBy(record => record.VehicleIdentifier))
         {
             var aliases = IdentifierAliases(record.VehicleIdentifier);
-            var liveTachoStatus = aliases
-                .Select(alias => tachoAliases.GetValueOrDefault(alias))
-                .Where(value => value is not null)
-                .OrderByDescending(value => value!.VehicleCode.Length)
-                .FirstOrDefault();
-
             var vehicle = aliases
                 .Select(alias => vehicleAliases.GetValueOrDefault(alias))
                 .Where(value => value is not null)
                 .OrderByDescending(value => value!.Registration.Length)
+                .FirstOrDefault();
+
+            var tachoMatchAliases = VehicleTachoMatchAliases(record.VehicleIdentifier, vehicle?.Registration, vehicle?.FleetNumber, vehicle?.Abbreviation);
+            var liveTachoStatus = tachoMatchAliases
+                .Select(alias => tachoAliases.GetValueOrDefault(alias))
+                .Where(value => value is not null)
+                .OrderByDescending(value => value!.VehicleCode.Length)
                 .FirstOrDefault();
 
             AllocationLite? allocation = null;
@@ -308,6 +309,24 @@ public sealed class OperationsLiveCoverageController(
     private static bool IsMoving(DotTelemetryRecord record) => record.IsMoving == true || record.SpeedKph.GetValueOrDefault() > 3;
     private static string NormaliseIdentifier(string value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
     private static string NormalisePersonName(string? value) => string.Join(' ', (value ?? string.Empty).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Select(word => new string(word.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray())).Where(word => word.Length > 0).OrderBy(word => word, StringComparer.Ordinal));
+
+    internal static IReadOnlyList<string> VehicleTachoMatchAliases(string dotIdentifier, string? registration, string? fleetNumber, string? abbreviation)
+    {
+        var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        AddVehicleAliases(aliases, dotIdentifier);
+        AddVehicleAliases(aliases, registration);
+        AddVehicleAliases(aliases, fleetNumber, allowShortIdentifier: true);
+        AddVehicleAliases(aliases, abbreviation);
+        return aliases.ToList();
+    }
+
+    private static void AddVehicleAliases(HashSet<string> aliases, string? value, bool allowShortIdentifier = false)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return;
+        foreach (var alias in IdentifierAliases(value)) aliases.Add(alias);
+        var normalised = NormaliseIdentifier(value);
+        if (allowShortIdentifier && normalised.Length >= 2) aliases.Add(normalised);
+    }
 
     private static IReadOnlyList<string> IdentifierAliases(string value)
     {
