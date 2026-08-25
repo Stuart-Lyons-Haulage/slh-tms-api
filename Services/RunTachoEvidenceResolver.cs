@@ -22,7 +22,12 @@ public sealed record RunTachoEvidence(
 public sealed record RunTachoEvidenceResult(
     IReadOnlyDictionary<Guid, RunTachoEvidence> ByLoadId,
     bool Available,
-    string? Warning);
+    string? Warning,
+    int ProviderVehicles = 0,
+    int ProviderEvidenceRecords = 0,
+    int TachoDutyRecords = 0,
+    int FalconCardRecords = 0,
+    IReadOnlyDictionary<string, int>? StatusCounts = null);
 
 public static class RunTachoEvidenceResolver
 {
@@ -63,6 +68,10 @@ public static class RunTachoEvidenceResolver
             }
         }
 
+        var providerEvidence = statuses.Values.SelectMany(items => items).ToList();
+        var tachoDutyRecords = providerEvidence.Count(item => string.Equals(item.EvidenceSource, "TachoMasterDuty", StringComparison.OrdinalIgnoreCase));
+        var falconCardRecords = providerEvidence.Count(item => string.Equals(item.EvidenceSource, "FalconLiveCard", StringComparison.OrdinalIgnoreCase));
+
         var result = new Dictionary<Guid, RunTachoEvidence>();
         foreach (var load in loads)
         {
@@ -97,7 +106,28 @@ public static class RunTachoEvidenceResolver
                 Explanation(available, driver, vehicle, tacho));
         }
 
-        return new RunTachoEvidenceResult(result, available, warning);
+        var statusCounts = result.Values
+            .GroupBy(item => item.Status, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
+
+        logger.LogInformation(
+            "Run Tacho evidence for {PlanningDate}: providerVehicles={ProviderVehicles}, providerEvidence={ProviderEvidence}, TachoDuties={TachoDutyRecords}, FalconCards={FalconCardRecords}, runStatuses={RunStatuses}.",
+            planningDate,
+            statuses.Count,
+            providerEvidence.Count,
+            tachoDutyRecords,
+            falconCardRecords,
+            string.Join(", ", statusCounts.OrderBy(pair => pair.Key).Select(pair => $"{pair.Key}={pair.Value}")));
+
+        return new RunTachoEvidenceResult(
+            result,
+            available,
+            warning,
+            statuses.Count,
+            providerEvidence.Count,
+            tachoDutyRecords,
+            falconCardRecords,
+            statusCounts);
     }
 
     private static async Task<Dictionary<Guid, Driver>> LoadDriversAsync(TmsDbContext db, IReadOnlyCollection<Load> loads, CancellationToken ct)
