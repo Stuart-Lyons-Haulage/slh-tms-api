@@ -9,7 +9,7 @@ public sealed class EmbeddedGeofenceEngineTests
     public void Operational_falcon_payload_loads_all_unique_run_fences_plus_approved_supplements()
     {
         var fences = EmbeddedGeofenceEngine.ApprovedFences;
-        var expected = OperationalGeofencePayload.ExpectedFenceCount + 2;
+        var expected = OperationalGeofencePayload.ExpectedFenceCount + 3;
 
         Assert.Equal(expected, fences.Count);
         Assert.Equal(expected, fences.Select(x => x.Id).Distinct().Count());
@@ -42,7 +42,7 @@ public sealed class EmbeddedGeofenceEngineTests
         Assert.Equal(5, counts["FWC Collection"]);
         Assert.Equal(4, counts["Roundstone Collection"]);
         Assert.Equal(1, counts["SLH DEPOT"]);
-        Assert.Equal(2, counts["SLH supplemental"]);
+        Assert.Equal(3, counts["SLH supplemental"]);
 
         var excluded = new[] { "DVS", "DVSA Checkpoint", "Restricted Access", "Service Centre", "Service Station" };
         Assert.DoesNotContain(fences, fence => excluded.Contains(fence.Category, StringComparer.OrdinalIgnoreCase));
