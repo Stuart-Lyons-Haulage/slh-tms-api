@@ -8,17 +8,20 @@ using Slh.Tms.Api.Services;
 namespace Slh.Tms.Api.Controllers;
 
 /// <summary>
-/// Shared production-safe planning readers. Production planning is register-first;
-/// legacy Loads/LoadStops are used only as a fallback for older environments.
+/// Shared production-safe planning readers. Production can contain current runs in both
+/// the planning register and the legacy/live Loads table, so reads merge both sources.
+/// Live-table rows win when the same load id exists in both stores.
 /// </summary>
 internal static class PlanningResilience
 {
     public static async Task<List<Load>> ReadLoadsAsync(TmsDbContext db, DateOnly? date, CancellationToken ct)
     {
+        var merged = new Dictionary<Guid, Load>();
+
         try
         {
             var registered = await PlanningRegisterStore.ReadLoadsAsync(db, date, ct);
-            if (registered.Count > 0) return registered;
+            foreach (var load in registered) merged[load.Id] = load;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -29,13 +32,19 @@ internal static class PlanningResilience
         {
             var query = db.Loads.AsNoTracking().Include(x => x.Stops).AsQueryable();
             if (date is not null) query = query.Where(x => x.PlanningDate == date.Value);
-            return await query.OrderBy(x => x.PlanningDate).ThenBy(x => x.Reference).Take(2000).ToListAsync(ct);
+            var live = await query.OrderBy(x => x.PlanningDate).ThenBy(x => x.Reference).Take(2000).ToListAsync(ct);
+            foreach (var load in live) merged[load.Id] = load;
         }
-        catch (Exception ex) when (SchemaUnavailable(ex))
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             db.ChangeTracker.Clear();
-            return [];
         }
+
+        return merged.Values
+            .OrderBy(x => x.PlanningDate)
+            .ThenBy(x => x.Reference)
+            .Take(2000)
+            .ToList();
     }
 
     public static async Task<Load?> ReadLoadAsync(TmsDbContext db, Guid id, CancellationToken ct)
