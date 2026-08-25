@@ -29,8 +29,8 @@ jobs:
           cat "$body_file"
           echo
           test "$status" = "200"
-          grep -Eq '"geofenceCount"[[:space:]]*:[[:space:]]*316' "$body_file"
-          grep -Eq '"expectedGeofenceCount"[[:space:]]*:[[:space:]]*316' "$body_file"
+          grep -Eq '"geofenceCount"[[:space:]]*:[[:space:]]*317' "$body_file"
+          grep -Eq '"expectedGeofenceCount"[[:space:]]*:[[:space:]]*317' "$body_file"
           rm -f "$body_file"
 
       - name: Check Site Master geofence linkage
@@ -84,6 +84,7 @@ jobs:
               naturesWay: {
                 selsey:  { plannedStops: planned("selsey"),  visitEvidenceStops: evidence("selsey"),  departedStops: departed("selsey") },
                 runcton: { plannedStops: planned("runcton"), visitEvidenceStops: evidence("runcton"), departedStops: departed("runcton") },
+                merston: { plannedStops: planned("merston"), visitEvidenceStops: evidence("merston"), departedStops: departed("merston") },
                 drayton: { plannedStops: planned("drayton"), visitEvidenceStops: evidence("drayton"), departedStops: departed("drayton") }
               }
             }' "$body_file")"
@@ -97,7 +98,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          for site in selsey runcton drayton; do
+          for site in selsey runcton merston drayton; do
             planned="$(echo "$summary" | jq -r ".naturesWay.$site.plannedStops")"
             evidence="$(echo "$summary" | jq -r ".naturesWay.$site.visitEvidenceStops")"
             if test "$planned" -gt 0 && test "$evidence" -eq 0; then
