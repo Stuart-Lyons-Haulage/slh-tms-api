@@ -82,6 +82,11 @@ jobs:
           probe_200 'Azure SQL' "$API_BASE/api/v1/health/ready"
           probe_200 'Operational data/schema' "$API_BASE/api/v1/diagnostics/data-readiness"
           probe_200 'RoadTech current GPS' "$API_BASE/api/v1/health/tracking"
+          # Vehicle/geofence coverage is introduced by this change. During the PR the
+          # currently deployed revision does not have it yet, so require it after deploy.
+          if test "$GITHUB_EVENT_NAME" != "pull_request"; then
+            probe_200 'Vehicle geofence coverage' "$API_BASE/api/v1/health/tracking/geofences"
+          fi
           probe_tachomaster
           probe_200 'Falcon geofence payload' "$API_BASE/api/v1/health/geofences"
           # The planner/import health route is introduced by this change. During the PR
