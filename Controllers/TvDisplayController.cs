@@ -127,6 +127,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
             var stops = load.Stops.OrderBy(x => x.Sequence).ToList();
             var visits = geofenceSnapshot.Visits.Where(visit => visit.LoadId == load.Id).OrderBy(visit => visit.EnteredAtUtc).ToList();
             var completedStopIds = GeofencePlanningMatch.CompletedStopIds(load, visits);
+            if (ShouldHideCompletedRun(load, completedStopIds)) continue;
             var currentVisit = geofenceSnapshot.ActiveVisits
                 .Where(visit => visit.LoadId == load.Id)
                 .OrderByDescending(visit => visit.EnteredAtUtc)
@@ -223,6 +224,13 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
         });
     }
 
+    internal static bool ShouldHideCompletedRun(Load load, IReadOnlySet<Guid> completedStopIds)
+    {
+        if (load.Status == LoadStatus.Completed) return true;
+        var stops = load.Stops ?? [];
+        return stops.Count > 0 && stops.All(stop => completedStopIds.Contains(stop.Id));
+    }
+
     private static LoadStop? PickNextStop(List<LoadStop> stops, DateTimeOffset now, LoadStatus status)
     {
         if (status == LoadStatus.Completed || stops.Count == 0) return null;
@@ -275,7 +283,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
     {
         try
         {
-            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime);
+            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, TimeZoneInfo.FindSystemTimeZoneId("Europe/London")).DateTime);
         }
         catch (TimeZoneNotFoundException)
         {
