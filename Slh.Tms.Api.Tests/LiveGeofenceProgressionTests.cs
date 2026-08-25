@@ -135,6 +135,57 @@ public sealed class LiveGeofenceProgressionTests
     }
 
     [Fact]
+    public async Task Raw_RoadTech_vehicle_key_replays_full_history_through_canonical_alias()
+    {
+        var fence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences.Where(x => string.Equals(x.Name, "Selsey Despatch", StringComparison.OrdinalIgnoreCase)));
+        var longitude = fence.Points.Average(x => x.Longitude);
+        var latitude = fence.Points.Average(x => x.Latitude);
+        var vehicleId = Guid.NewGuid();
+        var loadId = Guid.NewGuid();
+        var stopId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        var planningDate = UkDate(now);
+        const string rawRoadTechKey = "KY71 CVP";
+
+        var options = new DbContextOptionsBuilder<TmsDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
+        await using var db = new TmsDbContext(options);
+        db.Vehicles.Add(new Vehicle { Id = vehicleId, Registration = "KY71CVP", Active = true });
+        db.VehicleTrackingEvents.AddRange(
+            Tracking("raw-entry", rawRoadTechKey, now.AddMinutes(-35), latitude, longitude),
+            Tracking("raw-confirm", rawRoadTechKey, now.AddMinutes(-20), latitude, longitude),
+            Tracking("raw-exit", rawRoadTechKey, now.AddMinutes(-10), 0d, 0d));
+        db.VehicleLiveStatuses.Add(new VehicleLiveStatus
+        {
+            VehicleIdentifier = rawRoadTechKey,
+            LastEventTimeUtc = now.AddMinutes(-10),
+            LastReceivedAtUtc = now.AddMinutes(-10),
+            Latitude = 0m,
+            Longitude = 0m,
+            LastKnownStatus = "Received"
+        });
+        await db.SaveChangesAsync();
+
+        var load = new Load
+        {
+            Id = loadId,
+            Reference = "RUN-RAW-ROADTECH",
+            PlanningDate = planningDate,
+            Status = LoadStatus.Planned,
+            VehicleId = vehicleId,
+            Stops = [new LoadStop { Id = stopId, LoadId = loadId, Sequence = 1, Name = "NWF-Selsey", PlannedArrivalUtc = now.AddMinutes(-30) }]
+        };
+
+        var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, GeofencePlanningMatch.PrepareLoads([load]), CancellationToken.None);
+
+        Assert.Equal(3, snapshot.TrackingEventCount);
+        var visit = Assert.Single(snapshot.Visits);
+        Assert.Equal(loadId, visit.LoadId);
+        Assert.Equal(stopId, visit.LoadStopId);
+        Assert.NotNull(visit.ConfirmedAtUtc);
+        Assert.NotNull(visit.ExitedAtUtc);
+    }
+
+    [Fact]
     public async Task Full_day_reconstruction_does_not_drop_planned_vehicle_after_twenty_thousand_unrelated_events()
     {
         var fence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences.Where(x => string.Equals(x.Name, "Runcton (Natures Way)", StringComparison.OrdinalIgnoreCase)));
