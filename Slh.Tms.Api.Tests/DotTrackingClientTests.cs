@@ -48,6 +48,34 @@ public sealed class DotTrackingClientTests
     }
 
     [Fact]
+    public async Task RoadTech_history_uses_current_telemetry_endpoint_with_requested_day_and_all_vehicles()
+    {
+        var handler = new CapturingHandler();
+        var client = new DotTrackingClient(new HttpClient(handler), new DotTrackingOptions
+        {
+            Enabled = true,
+            BaseUrl = "https://api-v1-alpha.roadtech.co.uk",
+            ApiKey = "test-key",
+            Username = "planner",
+            Password = "secret",
+            CompanyCode = "SLH"
+        }, NullLogger<DotTrackingClient>.Instance);
+
+        await client.GetHistoricalVehicleEventsAsync(new DateOnly(2026, 8, 25));
+
+        Assert.Equal(new[]
+        {
+            "https://api-v1-alpha.roadtech.co.uk/api/auth/login",
+            "https://api-v1-alpha.roadtech.co.uk/api/Falcon/GetCurrentTelemetry"
+        }, handler.Requests.Select(request => request.RequestUri!.ToString()));
+
+        using var payload = JsonDocument.Parse(handler.Bodies[1]);
+        Assert.Equal("2026-08-25", payload.RootElement.GetProperty("T").GetString());
+        Assert.Equal(0, payload.RootElement.GetProperty("OnlyLive").GetInt32());
+        Assert.Equal(0, payload.RootElement.GetProperty("Offset").GetInt32());
+    }
+
+    [Fact]
     public async Task RoadTech_login_retries_with_sha1_password_when_plain_password_is_rejected()
     {
         var handler = new CapturingHandler(rejectFirstLogin: true);
