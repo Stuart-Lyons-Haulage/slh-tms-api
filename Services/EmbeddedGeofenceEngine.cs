@@ -174,7 +174,22 @@ public static class EmbeddedGeofenceEngine
                 observationCount++;
             }
 
-            visits.AddRange(DeriveVisits(vehicle.Id, vehicle.Registration, vehicleEvents.OrderBy(x => x.EventTimeUtc).ToList(), fences));
+            var derived = DeriveVisits(vehicle.Id, vehicle.Registration, vehicleEvents.OrderBy(x => x.EventTimeUtc).ToList(), fences).ToList();
+            if (live is not null)
+            {
+                var liveFence = fences.FirstOrDefault(x => Contains(x.Points, live.Longitude, live.Latitude));
+                var active = liveFence is null
+                    ? null
+                    : derived.LastOrDefault(x => x.ExitedAtUtc is null && x.Fence.Id == liveFence.Id);
+                if (active is not null && live.LastReceivedAtUtc > active.LastInsideAtUtc)
+                {
+                    // The receipt timestamp proves that the same physical position is still
+                    // current and can extend dwell/confirmation, but it must not move the
+                    // original provider-backed EnteredAtUtc used by ARRIVED on the wallboard.
+                    UpdateVisit(active, live.LastReceivedAtUtc);
+                }
+            }
+            visits.AddRange(derived);
         }
 
         LinkVisitsToRuns(visits, loads);
