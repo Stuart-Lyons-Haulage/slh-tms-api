@@ -27,20 +27,41 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
 
                 if (now >= nextRecoveryAtUtc)
                 {
-                    foreach (var recoveryDay in operatingDays)
+                    try
                     {
-                        var recovered = (await client.GetHistoricalVehicleEventsAsync(recoveryDay, stoppingToken))
-                            .Select(DotTelemetryRecord.FromProvider);
-                        await store.PersistAsync(recovered, stoppingToken, markAsLiveReceipt: false);
-                        projectionDays.Add(recoveryDay);
+                        foreach (var recoveryDay in operatingDays)
+                        {
+                            var recovered = (await client.GetHistoricalVehicleEventsAsync(recoveryDay, stoppingToken))
+                                .Select(DotTelemetryRecord.FromProvider);
+                            await store.PersistAsync(recovered, stoppingToken, markAsLiveReceipt: false);
+                            projectionDays.Add(recoveryDay);
+                        }
                     }
-
-                    nextRecoveryAtUtc = now.Add(recoveryInterval);
+                    catch (Exception exception) when (!stoppingToken.IsCancellationRequested)
+                    {
+                        // Historical recovery is supplementary. Do not let a provider/history
+                        // fault suppress the current-day embedded geofence projection, because
+                        // current GPS may still be healthy and already persisted locally.
+                        logger.LogWarning(exception, "DOT historical tracking recovery failed; continuing with current-day geofence projection.");
+                    }
+                    finally
+                    {
+                        nextRecoveryAtUtc = now.Add(recoveryInterval);
+                    }
                 }
 
-                // Keep SQL as the durable audit projection of the exact same embedded
-                // RoadTech/Falcon ENTER/EXIT reconstruction used by the live wallboards.
-                await EmbeddedGeofenceSqlProjection.RefreshOperatingDaysAsync(db, projectionDays, stoppingToken);
+                try
+                {
+                    // Keep SQL as the durable audit projection of the exact same embedded
+                    // RoadTech/Falcon ENTER/EXIT reconstruction used by the live wallboards.
+                    await EmbeddedGeofenceSqlProjection.RefreshOperatingDaysAsync(db, projectionDays, stoppingToken);
+                }
+                catch (Exception exception) when (!stoppingToken.IsCancellationRequested)
+                {
+                    // Projection failure must be visible but must not interrupt current RoadTech
+                    // GPS ingestion. The next poll will retry the idempotent projection.
+                    logger.LogWarning(exception, "Embedded geofence SQL projection failed; current tracking remains available and projection will retry next poll.");
+                }
             }
             catch (InvalidOperationException exception) { logger.LogDebug(exception, "DOT tracking ingestion is not configured."); }
             catch (Exception exception) when (!stoppingToken.IsCancellationRequested) { logger.LogWarning(exception, "DOT tracking ingestion failed; retrying in {Minutes} minute(s).", pollInterval.TotalMinutes); }
