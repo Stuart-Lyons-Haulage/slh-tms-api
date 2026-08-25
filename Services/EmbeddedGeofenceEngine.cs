@@ -159,7 +159,10 @@ public static class EmbeddedGeofenceEngine
                     ProviderName = "RoadTech Falcon live observation",
                     ProviderEventId = $"live-{live.Id}-{live.LastReceivedAtUtc:O}",
                     VehicleIdentifier = live.VehicleIdentifier,
-                    EventTimeUtc = live.LastReceivedAtUtc,
+                    // Receipt time proves freshness only. The provider event timestamp is
+                    // the operational evidence for when this position was actually observed,
+                    // so a wallboard refresh must never manufacture a new ARRIVED time.
+                    EventTimeUtc = live.LastEventTimeUtc,
                     Latitude = live.Latitude,
                     Longitude = live.Longitude,
                     SpeedKph = live.SpeedKph,
@@ -171,7 +174,22 @@ public static class EmbeddedGeofenceEngine
                 observationCount++;
             }
 
-            visits.AddRange(DeriveVisits(vehicle.Id, vehicle.Registration, vehicleEvents.OrderBy(x => x.EventTimeUtc).ToList(), fences));
+            var derived = DeriveVisits(vehicle.Id, vehicle.Registration, vehicleEvents.OrderBy(x => x.EventTimeUtc).ToList(), fences).ToList();
+            if (live is not null)
+            {
+                var liveFence = fences.FirstOrDefault(x => Contains(x.Points, live.Longitude, live.Latitude));
+                var active = liveFence is null
+                    ? null
+                    : derived.LastOrDefault(x => x.ExitedAtUtc is null && x.Fence.Id == liveFence.Id);
+                if (active is not null && live.LastReceivedAtUtc > active.LastInsideAtUtc)
+                {
+                    // The receipt timestamp proves that the same physical position is still
+                    // current and can extend dwell/confirmation, but it must not move the
+                    // original provider-backed EnteredAtUtc used by ARRIVED on the wallboard.
+                    UpdateVisit(active, live.LastReceivedAtUtc);
+                }
+            }
+            visits.AddRange(derived);
         }
 
         LinkVisitsToRuns(visits, loads);
