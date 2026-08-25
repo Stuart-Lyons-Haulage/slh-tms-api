@@ -66,6 +66,8 @@ public static class GeofencePlanningMatch
             .ToList();
         if (naturesWayMatches.Count == 1) return naturesWayMatches[0].Name;
 
+        // Runcton is the historic exception in the approved DOT export: its canonical
+        // fence is Vitacress Runcton. The NWF Collection category remains authoritative.
         var categoryMatches = EmbeddedGeofenceEngine.ApprovedFences
             .Where(fence => string.Equals(fence.Category, "NWF Collection", StringComparison.OrdinalIgnoreCase))
             .Where(fence => ContainsAllWords(fence.Name, locality))
@@ -77,8 +79,9 @@ public static class GeofencePlanningMatch
             .ToList();
         if (estateMatches.Count == 1) return estateMatches[0].Name;
 
-        // A locality-only value is still safer than carrying the planner's NWF prefix:
-        // the engine permits one sufficiently specific token but rejects generic brands.
+        // If no unique approved fence exists, preserve only the locality. Crucially,
+        // SamePhysicalSite will not use this fallback to link an NWF stop to a different
+        // business sharing that locality.
         return string.Join(' ', locality);
     }
 
@@ -110,15 +113,14 @@ public static class GeofencePlanningMatch
     {
         if (StopInsideFence(stop, fence)) return true;
 
-        // NWF is a deliberate planner shorthand for Nature's Way. Do not let it fall
-        // through to the generic locality matcher: "NWF Drayton" must never link to an
-        // unrelated Drayton business simply because the locality token is specific.
+        // NWF planner shorthand is resolved to one canonical approved DOT/Falcon fence.
+        // Compare against that canonical name exactly instead of generic locality fuzzing:
+        // this permits the historic Vitacress Runcton exception while preventing
+        // "NWF Drayton" from linking to an unrelated Drayton business.
         if (IsNwfPlannerLabel(stop.Name))
         {
-            if (!IsNaturesWayFence(fence.Name)) return false;
-            var plannerLocality = NaturesWayLocalityTokens(stop.Name);
-            var fenceLocality = NaturesWayLocalityTokens(fence.Name);
-            return plannerLocality.Count > 0 && plannerLocality.SetEquals(fenceLocality);
+            var canonical = MatchText(stop.Name);
+            return NormalizeName(canonical) == NormalizeName(fence.Name);
         }
 
         var left = MeaningfulTokens(MatchText(stop.Name));
@@ -214,6 +216,9 @@ public static class GeofencePlanningMatch
         var words = Words(value).ToHashSet(StringComparer.OrdinalIgnoreCase);
         return words.Contains("NATURES") && words.Contains("WAY");
     }
+
+    private static string NormalizeName(string? value) =>
+        new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     private static HashSet<string> NaturesWayLocalityTokens(string? value) =>
         Words(value)
