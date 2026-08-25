@@ -49,6 +49,18 @@ public sealed class RoadTechHistoricalRecoveryTests
         Assert.Equal(new DateOnly(2026, 8, 21), days[1]);
     }
 
+    [Fact]
+    public void Historical_recovery_is_capped_at_ten_minutes_for_same_day_geofence_backfill()
+    {
+        var interval = DotTrackingIngestionService.HistoryRecoveryInterval(new DotTrackingOptions
+        {
+            PollIntervalMinutes = 1,
+            RecoveryIntervalMinutes = 60
+        });
+
+        Assert.Equal(TimeSpan.FromMinutes(10), interval);
+    }
+
     private sealed class HistoricalPagingHandler : HttpMessageHandler
     {
         private int _historyPage;
