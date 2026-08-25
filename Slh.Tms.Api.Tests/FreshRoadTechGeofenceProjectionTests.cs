@@ -53,6 +53,7 @@ public sealed class FreshRoadTechGeofenceProjectionTests
             Id = fence.Id,
             Name = fence.Name,
             NormalizedName = Normalize(fence.Name),
+            PolygonJson = "[]",
             Active = true,
             CreatedAtUtc = now,
             UpdatedAtUtc = now
