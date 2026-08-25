@@ -46,7 +46,8 @@ public static class RunTachoEvidenceResolver
         var vehicles = await LoadVehiclesAsync(db, loads, ct);
         var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles.Values, ct);
 
-        IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> statuses = new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
+        IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> allStatuses =
+            new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
         var available = tachoMaster.IsConfigured;
         string? warning = null;
 
@@ -58,7 +59,12 @@ public static class RunTachoEvidenceResolver
         {
             try
             {
-                statuses = await tachoMaster.GetLiveDriverStatusesByVehicleAsync(planningDate, ct);
+                // Load the complete UK operating day once. Closed TachoMaster duties are
+                // authoritative historical sign-on/driver evidence for work already performed,
+                // while open duties and Falcon cards form the current-driver evidence subset.
+                // Live ETA legal-hours calculations use TachoMasterClient's separate live-duty
+                // path and therefore never inherit a closed duty from this audit resolver.
+                allStatuses = await tachoMaster.GetAllDriverStatusesByVehicleAsync(planningDate, ct);
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
@@ -68,9 +74,12 @@ public static class RunTachoEvidenceResolver
             }
         }
 
-        var providerEvidence = statuses.Values.SelectMany(items => items).ToList();
-        var tachoDutyRecords = providerEvidence.Count(item => string.Equals(item.EvidenceSource, "TachoMasterDuty", StringComparison.OrdinalIgnoreCase));
-        var falconCardRecords = providerEvidence.Count(item => string.Equals(item.EvidenceSource, "FalconLiveCard", StringComparison.OrdinalIgnoreCase));
+        var currentStatuses = CurrentStatuses(allStatuses);
+        var providerEvidence = allStatuses.Values.SelectMany(items => items).ToList();
+        var tachoDutyRecords = providerEvidence.Count(item =>
+            string.Equals(item.EvidenceSource, "TachoMasterDuty", StringComparison.OrdinalIgnoreCase));
+        var falconCardRecords = providerEvidence.Count(item =>
+            string.Equals(item.EvidenceSource, "FalconLiveCard", StringComparison.OrdinalIgnoreCase));
 
         var result = new Dictionary<Guid, RunTachoEvidence>();
         foreach (var load in loads)
@@ -80,30 +89,44 @@ public static class RunTachoEvidenceResolver
             var aliases = vehicle is not null && aliasesByVehicle.TryGetValue(vehicle.Id, out var knownAliases)
                 ? knownAliases
                 : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var tacho = available && aliases.Count > 0
-                ? ExecutionIdentityResolver.MatchLiveDriverIdentityForVehicle(aliases, driver, statuses)
+
+            var current = available && aliases.Count > 0
+                ? ExecutionIdentityResolver.MatchLiveDriverIdentityForVehicle(aliases, driver, currentStatuses)
                 : null;
+            var historical = available && current is null && aliases.Count > 0
+                ? ExecutionIdentityResolver.MatchTachoForDriver(aliases, driver, allStatuses)
+                : null;
+            var selected = current ?? historical;
+            var historicalOnly = current is null && historical is not null && historical.DutyEndUtc is not null;
+
             var status = !available
                 ? "Unavailable"
                 : driver is null
                     ? "NoPlannedDriver"
                     : vehicle is null
                         ? "NoPlannedVehicle"
-                        : EvidenceStatus(driver, tacho);
+                        : EvidenceStatus(driver, selected, historicalOnly);
+
+            // A closed same-day duty can prove identity/sign-on for audit and completed-work
+            // correlation, but it must never masquerade as current legal-hours authority.
+            var driveAvailableToday = historicalOnly ? null : selected?.DriveAvailableTodayMinutes;
+            var driveAvailableWeek = historicalOnly ? null : selected?.DriveAvailableWeekMinutes;
+            var workAvailableWeek = historicalOnly ? null : selected?.WorkAvailableWeekMinutes;
+            var evidenceSource = historicalOnly ? "TachoMasterDayDuty" : selected?.EvidenceSource;
 
             result[load.Id] = new RunTachoEvidence(
                 status,
-                tacho?.DriverName,
-                tacho?.VehicleCode,
-                tacho?.DutyStartUtc,
-                tacho?.DutyEndUtc,
-                tacho?.DriveAvailableTodayMinutes,
-                tacho?.DriveAvailableWeekMinutes,
-                tacho?.WorkAvailableWeekMinutes,
-                tacho is not null,
-                tacho?.DriveAvailableTodayMinutes is not null,
-                tacho?.EvidenceSource,
-                Explanation(available, driver, vehicle, tacho));
+                selected?.DriverName,
+                selected?.VehicleCode,
+                selected?.DutyStartUtc,
+                selected?.DutyEndUtc,
+                driveAvailableToday,
+                driveAvailableWeek,
+                workAvailableWeek,
+                selected is not null,
+                !historicalOnly && driveAvailableToday is not null,
+                evidenceSource,
+                Explanation(available, driver, vehicle, selected, historicalOnly));
         }
 
         var statusCounts = result.Values
@@ -111,23 +134,43 @@ public static class RunTachoEvidenceResolver
             .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
 
         logger.LogInformation(
-            "Run Tacho evidence for {PlanningDate}: providerVehicles={ProviderVehicles}, providerEvidence={ProviderEvidence}, TachoDuties={TachoDutyRecords}, FalconCards={FalconCardRecords}, runStatuses={RunStatuses}.",
+            "Run Tacho evidence for {PlanningDate}: providerVehicles={ProviderVehicles}, providerEvidence={ProviderEvidence}, TachoDuties={TachoDutyRecords}, FalconCards={FalconCardRecords}, currentEvidenceVehicles={CurrentEvidenceVehicles}, runStatuses={RunStatuses}.",
             planningDate,
-            statuses.Count,
+            allStatuses.Count,
             providerEvidence.Count,
             tachoDutyRecords,
             falconCardRecords,
+            currentStatuses.Count,
             string.Join(", ", statusCounts.OrderBy(pair => pair.Key).Select(pair => $"{pair.Key}={pair.Value}")));
 
         return new RunTachoEvidenceResult(
             result,
             available,
             warning,
-            statuses.Count,
+            allStatuses.Count,
             providerEvidence.Count,
             tachoDutyRecords,
             falconCardRecords,
             statusCounts);
+    }
+
+    private static IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> CurrentStatuses(
+        IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> allStatuses)
+    {
+        return allStatuses
+            .Select(pair => new
+            {
+                pair.Key,
+                Values = pair.Value.Where(status =>
+                    string.Equals(status.EvidenceSource, "FalconLiveCard", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(status.EvidenceSource, "TachoMasterDuty", StringComparison.OrdinalIgnoreCase) && status.DutyEndUtc is null)
+                    .ToList()
+            })
+            .Where(pair => pair.Values.Count > 0)
+            .ToDictionary(
+                pair => pair.Key,
+                pair => (IReadOnlyList<TachoVehicleDriverStatus>)pair.Values,
+                StringComparer.OrdinalIgnoreCase);
     }
 
     private static async Task<Dictionary<Guid, Driver>> LoadDriversAsync(TmsDbContext db, IReadOnlyCollection<Load> loads, CancellationToken ct)
@@ -148,26 +191,34 @@ public static class RunTachoEvidenceResolver
             : await db.Vehicles.AsNoTracking().Where(vehicle => ids.Contains(vehicle.Id)).ToDictionaryAsync(vehicle => vehicle.Id, ct);
     }
 
-    private static string Explanation(bool available, Driver? driver, Vehicle? vehicle, TachoVehicleDriverStatus? tacho)
+    private static string Explanation(
+        bool available,
+        Driver? driver,
+        Vehicle? vehicle,
+        TachoVehicleDriverStatus? tacho,
+        bool historicalOnly)
     {
         if (!available) return "TachoMaster could not be reached for this refresh.";
         if (driver is null) return "No planned driver is allocated to this run.";
         if (vehicle is null) return "No planned vehicle is allocated to this run.";
-        if (tacho is null) return "No live driver card, Falcon driver identity or open TachoMaster duty was matched to the planned driver and vehicle.";
+        if (tacho is null) return "No Falcon current-driver evidence, open TachoMaster duty or same-day TachoMaster duty was matched to the planned driver and vehicle.";
         if (!ExecutionIdentityResolver.DriverMatches(driver, tacho))
-            return $"Live card/driver evidence is present for {tacho.DriverName}, but it does not match the planned driver.";
+            return $"Driver evidence is present for {tacho.DriverName}, but it does not match the planned driver.";
+        if (historicalOnly)
+            return $"{tacho.DriverName} has a same-day TachoMaster duty on the planned vehicle from {tacho.DutyStartUtc:O} to {tacho.DutyEndUtc:O}. This proves historical sign-on identity only; closed-duty legal-hours figures are not used for a live ETA.";
         if (tacho.EvidenceSource == "FalconLiveCard")
             return tacho.DriveAvailableTodayMinutes is null
                 ? $"{tacho.DriverName} is confirmed by Falcon live card/driver evidence at {tacho.DutyStartUtc:O}; TachoMaster did not return legal-hours metrics."
                 : $"{tacho.DriverName} is confirmed by Falcon live card/driver evidence at {tacho.DutyStartUtc:O}; TachoMaster profile metrics are attached for hours checks.";
-        return $"{tacho.DriverName} signed on in TachoMaster at {tacho.DutyStartUtc:O}.";
+        return $"{tacho.DriverName} has an open TachoMaster duty from {tacho.DutyStartUtc:O}.";
     }
 
-    private static string EvidenceStatus(Driver? driver, TachoVehicleDriverStatus? tacho)
+    private static string EvidenceStatus(Driver? driver, TachoVehicleDriverStatus? tacho, bool historicalOnly)
     {
         if (driver is null) return "NoPlannedDriver";
         if (tacho is null) return "NoTachoDuty";
         if (!ExecutionIdentityResolver.DriverMatches(driver, tacho)) return "Mismatch";
+        if (historicalOnly) return "DutyConfirmed";
         return tacho.EvidenceSource == "FalconLiveCard" ? "CardConfirmed" : "Matched";
     }
 }
