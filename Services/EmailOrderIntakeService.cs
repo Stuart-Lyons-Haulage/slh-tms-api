@@ -23,8 +23,16 @@ public sealed class EmailOrderIntakeService
         @"\bTotal\s+Pallets?\s*[:=-]?\s*(?<qty>\d+)\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    private static readonly Regex LabelledQuantityRegex = new(
+        @"\b(?:Pallets?|Trolleys?)\s*[:=-]?\s*(?<qty>\d{1,3})\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private static readonly Regex PalletQuantityRegex = new(
-        @"\b(?<qty>\d{1,3})\s+pallets?\b",
+        @"\b(?<qty>\d{1,3})\s+(?:pallets?|trolleys?)\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex MonthNameDateRegex = new(
+        @"\b(?<day>0?[1-9]|[12]\d|3[01])(?:st|nd|rd|th)?\s+(?<month>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+(?<year>20\d{2}|\d{2}))?\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex CollectionTimeRegex = new(
@@ -50,7 +58,8 @@ public sealed class EmailOrderIntakeService
         new("MORRISONS", "Morrisons", ["MORRISONS", "MORRISON'S"]),
         new("ALDI", "Aldi", ["ALDI"]),
         new("COOP", "COOP", ["COOP", "CO-OP", "CO OP"]),
-        new("OCADO", "Ocado", ["OCADO"])
+        new("OCADO", "Ocado", ["OCADO"]),
+        new("HILLBROTHERS", "Hams Hall", ["HAMS HALL", "HILL BROTHERS", "HILLBROTHERS", "HILLS PLANTS"])
     ];
 
     static EmailOrderIntakeService()
@@ -260,7 +269,9 @@ public sealed class EmailOrderIntakeService
         var jobType = InferJobType(request.Subject, body);
         var collection = InferCollectionSite(request.Subject, body, jobType);
         var destination = InferDestination(request.Subject, jobType) ?? signal?.SiteName;
-        var pallets = ExtractInt(TotalPalletsRegex, body, "qty") ?? ExtractInt(PalletQuantityRegex, sourceText, "qty");
+        var pallets = ExtractInt(TotalPalletsRegex, body, "qty")
+            ?? ExtractInt(LabelledQuantityRegex, sourceText, "qty")
+            ?? ExtractInt(PalletQuantityRegex, sourceText, "qty");
         var requestedTime = ExtractMatch(CollectionTimeRegex, body, "time")?.Replace('.', ':');
         if (!HasEnoughBodyOrderEvidence(rawPo, collection, destination, pallets, requestedTime, jobType, signal is not null))
         {
@@ -409,10 +420,20 @@ public sealed class EmailOrderIntakeService
     private static DateOnly? ExtractDate(string input, DateTimeOffset receivedAt)
     {
         var match = DateRegex.Match(input ?? string.Empty);
-        if (!match.Success) return null;
-        var day = int.Parse(match.Groups["day"].Value, CultureInfo.InvariantCulture);
-        var month = int.Parse(match.Groups["month"].Value, CultureInfo.InvariantCulture);
-        var yearText = match.Groups["year"].Value;
+        if (match.Success)
+            return BuildDate(match.Groups["day"].Value, match.Groups["month"].Value, match.Groups["year"].Value, receivedAt);
+
+        var monthNameMatch = MonthNameDateRegex.Match(input ?? string.Empty);
+        if (!monthNameMatch.Success) return null;
+        return BuildDate(monthNameMatch.Groups["day"].Value, monthNameMatch.Groups["month"].Value, monthNameMatch.Groups["year"].Value, receivedAt);
+    }
+
+    private static DateOnly? BuildDate(string dayText, string monthText, string yearText, DateTimeOffset receivedAt)
+    {
+        var day = int.Parse(dayText, CultureInfo.InvariantCulture);
+        var month = int.TryParse(monthText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedMonth)
+            ? parsedMonth
+            : MonthNumber(monthText);
         var year = string.IsNullOrWhiteSpace(yearText)
             ? receivedAt.Year
             : yearText.Length == 2
@@ -421,6 +442,23 @@ public sealed class EmailOrderIntakeService
         try { return new DateOnly(year, month, day); }
         catch (ArgumentOutOfRangeException) { return null; }
     }
+
+    private static int MonthNumber(string value) => value.Trim().ToUpperInvariant() switch
+    {
+        var month when month.StartsWith("JAN", StringComparison.Ordinal) => 1,
+        var month when month.StartsWith("FEB", StringComparison.Ordinal) => 2,
+        var month when month.StartsWith("MAR", StringComparison.Ordinal) => 3,
+        var month when month.StartsWith("APR", StringComparison.Ordinal) => 4,
+        "MAY" => 5,
+        var month when month.StartsWith("JUN", StringComparison.Ordinal) => 6,
+        var month when month.StartsWith("JUL", StringComparison.Ordinal) => 7,
+        var month when month.StartsWith("AUG", StringComparison.Ordinal) => 8,
+        var month when month.StartsWith("SEP", StringComparison.Ordinal) => 9,
+        var month when month.StartsWith("OCT", StringComparison.Ordinal) => 10,
+        var month when month.StartsWith("NOV", StringComparison.Ordinal) => 11,
+        var month when month.StartsWith("DEC", StringComparison.Ordinal) => 12,
+        _ => 0
+    };
 
     private static DateOnly? ParseDateText(string? input, DateTimeOffset receivedAt) =>
         string.IsNullOrWhiteSpace(input) ? null : ExtractDate(input, receivedAt);
@@ -454,6 +492,7 @@ public sealed class EmailOrderIntakeService
         }
         if ((senderAddress ?? string.Empty).EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase)) return "NWF";
         if ((senderAddress ?? string.Empty).EndsWith("@summerberry.co.uk", StringComparison.OrdinalIgnoreCase)) return "TSBC";
+        if ((senderAddress ?? string.Empty).EndsWith("@hillsplants.com", StringComparison.OrdinalIgnoreCase)) return "HILLBROTHERS";
         var domain = (senderAddress ?? string.Empty).Split('@').LastOrDefault();
         var stem = domain?.Split('.').FirstOrDefault();
         var clean = new string((stem ?? "EMAIL").Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
@@ -480,6 +519,9 @@ public sealed class EmailOrderIntakeService
     {
         var explicitSite = ExtractMatch(CollectFromRegex, body, "site");
         if (!string.IsNullOrWhiteSpace(explicitSite)) return CleanSourceLine(explicitSite);
+        if (body.Contains("Hills collection", StringComparison.OrdinalIgnoreCase) ||
+            body.Contains("Hill Brothers", StringComparison.OrdinalIgnoreCase))
+            return "Hill Brothers";
         if (jobType == "Tray collection")
         {
             var match = Regex.Match(subject ?? string.Empty, @"Tray\s+collection\s+(?<site>.+?)(?:\s+\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)?$", RegexOptions.IgnoreCase);

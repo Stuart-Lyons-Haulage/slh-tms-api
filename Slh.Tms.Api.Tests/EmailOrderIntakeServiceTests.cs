@@ -52,6 +52,37 @@ public sealed class EmailOrderIntakeServiceTests
     }
 
     [Fact]
+    public void SummerBerryLabelledPalletBody_IsStaged()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-summerberry-spinneys", null, "info@lyonshaulage.com", "Ioana-Andreea.Pascalau@summerberry.co.uk", "Ioana",
+            "26.08.2026 Spinneys/JHF delivery", DateTimeOffset.Parse("2026-08-25T07:10:15Z"),
+            "Customer : Spinneys/JHF order\nDepot Date: 26.08.2026\nCollection : 25.08.2026- 17:00\nPallets : 5\nAdress of delivery : K&N facility", null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("TSBC", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("2026-08-26", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("Spinneys/JHF", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal(5, order.Payload.GetProperty("pallets").GetInt32());
+    }
+
+    [Fact]
+    public void HillBrothersHamsHallTrolleyBody_IsStaged()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-hams-hall", null, "info@lyonshaulage.com", "eva@hillsplants.com", "Eva Jaskulska",
+            "Hams Hall - depot THU", DateTimeOffset.Parse("2026-08-25T06:54:52Z"),
+            "Good morning,\nHams Hall order for depot Thursday 27th Aug is 19 trolleys.\nHills collection.\nKind regards,\nEva", null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("HILLBROTHERS", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("2026-08-27", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("Hams Hall", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal("Hill Brothers", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal(19, order.Payload.GetProperty("pallets").GetInt32());
+    }
+
+    [Fact]
     public void DatedBodyWithoutOrderFields_IsNotStagedAsZeroPalletFallback()
     {
         var result = service.Parse(new MailboxEmailIntakeRequest(
