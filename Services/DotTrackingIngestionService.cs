@@ -5,10 +5,12 @@ namespace Slh.Tms.Api.Services;
 
 public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactory, DotTrackingOptions options, ILogger<DotTrackingIngestionService> logger) : BackgroundService
 {
+    private const int MaximumHistoryRecoveryMinutes = 10;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var pollInterval = TimeSpan.FromMinutes(Math.Max(1, options.PollIntervalMinutes));
-        var recoveryInterval = TimeSpan.FromMinutes(Math.Max(options.PollIntervalMinutes, options.RecoveryIntervalMinutes));
+        var recoveryInterval = HistoryRecoveryInterval(options);
         var nextRecoveryAtUtc = DateTimeOffset.MinValue;
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -32,9 +34,14 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
                         foreach (var recoveryDay in operatingDays)
                         {
                             var recovered = (await client.GetHistoricalVehicleEventsAsync(recoveryDay, stoppingToken))
-                                .Select(DotTelemetryRecord.FromProvider);
+                                .Select(DotTelemetryRecord.FromProvider)
+                                .ToList();
                             await store.PersistAsync(recovered, stoppingToken, markAsLiveReceipt: false);
                             projectionDays.Add(recoveryDay);
+                            logger.LogInformation(
+                                "DOT historical recovery persisted {RecordCount} RoadTech record(s) for {RecoveryDay}; linked geofences will be replayed immediately.",
+                                recovered.Count,
+                                recoveryDay);
                         }
                     }
                     catch (Exception exception) when (!stoppingToken.IsCancellationRequested)
@@ -54,6 +61,8 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
                 {
                     // Keep SQL as the durable audit projection of the exact same embedded
                     // RoadTech/Falcon ENTER/EXIT reconstruction used by the live wallboards.
+                    // Projection runs immediately after every successful history replay so a
+                    // newly linked fence can recover earlier crossings from the same day.
                     await EmbeddedGeofenceSqlProjection.RefreshOperatingDaysAsync(db, projectionDays, stoppingToken);
                 }
                 catch (Exception exception) when (!stoppingToken.IsCancellationRequested)
@@ -67,6 +76,13 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
             catch (Exception exception) when (!stoppingToken.IsCancellationRequested) { logger.LogWarning(exception, "DOT tracking ingestion failed; retrying in {Minutes} minute(s).", pollInterval.TotalMinutes); }
             await Task.Delay(pollInterval, stoppingToken);
         }
+    }
+
+    internal static TimeSpan HistoryRecoveryInterval(DotTrackingOptions options)
+    {
+        var pollMinutes = Math.Max(1, options.PollIntervalMinutes);
+        var configuredMinutes = Math.Max(pollMinutes, options.RecoveryIntervalMinutes);
+        return TimeSpan.FromMinutes(Math.Min(MaximumHistoryRecoveryMinutes, configuredMinutes));
     }
 
     internal static IReadOnlyList<DateOnly> RecoveryDays(DateTimeOffset utcNow)
