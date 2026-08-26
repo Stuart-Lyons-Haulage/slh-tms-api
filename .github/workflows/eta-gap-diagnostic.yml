@@ -17,37 +17,43 @@ jobs:
       TV_WALLBOARD_ACCESS_KEY: ${{ secrets.TV_WALLBOARD_ACCESS_KEY }}
       PLANNING_DATE: '2026-08-26'
     steps:
-      - name: Inspect Run 15 and Run 22 ETA inputs
+      - name: Inspect final ETA deadlines and wallboard risk inputs
         shell: bash
         run: |
           set -euo pipefail
           test -n "$TV_WALLBOARD_ACCESS_KEY"
           headers=(-H "X-TMS-TV-Key: $TV_WALLBOARD_ACCESS_KEY")
 
-          loads_file="$(mktemp)"
           timing_file="$(mktemp)"
           eta_file="$(mktemp)"
 
-          loads_status="$(curl --silent --show-error --output "$loads_file" --write-out '%{http_code}' "${headers[@]}" "$API_BASE/api/v1/loads?date=$PLANNING_DATE")"
           timing_status="$(curl --silent --show-error --output "$timing_file" --write-out '%{http_code}' "${headers[@]}" "$API_BASE/api/v1/run-timing?date=$PLANNING_DATE")"
           eta_status="$(curl --silent --show-error --output "$eta_file" --write-out '%{http_code}' "${headers[@]}" "$API_BASE/api/v1/operations/delivery-etas?date=$PLANNING_DATE")"
-          echo "loads=$loads_status timing=$timing_status etas=$eta_status"
-          test "$loads_status" = "200"
+          echo "timing=$timing_status etas=$eta_status"
           test "$timing_status" = "200"
           test "$eta_status" = "200"
 
-          echo '=== RUN TIMING ==='
-          jq '[.records[] | select(.loadReference == "Run 15 AM" or .loadReference == "Run 22 AM")]' "$timing_file"
+          jq -n --slurpfile timing "$timing_file" --slurpfile etas "$eta_file" '
+            ($timing[0].records // []) as $timingRecords |
+            ($etas[0].records // []) as $etaRecords |
+            [ $timingRecords[] as $t |
+              ($etaRecords | map(select(.loadId == $t.loadId)) | sort_by(.sequence)) as $runEtas |
+              ($runEtas[0] // null) as $first |
+              ($runEtas[-1] // null) as $final |
+              {
+                loadReference: $t.loadReference,
+                nextStopName: $t.nextStopName,
+                nextEtaUtc: $t.nextEtaUtc,
+                finalEtaUtc: $t.finalEtaUtc,
+                nextDeadlineUtc: ($runEtas | map(select(.stopId == $t.nextStopId))[0].deliveryWindowEndUtc // $runEtas | map(select(.sequence == $t.nextStopSequence))[0].deliveryWindowEndUtc // null),
+                finalStopName: ($final.stopName // null),
+                finalStopEtaFromDeliveryFeedUtc: ($final.etaUtc // null),
+                finalDeliveryWindowStartUtc: ($final.deliveryWindowStartUtc // null),
+                finalDeliveryWindowEndUtc: ($final.deliveryWindowEndUtc // null),
+                finalDeliveryRisk: ($final.risk // null),
+                firstStopName: ($first.stopName // null),
+                firstPlannedOrEtaUtc: ($first.etaUtc // null)
+              }
+            ]'
 
-          echo '=== LOAD/STOPS ==='
-          jq '[.[] | select(.reference == "Run 15 AM" or .reference == "Run 22 AM") | {
-            id, reference, status, vehicleId, driverId,
-            stops: [.stops[] | {id, sequence, name, address, latitude, longitude, plannedArrivalUtc}]
-          }]' "$loads_file"
-
-          echo '=== DELIVERY ETA RECORDS ==='
-          jq '[.records[] | select(.loadReference == "Run 15 AM" or .loadReference == "Run 22 AM") | {
-            loadReference, stopId, sequence, stopName, etaUtc, source, trackingUpdatedAtUtc, tachoStatus, tachoExplanation
-          }]' "$eta_file"
-
-          rm -f "$loads_file" "$timing_file" "$eta_file"
+          rm -f "$timing_file" "$eta_file"
