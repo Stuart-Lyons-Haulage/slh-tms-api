@@ -6,14 +6,17 @@ namespace Slh.Tms.Api.Tests;
 
 public sealed class OperationalStopCoordinatesTests
 {
-    [Fact]
-    public void Missing_site_coordinates_fall_back_to_unique_approved_geofence()
+    [Theory]
+    [InlineData("NWF-Selsey")]
+    [InlineData("Collect · NWF-Selsey")]
+    [InlineData("Collection · NWF-Selsey")]
+    public void Missing_site_coordinates_fall_back_to_unique_approved_geofence(string stopName)
     {
         var stop = new LoadStop
         {
             Id = Guid.NewGuid(),
             Sequence = 1,
-            Name = "NWF-Selsey"
+            Name = stopName
         };
 
         var coordinate = OperationalStopCoordinates.Resolve(stop);
