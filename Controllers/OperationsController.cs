@@ -25,18 +25,15 @@ public sealed class OperationsController(
         if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
  
         var planningDate = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
-        List<Load> loads;
-        try
-        {
-            loads = await db.Loads.AsNoTracking().Include(load => load.Stops)
-                .Where(load => load.PlanningDate == planningDate && load.Status != LoadStatus.Cancelled)
-                .OrderBy(load => load.Reference).Take(200).ToListAsync(ct);
-        }
-        catch (Exception exception) when (IsSchemaUnavailable(exception))
-        {
-            db.ChangeTracker.Clear();
-            loads = await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct);
-        }
+        // A planning-day reset leaves cancelled rows in the legacy/live Loads table while
+        // the re-imported active plan is authoritative in the planning register. Use the
+        // same resilient merged reader as TV/run progression so the ETA feed cannot go
+        // empty merely because a cancelled live tombstone exists for an active run.
+        var loads = (await PlanningResilience.ReadLoadsAsync(db, planningDate, ct))
+            .Where(load => load.PlanningDate == planningDate && load.Status != LoadStatus.Cancelled)
+            .OrderBy(load => load.Reference)
+            .Take(200)
+            .ToList();
         var orderIds = loads.SelectMany(load => load.Stops).Where(stop => stop.OrderId != null).Select(stop => stop.OrderId!.Value).Distinct().ToList();
         var orders = await SafeDictionary(db.TransportOrders.AsNoTracking().Where(order => orderIds.Contains(order.Id)), order => order.Id, ct);
         if (orders.Count == 0 && orderIds.Count > 0) orders = (await PlanningRegisterStore.ReadOrdersAsync(db, null, null, ct)).Where(order => orderIds.Contains(order.Id)).ToDictionary(order => order.Id);
