@@ -40,3 +40,8 @@ jobs:
 
       - name: Run tests
         run: dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --no-restore
+
+      - name: Validate Info mailbox heartbeat flow
+        run: |
+          python3 power-automate/info-mailbox-heartbeat/validate_workflow.py
+          python3 -m unittest discover -s power-automate/info-mailbox-heartbeat -p 'test_*.py'
