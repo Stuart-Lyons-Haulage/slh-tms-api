@@ -23,4 +23,21 @@ public sealed class NaturesWayPlanningMatchTests
         var fence = Assert.Single(matchingFences);
         Assert.Equal(fence.Name, GeofencePlanningMatch.MatchText(plannerLabel));
     }
+
+    [Theory]
+    [InlineData("Collect · NWF-Selsey", "Selsey")]
+    [InlineData("Collection · NWF-Merston", "Merston")]
+    [InlineData("Collect NWF-Drayton", "Drayton")]
+    [InlineData("Collect · NWF-Runcton", "Runcton")]
+    public void Source_line_operational_prefix_does_not_change_nwf_physical_site(string plannerLabel, string locality)
+    {
+        var stop = new LoadStop { Id = Guid.NewGuid(), Sequence = 1, Name = plannerLabel };
+        var matchingFences = EmbeddedGeofenceEngine.ApprovedFences
+            .Where(fence => GeofencePlanningMatch.SamePhysicalSite(stop, fence))
+            .ToList();
+
+        var fence = Assert.Single(matchingFences);
+        Assert.Contains(locality, fence.Name, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(fence.Name, GeofencePlanningMatch.MatchText(plannerLabel));
+    }
 }
