@@ -1,0 +1,607 @@
+name: Temporary Info Mailbox Intake Repair
+
+on:
+  push:
+    branches:
+      - fix/info-mailbox-precedence-categories-20260826
+    paths:
+      - .github/workflows/_temporary_info_mailbox_fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/info-mailbox-precedence-categories-20260826
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: |
+          dotnet restore Slh.Tms.Api.csproj
+          dotnet restore Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj
+
+      - name: Apply tests and prove red
+        shell: python
+        run: |
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          path = Path('Slh.Tms.Api.Tests/EmailOrderIntakeServiceTests.cs')
+          text = path.read_text(encoding='utf-8')
+          marker = '\n}'
+          tests = r'''
+
+    [Fact]
+    public void ExplicitCollectFrom_OverridesSenderDomainCollectionMapping()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-explicit-collection", null, "info@lyonshaulage.com", "planner@summerberry.co.uk", "Planner",
+            "Customer order 27/08/2026", DateTimeOffset.Parse("2026-08-26T08:00:00Z"),
+            """
+            Customer: Spinneys
+            Collection: 26/08/2026 17:00
+            Collect from: Groves Farm
+            Delivery date: 27/08/2026
+            Pallets: 9
+            Delivery address: Heron Foods
+            Melton Mowbray
+            """, null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("Groves Farm", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("2026-08-26", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("2026-08-27", order.Payload.GetProperty("deliveryDate").GetString());
+        Assert.Equal("17:00", order.Payload.GetProperty("requestedTime").GetString());
+    }
+
+    [Fact]
+    public void ExplicitBodyDeliveryTo_OverridesConflictingSubjectDestination()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-body-destination", null, "info@lyonshaulage.com", "planner@example.com", "Planner",
+            "COOP delivery 27/08/2026", DateTimeOffset.Parse("2026-08-26T08:00:00Z"),
+            "Collect from: Groves Farm\nDelivery to Heron Melton - Snow Hill, Melton Mowbray.\nPallets: 7\nCollection time: 16:00\n27/08/2026", null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("Heron Melton", order.Payload.GetProperty("stallNumber").GetString());
+    }
+
+    [Fact]
+    public void MasterDataBodySignal_OverridesConflictingSubjectCustomer()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-master-precedence", null, "info@lyonshaulage.com", "planner@example.com", "Planner",
+            "Waitrose collection 27/08/2026", DateTimeOffset.Parse("2026-08-26T08:00:00Z"),
+            "Sainsbury Waltham Point has 12 pallets. Collect from: Groves Farm. Collection time: 15:00.", null, null, null),
+            ["Sainsbury Waltham Point"]);
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("SAINSBURY", order.Payload.GetProperty("customerCode").GetString());
+    }
+
+    [Fact]
+    public void BarfootsWaitroseWaveBody_StagesEveryWaveAsSeparateOrder()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-barfoots-waves", null, "info@lyonshaulage.com", "planner@barfoots.co.uk", "Planner",
+            "Waitrose from Sefter & Leythorne for depot 27/08/26", DateTimeOffset.Parse("2026-08-26T10:19:58Z"),
+            """
+            Please see attached Waitrose confirmed pallet booking:
+            Aylesford WAVE 1 from Sefter 2 pallets PO O78057 & Aylesford Wave 3 10 pallets PO O78077.
+            Leyland WAVE 1 from Sefter 1 pallet PO B78374 & Leyland Wave 3 3 pallets PO B78353.
+            """, null, null, null));
+
+        Assert.Equal(4, result.Orders.Count);
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("stallNumber").GetString() == "Aylesford" && order.Payload.GetProperty("pallets").GetInt32() == 10 && order.Payload.GetProperty("customerPo").GetString() == "O78077");
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("stallNumber").GetString() == "Leyland" && order.Payload.GetProperty("pallets").GetInt32() == 3 && order.Payload.GetProperty("customerPo").GetString() == "B78353");
+        Assert.All(result.Orders, order =>
+        {
+            Assert.Equal("WAITROSE", order.Payload.GetProperty("customerCode").GetString());
+            Assert.Equal("Sefter", order.Payload.GetProperty("sellerName").GetString());
+            Assert.Equal("2026-08-26", order.Payload.GetProperty("collectionDate").GetString());
+            Assert.Equal("2026-08-27", order.Payload.GetProperty("deliveryDate").GetString());
+            Assert.Equal("Medium", order.Payload.GetProperty("intakeConfidence").GetString());
+        });
+    }
+
+    [Fact]
+    public void SainsburyImageLedTransportRequirements_AreEligibleForMappingReview()
+    {
+        var request = new MailboxEmailIntakeRequest(
+            "message-sainsbury-image", null, "info@lyonshaulage.com", "planner@newey.com", "Planner",
+            "Sainsbury's Week 36", DateTimeOffset.Parse("2026-08-26T10:20:22Z"),
+            "Please see our transport requirements for week 36.", null, null,
+            [new MailboxAttachmentRequest("image001.png", "image/png", "AA==", true)]);
+        var parsed = service.Parse(request);
+        Assert.NotNull(parsed.IgnoredReason);
+
+        var method = typeof(Slh.Tms.Api.Controllers.OrderIntakeController).GetMethod(
+            "ShouldStageMappingException",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Assert.NotNull(method);
+        Assert.True((bool)method!.Invoke(null, [request, parsed])!);
+    }
+'''
+          if 'ExplicitCollectFrom_OverridesSenderDomainCollectionMapping' not in text:
+              pos = text.rfind(marker)
+              if pos < 0:
+                  raise SystemExit('Could not find test class terminator')
+              text = text[:pos] + tests + text[pos:]
+              path.write_text(text, encoding='utf-8')
+
+          focused = 'FullyQualifiedName~ExplicitCollectFrom_OverridesSenderDomainCollectionMapping|FullyQualifiedName~ExplicitBodyDeliveryTo_OverridesConflictingSubjectDestination|FullyQualifiedName~MasterDataBodySignal_OverridesConflictingSubjectCustomer|FullyQualifiedName~BarfootsWaitroseWaveBody_StagesEveryWaveAsSeparateOrder|FullyQualifiedName~SainsburyImageLedTransportRequirements_AreEligibleForMappingReview'
+          result = subprocess.run([
+              'dotnet','test','Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj',
+              '--configuration','Release','--filter',focused
+          ])
+          if result.returncode == 0:
+              print('Expected RED tests to fail before implementation, but they passed.', file=sys.stderr)
+              sys.exit(1)
+          print('RED confirmed: the new intake precedence/mapping tests fail before implementation.')
+
+      - name: Apply parser, review guard, and Power Automate category fixes
+        shell: python
+        run: |
+          from pathlib import Path
+          import json
+
+          service_path = Path('Services/EmailOrderIntakeService.cs')
+          service = service_path.read_text(encoding='utf-8')
+
+          old_return = '''        if (orders.Count == 0)\n            return new EmailIntakeParseResult([], globalWarnings, "No transport order could be identified from this email.");\n\n        return new EmailIntakeParseResult(orders, globalWarnings, null);'''
+          new_return = '''        if (orders.Count == 0)\n            return new EmailIntakeParseResult([], globalWarnings, "No transport order could be identified from this email.");\n\n        orders = orders\n            .Select(order => ApplyPrecedenceOverrides(order, request, body, masterSiteNames ?? []))\n            .ToList();\n        return new EmailIntakeParseResult(orders, globalWarnings, null);'''
+          if old_return not in service:
+              raise SystemExit('Parse return marker not found')
+          service = service.replace(old_return, new_return, 1)
+
+          old_structured = '''        var doubleHWaitrose = ParseDoubleHWaitroseColumnTable(request, rawPo, body, sourceText, receivedAt);\n        if (doubleHWaitrose.Count > 0) return doubleHWaitrose;\n\n        var waitrose = ParseWaitroseDepotTable(request, rawPo, body, sourceText, sourceDate, receivedAt);'''
+          new_structured = '''        var doubleHWaitrose = ParseDoubleHWaitroseColumnTable(request, rawPo, body, sourceText, receivedAt);\n        if (doubleHWaitrose.Count > 0) return doubleHWaitrose;\n\n        var barfootsWaitrose = ParseBarfootsWaitroseWaveBody(request, body, receivedAt);\n        if (barfootsWaitrose.Count > 0) return barfootsWaitrose;\n\n        var waitrose = ParseWaitroseDepotTable(request, rawPo, body, sourceText, sourceDate, receivedAt);'''
+          if old_structured not in service:
+              raise SystemExit('Structured parser marker not found')
+          service = service.replace(old_structured, new_structured, 1)
+
+          marker = '''    private static List<ParsedEmailOrder> ParseInternalMorrisonsCollections('''
+          barfoots_method = r'''    private static List<ParsedEmailOrder> ParseBarfootsWaitroseWaveBody(
+        MailboxEmailIntakeRequest request,
+        string body,
+        DateTimeOffset receivedAt)
+    {
+        var source = $"{request.Subject}\n{request.SenderAddress}\n{body}";
+        if (!source.Contains("Waitrose", StringComparison.OrdinalIgnoreCase) ||
+            !source.Contains("WAVE", StringComparison.OrdinalIgnoreCase) ||
+            !source.Contains("pallet", StringComparison.OrdinalIgnoreCase) ||
+            !source.Contains("PO", StringComparison.OrdinalIgnoreCase) ||
+            (!(request.SenderAddress ?? string.Empty).EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) &&
+             !source.Contains("Barfoots", StringComparison.OrdinalIgnoreCase)))
+            return [];
+
+        var deliveryDate = ExtractDate(request.Subject ?? string.Empty, receivedAt)
+                           ?? ExtractDateAfter(body, @"depot\s+date[^0-9\r\n]*");
+        if (deliveryDate is null) return [];
+
+        var explicitCollectionDate = ExtractDateAfter(body, @"collection(?:\s+date)?[^0-9\r\n]*");
+        var collectionDate = explicitCollectionDate ?? LocalDate(receivedAt);
+        var rows = Regex.Matches(
+                body,
+                @"(?<depot>Aylesford|Bracknell|Brinklow|Leyland)\s+WAVE\s+(?<wave>\d+)\s+from\s+(?<collection>[A-Z][A-Z0-9 &'()/-]{1,80}?)\s+(?<qty>\d{1,3})\s+pallets?\s+PO\s+(?<po>[A-Z0-9/-]+)",
+                RegexOptions.IgnoreCase)
+            .Cast<Match>()
+            .Select(match => new
+            {
+                Depot = CultureInfo.InvariantCulture.TextInfo.ToTitleCase(match.Groups["depot"].Value.ToLowerInvariant()),
+                Wave = int.Parse(match.Groups["wave"].Value, CultureInfo.InvariantCulture),
+                Collection = CleanSourceLine(match.Groups["collection"].Value),
+                Pallets = int.Parse(match.Groups["qty"].Value, CultureInfo.InvariantCulture),
+                Po = match.Groups["po"].Value.Trim().ToUpperInvariant()
+            })
+            .Where(row => row.Pallets > 0)
+            .ToList();
+        if (rows.Count == 0) return [];
+
+        return rows.Select(row =>
+        {
+            var warnings = new List<string>();
+            if (explicitCollectionDate is null)
+                warnings.Add("Collection date inferred as the email received date from the Barfoots Waitrose wave template; confirm if collection occurs on a different day.");
+            return BuildStructuredOrder(
+                request,
+                $"barfoots-waitrose-{NormaliseKey(row.Depot)}-wave-{row.Wave}-{NormaliseKey(row.Po)}",
+                "WAITROSE",
+                row.Po,
+                collectionDate,
+                deliveryDate.Value,
+                row.Pallets,
+                row.Collection,
+                row.Depot,
+                $"Waitrose Wave {row.Wave} depot delivery",
+                warnings);
+        }).ToList();
+    }
+
+'''
+          if marker not in service:
+              raise SystemExit('Barfoots insertion marker not found')
+          service = service.replace(marker, barfoots_method + marker, 1)
+
+          precedence_marker = '''    private static bool HasEnoughBodyOrderEvidence('''
+          precedence_methods = r'''    private static ParsedEmailOrder ApplyPrecedenceOverrides(
+        ParsedEmailOrder order,
+        MailboxEmailIntakeRequest request,
+        string body,
+        IReadOnlyCollection<string> masterSiteNames)
+    {
+        var payload = JsonSerializer.Deserialize<Dictionary<string, object?>>(order.Payload.GetRawText())
+                      ?? new Dictionary<string, object?>();
+        var warnings = order.Warnings.ToList();
+        var sources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var receivedAt = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
+
+        var collectFrom = ExtractMatch(CollectFromRegex, body, "site");
+        var collectionLabel = ExtractLabelValue(body, "collection", "collect", "pickup");
+        var explicitCollectionSite = !string.IsNullOrWhiteSpace(collectFrom)
+            ? CleanSourceLine(collectFrom)
+            : ExtractCollectionSiteFromLabel(collectionLabel);
+        if (!string.IsNullOrWhiteSpace(explicitCollectionSite))
+        {
+            payload["sellerName"] = explicitCollectionSite;
+            sources["collectionSite"] = "body.explicit";
+            warnings.RemoveAll(warning =>
+                warning.Contains("Collection site was not explicit", StringComparison.OrdinalIgnoreCase) ||
+                warning.StartsWith("Collection site inferred as ", StringComparison.OrdinalIgnoreCase));
+        }
+        else
+        {
+            var senderSite = InferCollectionSiteFromSender(request.SenderAddress);
+            var existingSite = PayloadText(payload, "sellerName");
+            sources["collectionSite"] = !string.IsNullOrWhiteSpace(senderSite) && string.Equals(senderSite, existingSite, StringComparison.OrdinalIgnoreCase)
+                ? "master.sender-domain"
+                : "template-or-fallback";
+        }
+
+        var deliveryAddress = ExtractLabelBlock(body, "addressofdelivery", "adressofdelivery", "deliveryaddress", "deliverto", "destination", "shipto");
+        var bodyDeliveryTo = ExtractMatch(DeliveryToRegex, body, "site");
+        var explicitDestination = CleanDeliveryAddressForSite(deliveryAddress)
+                                  ?? DeliverySiteName(bodyDeliveryTo);
+        if (!string.IsNullOrWhiteSpace(explicitDestination))
+        {
+            payload["stallNumber"] = explicitDestination;
+            sources["deliverySite"] = "body.explicit";
+            if (!string.IsNullOrWhiteSpace(deliveryAddress))
+                payload["deliveryAddress"] = deliveryAddress;
+            warnings.RemoveAll(warning =>
+                warning.Contains("Delivery address/destination was not explicit", StringComparison.OrdinalIgnoreCase) ||
+                warning.Contains("Delivery/return destination was not explicit", StringComparison.OrdinalIgnoreCase));
+        }
+        else
+        {
+            sources["deliverySite"] = "template-or-subject";
+        }
+
+        var explicitCollectionDate = ParseDateText(collectionLabel, receivedAt)
+                                     ?? ExtractDateAfter(body, @"collection(?:\s+date)?[^.\r\n]*?")
+                                     ?? ExtractDateAfter(body, @"collect[^.\r\n]*?");
+        if (explicitCollectionDate is not null)
+        {
+            payload["collectionDate"] = explicitCollectionDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            sources["collectionDate"] = "body.explicit";
+        }
+        else
+        {
+            sources["collectionDate"] = "template-or-subject";
+        }
+
+        var deliveryLabel = ExtractLabelValue(body, "deliverydate", "depotdate", "deliver", "delivery");
+        var explicitDeliveryDate = ParseDateText(deliveryLabel, receivedAt)
+                                   ?? ExtractDateAfter(body, @"depot\s+date[^.\r\n]*?")
+                                   ?? ExtractDateAfter(body, @"delivery\s+date[^.\r\n]*?");
+        if (explicitDeliveryDate is not null)
+        {
+            payload["deliveryDate"] = explicitDeliveryDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            sources["deliveryDate"] = "body.explicit";
+        }
+        else
+        {
+            sources["deliveryDate"] = "template-or-subject";
+        }
+
+        var explicitCollectionTime = NormaliseTime(ExtractTime(collectionLabel) ?? ExtractMatch(CollectionTimeRegex, body, "time"));
+        if (!string.IsNullOrWhiteSpace(explicitCollectionTime))
+        {
+            payload["requestedTime"] = explicitCollectionTime;
+            sources["collectionTime"] = "body.explicit";
+        }
+        else
+        {
+            sources["collectionTime"] = "template-or-fallback";
+        }
+
+        var explicitDeliveryTime = NormaliseTime(ExtractMatch(DeliveryDeadlineRegex, body, "time"));
+        if (!string.IsNullOrWhiteSpace(explicitDeliveryTime))
+        {
+            payload["deliveryRequestedTime"] = explicitDeliveryTime;
+            payload["deliveryTimeConstraint"] = "Not later than";
+            sources["deliveryTime"] = "body.explicit";
+        }
+        else
+        {
+            sources["deliveryTime"] = "template-or-fallback";
+        }
+
+        var explicitCustomer = CleanCustomerName(ExtractLabelValue(body, "customer"));
+        var masterSite = FindMasterSiteMention(body, masterSiteNames);
+        var bodySignal = DetectKnownSignal(body, []);
+        var subjectSignal = DetectKnownSignal(request.Subject ?? string.Empty, []);
+        var existingCustomer = PayloadText(payload, "customerCode");
+        string? resolvedCustomer;
+        string customerSource;
+        if (!string.IsNullOrWhiteSpace(explicitCustomer))
+        {
+            resolvedCustomer = CustomerCode(explicitCustomer);
+            customerSource = "body.explicit";
+            payload["marketName"] = explicitCustomer;
+        }
+        else if (!string.IsNullOrWhiteSpace(masterSite))
+        {
+            resolvedCustomer = InferCustomerCode(masterSite, null, masterSite);
+            customerSource = "master-data.body-site";
+            if (!string.IsNullOrWhiteSpace(existingCustomer) && !string.Equals(existingCustomer, resolvedCustomer, StringComparison.OrdinalIgnoreCase))
+                warnings.Add($"Customer resolved as {resolvedCustomer} from master-data site match, taking precedence over conflicting lower-priority hints.");
+        }
+        else if (bodySignal is not null)
+        {
+            resolvedCustomer = bodySignal.CustomerCode;
+            customerSource = "template.body-signal";
+        }
+        else if (IsTemplateSource(order.SourceKey) && !string.IsNullOrWhiteSpace(existingCustomer) && !string.Equals(existingCustomer, "EMAIL", StringComparison.OrdinalIgnoreCase))
+        {
+            resolvedCustomer = existingCustomer;
+            customerSource = "template";
+        }
+        else if (subjectSignal is not null)
+        {
+            resolvedCustomer = subjectSignal.CustomerCode;
+            customerSource = "subject";
+        }
+        else
+        {
+            resolvedCustomer = existingCustomer ?? InferCustomerCode(request.Subject, request.SenderAddress, PayloadText(payload, "stallNumber"));
+            customerSource = "fallback";
+        }
+        if (!string.IsNullOrWhiteSpace(resolvedCustomer))
+            payload["customerCode"] = resolvedCustomer;
+        sources["customer"] = customerSource;
+
+        warnings = warnings
+            .Where(warning => !string.IsNullOrWhiteSpace(warning))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        payload["intakeWarnings"] = warnings;
+        payload["intakeConfidence"] = PrecedenceConfidence(warnings);
+        payload["intakeFieldSources"] = sources;
+
+        var naturalKey = BuildPrecedenceNaturalKey(order, request, payload);
+        payload["intakeNaturalKey"] = naturalKey;
+        return new ParsedEmailOrder(order.SourceKey, naturalKey, JsonSerializer.SerializeToElement(payload), warnings);
+    }
+
+    private static string? ExtractCollectionSiteFromLabel(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var clean = DateRegex.Replace(value, " ");
+        clean = MonthNameDateRegex.Replace(clean, " ");
+        clean = Regex.Replace(clean, @"\b(?:[01]?\d|2[0-3])(?:[:.]\d{2})?\s*(?:am|pm)?\b", " ", RegexOptions.IgnoreCase);
+        clean = Regex.Replace(clean, @"\b(?:today|tomorrow)\b", " ", RegexOptions.IgnoreCase);
+        clean = Regex.Replace(clean, @"\s+", " ").Trim(' ', '-', '–', '—', ':');
+        return clean.Any(char.IsLetter) && clean.Length >= 3 ? CleanSourceLine(clean) : null;
+    }
+
+    private static string? DeliverySiteName(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var clean = CleanSourceLine(value).Trim(' ', '-', '–', '—');
+        var separator = clean.IndexOf(" - ", StringComparison.Ordinal);
+        if (separator > 0) clean = clean[..separator].Trim();
+        else
+        {
+            var comma = clean.IndexOf(',');
+            if (comma > 0) clean = clean[..comma].Trim();
+        }
+        return string.IsNullOrWhiteSpace(clean) ? null : clean;
+    }
+
+    private static string? FindMasterSiteMention(string body, IReadOnlyCollection<string> masterSiteNames) =>
+        masterSiteNames
+            .Where(site => !string.IsNullOrWhiteSpace(site) && site.Trim().Length >= 3)
+            .OrderByDescending(site => site.Length)
+            .FirstOrDefault(site => body.Contains(site.Trim(), StringComparison.OrdinalIgnoreCase))
+            ?.Trim();
+
+    private static bool IsTemplateSource(string sourceKey) =>
+        !sourceKey.StartsWith("body-", StringComparison.OrdinalIgnoreCase) &&
+        !sourceKey.StartsWith("labelled-body-", StringComparison.OrdinalIgnoreCase);
+
+    private static string? PayloadText(Dictionary<string, object?> payload, string key)
+    {
+        if (!payload.TryGetValue(key, out var value) || value is null) return null;
+        if (value is JsonElement element)
+        {
+            if (element.ValueKind == JsonValueKind.String) return element.GetString();
+            if (element.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) return null;
+            return element.ToString();
+        }
+        return Convert.ToString(value, CultureInfo.InvariantCulture);
+    }
+
+    private static string PrecedenceConfidence(IReadOnlyList<string> warnings)
+    {
+        var hardWarnings = warnings.Count(warning =>
+            !warning.StartsWith("Collection site inferred as ", StringComparison.OrdinalIgnoreCase) &&
+            !warning.StartsWith("No customer PO/reference", StringComparison.OrdinalIgnoreCase) &&
+            !warning.StartsWith("Customer resolved as ", StringComparison.OrdinalIgnoreCase));
+        return hardWarnings == 0 ? "High" : hardWarnings <= 2 ? "Medium" : "Low";
+    }
+
+    private static string BuildPrecedenceNaturalKey(
+        ParsedEmailOrder order,
+        MailboxEmailIntakeRequest request,
+        Dictionary<string, object?> payload)
+    {
+        var customer = PayloadText(payload, "customerCode") ?? "EMAIL";
+        var customerPo = PayloadText(payload, "customerPo") ?? order.SourceKey;
+        var collectionDate = PayloadText(payload, "collectionDate") ?? string.Empty;
+        var deliveryDate = PayloadText(payload, "deliveryDate") ?? collectionDate;
+        var collection = PayloadText(payload, "sellerName");
+        var destination = PayloadText(payload, "stallNumber");
+        var pallets = PayloadText(payload, "pallets");
+        return $"{(request.SenderAddress ?? string.Empty).Trim().ToLowerInvariant()}|{NormaliseKey(customer)}|{NormaliseKey(customerPo)}|{collectionDate}|{deliveryDate}|{NormaliseKey(collection)}|{NormaliseKey(destination)}|{pallets}";
+    }
+
+'''
+          if precedence_marker not in service:
+              raise SystemExit('Precedence insertion marker not found')
+          service = service.replace(precedence_marker, precedence_methods + precedence_marker, 1)
+
+          old_destination = '''        if (jobType == "Tray collection") return null;\n        if (clean.Contains("COOP", StringComparison.OrdinalIgnoreCase) || clean.Contains("CO-OP", StringComparison.OrdinalIgnoreCase)) return "COOP";\n        var subjectDeliveryTo = Regex.Match(clean, @"^Delivery\\s+to\\s+(?<dest>.+?)(?:\\s+\\d{1,2}[./-]\\d{1,2}(?:[./-]\\d{2,4})?)?$", RegexOptions.IgnoreCase);\n        if (subjectDeliveryTo.Success) return CleanSourceLine(subjectDeliveryTo.Groups["dest"].Value.Trim(' ', '-', '–', '—'));\n        var bodyDeliveryTo = ExtractMatch(DeliveryToRegex, body, "site");\n        if (!string.IsNullOrWhiteSpace(bodyDeliveryTo))\n            return CleanSourceLine(bodyDeliveryTo.Trim(' ', '-', '–', '—'));'''
+          new_destination = '''        if (jobType == "Tray collection") return null;\n        var bodyDeliveryTo = ExtractMatch(DeliveryToRegex, body, "site");\n        if (!string.IsNullOrWhiteSpace(bodyDeliveryTo))\n            return DeliverySiteName(bodyDeliveryTo);\n        var subjectDeliveryTo = Regex.Match(clean, @"^Delivery\\s+to\\s+(?<dest>.+?)(?:\\s+\\d{1,2}[./-]\\d{1,2}(?:[./-]\\d{2,4})?)?$", RegexOptions.IgnoreCase);\n        if (subjectDeliveryTo.Success) return CleanSourceLine(subjectDeliveryTo.Groups["dest"].Value.Trim(' ', '-', '–', '—'));\n        if (clean.Contains("COOP", StringComparison.OrdinalIgnoreCase) || clean.Contains("CO-OP", StringComparison.OrdinalIgnoreCase)) return "COOP";'''
+          if old_destination not in service:
+              raise SystemExit('Destination precedence marker not found')
+          service = service.replace(old_destination, new_destination, 1)
+          service_path.write_text(service, encoding='utf-8')
+
+          controller_path = Path('Controllers/OrderIntakeController.cs')
+          controller = controller_path.read_text(encoding='utf-8')
+          controller = controller.replace(
+              '''               sender.EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) ||\n               value.Contains("NWAY", StringComparison.OrdinalIgnoreCase) ||''',
+              '''               sender.EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) ||\n               sender.EndsWith("@newey.com", StringComparison.OrdinalIgnoreCase) ||\n               sender.EndsWith("@sainsburys.co.uk", StringComparison.OrdinalIgnoreCase) ||\n               value.Contains("Sainsbury", StringComparison.OrdinalIgnoreCase) ||\n               value.Contains("NWAY", StringComparison.OrdinalIgnoreCase) ||''', 1)
+          controller = controller.replace(
+              '''            value.Contains("delivery to", StringComparison.OrdinalIgnoreCase))''',
+              '''            value.Contains("delivery to", StringComparison.OrdinalIgnoreCase) ||\n            value.Contains("transport requirements", StringComparison.OrdinalIgnoreCase))''', 1)
+          controller = controller.replace(
+              '''        if (value.Contains("Barfoots", StringComparison.OrdinalIgnoreCase) ||\n            (request.SenderAddress ?? string.Empty).EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase))\n            return "BARFOOTS";\n        if (value.Contains("Aldi", StringComparison.OrdinalIgnoreCase)) return "ALDI";''',
+              '''        if (value.Contains("Barfoots", StringComparison.OrdinalIgnoreCase) ||\n            (request.SenderAddress ?? string.Empty).EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase))\n            return "BARFOOTS";\n        if (value.Contains("Sainsbury", StringComparison.OrdinalIgnoreCase) ||\n            (request.SenderAddress ?? string.Empty).EndsWith("@sainsburys.co.uk", StringComparison.OrdinalIgnoreCase) ||\n            (request.SenderAddress ?? string.Empty).EndsWith("@newey.com", StringComparison.OrdinalIgnoreCase))\n            return "SAINSBURY";\n        if (value.Contains("Aldi", StringComparison.OrdinalIgnoreCase)) return "ALDI";''', 1)
+          controller_path.write_text(controller, encoding='utf-8')
+
+          workflow_path = Path('power-automate/info-mailbox-order-intake/workflow.json')
+          workflow = json.loads(workflow_path.read_text(encoding='utf-8'))
+          actions = workflow['properties']['definition']['actions']
+          submit_actions = actions['Scope_Submit_To_TMS']['actions']
+          graph_uri = "@concat('https://graph.microsoft.com/v1.0/users/', encodeUriComponent(parameters('SLH_InfoMailboxUPN')), '/messages/', encodeUriComponent(triggerOutputs()?['body/id']))"
+          outlook_host = {
+              'apiId': '/providers/Microsoft.PowerApps/apis/shared_office365',
+              'connectionName': 'shared_office365',
+              'operationId': 'HttpRequest'
+          }
+          retry = {'type': 'exponential', 'count': 2, 'interval': 'PT5S', 'minimumInterval': 'PT5S', 'maximumInterval': 'PT30S'}
+          submit_actions['Condition_Mark_Source_Email'] = {
+              'type': 'If',
+              'runAfter': {'Record_Import_Result': ['Succeeded']},
+              'expression': {'and': [{'not': {'equals': ["@body('POST_To_TMS_Staging')?['outlookCategory']", None]}}]},
+              'actions': {
+                  'GET_Source_Email_For_Category': {
+                      'type': 'OpenApiConnection',
+                      'inputs': {'host': outlook_host, 'parameters': {'Uri': graph_uri, 'Method': 'GET', 'ContentType': 'application/json'}},
+                      'runtimeConfiguration': {'retryPolicy': retry, 'secureData': {'properties': ['outputs']}}
+                  },
+                  'PATCH_Source_Email_Category': {
+                      'type': 'OpenApiConnection',
+                      'runAfter': {'GET_Source_Email_For_Category': ['Succeeded']},
+                      'inputs': {
+                          'host': outlook_host,
+                          'parameters': {
+                              'Uri': graph_uri,
+                              'Method': 'PATCH',
+                              'Body': "@concat('{\"categories\":', string(union(coalesce(body('GET_Source_Email_For_Category')?['categories'], json('[]')), createArray(body('POST_To_TMS_Staging')?['outlookCategory']))), '}')",
+                              'ContentType': 'application/json'
+                          }
+                      },
+                      'runtimeConfiguration': {'retryPolicy': retry}
+                  }
+              },
+              'else': {'actions': {}}
+          }
+
+          error_actions = actions['Scope_Error_Handler']['actions']
+          error_actions['GET_Source_Email_For_Review_Category'] = {
+              'type': 'OpenApiConnection',
+              'runAfter': {'Handle_Import_Exception': ['Succeeded']},
+              'inputs': {'host': outlook_host, 'parameters': {'Uri': graph_uri, 'Method': 'GET', 'ContentType': 'application/json'}},
+              'runtimeConfiguration': {'retryPolicy': retry, 'secureData': {'properties': ['outputs']}}
+          }
+          error_actions['PATCH_Source_Email_TMS_Review'] = {
+              'type': 'OpenApiConnection',
+              'runAfter': {'GET_Source_Email_For_Review_Category': ['Succeeded']},
+              'inputs': {
+                  'host': outlook_host,
+                  'parameters': {
+                      'Uri': graph_uri,
+                      'Method': 'PATCH',
+                      'Body': "@concat('{\"categories\":', string(union(coalesce(body('GET_Source_Email_For_Review_Category')?['categories'], json('[]')), createArray('TMS Review'))), '}')",
+                      'ContentType': 'application/json'
+                  }
+              },
+              'runtimeConfiguration': {'retryPolicy': retry}
+          }
+          error_actions['Terminate_Failed_Import']['runAfter'] = {
+              'PATCH_Source_Email_TMS_Review': ['Succeeded', 'Failed', 'TimedOut', 'Skipped']
+          }
+          workflow_path.write_text(json.dumps(workflow, indent=2) + '\n', encoding='utf-8')
+
+          validator_path = Path('power-automate/info-mailbox-order-intake/validate_workflow.py')
+          validator = validator_path.read_text(encoding='utf-8')
+          validation_marker = '    connection_names = set(properties.get("connectionReferences", {}))\n'
+          validation = '''    if '\"operationId\":\"HttpRequest\"' not in serialized:\n        errors.append("shared-mailbox category update must use the Outlook Microsoft Graph HTTP action")\n    if "outlookCategory" not in serialized or "TMS Review" not in serialized:\n        errors.append("TMS result categories are missing")\n    if "graph.microsoft.com/v1.0/users/" not in serialized or "/messages/" not in serialized:\n        errors.append("shared-mailbox category update must target the source message through Microsoft Graph")\n    if "AssignCategory" in serialized:\n        errors.append("AssignCategory is not valid for this shared-mailbox workflow; use Graph /users/{mailbox}/messages/{id}")\n\n'''
+          if validation_marker not in validator:
+              raise SystemExit('Validator insertion marker not found')
+          validator = validator.replace(validation_marker, validation + validation_marker, 1)
+          validator_path.write_text(validator, encoding='utf-8')
+
+          validator_test_path = Path('power-automate/info-mailbox-order-intake/test_validate_workflow.py')
+          validator_test = validator_test_path.read_text(encoding='utf-8')
+          validator_tests = r'''
+
+    def test_rejects_missing_shared_mailbox_category_workflow(self):
+        workflow = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
+        del workflow["properties"]["definition"]["actions"]["Scope_Submit_To_TMS"]["actions"]["Condition_Mark_Source_Email"]
+        errors = validate(workflow)
+        self.assertTrue(any("category" in item.lower() for item in errors))
+
+    def test_rejects_assign_category_for_shared_mailbox(self):
+        workflow = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
+        workflow["properties"]["definition"]["actions"]["Fake_Assign_Category"] = {
+            "type": "OpenApiConnection",
+            "inputs": {"host": {"operationId": "AssignCategory"}},
+        }
+        errors = validate(workflow)
+        self.assertTrue(any("AssignCategory" in item for item in errors))
+'''
+          if 'test_rejects_missing_shared_mailbox_category_workflow' not in validator_test:
+              pos = validator_test.rfind('\n\nif __name__ == "__main__":')
+              if pos < 0:
+                  raise SystemExit('Validator test insertion marker not found')
+              validator_test = validator_test[:pos] + validator_tests + validator_test[pos:]
+              validator_test_path.write_text(validator_test, encoding='utf-8')
+
+      - name: Prove green and run full verification
+        run: |
+          dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --filter 'FullyQualifiedName~ExplicitCollectFrom_OverridesSenderDomainCollectionMapping|FullyQualifiedName~ExplicitBodyDeliveryTo_OverridesConflictingSubjectDestination|FullyQualifiedName~MasterDataBodySignal_OverridesConflictingSubjectCustomer|FullyQualifiedName~BarfootsWaitroseWaveBody_StagesEveryWaveAsSeparateOrder|FullyQualifiedName~SainsburyImageLedTransportRequirements_AreEligibleForMappingReview'
+          python power-automate/info-mailbox-order-intake/test_validate_workflow.py
+          python power-automate/info-mailbox-order-intake/validate_workflow.py
+          dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release
+
+      - name: Commit repaired implementation to feature branch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/_temporary_info_mailbox_fix.yml
+          git add Services/EmailOrderIntakeService.cs Controllers/OrderIntakeController.cs Slh.Tms.Api.Tests/EmailOrderIntakeServiceTests.cs power-automate/info-mailbox-order-intake/workflow.json power-automate/info-mailbox-order-intake/validate_workflow.py power-automate/info-mailbox-order-intake/test_validate_workflow.py
+          git commit -m 'Fix mailbox parsing precedence and result categories'
+          git push origin HEAD:fix/info-mailbox-precedence-categories-20260826
