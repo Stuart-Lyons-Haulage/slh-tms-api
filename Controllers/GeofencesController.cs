@@ -14,16 +14,24 @@ public sealed class GeofencesController(TmsDbContext db) : ControllerBase
 {
     [HttpPost("import-falcon")]
     [Authorize(Policy = "TmsWrite")]
-    public IActionResult ImportFalcon([FromBody] JsonElement payload)
+    public async Task<IActionResult> ImportFalcon([FromBody] JsonElement payload, CancellationToken ct)
     {
         if (payload.ValueKind != JsonValueKind.Object || !payload.TryGetProperty("geofences", out var geofences) || geofences.ValueKind != JsonValueKind.Array)
             return UnprocessableEntity(new { error = "Expected a Falcon geofence JSON object containing a geofences array." });
 
-        return Conflict(new
+        var promotion = await PromoteCodedGeofencesAsync(ct);
+        var sync = await SiteGeofenceMasterSync.SyncAsync(db, ct);
+        return Ok(new
         {
             code = "embedded_geofence_runtime",
-            message = "The production geofence engine is using the approved SLH embedded geofence set because this Azure SQL identity does not have DDL permission. New Falcon geofences should be incorporated into the approved seed rather than written to runtime geofence tables.",
-            supplied = geofences.GetArrayLength()
+            message = "The production geofence engine uses the approved SLH embedded geofence set. The supplied Falcon payload was accepted as a sync trigger and site links were repaired against Site Master.",
+            supplied = geofences.GetArrayLength(),
+            promotedSites = promotion.CreatedSites,
+            restoredSites = promotion.RestoredSites,
+            relinked = promotion.Linked + sync.GeofencesLinked,
+            canonicalized = sync.GeofencesCanonicalized,
+            unlinked = sync.GeofencesUnlinked,
+            sitesMissingGeofence = sync.SitesMissingGeofence
         });
     }
 
@@ -51,16 +59,19 @@ public sealed class GeofencesController(TmsDbContext db) : ControllerBase
     public async Task<IActionResult> RepairLinks(CancellationToken ct)
     {
         var promotion = await PromoteCodedGeofencesAsync(ct);
+        var sync = await SiteGeofenceMasterSync.SyncAsync(db, ct);
         var statuses = await EmbeddedGeofenceEngine.FenceStatusesAsync(db, ct);
         var linked = statuses.Count(x => x.SiteId != null);
         return Ok(new
         {
             total = statuses.Count,
             linked,
-            relinked = promotion.Linked,
+            relinked = promotion.Linked + sync.GeofencesLinked,
             promotedSites = promotion.CreatedSites,
             restoredSites = promotion.RestoredSites,
             ambiguousSiteCodes = promotion.AmbiguousCodes,
+            canonicalized = sync.GeofencesCanonicalized,
+            sitesMissingGeofence = sync.SitesMissingGeofence,
             unlinked = statuses.Count - linked,
             validPolygons = statuses.Count,
             invalidPolygons = 0,
@@ -170,7 +181,7 @@ public sealed class GeofencesController(TmsDbContext db) : ControllerBase
         if (coded.Count == 0) return new SitePromotionResult(0, 0, 0, 0);
 
         var sites = await db.Sites.ToListAsync(ct);
-        var actor = User.Identity?.Name ?? User.FindFirst("preferred_username")?.Value ?? "geofence-link-repair";
+        var actor = Actor();
         var now = DateTimeOffset.UtcNow;
         var created = 0;
         var restored = 0;
@@ -264,6 +275,7 @@ public sealed class GeofencesController(TmsDbContext db) : ControllerBase
         .ToArray());
 
     private static string NumericCode(string? value) => NormalizeCode(value).TrimStart('0');
+    private string Actor() => User.Identity?.Name ?? User.FindFirst("preferred_username")?.Value ?? "geofence-link-repair";
     private static string NormalizeName(string value) => string.Join(' ', value.Trim().ToUpperInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries));
 
     private static DateOnly UkOperatingDate(DateTimeOffset value)

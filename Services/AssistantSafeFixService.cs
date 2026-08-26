@@ -18,6 +18,7 @@ public sealed class AssistantSafeFixService(
 
         await SafeStep("Vehicles", () => NormaliseVehicleRegistrations(changes, skipped, ct), changes, skipped);
         await SafeStep("Sites", () => RepairSites(changes, skipped, ct), changes, skipped);
+        await SafeStep("Geofence site links", () => RepairGeofenceSiteLinks(changes, skipped, ct), changes, skipped);
         await SafeStep("Markets", () => RepairMarkets(changes, skipped, ct), changes, skipped);
         await SafeStep("Customer contacts", () => NormaliseCustomerEmails(changes, ct), changes, skipped);
 
@@ -144,6 +145,16 @@ public sealed class AssistantSafeFixService(
         }
         var remainingLikely = FindLikelySiteDuplicateGroups(sites.Where(x => x.Active).ToList()).Where(group => !safeGroups.Any(safe => safe.Select(x => x.Id).OrderBy(x => x).SequenceEqual(group.Select(x => x.Id).OrderBy(x => x)))).Take(20);
         foreach (var group in remainingLikely) skipped.Add($"Possible site duplicate left for review: {string.Join(" / ", group.Select(x => $"{x.Name} ({x.ExternalCode})"))}.");
+    }
+
+    private async Task RepairGeofenceSiteLinks(List<string> changes, List<string> skipped, CancellationToken ct)
+    {
+        var result = await SiteGeofenceMasterSync.SyncAsync(db, ct);
+        if (result.SitesCoded > 0) changes.Add($"Canonicalised {result.SitesCoded} Site Master code{(result.SitesCoded == 1 ? "" : "s")} to the SITE### geofence format.");
+        if (result.GeofencesLinked > 0) changes.Add($"Synced {result.GeofencesLinked} geofence-to-site link{(result.GeofencesLinked == 1 ? "" : "s")}.");
+        if (result.GeofencesCanonicalized > 0) changes.Add($"Updated {result.GeofencesCanonicalized} geofence site code{(result.GeofencesCanonicalized == 1 ? "" : "s")} to the canonical Site Master code.");
+        if (result.GeofencesUnlinked > 0) skipped.Add($"{result.GeofencesUnlinked} stale geofence link{(result.GeofencesUnlinked == 1 ? " was" : "s were")} cleared for manual review.");
+        if (result.SitesMissingGeofence > 0) skipped.Add($"{result.SitesMissingGeofence} active site{(result.SitesMissingGeofence == 1 ? " is" : "s are")} still missing a confirmed geofence link.");
     }
 
     private async Task RepairMarkets(List<string> changes, List<string> skipped, CancellationToken ct)

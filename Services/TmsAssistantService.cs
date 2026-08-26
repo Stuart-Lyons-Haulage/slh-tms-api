@@ -78,6 +78,10 @@ public sealed class TmsAssistantService(
         if (missingMapPoints > 0)
             suggestions.Add(new("sites-map-point", "medium", "Add missing map points", $"{missingMapPoints} site{(missingMapPoints == 1 ? " has" : "s have")} an address but no latitude/longitude. The Assistant can use Azure Maps to add these coordinates safely.", "Sites", true));
 
+        var geofenceLinkGaps = await GeofenceLinkGaps(ct);
+        if (geofenceLinkGaps.SitesMissingGeofence > 0)
+            suggestions.Add(new("geofences-sites-sync", geofenceLinkGaps.AutoFixAvailable ? "high" : "medium", "Sync geofences with sites", $"{geofenceLinkGaps.SitesMissingGeofence} active site{(geofenceLinkGaps.SitesMissingGeofence == 1 ? " is" : "s are")} missing a confirmed geofence link. The Assistant can safely apply unique name-confirmed matches; ambiguous links remain review-only.", "Sites", geofenceLinkGaps.AutoFixAvailable));
+
         var duplicateSiteGroups = FindDuplicateSiteGroups(sites);
         if (duplicateSiteGroups.Count > 0)
         {
@@ -192,6 +196,22 @@ public sealed class TmsAssistantService(
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(ex, "Assistant site-detail enrichment was unavailable; base site records will be used.");
+        }
+    }
+
+    private async Task<(int SitesMissingGeofence, bool AutoFixAvailable)> GeofenceLinkGaps(CancellationToken ct)
+    {
+        try
+        {
+            var statuses = await SiteGeofenceMasterSync.GetStatusAsync(db, ct);
+            var missing = statuses.Count(status => status.NeedsReview);
+            return (missing, missing > 0);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Assistant geofence link scan was unavailable.");
+            db.ChangeTracker.Clear();
+            return (0, false);
         }
     }
 
