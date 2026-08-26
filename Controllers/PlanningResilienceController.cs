@@ -10,7 +10,8 @@ namespace Slh.Tms.Api.Controllers;
 /// <summary>
 /// Shared production-safe planning readers. Production can contain current runs in both
 /// the planning register and the legacy/live Loads table, so reads merge both sources.
-/// Live-table rows win when the same load id exists in both stores.
+/// Live-table rows normally win when the same load id exists in both stores. A cancelled
+/// live tombstone must not override an active planning-register row created by a reset/re-import.
 /// </summary>
 internal static class PlanningResilience
 {
@@ -33,7 +34,12 @@ internal static class PlanningResilience
             var query = db.Loads.AsNoTracking().Include(x => x.Stops).AsQueryable();
             if (date is not null) query = query.Where(x => x.PlanningDate == date.Value);
             var live = await query.OrderBy(x => x.PlanningDate).ThenBy(x => x.Reference).Take(2000).ToListAsync(ct);
-            foreach (var load in live) merged[load.Id] = load;
+            foreach (var load in live)
+            {
+                if (merged.TryGetValue(load.Id, out var registered) && KeepRegisteredOverLiveTombstone(registered, load))
+                    continue;
+                merged[load.Id] = load;
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -46,6 +52,9 @@ internal static class PlanningResilience
             .Take(2000)
             .ToList();
     }
+
+    internal static bool KeepRegisteredOverLiveTombstone(Load registered, Load live) =>
+        live.Status == LoadStatus.Cancelled && registered.Status != LoadStatus.Cancelled;
 
     public static async Task<Load?> ReadLoadAsync(TmsDbContext db, Guid id, CancellationToken ct)
     {
