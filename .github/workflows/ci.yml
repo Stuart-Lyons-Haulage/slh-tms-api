@@ -2,13 +2,17 @@ name: CI - Build and Test
 
 on:
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
-    branches: ['**']
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: api-ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -18,7 +22,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup .NET 8 SDK
-        uses: actions/setup-dotnet@v3
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
