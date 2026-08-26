@@ -44,18 +44,36 @@ jobs:
               finalEtaUtc,
               finalEtaSource,
               previousGeofenceDepartureUtc,
-              currentGeofenceName
+              currentGeofenceName,
+              preRouteDwellMinutes: (.preRouteDwellMinutes // 0),
+              totalTravelMinutes: ([.etaLegs[]?.travelMinutes] | add // 0),
+              totalIntermediateDwellMinutes: ([.etaLegs[]?.dwellMinutesAfterArrival] | add // 0),
+              etaLegs: [(.etaLegs // [])[] | {
+                sequence,
+                stopName,
+                travelMinutes,
+                dwellMinutesAfterArrival,
+                arrivalEtaUtc,
+                approximate,
+                provider
+              }]
             }],
             missingAfterDeparture: [.records[] | select(.completed != true and .previousGeofenceDepartureUtc != null and .finalEtaUtc == null) | {
               loadReference,
               nextStopName,
               previousGeofenceDepartureUtc,
-              currentGeofenceName
+              currentGeofenceName,
+              etaUnavailableStopName,
+              etaUnavailableReason,
+              preRouteDwellMinutes: (.preRouteDwellMinutes // 0),
+              etaLegs: (.etaLegs // [])
             }]
           }' "$body_file")"
           echo "$summary" | jq .
           {
             echo '### Production final ETA evidence'
+            echo
+            echo 'Each run includes the HGV route-provider leg minutes, predicted dwell and cumulative arrival evidence used by the final ETA.'
             echo
             echo '```json'
             echo "$summary" | jq .
@@ -71,5 +89,5 @@ jobs:
             exit 1
           fi
 
-          jq -r '.records[] | select(.completed != true and .previousGeofenceDepartureUtc != null and .finalEtaUtc == null) | "::warning title=Final ETA gap \(.loadReference)::Departure anchor exists but cumulative final ETA is still unavailable for next stop \(.nextStopName // "unknown")."' "$body_file"
+          jq -r '.records[] | select(.completed != true and .previousGeofenceDepartureUtc != null and .finalEtaUtc == null) | "::warning title=Final ETA gap \(.loadReference)::Departure anchor exists but cumulative final ETA is unavailable at \(.etaUnavailableStopName // .nextStopName // "unknown"): \(.etaUnavailableReason // "reason unavailable")."' "$body_file"
           rm -f "$body_file"
