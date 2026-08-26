@@ -1,7 +1,7 @@
 swagger: '2.0'
 info:
   title: SLH TMS API
-  version: '1.2'
+  version: '1.3'
 host: slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
 basePath: /api/v1
 schemes: [https]
@@ -145,14 +145,25 @@ paths:
       responses:
         '202': { description: Email parsed and one or more orders staged, schema: { $ref: '#/definitions/EmailIntakeResponse' } }
         '200': { description: Email ignored or previously processed, schema: { $ref: '#/definitions/EmailIntakeResponse' } }
+  /order-intake/email/heartbeat:
+    post:
+      operationId: RecordInfoMailboxHeartbeat
+      summary: Record a successful scheduled shared-mailbox connectivity probe
+      x-ms-visibility: important
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema: { $ref: '#/definitions/InfoMailboxHeartbeatRequest' }
+      responses:
+        '202': { description: Shared-mailbox heartbeat recorded, schema: { $ref: '#/definitions/InfoMailboxHeartbeatResponse' } }
   /customer-communications/pending:
     get:
       operationId: GetPendingCustomerAcknowledgements
       summary: Get customer acknowledgements due after Order Review acceptance
       parameters:
         - { name: take, in: query, type: integer, required: false, default: 50, maximum: 200 }
-      responses:
-        '200': { description: Pending consolidated acknowledgements }
+      responses: { '200': { description: Pending consolidated acknowledgements } }
   /customer-communications/{communicationKey}/sent:
     post:
       operationId: MarkCustomerAcknowledgementSent
@@ -256,6 +267,22 @@ definitions:
       attachments:
         type: array
         items: { $ref: '#/definitions/MailboxAttachmentRequest' }
+  InfoMailboxHeartbeatRequest:
+    type: object
+    required: [mailbox]
+    properties:
+      mailbox: { type: string, example: info@lyonshaulage.com }
+      flowName: { type: string, example: 'SLH-TMS | Info Mailbox | Heartbeat | PROD' }
+      flowRunId: { type: string }
+      checkedAtUtc: { type: string, format: date-time }
+      latestInboxReceivedAtUtc: { type: string, format: date-time, description: Newest shared-Inbox message observed by the successful Outlook/Graph probe }
+  InfoMailboxHeartbeatResponse:
+    type: object
+    properties:
+      heartbeatAccepted: { type: boolean }
+      mailbox: { type: string }
+      recordedAtUtc: { type: string, format: date-time }
+      latestInboxReceivedAtUtc: { type: string, format: date-time }
   EmailIntakeResponse:
     type: object
     properties:
