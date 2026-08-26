@@ -96,6 +96,22 @@ public sealed class SiteMasterConsolidationTests
         Assert.Equal(StagingStatus.PendingReview, review.Status);
     }
 
+    [Fact]
+    public async Task Matching_archived_site_code_is_restored_instead_of_duplicated()
+    {
+        await using var db = CreateDb();
+        var archived = new Site { ExternalCode = "ALDI-CDF", Name = "Aldi Cardiff", Active = false };
+        db.Sites.Add(archived);
+        db.Customers.Add(new Customer { Code = "ALDI-CDF", Name = "Aldi Cardiff" });
+        await db.SaveChangesAsync();
+
+        await SiteMasterConsolidation.ReconcileAsync(db, "test", CancellationToken.None);
+
+        var site = Assert.Single(db.Sites.Where(x => x.ExternalCode == "ALDI-CDF"));
+        Assert.True(site.Active);
+        Assert.Equal(archived.Id, site.Id);
+    }
+
     private static TmsDbContext CreateDb()
     {
         var options = new DbContextOptionsBuilder<TmsDbContext>()
