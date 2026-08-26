@@ -238,23 +238,51 @@ jobs:
               --name "$AZURE_CONTAINER_APP_NAME" \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --revision-weight "$latest_revision=100"; then
-              exit 0
+              break
             fi
             echo "Traffic update is busy; retrying ($attempt/18)..."
             sleep 10
           done
-          exit 1
 
-      - name: Check versioned TMS health endpoint
+          latest_revision_fqdn="$(az containerapp revision show \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision "$latest_revision" \
+            --query properties.fqdn \
+            --output tsv)"
+          test -n "$latest_revision_fqdn"
+          echo "LATEST_REVISION=$latest_revision" >> "$GITHUB_ENV"
+          echo "LATEST_REVISION_FQDN=$latest_revision_fqdn" >> "$GITHUB_ENV"
+
+      - name: Check exact deployed revision health
         run: |
           set -euo pipefail
-          for attempt in {1..24}; do
-            health="$(curl --fail --silent --show-error "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health" || true)"
+          test -n "$LATEST_REVISION_FQDN"
+          for attempt in {1..36}; do
+            health="$(curl --fail --silent --show-error --max-time 10 \
+              -H 'Cache-Control: no-cache' \
+              "https://$LATEST_REVISION_FQDN/api/v1/health?deployment=${{ github.sha }}" || true)"
             if echo "$health" | grep --quiet "${{ github.sha }}"; then
               echo "$health"
               exit 0
             fi
-            echo "Latest API revision is not serving traffic yet, retrying..."
+            echo "Exact revision $LATEST_REVISION is not healthy with the expected deployment revision yet; retrying..."
+            sleep 10
+          done
+          exit 1
+
+      - name: Check public TMS health route
+        run: |
+          set -euo pipefail
+          for attempt in {1..36}; do
+            health="$(curl --fail --silent --show-error --max-time 10 \
+              -H 'Cache-Control: no-cache' \
+              "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health?deployment=${{ github.sha }}" || true)"
+            if test -n "$health"; then
+              echo "$health"
+              exit 0
+            fi
+            echo "Public API route is not healthy yet; retrying..."
             sleep 10
           done
           exit 1
