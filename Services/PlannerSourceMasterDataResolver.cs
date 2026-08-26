@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
@@ -11,6 +12,11 @@ namespace Slh.Tms.Api.Services;
 /// </summary>
 public sealed class PlannerSourceMasterDataResolver
 {
+    private static readonly HashSet<string> PlannerPrefixes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "BAR", "BARFOOTS", "LAN", "LANGMEADS", "SB", "GHS", "SLH", "WAITROSE", "MORRISONS", "ALDI"
+    };
+
     private readonly IReadOnlyList<Site> _sites;
     private readonly IReadOnlyList<SiteGeofence> _geofences;
 
@@ -98,10 +104,6 @@ public sealed class PlannerSourceMasterDataResolver
         var linkedSite = SiteFromLink(linked);
         if (linked is null || linkedSite is null) return null;
 
-        // An explicit manual geofence→Site link is stronger than historic locality/name
-        // exceptions. Resolve the planner label directly against Site Master aliases;
-        // if it cannot resolve, fail closed rather than attaching the physical visit to
-        // the wrong job merely because the names overlap.
         var plannedSite = MatchSite(sourceLabel);
         return plannedSite is null ? false : plannedSite.Id == linkedSite.Id;
     }
@@ -118,7 +120,7 @@ public sealed class PlannerSourceMasterDataResolver
 
     private Site? MatchSite(string value)
     {
-        var keys = new[] { value, GeofencePlanningMatch.MatchText(value) }
+        var keys = PlannerSiteVariants(value)
             .Where(item => !string.IsNullOrWhiteSpace(item))
             .Select(Normalize)
             .Where(item => item.Length > 0)
@@ -131,9 +133,48 @@ public sealed class PlannerSourceMasterDataResolver
         var fuzzy = _sites.Where(site => SiteCandidates(site).Any(candidate =>
         {
             var candidateKey = Normalize(candidate);
-            return candidateKey.Length >= 5 && keys.Any(key => key.Contains(candidateKey, StringComparison.Ordinal) || candidateKey.Contains(key, StringComparison.Ordinal));
+            return candidateKey.Length >= 5 && keys.Any(key => key.Length >= 5 && (key.Contains(candidateKey, StringComparison.Ordinal) || candidateKey.Contains(key, StringComparison.Ordinal)));
         })).ToList();
         return fuzzy.Select(site => site.Id).Distinct().Count() == 1 ? fuzzy[0] : null;
+    }
+
+    private static IEnumerable<string> PlannerSiteVariants(string value)
+    {
+        var initial = value.Trim();
+        var values = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { initial, GeofencePlanningMatch.MatchText(initial) };
+
+        foreach (var candidate in values.ToList())
+        {
+            var withoutTemperature = Regex.Replace(candidate, @"\(\s*[+-]?\d+(?:\.\d+)?\s*°?\s*C\s*\)", string.Empty, RegexOptions.IgnoreCase).Trim();
+            if (!string.IsNullOrWhiteSpace(withoutTemperature)) values.Add(withoutTemperature);
+
+            var openParen = candidate.LastIndexOf('(');
+            if (openParen > 0 && candidate.EndsWith(')'))
+            {
+                var before = candidate[..openParen].Trim();
+                var inside = candidate[(openParen + 1)..^1].Trim();
+                if (!string.IsNullOrWhiteSpace(before)) values.Add(before);
+                if (!string.IsNullOrWhiteSpace(inside) && !inside.Contains('°')) values.Add(inside);
+            }
+        }
+
+        foreach (var candidate in values.ToList())
+        {
+            var separator = candidate.IndexOf('-');
+            if (separator > 0)
+            {
+                var prefix = candidate[..separator].Trim();
+                if (PlannerPrefixes.Contains(prefix)) values.Add(candidate[(separator + 1)..].Trim());
+            }
+        }
+
+        foreach (var candidate in values.ToList())
+        {
+            var stripped = Regex.Replace(candidate, @"\s+(CHILL|FRV)$", string.Empty, RegexOptions.IgnoreCase).Trim();
+            if (!string.IsNullOrWhiteSpace(stripped)) values.Add(stripped);
+        }
+
+        return values;
     }
 
     private Site? SiteFromLink(SiteGeofence? linked)
