@@ -184,6 +184,12 @@ public sealed class EmailOrderIntakeService
         var internalMorrisons = ParseInternalMorrisonsCollections(request, rawPo, body, receivedAt);
         if (internalMorrisons.Count > 0) return internalMorrisons;
 
+        var vitacressLeyland = ParseVitacressWaitroseLeyland(request, rawPo, body, receivedAt);
+        if (vitacressLeyland.Count > 0) return vitacressLeyland;
+
+        var additionalMarket = ParsePmTransportAdditionalMarket(request, rawPo, body, receivedAt);
+        if (additionalMarket.Count > 0) return additionalMarket;
+
         var simpleSplit = ParseSimpleSplitBody(request, rawPo, body, receivedAt);
         return simpleSplit;
     }
@@ -397,6 +403,108 @@ public sealed class EmailOrderIntakeService
                     collectionTime);
             })
             .ToList();
+    }
+
+    private static List<ParsedEmailOrder> ParseVitacressWaitroseLeyland(
+        MailboxEmailIntakeRequest request,
+        string? rawPo,
+        string body,
+        DateTimeOffset receivedAt)
+    {
+        var sourceText = $"{request.Subject}\n{request.SenderAddress}\n{body}";
+        if (!sourceText.Contains("Vitacress", StringComparison.OrdinalIgnoreCase) ||
+            !sourceText.Contains("Waitrose", StringComparison.OrdinalIgnoreCase) ||
+            !sourceText.Contains("Leyland", StringComparison.OrdinalIgnoreCase))
+            return [];
+
+        var match = Regex.Match(
+            sourceText,
+            @"drop\s+(?<qty>\d{1,3})\s*(?:plts?|pallets?)\s+into\s+(?<collection>Bracknell|Aylesford|Brinklow|Leyland)\s+(?<dateText>tomorrow\s+)?(?<date>\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)?(?:[^.\r\n]*?\baround\s+(?<time>(?:[01]?\d|2[0-3])(?:[:.]\d{2})?))?[^.\r\n]*?onward\s+delivery\s+to\s+(?<destination>Leyland|Bracknell|Aylesford|Brinklow)",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        if (!match.Success) return [];
+
+        var pallets = int.Parse(match.Groups["qty"].Value, CultureInfo.InvariantCulture);
+        var collection = CleanSourceLine(match.Groups["collection"].Value);
+        var destination = CleanSourceLine(match.Groups["destination"].Value);
+        var date = match.Groups["date"].Success
+            ? ExtractDate(match.Groups["date"].Value, receivedAt)
+            : match.Groups["dateText"].Success
+                ? LocalDate(receivedAt).AddDays(1)
+                : ExtractDate(sourceText, receivedAt) ?? LocalDate(receivedAt);
+        if (date is null) return [];
+
+        var time = NormaliseTime(match.Groups["time"].Success ? match.Groups["time"].Value : null);
+        var warnings = string.IsNullOrWhiteSpace(rawPo)
+            ? ["No customer PO/reference was found; a stable email reference was generated and should be checked before approval."]
+            : Array.Empty<string>();
+
+        return
+        [
+            BuildStructuredOrder(
+                request,
+                "vitacress-waitrose-leyland",
+                "WAITROSE",
+                rawPo,
+                date.Value,
+                date.Value,
+                pallets,
+                collection,
+                destination,
+                "Waitrose onward depot delivery",
+                warnings,
+                time)
+        ];
+    }
+
+    private static List<ParsedEmailOrder> ParsePmTransportAdditionalMarket(
+        MailboxEmailIntakeRequest request,
+        string? rawPo,
+        string body,
+        DateTimeOffset receivedAt)
+    {
+        var sourceText = $"{request.Subject}\n{request.SenderAddress}\n{body}";
+        if (!sourceText.Contains("@PMTransport.co.uk", StringComparison.OrdinalIgnoreCase) &&
+            !sourceText.Contains("pmtransport.co.uk", StringComparison.OrdinalIgnoreCase))
+            return [];
+        if (!sourceText.Contains("additional market", StringComparison.OrdinalIgnoreCase) &&
+            !sourceText.Contains("sunstar", StringComparison.OrdinalIgnoreCase))
+            return [];
+
+        var match = Regex.Match(
+            sourceText,
+            @"another\s+(?<qty>\d{1,3})\s*(?:pt|plts?|pallets?)\s+(?<collection>sunstar)[^\r\n.]*?(?:spit|spitalfields)",
+            RegexOptions.IgnoreCase);
+        if (!match.Success) return [];
+
+        var pallets = int.Parse(match.Groups["qty"].Value, CultureInfo.InvariantCulture);
+        var readyTime = NormaliseTime(ExtractMatch(new Regex(@"\bready\s+about\s+(?<time>(?:[01]?\d|2[0-3])(?:[:.]\d{2})?\s*(?:am|pm)?)", RegexOptions.IgnoreCase), body, "time"));
+        var collectionDate = LocalDate(receivedAt);
+        var deliveryDate = collectionDate;
+        var warnings = new List<string>
+        {
+            "Short market amendment parsed from email body; check against existing market orders before approval."
+        };
+        if (string.IsNullOrWhiteSpace(rawPo))
+            warnings.Add("No customer PO/reference was found; a stable email reference was generated and should be checked before approval.");
+        if (Regex.IsMatch(body, @"\b11\s*(?:pt|plts?|pallets?)\b", RegexOptions.IgnoreCase))
+            warnings.Add("Email also mentions 11 pallets may be ready; this was treated as availability information, not an additional order quantity.");
+
+        return
+        [
+            BuildStructuredOrder(
+                request,
+                "pmtransport-additional-market-sunstar-spitalfields",
+                "PMTRANSPORT",
+                rawPo,
+                collectionDate,
+                deliveryDate,
+                pallets,
+                "Sunstar",
+                "Spitalfields",
+                "Additional market delivery",
+                warnings,
+                readyTime)
+        ];
     }
 
     private static IEnumerable<ParsedEmailOrder> ParseWorkbook(

@@ -215,6 +215,59 @@ public sealed class EmailOrderIntakeServiceTests
     }
 
     [Fact]
+    public void VitacressWaitroseLeylandReply_StagesOnwardDepotDelivery()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-vitacress-leyland", null, "info@lyonshaulage.com", "kay@lyonshaulage.com", "Kay Ryan",
+            "RE: Leyland", DateTimeOffset.Parse("2026-08-26T09:32:30Z"),
+            """
+            Morning Maciej
+
+            Booked in for you
+
+            From: Maciej Rybitwa <Maciej.Rybitwa@vitacress.com>
+            To: Waitrose Primary Transport; info <info@lyonshaulage.com>
+            Subject: Leyland
+
+            Morning
+            We will drop 7 plts into Bracknell tomorrow 27/08/26 around 07.30 for your onward delivery to Leyland.
+            """, null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("WAITROSE", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("2026-08-27", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("2026-08-27", order.Payload.GetProperty("deliveryDate").GetString());
+        Assert.Equal("Bracknell", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Leyland", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal(7, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.Equal("07:30", order.Payload.GetProperty("requestedTime").GetString());
+    }
+
+    [Fact]
+    public void PmTransportAdditionalMarketEmail_StagesShortMarketAmendmentForReview()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-additional-market", null, "info@lyonshaulage.com", "Keiran@PMTransport.co.uk", "Keiran",
+            "Additional market", DateTimeOffset.Parse("2026-08-26T09:33:04Z"),
+            """
+            Another 3pt sunstar spit please
+
+            All pallets will be ready about 6pm,
+
+            They may get 11pt ready for about 5 if needed
+            """, null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("PMTRANSPORT", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("2026-08-26", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("Sunstar", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Spitalfields", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal(3, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.Equal("18:00", order.Payload.GetProperty("requestedTime").GetString());
+        Assert.Contains(order.Warnings, warning => warning.Contains("11 pallets may be ready", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void SimpleTodayTonightSplitBody_StagesEachLine()
     {
         var result = service.Parse(new MailboxEmailIntakeRequest(

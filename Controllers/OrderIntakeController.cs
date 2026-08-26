@@ -271,6 +271,9 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
         var recognisedSource = sender.EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) ||
                internalPlannerAttachment ||
+               sender.EndsWith("@apsgroup.uk.com", StringComparison.OrdinalIgnoreCase) ||
+               sender.EndsWith("@pmtransport.co.uk", StringComparison.OrdinalIgnoreCase) ||
+               sender.EndsWith("@vitacress.com", StringComparison.OrdinalIgnoreCase) ||
                sender.EndsWith("@langmeadherbs.co.uk", StringComparison.OrdinalIgnoreCase) ||
                sender.EndsWith("@langmeadfarms.co.uk", StringComparison.OrdinalIgnoreCase) ||
                sender.EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) ||
@@ -280,6 +283,9 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                value.Contains("Nature's Way", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("Langmead", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("Barfoots", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Market Week", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("PM Transport", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Vitacress", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("Aldi", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("Waitrose", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("Weightrose", StringComparison.OrdinalIgnoreCase) ||
@@ -299,6 +305,9 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             value.Contains("purchase order", StringComparison.OrdinalIgnoreCase) ||
             value.Contains("delivery quantities", StringComparison.OrdinalIgnoreCase) ||
             value.Contains("booking form", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("market week", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("additional market", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("onward delivery", StringComparison.OrdinalIgnoreCase) ||
             value.Contains("confirmed collection", StringComparison.OrdinalIgnoreCase) ||
             value.Contains("confirmed collections", StringComparison.OrdinalIgnoreCase) ||
             value.Contains("confirmed ALDI", StringComparison.OrdinalIgnoreCase) ||
