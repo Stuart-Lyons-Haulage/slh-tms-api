@@ -1,9 +1,6 @@
 name: Repair TachoMaster runtime configuration
 
 on:
-  workflow_run:
-    workflows: ["CD - Deploy TMS to Azure Container Apps"]
-    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -12,7 +9,6 @@ permissions:
 
 jobs:
   configure:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -53,31 +49,13 @@ jobs:
               "Integrations__TachoMaster__Username=secretref:dot-username" \
               "Integrations__TachoMaster__Password=secretref:dot-password"
 
-      - name: Route traffic to latest ready revision
-        run: |
-          set -euo pipefail
-          latest_ready="$(az containerapp show \
-            --name "$AZURE_CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --query properties.latestReadyRevisionName \
-            --output tsv)"
-          test -n "$latest_ready"
-          az containerapp ingress traffic set \
-            --name "$AZURE_CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --revision-weight "$latest_ready=100"
-
       - name: Verify TachoMaster upstream connection
         run: |
           set -euo pipefail
           for attempt in {1..12}; do
-            body="$(curl --silent --show-error \
-              "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/tachomaster" || true)"
+            body="$(curl --silent --show-error "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/tachomaster" || true)"
             echo "$body"
-            if echo "$body" | grep -q '"status":"healthy"'; then
-              exit 0
-            fi
+            if echo "$body" | grep -q '"status":"healthy"'; then exit 0; fi
             sleep 10
           done
-          echo "TachoMaster did not become healthy after runtime configuration was applied."
           exit 1
