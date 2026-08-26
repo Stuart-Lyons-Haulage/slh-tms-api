@@ -85,13 +85,13 @@ public sealed class TvRouteProgressController(
             var currentStop = activeVisit?.LoadStopId is Guid currentId
                 ? stops.FirstOrDefault(x => x.Id == currentId)
                 : null;
-            var nextStop = stops.FirstOrDefault(x => !completedStopIds.Contains(x.Id) && x.Id != currentStop?.Id);
-            if (currentStop is null)
-                nextStop = stops.FirstOrDefault(x => !completedStopIds.Contains(x.Id));
+            var nextStop = RunProgressionFrontier.NextOperationalStop(stops, completedStopIds, currentStop?.Id);
+            var progressionFrontierSequence = RunProgressionFrontier.Sequence(stops, completedStopIds, currentStop?.Id);
+            var evidenceGaps = RunProgressionFrontier.EvidenceGapsBeforeFrontier(stops, completedStopIds, currentStop?.Id);
 
             // Lake Lane is the depot origin. Its departure proves the run has started
             // before the first customer geofence has been reached.
-            var lakeLaneDeparture = completedStopIds.Count == 0
+            var lakeLaneDeparture = progressionFrontierSequence == 0
                 ? OperationalRunOrigin.LakeLaneDepartureFor(snapshot, load)
                 : null;
             var departedLakeLane = lakeLaneDeparture?.ExitedAtUtc is not null;
@@ -107,7 +107,7 @@ public sealed class TvRouteProgressController(
             var trackingAge = freshnessAtUtc is null ? (TimeSpan?)null : now - freshnessAtUtc.Value;
             var trackingFresh = trackingAge is not null && trackingAge.Value >= TimeSpan.Zero && trackingAge.Value <= LiveTrackingThreshold;
             var trackingMoving = trackingFresh && live is not null && (live.IsMoving == true || (live.SpeedKph ?? 0) > 2);
-            var geofenceStarted = departedLakeLane || currentStop is not null || completedStopIds.Count > 0;
+            var geofenceStarted = departedLakeLane || currentStop is not null || progressionFrontierSequence > 0;
 
             // Only fresh RoadTech coordinates may influence the visible vehicle marker.
             // Lake Lane departure supplies the trustworthy origin for the first leg.
@@ -117,7 +117,7 @@ public sealed class TvRouteProgressController(
                 activeVisit,
                 trackingFresh ? live : null,
                 lakeLaneDeparture);
-            var complete = stops.Count > 0 && completedStopIds.Count >= stops.Count;
+            var complete = RunProgressionFrontier.FinalStopCompleted(stops, completedStopIds);
             var phase = complete
                 ? "Complete"
                 : currentStop is not null
@@ -152,6 +152,8 @@ public sealed class TvRouteProgressController(
                 reference = load.Reference,
                 totalStops = stops.Count,
                 completedStops = completedStopIds.Count,
+                progressionFrontierSequence,
+                evidenceGaps = evidenceGaps.Select(stop => new { stop.Id, stop.Sequence, stop.Name }).ToList(),
                 currentStopId = currentStop?.Id,
                 nextStopId = nextStop?.Id,
                 focusStop = focusStop?.Name,

@@ -197,7 +197,9 @@ public sealed class RunProgressController(
             .Where(x => x.LoadId == load.Id)
             .OrderByDescending(x => x.EnteredAtUtc)
             .FirstOrDefault();
-        var nextStop = orderedStops.FirstOrDefault(x => !completedStopIds.Contains(x.Id));
+        var nextStop = RunProgressionFrontier.NextOperationalStop(orderedStops, completedStopIds, activeVisit?.LoadStopId);
+        var progressionFrontierSequence = RunProgressionFrontier.Sequence(orderedStops, completedStopIds, activeVisit?.LoadStopId);
+        var evidenceGaps = RunProgressionFrontier.EvidenceGapsBeforeFrontier(orderedStops, completedStopIds, activeVisit?.LoadStopId);
         var lastDeparture = visits
             .Where(x => x.ExitedAtUtc != null && x.ConfirmedAtUtc != null)
             .OrderByDescending(x => x.ExitedAtUtc)
@@ -212,9 +214,9 @@ public sealed class RunProgressController(
             dwell = Math.Max(activeVisit.DwellMinutes, Math.Max(0, (int)Math.Floor((now - activeVisit.EnteredAtUtc).TotalMinutes)));
         var delayed = activeVisit is not null && waitLimit is int limit && dwell.GetValueOrDefault() > limit;
         var activeStatus = activeVisit is null ? null : delayed ? "SiteDelay" : activeVisit.ConfirmedAtUtc is not null ? "OnSiteConfirmed" : "Arrived";
-        var runState = totalStops > 0 && completedStops >= totalStops
+        var runState = RunProgressionFrontier.FinalStopCompleted(orderedStops, completedStopIds)
             ? "Completed"
-            : activeStatus ?? (completedStops > 0 ? "BetweenStops" : InferredRunState(load, orderedStops, now));
+            : activeStatus ?? (progressionFrontierSequence > 0 ? "BetweenStops" : InferredRunState(load, orderedStops, now));
 
         return new
         {
@@ -224,6 +226,8 @@ public sealed class RunProgressController(
             runState,
             totalStops,
             completedStops,
+            progressionFrontierSequence,
+            evidenceGaps = evidenceGaps.Select(stop => new { stop.Id, stop.Sequence, stop.Name }).ToList(),
             progressPercent,
             nextStop = nextStop is null ? null : new { nextStop.Id, nextStop.Sequence, nextStop.Name, nextStop.Address, nextStop.PlannedArrivalUtc },
             currentVisit = activeVisit is null ? null : new
