@@ -67,11 +67,48 @@ public sealed class InfoMailboxHeartbeatTests : IClassFixture<CustomWebFactory>
         using var state = JsonDocument.Parse(await stateResponse.Content.ReadAsStringAsync());
         var root = state.RootElement;
         Assert.Equal("every 5 minutes heartbeat", root.GetProperty("schedules").GetProperty("infoMailbox").GetString());
-        var mailboxProvider = root.GetProperty("providers").EnumerateArray().Single(item => item.GetProperty("name").GetString() == "Info mailbox");
+        var mailboxProvider = FindMailboxProvider(root);
         Assert.Equal("current", mailboxProvider.GetProperty("state").GetString());
         var mailbox = root.GetProperty("mailbox");
         Assert.Equal("info@lyonshaulage.com", mailbox.GetProperty("mailbox").GetString());
         Assert.Equal(latestInbox, mailbox.GetProperty("latestInboxReceivedAtUtc").GetDateTimeOffset().ToString("O"));
         Assert.True(mailbox.GetProperty("lastHeartbeatUtc").GetDateTimeOffset() > DateTimeOffset.UtcNow.AddMinutes(-2));
     }
+
+    [Theory]
+    [InlineData(15, "pending")]
+    [InlineData(25, "stale")]
+    public async Task System_state_distinguishes_delayed_and_stale_mailbox_heartbeat(int ageMinutes, string expectedState)
+    {
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
+        var payload = JsonSerializer.Serialize(new
+        {
+            mailbox = "info@lyonshaulage.com",
+            flowName = "SLH-TMS | Info Mailbox | Heartbeat | PROD",
+            flowRunId = $"run-age-{Guid.NewGuid():N}",
+            checkedAtUtc = DateTimeOffset.UtcNow,
+            latestInboxReceivedAtUtc = DateTimeOffset.UtcNow.AddHours(-1)
+        });
+        var response = await client.PostAsync(
+            "/api/v1/order-intake/email/heartbeat",
+            new StringContent(payload, Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            var heartbeat = Assert.Single(db.StagedImports.Where(item => item.EntityType == "infomailboxheartbeat"));
+            heartbeat.ReceivedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-ageMinutes);
+            heartbeat.ReviewedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-ageMinutes);
+            await db.SaveChangesAsync();
+        }
+
+        var stateResponse = await client.GetAsync("/api/v1/system-sync/state");
+        Assert.Equal(HttpStatusCode.OK, stateResponse.StatusCode);
+        using var state = JsonDocument.Parse(await stateResponse.Content.ReadAsStringAsync());
+        Assert.Equal(expectedState, FindMailboxProvider(state.RootElement).GetProperty("state").GetString());
+    }
+
+    private static JsonElement FindMailboxProvider(JsonElement root) =>
+        root.GetProperty("providers").EnumerateArray().Single(item => item.GetProperty("name").GetString() == "Info mailbox");
 }
