@@ -1,0 +1,34 @@
+name: Diagnose geofence site codes
+
+on:
+  push:
+    branches:
+      - diagnose/geofence-site-code-contamination
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Decode embedded DOT geofence payload
+        shell: python
+        run: |
+          import base64, gzip, json, pathlib, re, collections
+          parts=[]
+          for path in sorted(pathlib.Path('Services').glob('GeofencePayloadChunk*.cs')):
+              text=path.read_text()
+              m=re.search(r'internal const string Value = "([A-Za-z0-9+/=]+)";', text)
+              if not m:
+                  raise SystemExit(f'No payload string in {path}')
+              parts.append(m.group(1))
+          payload=json.loads(gzip.decompress(base64.b64decode(''.join(parts))))
+          codes=collections.Counter(str(x.get('site_no')).strip() if x.get('site_no') is not None else '<null>' for x in payload)
+          print('fences', len(payload))
+          print('site-code distribution (top 30):')
+          for code,count in codes.most_common(30): print(repr(code), count)
+          one=[x.get('name') for x in payload if str(x.get('site_no')).strip() == '1']
+          print('site_no=1 count', len(one))
+          print('site_no=1 sample', one[:50])
