@@ -1,0 +1,75 @@
+name: Verify Final ETA production
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/final-eta-production-proof.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  final-eta-proof:
+    runs-on: ubuntu-latest
+    env:
+      API_BASE: https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+      TV_WALLBOARD_ACCESS_KEY: ${{ secrets.TV_WALLBOARD_ACCESS_KEY }}
+    steps:
+      - name: Verify cumulative geofence final ETA
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$TV_WALLBOARD_ACCESS_KEY"
+          body_file="$(mktemp)"
+          status="$(curl --silent --show-error --output "$body_file" --write-out '%{http_code}' \
+            -H "X-TMS-TV-Key: $TV_WALLBOARD_ACCESS_KEY" \
+            "$API_BASE/api/v1/run-timing" || true)"
+          echo "[Run timing] HTTP $status"
+          test "$status" = "200"
+
+          summary="$(jq -c '{
+            planningDate,
+            calculatedAtUtc,
+            geofenceAvailable,
+            totalRuns: (.records | length),
+            completedRuns: ([.records[] | select(.completed == true)] | length),
+            runsWithDepartureAnchor: ([.records[] | select(.previousGeofenceDepartureUtc != null)] | length),
+            runsWithNextEta: ([.records[] | select(.nextEtaUtc != null)] | length),
+            runsWithFinalEta: ([.records[] | select(.finalEtaUtc != null)] | length),
+            finalEtaSources: ([.records[] | select(.finalEtaUtc != null) | .finalEtaSource] | group_by(.) | map({source: .[0], count: length})),
+            finalEtas: [.records[] | select(.finalEtaUtc != null) | {
+              loadReference,
+              nextStopName,
+              finalEtaUtc,
+              finalEtaSource,
+              previousGeofenceDepartureUtc,
+              currentGeofenceName
+            }],
+            missingAfterDeparture: [.records[] | select(.completed != true and .previousGeofenceDepartureUtc != null and .finalEtaUtc == null) | {
+              loadReference,
+              nextStopName,
+              previousGeofenceDepartureUtc,
+              currentGeofenceName
+            }]
+          }' "$body_file")"
+          echo "$summary" | jq .
+          {
+            echo '### Production final ETA evidence'
+            echo
+            echo '```json'
+            echo "$summary" | jq .
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          available="$(jq -r '.geofenceAvailable // false' "$body_file")"
+          departure_count="$(jq -r '[.records[] | select(.previousGeofenceDepartureUtc != null)] | length' "$body_file")"
+          final_eta_count="$(jq -r '[.records[] | select(.finalEtaUtc != null)] | length' "$body_file")"
+          test "$available" = "true"
+          if test "$departure_count" -gt 0 && test "$final_eta_count" -eq 0; then
+            echo "::error title=Final ETA unavailable::There are $departure_count run(s) with an authoritative geofence departure but none produced a cumulative final ETA."
+            exit 1
+          fi
+
+          jq -r '.records[] | select(.completed != true and .previousGeofenceDepartureUtc != null and .finalEtaUtc == null) | "::warning title=Final ETA gap \(.loadReference)::Departure anchor exists but cumulative final ETA is still unavailable for next stop \(.nextStopName // "unknown")."' "$body_file"
+          rm -f "$body_file"
