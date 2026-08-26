@@ -1,0 +1,94 @@
+{
+  "properties": {
+    "displayName": "SLH-TMS | Info Mailbox | Heartbeat | PROD",
+    "state": "Stopped",
+    "connectionReferences": {
+      "shared_office365": {
+        "runtimeSource": "embedded",
+        "connection": { "connectionReferenceLogicalName": "slh_sharedoffice365_info" },
+        "api": { "name": "shared_office365" }
+      },
+      "shared_slhtms": {
+        "runtimeSource": "embedded",
+        "connection": { "connectionReferenceLogicalName": "slh_sharedslhtms_prod" },
+        "api": { "name": "shared_slhtms" }
+      }
+    },
+    "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "contentVersion": "1.0.0.0",
+      "parameters": {
+        "$connections": { "defaultValue": {}, "type": "Object" },
+        "SLH_InfoMailboxUPN": { "defaultValue": "info@lyonshaulage.com", "type": "String" }
+      },
+      "triggers": {
+        "Every_5_Minutes": {
+          "type": "Recurrence",
+          "recurrence": {
+            "frequency": "Minute",
+            "interval": 5
+          },
+          "runtimeConfiguration": {
+            "concurrency": { "runs": 1 }
+          }
+        }
+      },
+      "actions": {
+        "Probe_Info_Shared_Mailbox": {
+          "type": "OpenApiConnection",
+          "inputs": {
+            "host": {
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365",
+              "connectionName": "shared_office365",
+              "operationId": "HttpRequest"
+            },
+            "parameters": {
+              "Uri": "@concat('https://graph.microsoft.com/v1.0/users/', encodeUriComponent(parameters('SLH_InfoMailboxUPN')), '/mailFolders/inbox/messages?$top=1&$orderby=receivedDateTime%20desc&$select=id,receivedDateTime')",
+              "Method": "GET",
+              "ContentType": "application/json"
+            }
+          },
+          "runtimeConfiguration": {
+            "retryPolicy": {
+              "type": "exponential",
+              "count": 4,
+              "interval": "PT10S",
+              "minimumInterval": "PT10S",
+              "maximumInterval": "PT2M"
+            },
+            "secureData": { "properties": ["outputs"] }
+          }
+        },
+        "Record_Heartbeat_In_TMS": {
+          "type": "OpenApiConnection",
+          "runAfter": { "Probe_Info_Shared_Mailbox": ["Succeeded"] },
+          "inputs": {
+            "host": {
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_slhtms",
+              "connectionName": "shared_slhtms",
+              "operationId": "RecordInfoMailboxHeartbeat"
+            },
+            "body": {
+              "mailbox": "@parameters('SLH_InfoMailboxUPN')",
+              "flowName": "SLH-TMS | Info Mailbox | Heartbeat | PROD",
+              "flowRunId": "@workflow()?['run']?['name']",
+              "checkedAtUtc": "@utcNow()",
+              "latestInboxReceivedAtUtc": "@if(empty(body('Probe_Info_Shared_Mailbox')?['value']), null, first(body('Probe_Info_Shared_Mailbox')?['value'])?['receivedDateTime'])"
+            }
+          },
+          "runtimeConfiguration": {
+            "retryPolicy": {
+              "type": "exponential",
+              "count": 4,
+              "interval": "PT10S",
+              "minimumInterval": "PT10S",
+              "maximumInterval": "PT2M"
+            }
+          }
+        }
+      },
+      "outputs": {}
+    }
+  },
+  "schemaVersion": "1.0.0.0"
+}
