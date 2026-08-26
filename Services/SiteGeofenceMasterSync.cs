@@ -46,6 +46,7 @@ public static partial class SiteGeofenceMasterSync
 
         var fences = await db.SiteGeofences.Where(x => x.Active).OrderBy(x => x.Name).ToListAsync(ct);
         var sitesCoded = CanonicalizeSiteCodes(sites, fences);
+        var sitesById = sites.ToDictionary(x => x.Id);
         var linked = 0;
         var unlinked = 0;
         var canonicalized = 0;
@@ -55,6 +56,24 @@ public static partial class SiteGeofenceMasterSync
             if (string.Equals(fence.SiteNumber?.Trim(), LocationOnly, StringComparison.OrdinalIgnoreCase))
                 continue;
 
+            // A reviewed/existing link is authoritative when the geofence name contains
+            // any meaningful part of that Site's name, driver name or alias. Do not
+            // throw it away merely because another Site happens to share a brand token.
+            if (fence.SiteId is Guid linkedSiteId &&
+                sitesById.TryGetValue(linkedSiteId, out var linkedSite) &&
+                NameConfirms(fence.Name, linkedSite))
+            {
+                if (!string.Equals(fence.SiteNumber, linkedSite.ExternalCode, StringComparison.OrdinalIgnoreCase))
+                {
+                    fence.SiteNumber = linkedSite.ExternalCode;
+                    canonicalized++;
+                }
+                fence.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                continue;
+            }
+
+            // Only unlinked/invalid links are candidates for automatic matching. Auto-link
+            // remains conservative: there must be one unique strongest name-confirmed Site.
             var candidates = MatchingSites(fence.Name, sites);
             if (candidates.Count == 1)
             {
@@ -73,6 +92,8 @@ public static partial class SiteGeofenceMasterSync
                 continue;
             }
 
+            // If an existing relationship has no meaningful name confirmation at all,
+            // it is not a defensible link and should be surfaced for review.
             if (fence.SiteId is not null || !string.IsNullOrWhiteSpace(fence.SiteNumber))
             {
                 fence.SiteId = null;
@@ -117,9 +138,8 @@ public static partial class SiteGeofenceMasterSync
 
         var requested = sites.FirstOrDefault(x => string.Equals(x.ExternalCode, siteCode.Trim(), StringComparison.OrdinalIgnoreCase))
             ?? throw new KeyNotFoundException("Site code not found.");
-        var candidates = MatchingSites(fence.Name, sites);
-        if (candidates.Count != 1 || candidates[0].Id != requested.Id)
-            throw new InvalidOperationException($"Geofence '{fence.Name}' is not a unique name-confirmed match for {requested.ExternalCode} · {requested.Name}.");
+        if (!NameConfirms(fence.Name, requested))
+            throw new InvalidOperationException($"Geofence '{fence.Name}' does not contain a meaningful name confirmation for {requested.ExternalCode} · {requested.Name}.");
 
         fence.SiteId = requested.Id;
         fence.SiteNumber = requested.ExternalCode;
@@ -199,12 +219,7 @@ public static partial class SiteGeofenceMasterSync
             .Select(site =>
             {
                 var linked = fenceList
-                    .Where(fence =>
-                    {
-                        if (fence.SiteId != site.Id) return false;
-                        var candidates = MatchingSites(fence.Name, sites);
-                        return candidates.Count == 1 && candidates[0].Id == site.Id;
-                    })
+                    .Where(fence => fence.SiteId == site.Id && NameConfirms(fence.Name, site))
                     .Select(fence => fence.Name)
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .OrderBy(x => x)

@@ -35,6 +35,33 @@ public sealed class SiteGeofenceMasterSyncTests
     }
 
     [Fact]
+    public async Task Sync_preserves_existing_name_confirmed_link_even_when_brand_match_is_not_unique()
+    {
+        await using var db = CreateDb();
+        var chelmsford = new Site { ExternalCode = "ALDI-CHELMSFORD", Name = "Aldi - Chelmsford", Active = true };
+        var cardiff = new Site { ExternalCode = "ALDI-CARDIFF", Name = "Aldi Cardiff", Active = true };
+        db.Sites.AddRange(chelmsford, cardiff);
+        db.SiteGeofences.Add(new SiteGeofence
+        {
+            Name = "Aldi Depot",
+            NormalizedName = "ALDI DEPOT",
+            SiteId = chelmsford.Id,
+            SiteNumber = "ALDI-CHELMSFORD",
+            PolygonJson = "[[0,0],[1,0],[0,1]]",
+            Active = true
+        });
+        await db.SaveChangesAsync();
+
+        var result = await SiteGeofenceMasterSync.SyncAsync(db, CancellationToken.None);
+
+        var fence = Assert.Single(db.SiteGeofences);
+        Assert.Equal(chelmsford.Id, fence.SiteId);
+        Assert.Equal(chelmsford.ExternalCode, fence.SiteNumber);
+        Assert.Equal(0, result.GeofencesUnlinked);
+        Assert.Contains(result.Sites, x => x.SiteId == chelmsford.Id && x.GeofenceLinked && !x.NeedsReview);
+    }
+
+    [Fact]
     public async Task Sync_removes_stale_link_when_geofence_name_does_not_confirm_site()
     {
         await using var db = CreateDb();
@@ -62,7 +89,7 @@ public sealed class SiteGeofenceMasterSyncTests
     }
 
     [Fact]
-    public async Task Brand_only_match_is_not_linked_when_multiple_sites_share_brand()
+    public async Task Brand_only_unlinked_geofence_is_not_guessed_when_multiple_sites_share_brand()
     {
         await using var db = CreateDb();
         db.Sites.AddRange(
@@ -83,6 +110,31 @@ public sealed class SiteGeofenceMasterSyncTests
         Assert.Null(fence.SiteId);
         Assert.Equal(0, result.GeofencesLinked);
         Assert.Equal(2, result.SitesMissingGeofence);
+    }
+
+    [Fact]
+    public async Task Manual_link_accepts_meaningful_confirmation_without_requiring_global_uniqueness()
+    {
+        await using var db = CreateDb();
+        var chelmsford = new Site { ExternalCode = "SITE001", Name = "Aldi - Chelmsford", Active = true };
+        var cardiff = new Site { ExternalCode = "SITE002", Name = "Aldi Cardiff", Active = true };
+        var fence = new SiteGeofence
+        {
+            Name = "Aldi Depot",
+            NormalizedName = "ALDI DEPOT",
+            PolygonJson = "[[0,0],[1,0],[0,1]]",
+            Active = true
+        };
+        db.Sites.AddRange(chelmsford, cardiff);
+        db.SiteGeofences.Add(fence);
+        await db.SaveChangesAsync();
+
+        var status = await SiteGeofenceMasterSync.LinkGeofenceAsync(db, fence.Id, "SITE001", CancellationToken.None);
+
+        Assert.Equal(chelmsford.Id, fence.SiteId);
+        Assert.Equal("SITE001", fence.SiteNumber);
+        Assert.True(status.GeofenceLinked);
+        Assert.False(status.NeedsReview);
     }
 
     private static TmsDbContext CreateDb()
