@@ -44,4 +44,4 @@ jobs:
           git commit -m 'Fix Markets Sainsbury and Waitrose mailbox intake'
           git push origin HEAD:fix/markets-sainsbury-waitrose-intake-20260826
 
-# rerun after preserving C# escape sequences
+# rerun with explicit object-array test fixtures
