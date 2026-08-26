@@ -93,6 +93,8 @@ public sealed class RunTimingController(
             string finalEtaSource = "Unavailable";
             string? etaUnavailableStopName = null;
             string? etaUnavailableReason = null;
+            var etaLegs = new List<RunTimingLeg>();
+            var preRouteDwellMinutes = 0;
 
             if (!completed)
             {
@@ -114,6 +116,7 @@ public sealed class RunTimingController(
                         var predictedDwell = PredictedDwellMinutes(snapshot, activeStop, defaultIntermediateDwellMinutes);
                         var elapsedMinutes = Math.Max(0, (now - currentVisit.EnteredAtUtc).TotalMinutes);
                         var remainingDwell = Math.Max(0, predictedDwell - elapsedMinutes);
+                        preRouteDwellMinutes = (int)Math.Ceiling(remainingDwell);
                         routeAnchorUtc = now + TimeSpan.FromMinutes(remainingDwell);
                         finalContainsEstimate = remainingDwell > 0;
                     }
@@ -177,14 +180,26 @@ public sealed class RunTimingController(
                             finalEtaUtc = cursorTime;
                             cursor = destination.Value;
 
+                            var dwellMinutes = 0;
                             if (index < routeStops.Count - 1)
                             {
-                                var dwellMinutes = PredictedDwellMinutes(snapshot, stop, defaultIntermediateDwellMinutes);
-                                if (dwellMinutes > 0)
-                                {
-                                    cursorTime += TimeSpan.FromMinutes(dwellMinutes);
-                                    finalContainsEstimate = true;
-                                }
+                                dwellMinutes = PredictedDwellMinutes(snapshot, stop, defaultIntermediateDwellMinutes);
+                            }
+
+                            etaLegs.Add(new RunTimingLeg(
+                                stop.Id,
+                                stop.Sequence,
+                                stop.Name,
+                                (int)Math.Ceiling(route.TravelTime.TotalMinutes),
+                                dwellMinutes,
+                                cursorTime,
+                                route.IsApproximate,
+                                route.Provider));
+
+                            if (dwellMinutes > 0)
+                            {
+                                cursorTime += TimeSpan.FromMinutes(dwellMinutes);
+                                finalContainsEstimate = true;
                             }
                         }
                         catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException or Azure.Identity.AuthenticationFailedException)
@@ -231,7 +246,9 @@ public sealed class RunTimingController(
                 currentVisit?.EnteredAtUtc,
                 currentVisit?.Fence.Name,
                 etaUnavailableStopName,
-                etaUnavailableReason));
+                etaUnavailableReason,
+                preRouteDwellMinutes,
+                etaLegs));
         }
 
         return Ok(new RunTimingResponse(planningDate, now, true, records));
@@ -283,4 +300,16 @@ public sealed record RunTimingRecord(
     DateTimeOffset? DwellStartedAtUtc,
     string? CurrentGeofenceName,
     string? EtaUnavailableStopName,
-    string? EtaUnavailableReason);
+    string? EtaUnavailableReason,
+    int PreRouteDwellMinutes,
+    IReadOnlyList<RunTimingLeg> EtaLegs);
+
+public sealed record RunTimingLeg(
+    Guid StopId,
+    int Sequence,
+    string StopName,
+    int TravelMinutes,
+    int DwellMinutesAfterArrival,
+    DateTimeOffset ArrivalEtaUtc,
+    bool Approximate,
+    string Provider);
