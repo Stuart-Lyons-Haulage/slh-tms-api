@@ -50,9 +50,9 @@ public static class SiteMasterConsolidation
 
         // 1. Remove only high-confidence duplicate Sites. A duplicate group is auto-merged
         // when exactly one record owns active geofences; otherwise it is left untouched.
-        var sites = await db.Sites.Where(x => x.Active).ToListAsync(ct);
+        var activeSites = await db.Sites.Where(x => x.Active).ToListAsync(ct);
         var activeFences = await db.SiteGeofences.Where(x => x.Active).ToListAsync(ct);
-        foreach (var group in sites
+        foreach (var group in activeSites
                      .Where(x => Normalize(x.Name).Length > 0)
                      .GroupBy(x => Normalize(x.Name), StringComparer.OrdinalIgnoreCase)
                      .Where(x => x.Count() > 1))
@@ -88,7 +88,9 @@ public static class SiteMasterConsolidation
 
         // 2. Fold the legacy Customer/location register into Site Master without deleting
         // Customer rows, because historical/order commercial references still use CustomerCode.
-        sites = await db.Sites.Where(x => x.Active).ToListAsync(ct);
+        // All Sites are considered for code ownership so an archived Site can never be duplicated.
+        var allSites = await db.Sites.ToListAsync(ct);
+        activeSites = allSites.Where(x => x.Active).ToList();
         var customers = await db.Customers.Where(x => x.Active).ToListAsync(ct);
         foreach (var customer in customers)
         {
@@ -97,10 +99,29 @@ public static class SiteMasterConsolidation
             if (codeKey.Length == 0 || nameKey.Length == 0)
                 continue;
 
-            var codeMatches = sites.Where(x => Normalize(x.ExternalCode) == codeKey).ToList();
+            var codeMatches = allSites.Where(x => Normalize(x.ExternalCode) == codeKey).ToList();
             if (codeMatches.Count == 1)
             {
-                await AddSiteAliasesAsync(db, codeMatches[0], new[] { customer.Code, customer.Name }, source, ct);
+                var codeMatch = codeMatches[0];
+                if (!codeMatch.Active)
+                {
+                    if (Normalize(codeMatch.Name) != nameKey && Normalize(codeMatch.DriverTextName) != nameKey)
+                    {
+                        await FlagReviewAsync(db, SiteReviewType, $"archived-code:{codeKey}", new
+                        {
+                            reason = "customer_code_owned_by_different_archived_site",
+                            customer = new { customer.Id, customer.Code, customer.Name },
+                            archivedSite = new { codeMatch.Id, codeMatch.ExternalCode, codeMatch.Name, codeMatch.DriverTextName },
+                            requestedAction = "Confirm whether the archived Site should be restored or the Customer/location needs a different Site code."
+                        }, source, reviewKeys, ct);
+                        continue;
+                    }
+
+                    codeMatch.Active = true;
+                    activeSites.Add(codeMatch);
+                }
+
+                await AddSiteAliasesAsync(db, codeMatch, new[] { customer.Code, customer.Name }, source, ct);
                 continue;
             }
             if (codeMatches.Count > 1)
@@ -109,12 +130,12 @@ public static class SiteMasterConsolidation
                 {
                     reason = "customer_code_matches_multiple_sites",
                     customer = new { customer.Id, customer.Code, customer.Name },
-                    candidates = codeMatches.Select(x => new { x.Id, x.ExternalCode, x.Name }).ToArray()
+                    candidates = codeMatches.Select(x => new { x.Id, x.ExternalCode, x.Name, x.Active }).ToArray()
                 }, source, reviewKeys, ct);
                 continue;
             }
 
-            var nameMatches = sites.Where(x => Normalize(x.Name) == nameKey || Normalize(x.DriverTextName) == nameKey).ToList();
+            var nameMatches = activeSites.Where(x => Normalize(x.Name) == nameKey || Normalize(x.DriverTextName) == nameKey).ToList();
             if (nameMatches.Count == 1)
             {
                 await AddSiteAliasesAsync(db, nameMatches[0], new[] { customer.Code, customer.Name }, source, ct);
@@ -131,8 +152,6 @@ public static class SiteMasterConsolidation
                 continue;
             }
 
-            // A unique customer code/name with no conflicting Site is promoted to Site Master.
-            // The legacy Customer record remains active for commercial/order compatibility.
             var site = new Site
             {
                 ExternalCode = customer.Code.Trim(),
@@ -141,7 +160,8 @@ public static class SiteMasterConsolidation
                 Active = true
             };
             db.Sites.Add(site);
-            sites.Add(site);
+            allSites.Add(site);
+            activeSites.Add(site);
             promotedCustomers++;
             await AddSiteAliasesAsync(db, site, new[] { customer.Code, customer.Name }, source, ct);
         }
@@ -150,19 +170,19 @@ public static class SiteMasterConsolidation
         // 3. Sync every active geofence to the canonical Site identity. SiteId is authoritative;
         // SiteNumber is corrected to the canonical Site code. Unlinked fences use unique code/name/
         // alias matches only. Anything else is flagged for review.
-        sites = await db.Sites.Where(x => x.Active).ToListAsync(ct);
+        activeSites = await db.Sites.Where(x => x.Active).ToListAsync(ct);
         try
         {
-            await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
+            await MasterDetailStore.EnrichSitesAsync(db, activeSites, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             db.ChangeTracker.Clear();
-            sites = await db.Sites.Where(x => x.Active).ToListAsync(ct);
+            activeSites = await db.Sites.Where(x => x.Active).ToListAsync(ct);
         }
 
         var fences = await db.SiteGeofences.Where(x => x.Active).ToListAsync(ct);
-        var sitesById = sites.ToDictionary(x => x.Id);
+        var sitesById = activeSites.ToDictionary(x => x.Id);
         foreach (var fence in fences)
         {
             if (string.Equals(fence.SiteNumber?.Trim(), LocationOnly, StringComparison.OrdinalIgnoreCase))
@@ -182,13 +202,13 @@ public static class SiteMasterConsolidation
             var candidates = new List<Site>();
             var siteNumberKey = Normalize(fence.SiteNumber);
             if (siteNumberKey.Length > 0 && siteNumberKey != "1")
-                candidates.AddRange(sites.Where(x => Normalize(x.ExternalCode) == siteNumberKey));
+                candidates.AddRange(activeSites.Where(x => Normalize(x.ExternalCode) == siteNumberKey));
 
             if (candidates.Select(x => x.Id).Distinct().Count() != 1)
             {
                 candidates.Clear();
                 var fenceNameKey = Normalize(fence.Name);
-                candidates.AddRange(sites.Where(site => SiteNames(site).Any(name => Normalize(name) == fenceNameKey)));
+                candidates.AddRange(activeSites.Where(site => SiteNames(site).Any(name => Normalize(name) == fenceNameKey)));
             }
 
             candidates = candidates.GroupBy(x => x.Id).Select(x => x.First()).ToList();
@@ -237,7 +257,7 @@ public static class SiteMasterConsolidation
         string source,
         CancellationToken ct)
     {
-        var key = $"masterdetail:site:{Normalize(site.ExternalCode)}";
+        var key = $"masterdetail:site:{Normalize(site.ExternalCode).ToLowerInvariant()}";
         var row = await db.StagedImports.FirstOrDefaultAsync(x => x.IdempotencyKey == key, ct);
         JsonObject payload;
         try
@@ -295,7 +315,8 @@ public static class SiteMasterConsolidation
         ISet<string> reviewKeys,
         CancellationToken ct)
     {
-        var key = $"{entityType}:{suffix}";
+        var fullKey = $"{entityType}:{suffix}";
+        var key = fullKey.Length <= 200 ? fullKey : fullKey[..200];
         reviewKeys.Add(key);
         var row = await db.StagedImports.FirstOrDefaultAsync(x => x.IdempotencyKey == key, ct);
         var json = JsonSerializer.Serialize(payload);
@@ -304,7 +325,7 @@ public static class SiteMasterConsolidation
             db.StagedImports.Add(new StagedImport
             {
                 EntityType = entityType,
-                IdempotencyKey = key.Length <= 200 ? key : key[..200],
+                IdempotencyKey = key,
                 PayloadJson = json,
                 Status = StagingStatus.PendingReview,
                 Source = source,
