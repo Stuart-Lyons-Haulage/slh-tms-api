@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
@@ -157,13 +158,12 @@ public static partial class SiteGeofenceMasterSync
 
     public static async Task<SiteGeofenceStatus> LinkGeofenceAsync(TmsDbContext db, Guid geofenceId, string siteCode, CancellationToken ct)
     {
-        var fence = await db.SiteGeofences.FirstOrDefaultAsync(x => x.Id == geofenceId && x.Active, ct)
-            ?? throw new KeyNotFoundException("Geofence not found.");
         var sites = await db.Sites.Where(x => x.Active).ToListAsync(ct);
         try { await MasterDetailStore.EnrichSitesAsync(db, sites, ct); } catch (Exception ex) when (ex is not OperationCanceledException) { }
 
         var requested = sites.FirstOrDefault(x => string.Equals(x.ExternalCode, siteCode.Trim(), StringComparison.OrdinalIgnoreCase))
             ?? throw new KeyNotFoundException("Site code not found.");
+        var fence = await ResolveLinkableGeofenceAsync(db, geofenceId, ct);
 
         // This method is called by the authenticated operator dropdown. The selected
         // canonical Site is therefore an explicit manual decision and is authoritative.
@@ -173,6 +173,47 @@ public static partial class SiteGeofenceMasterSync
         fence.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
         return BuildStatus(sites, new[] { fence }).First(x => x.SiteId == requested.Id);
+    }
+
+    private static async Task<SiteGeofence> ResolveLinkableGeofenceAsync(TmsDbContext db, Guid geofenceId, CancellationToken ct)
+    {
+        var fence = await db.SiteGeofences.FirstOrDefaultAsync(x => x.Id == geofenceId && x.Active, ct);
+        if (fence is not null) return fence;
+
+        var embedded = EmbeddedGeofenceEngine.ApprovedFences.FirstOrDefault(x => x.Id == geofenceId)
+            ?? throw new KeyNotFoundException("Geofence not found.");
+        var normalizedName = NormalizeName(embedded.Name);
+        fence = await db.SiteGeofences.FirstOrDefaultAsync(x => x.NormalizedName == normalizedName, ct);
+        if (fence is null)
+        {
+            fence = new SiteGeofence
+            {
+                Id = embedded.Id,
+                Name = embedded.Name,
+                NormalizedName = normalizedName,
+                Category = embedded.Category,
+                CategoryMaxWaitMinutes = embedded.CategoryMaxWaitMinutes,
+                MaxWaitMinutes = embedded.MaxWaitMinutes,
+                PendingEntryMinutes = embedded.PendingEntryMinutes,
+                PendingExitMinutes = embedded.PendingExitMinutes,
+                SiteNumber = embedded.SiteNumber,
+                PolygonJson = PolygonJson(embedded),
+                Active = true
+            };
+            db.SiteGeofences.Add(fence);
+            return fence;
+        }
+
+        fence.Active = true;
+        fence.Name = embedded.Name;
+        fence.NormalizedName = normalizedName;
+        fence.Category ??= embedded.Category;
+        fence.CategoryMaxWaitMinutes ??= embedded.CategoryMaxWaitMinutes;
+        fence.MaxWaitMinutes ??= embedded.MaxWaitMinutes;
+        fence.PendingEntryMinutes = embedded.PendingEntryMinutes;
+        fence.PendingExitMinutes = embedded.PendingExitMinutes;
+        if (string.IsNullOrWhiteSpace(fence.PolygonJson)) fence.PolygonJson = PolygonJson(embedded);
+        return fence;
     }
 
     internal static bool NameConfirms(string geofenceName, Site site)
@@ -200,6 +241,11 @@ public static partial class SiteGeofenceMasterSync
             .DefaultIfEmpty(0)
             .Max();
     }
+
+    private static string NormalizeName(string value) => string.Join(' ', value.Trim().ToUpperInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries));
+
+    private static string PolygonJson(EmbeddedFence fence) =>
+        JsonSerializer.Serialize(fence.Points.Select(point => new[] { point.Longitude, point.Latitude }));
 
     private static async Task<int> CanonicalizeSiteCodesAsync(TmsDbContext db, IReadOnlyList<Site> sites, IReadOnlyList<SiteGeofence> fences, CancellationToken ct)
     {

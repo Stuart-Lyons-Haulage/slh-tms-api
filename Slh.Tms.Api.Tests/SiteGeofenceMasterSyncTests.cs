@@ -63,7 +63,7 @@ public sealed class SiteGeofenceMasterSyncTests
     }
 
     [Fact]
-    public async Task Sync_removes_stale_link_when_geofence_name_does_not_confirm_site()
+    public async Task Sync_preserves_explicit_link_when_geofence_name_does_not_confirm_site()
     {
         await using var db = CreateDb();
         var southbound = new Site { ExternalCode = "1", Name = "Southbound", Active = true };
@@ -82,11 +82,11 @@ public sealed class SiteGeofenceMasterSyncTests
         var result = await SiteGeofenceMasterSync.SyncAsync(db, CancellationToken.None);
 
         var fence = Assert.Single(db.SiteGeofences);
-        Assert.Null(fence.SiteId);
-        Assert.Null(fence.SiteNumber);
+        Assert.Equal(southbound.Id, fence.SiteId);
+        Assert.Equal("SITE001", fence.SiteNumber);
         Assert.Equal("SITE001", southbound.ExternalCode);
-        Assert.Equal(1, result.GeofencesUnlinked);
-        Assert.True(Assert.Single(result.Sites).NeedsReview);
+        Assert.Equal(0, result.GeofencesUnlinked);
+        Assert.False(Assert.Single(result.Sites).NeedsReview);
     }
 
     [Fact]
