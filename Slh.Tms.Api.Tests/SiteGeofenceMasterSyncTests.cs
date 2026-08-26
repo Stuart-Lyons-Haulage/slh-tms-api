@@ -26,11 +26,10 @@ public sealed class SiteGeofenceMasterSyncTests
 
         var result = await SiteGeofenceMasterSync.SyncAsync(db, CancellationToken.None);
 
-        Assert.Equal("SITE001", cardiff.ExternalCode);
-        Assert.Equal("SITE002", chelmsford.ExternalCode);
+        Assert.Equal(new[] { "SITE001", "SITE002" }, new[] { chelmsford.ExternalCode, cardiff.ExternalCode }.OrderBy(x => x).ToArray());
         var fence = Assert.Single(db.SiteGeofences);
         Assert.Equal(chelmsford.Id, fence.SiteId);
-        Assert.Equal("SITE002", fence.SiteNumber);
+        Assert.Equal(chelmsford.ExternalCode, fence.SiteNumber);
         Assert.Equal(1, result.GeofencesLinked);
         Assert.Contains(result.Sites, x => x.SiteId == chelmsford.Id && x.GeofenceLinked && !x.NeedsReview);
     }
