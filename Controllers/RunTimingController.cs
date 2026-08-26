@@ -43,7 +43,13 @@ public sealed class RunTimingController(
             return Ok(new RunTimingResponse(planningDate, DateTimeOffset.UtcNow, false, []));
         }
 
+        var now = DateTimeOffset.UtcNow;
+        var defaultIntermediateDwellMinutes = Math.Clamp(
+            configuration.GetValue<int?>("Operations:DefaultIntermediateDwellMinutes") ?? 20,
+            0,
+            120);
         var records = new List<RunTimingRecord>();
+
         foreach (var load in loads)
         {
             var orderedStops = (load.Stops ?? []).OrderBy(stop => stop.Sequence).ToList();
@@ -54,7 +60,10 @@ public sealed class RunTimingController(
             var completedStopIds = GeofencePlanningMatch.CompletedStopIds(load, visits);
             var completed = orderedStops.Count > 0 && orderedStops.All(stop => completedStopIds.Contains(stop.Id));
             var currentVisit = visits.LastOrDefault(visit => visit.ExitedAtUtc is null);
-            var nextStop = completed ? null : orderedStops.FirstOrDefault(stop => !completedStopIds.Contains(stop.Id));
+            var remainingStops = completed
+                ? []
+                : orderedStops.Where(stop => !completedStopIds.Contains(stop.Id)).ToList();
+            var nextStop = remainingStops.FirstOrDefault();
             var lastDeparture = visits
                 .Where(visit => visit.ExitedAtUtc is not null && visit.LoadStopId is not null && completedStopIds.Contains(visit.LoadStopId.Value))
                 .OrderByDescending(visit => visit.ExitedAtUtc)
@@ -69,33 +78,106 @@ public sealed class RunTimingController(
 
             DateTimeOffset? nextEtaUtc = null;
             string etaSource = "Unavailable";
-            if (!completed && currentVisit is null && timingDeparture?.ExitedAtUtc is DateTimeOffset departedAt && nextStop is not null &&
-                nextStop.Longitude is not null && nextStop.Latitude is not null)
+            DateTimeOffset? finalEtaUtc = null;
+            string finalEtaSource = "Unavailable";
+
+            if (!completed)
             {
-                (decimal Longitude, decimal Latitude)? origin;
-                if (lastDeparture is not null)
+                (decimal Longitude, decimal Latitude)? routeOrigin = null;
+                DateTimeOffset? routeAnchorUtc = null;
+                var routeStops = remainingStops;
+                var finalContainsEstimate = false;
+
+                if (currentVisit is not null)
                 {
-                    var previousStop = lastDeparture.LoadStopId is Guid previousStopId
-                        ? orderedStops.FirstOrDefault(stop => stop.Id == previousStopId)
-                        : null;
-                    origin = Origin(previousStop, lastDeparture.Fence);
+                    var activeStop = currentVisit.LoadStopId is Guid activeStopId
+                        ? orderedStops.FirstOrDefault(stop => stop.Id == activeStopId)
+                        : remainingStops.FirstOrDefault(stop => GeofencePlanningMatch.SamePhysicalSite(stop, currentVisit.Fence));
+
+                    if (activeStop is not null)
+                    {
+                        routeOrigin = OperationalRunOrigin.FenceCentre(currentVisit.Fence);
+                        routeStops = remainingStops.Where(stop => stop.Sequence > activeStop.Sequence).ToList();
+                        var predictedDwell = PredictedDwellMinutes(snapshot, activeStop, defaultIntermediateDwellMinutes);
+                        var elapsedMinutes = Math.Max(0, (now - currentVisit.EnteredAtUtc).TotalMinutes);
+                        var remainingDwell = Math.Max(0, predictedDwell - elapsedMinutes);
+                        routeAnchorUtc = now + TimeSpan.FromMinutes(remainingDwell);
+                        finalContainsEstimate = remainingDwell > 0;
+                    }
                 }
-                else
+                else if (timingDeparture?.ExitedAtUtc is DateTimeOffset departedAt)
                 {
-                    origin = OperationalRunOrigin.FenceCentre(timingDeparture.Fence);
+                    routeAnchorUtc = departedAt;
+                    if (lastDeparture is not null)
+                    {
+                        var previousStop = lastDeparture.LoadStopId is Guid previousStopId
+                            ? orderedStops.FirstOrDefault(stop => stop.Id == previousStopId)
+                            : null;
+                        routeOrigin = Origin(previousStop, lastDeparture.Fence);
+                    }
+                    else
+                    {
+                        routeOrigin = OperationalRunOrigin.FenceCentre(timingDeparture.Fence);
+                    }
                 }
 
-                if (origin is not null)
+                if (routeOrigin is not null && routeAnchorUtc is not null && routeStops.Count > 0)
                 {
-                    try
+                    var cursor = routeOrigin.Value;
+                    var cursorTime = routeAnchorUtc.Value;
+                    var routeFailed = false;
+
+                    for (var index = 0; index < routeStops.Count; index++)
                     {
-                        var route = await maps.TravelTimeEstimate(origin.Value, (nextStop.Longitude.Value, nextStop.Latitude.Value), ct);
-                        nextEtaUtc = departedAt + route.TravelTime;
-                        etaSource = route.IsApproximate ? "GeofenceEstimated" : "Geofence";
+                        var stop = routeStops[index];
+                        var destination = OperationalStopCoordinates.Resolve(stop);
+                        if (destination is null)
+                        {
+                            routeFailed = true;
+                            break;
+                        }
+
+                        try
+                        {
+                            var route = await maps.TravelTimeEstimate(cursor, destination.Value, ct);
+                            cursorTime += route.TravelTime;
+                            finalContainsEstimate |= route.IsApproximate;
+
+                            if (index == 0 && currentVisit is null)
+                            {
+                                nextEtaUtc = cursorTime;
+                                etaSource = route.IsApproximate ? "GeofenceEstimated" : "Geofence";
+                            }
+
+                            finalEtaUtc = cursorTime;
+                            cursor = destination.Value;
+
+                            if (index < routeStops.Count - 1)
+                            {
+                                var dwellMinutes = PredictedDwellMinutes(snapshot, stop, defaultIntermediateDwellMinutes);
+                                if (dwellMinutes > 0)
+                                {
+                                    cursorTime += TimeSpan.FromMinutes(dwellMinutes);
+                                    finalContainsEstimate = true;
+                                }
+                            }
+                        }
+                        catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException or Azure.Identity.AuthenticationFailedException)
+                        {
+                            logger.LogDebug(exception, "Could not calculate geofence-anchored ETA for run {Run} stop {Stop}.", load.Reference, stop.Name);
+                            routeFailed = true;
+                            break;
+                        }
                     }
-                    catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException or Azure.Identity.AuthenticationFailedException)
+
+                    if (routeFailed)
                     {
-                        logger.LogDebug(exception, "Could not calculate geofence-anchored ETA for run {Run} stop {Stop}.", load.Reference, nextStop.Name);
+                        finalEtaUtc = null;
+                        finalEtaSource = "Unavailable";
+                    }
+                    else if (finalEtaUtc is not null)
+                    {
+                        finalEtaSource = finalContainsEstimate ? "GeofenceEstimated" : "Geofence";
                     }
                 }
             }
@@ -109,19 +191,32 @@ public sealed class RunTimingController(
                 nextStop?.Name,
                 nextEtaUtc,
                 etaSource,
+                finalEtaUtc,
+                finalEtaSource,
                 timingDeparture?.ExitedAtUtc,
                 currentVisit?.EnteredAtUtc,
                 currentVisit?.Fence.Name));
         }
 
-        return Ok(new RunTimingResponse(planningDate, DateTimeOffset.UtcNow, true, records));
+        return Ok(new RunTimingResponse(planningDate, now, true, records));
     }
 
-    private static (decimal Longitude, decimal Latitude)? Origin(LoadStop? stop, EmbeddedFence fence)
+    private static (decimal Longitude, decimal Latitude)? Origin(LoadStop? stop, EmbeddedFence fence) =>
+        stop is null ? OperationalRunOrigin.FenceCentre(fence) : OperationalStopCoordinates.Resolve(stop) ?? OperationalRunOrigin.FenceCentre(fence);
+
+    private static int PredictedDwellMinutes(EmbeddedGeofenceSnapshot snapshot, LoadStop stop, int fallbackMinutes)
     {
-        if (stop?.Longitude is not null && stop.Latitude is not null)
-            return (stop.Longitude.Value, stop.Latitude.Value);
-        return OperationalRunOrigin.FenceCentre(fence);
+        var samples = snapshot.Visits
+            .Where(visit => visit.ExitedAtUtc is not null && GeofencePlanningMatch.SamePhysicalSite(stop, visit.Fence))
+            .Select(visit => (int)Math.Round((visit.ExitedAtUtc!.Value - visit.EnteredAtUtc).TotalMinutes))
+            .Where(minutes => minutes >= 2 && minutes <= 180)
+            .OrderBy(minutes => minutes)
+            .ToList();
+        if (samples.Count == 0) return fallbackMinutes;
+        var middle = samples.Count / 2;
+        return samples.Count % 2 == 1
+            ? samples[middle]
+            : (int)Math.Round((samples[middle - 1] + samples[middle]) / 2d);
     }
 
     private static DateOnly UkOperatingDate(DateTimeOffset value)
@@ -141,6 +236,8 @@ public sealed record RunTimingRecord(
     string? NextStopName,
     DateTimeOffset? NextEtaUtc,
     string EtaSource,
+    DateTimeOffset? FinalEtaUtc,
+    string FinalEtaSource,
     DateTimeOffset? PreviousGeofenceDepartureUtc,
     DateTimeOffset? DwellStartedAtUtc,
     string? CurrentGeofenceName);
