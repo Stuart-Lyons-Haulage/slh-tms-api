@@ -11,7 +11,8 @@ public sealed record SiteGeofenceSyncResult(
     int GeofencesUnlinked,
     int GeofencesCanonicalized,
     int SitesMissingGeofence,
-    IReadOnlyList<SiteGeofenceStatus> Sites);
+    IReadOnlyList<SiteGeofenceStatus> Sites,
+    IReadOnlyList<string>? Warnings = null);
 
 public sealed record SiteGeofenceStatus(
     Guid SiteId,
@@ -45,7 +46,20 @@ public static partial class SiteGeofenceMasterSync
         }
 
         var fences = await db.SiteGeofences.Where(x => x.Active).OrderBy(x => x.Name).ToListAsync(ct);
-        var sitesCoded = await CanonicalizeSiteCodesAsync(db, sites, fences, ct);
+        var warnings = new List<string>();
+        var sitesCoded = 0;
+        try
+        {
+            sitesCoded = await CanonicalizeSiteCodesAsync(db, sites, fences, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            warnings.Add($"Site code canonicalisation was skipped: {ex.GetBaseException().Message}");
+            db.ChangeTracker.Clear();
+            sites = await db.Sites.Where(x => x.Active).OrderBy(x => x.Name).ThenBy(x => x.Id).ToListAsync(ct);
+            fences = await db.SiteGeofences.Where(x => x.Active).OrderBy(x => x.Name).ToListAsync(ct);
+        }
+
         var sitesById = sites.ToDictionary(x => x.Id);
         var linked = 0;
         var unlinked = 0;
@@ -103,7 +117,21 @@ public static partial class SiteGeofenceMasterSync
             }
         }
 
-        await db.SaveChangesAsync(ct);
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            warnings.Add($"Automatic geofence link updates were skipped: {ex.GetBaseException().Message}");
+            db.ChangeTracker.Clear();
+            sites = await db.Sites.AsNoTracking().Where(x => x.Active).OrderBy(x => x.Name).ThenBy(x => x.Id).ToListAsync(ct);
+            fences = await db.SiteGeofences.AsNoTracking().Where(x => x.Active).OrderBy(x => x.Name).ToListAsync(ct);
+            linked = 0;
+            unlinked = 0;
+            canonicalized = 0;
+        }
+
         var status = BuildStatus(sites, fences);
         return new SiteGeofenceSyncResult(
             sitesCoded,
@@ -111,7 +139,8 @@ public static partial class SiteGeofenceMasterSync
             unlinked,
             canonicalized,
             status.Count(x => x.NeedsReview),
-            status);
+            status,
+            warnings);
     }
 
     public static async Task<IReadOnlyList<SiteGeofenceStatus>> GetStatusAsync(TmsDbContext db, CancellationToken ct)
@@ -208,6 +237,27 @@ public static partial class SiteGeofenceMasterSync
             .ToList();
         if (changedSites.Count == 0) return 0;
 
+        if (db.Database.IsRelational())
+        {
+            await using var transaction = await db.Database.BeginTransactionAsync(ct);
+            await ApplySiteCodeRenumberingAsync(db, changedSites, fences, desiredBySiteId, ct);
+            await transaction.CommitAsync(ct);
+        }
+        else
+        {
+            await ApplySiteCodeRenumberingAsync(db, changedSites, fences, desiredBySiteId, ct);
+        }
+
+        return changedSites.Count;
+    }
+
+    private static async Task ApplySiteCodeRenumberingAsync(
+        TmsDbContext db,
+        IReadOnlyList<Site> changedSites,
+        IReadOnlyList<SiteGeofence> fences,
+        IReadOnlyDictionary<Guid, string> desiredBySiteId,
+        CancellationToken ct)
+    {
         foreach (var site in changedSites)
             site.ExternalCode = TemporarySiteCode(site.Id);
 
@@ -221,7 +271,7 @@ public static partial class SiteGeofenceMasterSync
                 fence.SiteNumber = desired;
         }
 
-        return changedSites.Count;
+        await db.SaveChangesAsync(ct);
     }
 
     private static string TemporarySiteCode(Guid siteId) => $"TMP{siteId:N}"[..35];
