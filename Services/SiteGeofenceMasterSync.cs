@@ -45,7 +45,7 @@ public static partial class SiteGeofenceMasterSync
         }
 
         var fences = await db.SiteGeofences.Where(x => x.Active).OrderBy(x => x.Name).ToListAsync(ct);
-        var sitesCoded = CanonicalizeSiteCodes(sites, fences);
+        var sitesCoded = await CanonicalizeSiteCodesAsync(db, sites, fences, ct);
         var sitesById = sites.ToDictionary(x => x.Id);
         var linked = 0;
         var unlinked = 0;
@@ -174,7 +174,7 @@ public static partial class SiteGeofenceMasterSync
             .Max();
     }
 
-    private static int CanonicalizeSiteCodes(IReadOnlyList<Site> sites, IReadOnlyList<SiteGeofence> fences)
+    private static async Task<int> CanonicalizeSiteCodesAsync(TmsDbContext db, IReadOnlyList<Site> sites, IReadOnlyList<SiteGeofence> fences, CancellationToken ct)
     {
         var used = new HashSet<int>();
         var retained = new Dictionary<Guid, int>();
@@ -187,7 +187,7 @@ public static partial class SiteGeofenceMasterSync
         }
 
         var next = 1;
-        var changed = 0;
+        var desiredBySiteId = new Dictionary<Guid, string>();
         foreach (var site in sites)
         {
             if (!retained.TryGetValue(site.Id, out var number))
@@ -199,16 +199,32 @@ public static partial class SiteGeofenceMasterSync
             }
 
             var desired = $"SITE{number:D3}";
-            if (string.Equals(site.ExternalCode, desired, StringComparison.OrdinalIgnoreCase))
-                continue;
+            desiredBySiteId[site.Id] = desired;
+        }
 
+        var changedSites = sites
+            .Where(site => desiredBySiteId.TryGetValue(site.Id, out var desired) &&
+                !string.Equals(site.ExternalCode, desired, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (changedSites.Count == 0) return 0;
+
+        foreach (var site in changedSites)
+            site.ExternalCode = TemporarySiteCode(site.Id);
+
+        await db.SaveChangesAsync(ct);
+
+        foreach (var site in changedSites)
+        {
+            var desired = desiredBySiteId[site.Id];
             site.ExternalCode = desired;
-            changed++;
             foreach (var fence in fences.Where(x => x.SiteId == site.Id))
                 fence.SiteNumber = desired;
         }
-        return changed;
+
+        return changedSites.Count;
     }
+
+    private static string TemporarySiteCode(Guid siteId) => $"TMP{siteId:N}"[..35];
 
     private static IReadOnlyList<SiteGeofenceStatus> BuildStatus(IReadOnlyList<Site> sites, IEnumerable<SiteGeofence> fences)
     {

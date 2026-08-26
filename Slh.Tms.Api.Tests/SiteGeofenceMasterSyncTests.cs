@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Data.Sqlite;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
@@ -135,6 +136,31 @@ public sealed class SiteGeofenceMasterSyncTests
         Assert.Equal("SITE001", fence.SiteNumber);
         Assert.True(status.GeofenceLinked);
         Assert.False(status.NeedsReview);
+    }
+
+    [Fact]
+    public async Task Sync_renumbers_existing_site_codes_without_sql_unique_collision()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<TmsDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new TmsDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        db.Sites.AddRange(
+            new Site { ExternalCode = "Aldi", Name = "Aldi", Active = true },
+            new Site { ExternalCode = "SITE001", Name = "A.H. Worth (Fosdyke) Ltd", Active = true },
+            new Site { ExternalCode = "SITE003", Name = "Absolute Taste (Bicester)", Active = true });
+        await db.SaveChangesAsync();
+
+        var result = await SiteGeofenceMasterSync.SyncAsync(db, CancellationToken.None);
+
+        Assert.Equal(1, result.SitesCoded);
+        Assert.Equal(
+            new[] { "SITE001", "SITE003", "SITE002" },
+            db.Sites.OrderBy(site => site.Name).Select(site => site.ExternalCode).ToArray());
     }
 
     private static TmsDbContext CreateDb()
