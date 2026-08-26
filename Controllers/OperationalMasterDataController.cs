@@ -216,12 +216,40 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
     public Task<IActionResult> RestoreCustomer(Guid id, CancellationToken ct) => SetActive(db.Customers, id, true, "Customer", x => x.Active, (x, v) => x.Active = v, ct);
 
     [HttpGet("geofences/search")]
-    public async Task<IActionResult> SearchGeofences([FromQuery] string? q, [FromQuery] bool includeInactive, CancellationToken ct)
+    public async Task<IActionResult> SearchGeofences([FromQuery] string? q, [FromQuery] bool includeInactive, [FromQuery] int take = 100, CancellationToken ct = default)
     {
         q = (q ?? string.Empty).Trim();
-        var query = db.SiteGeofences.AsNoTracking().Where(x => includeInactive || x.Active);
-        if (q.Length > 0) query = query.Where(x => x.Name.Contains(q) || (x.SiteNumber != null && x.SiteNumber.Contains(q)) || (x.Category != null && x.Category.Contains(q)));
-        return Ok(await query.OrderBy(x => x.Name).Take(100).ToListAsync(ct));
+        take = Math.Clamp(take, 1, 5000);
+        var stored = await db.SiteGeofences.AsNoTracking()
+            .Where(x => includeInactive || x.Active)
+            .ToListAsync(ct);
+
+        // Some approved RoadTech geofences exist in the runtime seed before a user links
+        // them to a Site Master record. Include them here so they can be selected directly.
+        var storedIds = stored.Select(x => x.Id).ToHashSet();
+        var seeded = EmbeddedGeofenceEngine.ApprovedFences
+            .Where(fence => !storedIds.Contains(fence.Id))
+            .Select(fence => new SiteGeofence
+            {
+                Id = fence.Id,
+                Name = fence.Name,
+                NormalizedName = NormalizeName(fence.Name),
+                Category = fence.Category,
+                CategoryMaxWaitMinutes = fence.CategoryMaxWaitMinutes,
+                MaxWaitMinutes = fence.MaxWaitMinutes,
+                PendingEntryMinutes = fence.PendingEntryMinutes,
+                PendingExitMinutes = fence.PendingExitMinutes,
+                SiteNumber = fence.SiteNumber,
+                PolygonJson = PolygonJson(fence),
+                Active = true
+            });
+
+        var rows = stored.Concat(seeded);
+        if (q.Length > 0)
+            rows = rows.Where(x => x.Name.Contains(q, StringComparison.OrdinalIgnoreCase)
+                || (x.SiteNumber?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false)
+                || (x.Category?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false));
+        return Ok(rows.OrderBy(x => x.Name).Take(take).ToList());
     }
 
     [HttpPut("geofences/{id:guid}"), Authorize(Policy = "TmsApprove")]
