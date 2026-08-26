@@ -1,16 +1,18 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
 
 /// <summary>
-/// Operational wallboard timing derived from geofence execution.
-/// Dwell starts at first observation inside a geofence. The first-leg ETA starts when
-/// the vehicle leaves Lake Lane; subsequent ETAs are anchored to the previous customer
-/// geofence departure rather than continuously rebasing from current GPS.
+/// Operational wallboard timing derived from geofence execution and live RoadTech position.
+/// Geofence departure proves progression and is the resilient fallback anchor. While the
+/// vehicle is between stops, fresh RoadTech GPS + current time determine remaining travel.
+/// Dwell starts at first observation inside a geofence and is projected between remaining jobs.
 /// </summary>
 [ApiController, Route("api/v1/run-timing")]
 [Authorize]
@@ -55,6 +57,7 @@ public sealed class RunTimingController(
         }
 
         var now = DateTimeOffset.UtcNow;
+        var liveByVehicle = await LoadFreshLivePositionsAsync(loads, now, ct);
         var defaultIntermediateDwellMinutes = Math.Clamp(
             configuration.GetValue<int?>("Operations:DefaultIntermediateDwellMinutes") ?? 20,
             0,
@@ -69,23 +72,30 @@ public sealed class RunTimingController(
                 .OrderBy(visit => visit.EnteredAtUtc)
                 .ToList();
             var completedStopIds = GeofencePlanningMatch.CompletedStopIds(load, visits);
-            var completed = orderedStops.Count > 0 && orderedStops.All(stop => completedStopIds.Contains(stop.Id));
             var currentVisit = visits.LastOrDefault(visit => visit.ExitedAtUtc is null);
+            var activeStopId = currentVisit?.LoadStopId;
+            var completed = RunProgressionFrontier.FinalStopCompleted(orderedStops, completedStopIds);
             var remainingStops = completed
                 ? []
-                : orderedStops.Where(stop => !completedStopIds.Contains(stop.Id)).ToList();
+                : RunProgressionFrontier.RemainingOperationalStops(orderedStops, completedStopIds, activeStopId).ToList();
             var nextStop = remainingStops.FirstOrDefault();
+            var evidenceGaps = RunProgressionFrontier.EvidenceGapsBeforeFrontier(orderedStops, completedStopIds, activeStopId)
+                .Select(stop => new RunTimingEvidenceGap(stop.Id, stop.Sequence, stop.Name))
+                .ToList();
             var lastDeparture = visits
                 .Where(visit => visit.ExitedAtUtc is not null && visit.LoadStopId is not null && completedStopIds.Contains(visit.LoadStopId.Value))
                 .OrderByDescending(visit => visit.ExitedAtUtc)
                 .FirstOrDefault();
 
-            // Before stop 1, Lake Lane is the authoritative run origin. Once a customer
-            // stop has completed, the customer geofence departure becomes authoritative.
-            var lakeLaneDeparture = completedStopIds.Count == 0
+            // Lake Lane is the authoritative route origin before any customer departure.
+            // Once a customer stop has completed, that departure proves progression.
+            var lakeLaneDeparture = lastDeparture is null
                 ? OperationalRunOrigin.LakeLaneDepartureFor(snapshot, load)
                 : null;
             var timingDeparture = lastDeparture ?? lakeLaneDeparture;
+            var live = load.VehicleId is Guid vehicleId
+                ? liveByVehicle.GetValueOrDefault(vehicleId)
+                : null;
 
             DateTimeOffset? nextEtaUtc = null;
             string etaSource = "Unavailable";
@@ -95,6 +105,7 @@ public sealed class RunTimingController(
             string? etaUnavailableReason = null;
             var etaLegs = new List<RunTimingLeg>();
             var preRouteDwellMinutes = 0;
+            var routeAnchorSource = "Unavailable";
 
             if (!completed)
             {
@@ -105,19 +116,22 @@ public sealed class RunTimingController(
 
                 if (currentVisit is not null)
                 {
-                    var activeStop = currentVisit.LoadStopId is Guid activeStopId
-                        ? orderedStops.FirstOrDefault(stop => stop.Id == activeStopId)
-                        : remainingStops.FirstOrDefault(stop => GeofencePlanningMatch.SamePhysicalSite(stop, currentVisit.Fence));
+                    var activeStop = currentVisit.LoadStopId is Guid currentId
+                        ? orderedStops.FirstOrDefault(stop => stop.Id == currentId)
+                        : orderedStops.FirstOrDefault(stop => GeofencePlanningMatch.SamePhysicalSite(stop, currentVisit.Fence));
 
                     if (activeStop is not null)
                     {
                         routeOrigin = OperationalRunOrigin.FenceCentre(currentVisit.Fence);
-                        routeStops = remainingStops.Where(stop => stop.Sequence > activeStop.Sequence).ToList();
+                        routeStops = orderedStops
+                            .Where(stop => stop.Sequence > activeStop.Sequence && !completedStopIds.Contains(stop.Id))
+                            .ToList();
                         var predictedDwell = PredictedDwellMinutes(snapshot, activeStop, defaultIntermediateDwellMinutes);
                         var elapsedMinutes = Math.Max(0, (now - currentVisit.EnteredAtUtc).TotalMinutes);
                         var remainingDwell = Math.Max(0, predictedDwell - elapsedMinutes);
                         preRouteDwellMinutes = (int)Math.Ceiling(remainingDwell);
                         routeAnchorUtc = now + TimeSpan.FromMinutes(remainingDwell);
+                        routeAnchorSource = "Current geofence + remaining dwell";
                         finalContainsEstimate = remainingDwell > 0;
                     }
                     else
@@ -128,23 +142,31 @@ public sealed class RunTimingController(
                 }
                 else if (timingDeparture?.ExitedAtUtc is DateTimeOffset departedAt)
                 {
-                    routeAnchorUtc = departedAt;
+                    (decimal Longitude, decimal Latitude)? departureOrigin;
                     if (lastDeparture is not null)
                     {
                         var previousStop = lastDeparture.LoadStopId is Guid previousStopId
                             ? orderedStops.FirstOrDefault(stop => stop.Id == previousStopId)
                             : null;
-                        routeOrigin = Origin(previousStop, lastDeparture.Fence, masterData);
+                        departureOrigin = Origin(previousStop, lastDeparture.Fence, masterData);
                     }
                     else
                     {
-                        routeOrigin = OperationalRunOrigin.FenceCentre(timingDeparture.Fence);
+                        departureOrigin = OperationalRunOrigin.FenceCentre(timingDeparture.Fence);
+                    }
+
+                    if (departureOrigin is not null)
+                    {
+                        var anchor = RunTimingLiveAnchor.BetweenStops(now, departedAt, departureOrigin.Value, live);
+                        routeOrigin = anchor.Origin;
+                        routeAnchorUtc = anchor.AnchorUtc;
+                        routeAnchorSource = anchor.Source;
                     }
                 }
                 else if (remainingStops.Count > 0)
                 {
                     etaUnavailableStopName = nextStop?.Name;
-                    etaUnavailableReason = "No authoritative Lake Lane/customer geofence departure is available to anchor the remaining route.";
+                    etaUnavailableReason = "No authoritative Lake Lane/customer geofence departure is available to prove that this run has started.";
                 }
 
                 if (routeOrigin is not null && routeAnchorUtc is not null && routeStops.Count > 0)
@@ -182,9 +204,7 @@ public sealed class RunTimingController(
 
                             var dwellMinutes = 0;
                             if (index < routeStops.Count - 1)
-                            {
                                 dwellMinutes = PredictedDwellMinutes(snapshot, stop, defaultIntermediateDwellMinutes);
-                            }
 
                             etaLegs.Add(new RunTimingLeg(
                                 stop.Id,
@@ -204,7 +224,7 @@ public sealed class RunTimingController(
                         }
                         catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException or Azure.Identity.AuthenticationFailedException)
                         {
-                            logger.LogDebug(exception, "Could not calculate geofence-anchored ETA for run {Run} stop {Stop}.", load.Reference, stop.Name);
+                            logger.LogDebug(exception, "Could not calculate live/geofence ETA for run {Run} stop {Stop}.", load.Reference, stop.Name);
                             etaUnavailableStopName = stop.Name;
                             etaUnavailableReason = "The route provider could not calculate this remaining leg.";
                             routeFailed = true;
@@ -248,10 +268,52 @@ public sealed class RunTimingController(
                 etaUnavailableStopName,
                 etaUnavailableReason,
                 preRouteDwellMinutes,
-                etaLegs));
+                etaLegs,
+                routeAnchorSource,
+                evidenceGaps));
         }
 
         return Ok(new RunTimingResponse(planningDate, now, true, records));
+    }
+
+    private async Task<Dictionary<Guid, VehicleLiveStatus>> LoadFreshLivePositionsAsync(
+        IReadOnlyCollection<Load> loads,
+        DateTimeOffset now,
+        CancellationToken ct)
+    {
+        var vehicleIds = loads
+            .Where(load => load.VehicleId is not null)
+            .Select(load => load.VehicleId!.Value)
+            .Distinct()
+            .ToList();
+        if (vehicleIds.Count == 0) return new Dictionary<Guid, VehicleLiveStatus>();
+
+        try
+        {
+            var vehicles = await db.Vehicles.AsNoTracking()
+                .Where(vehicle => vehicleIds.Contains(vehicle.Id))
+                .ToListAsync(ct);
+            var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles, ct);
+            var freshSince = now.AddMinutes(-5);
+            var statuses = await db.VehicleLiveStatuses.AsNoTracking()
+                .Where(status => status.LastReceivedAtUtc >= freshSince)
+                .ToListAsync(ct);
+
+            var result = new Dictionary<Guid, VehicleLiveStatus>();
+            foreach (var vehicle in vehicles)
+            {
+                if (!aliasesByVehicle.TryGetValue(vehicle.Id, out var aliases)) continue;
+                var live = ExecutionIdentityResolver.MatchLive(aliases, statuses);
+                if (live is not null) result[vehicle.Id] = live;
+            }
+            return result;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            logger.LogWarning(exception, "Fresh RoadTech SQL position could not be resolved for live ETA rebasing; geofence departure fallback will remain active.");
+            return new Dictionary<Guid, VehicleLiveStatus>();
+        }
     }
 
     private static (decimal Longitude, decimal Latitude)? Origin(
@@ -302,7 +364,9 @@ public sealed record RunTimingRecord(
     string? EtaUnavailableStopName,
     string? EtaUnavailableReason,
     int PreRouteDwellMinutes,
-    IReadOnlyList<RunTimingLeg> EtaLegs);
+    IReadOnlyList<RunTimingLeg> EtaLegs,
+    string RouteAnchorSource,
+    IReadOnlyList<RunTimingEvidenceGap> EvidenceGaps);
 
 public sealed record RunTimingLeg(
     Guid StopId,
@@ -313,3 +377,5 @@ public sealed record RunTimingLeg(
     DateTimeOffset ArrivalEtaUtc,
     bool Approximate,
     string Provider);
+
+public sealed record RunTimingEvidenceGap(Guid StopId, int Sequence, string StopName);
