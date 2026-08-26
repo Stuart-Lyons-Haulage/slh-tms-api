@@ -8,8 +8,8 @@ namespace Slh.Tms.Api.Services;
 
 /// <summary>
 /// Parses the Natures Way Foods pallet-order CSV attached to the Info mailbox.
-/// The CSV is a daily customer snapshot. Zero-pallet rows are evidence only and
-/// are deliberately not staged as transport orders.
+/// The CSV is a daily customer snapshot. Explicit zero-pallet rows are valid
+/// transport movements when their collection and delivery routing is complete.
 /// </summary>
 public sealed class NwfPalletOrderCsvParser
 {
@@ -69,11 +69,12 @@ public sealed class NwfPalletOrderCsvParser
                     var palletQty = ParseInt(Cell(row, header, "PALLETQTY"));
                     var poRef = Cell(row, header, "POREF");
 
-                    if (palletQty is null or <= 0)
+                    if (palletQty is null || palletQty < 0)
                     {
-                        zeroPalletRows++;
+                        invalidRows++;
                         continue;
                     }
+                    if (palletQty == 0) zeroPalletRows++;
 
                     var rowWarnings = new List<string>();
                     if (date is null) rowWarnings.Add("Requested Ship Date is missing or invalid.");
@@ -173,12 +174,12 @@ public sealed class NwfPalletOrderCsvParser
                 }
 
                 if (zeroPalletRows > 0)
-                    warnings.Add($"{zeroPalletRows} zero-pallet row(s) were retained in the source evidence but not staged as transport orders.");
+                    warnings.Add($"{zeroPalletRows} zero-pallet row(s) were staged as routed transport movements.");
                 if (invalidRows > 0)
-                    warnings.Add($"{invalidRows} positive-pallet row(s) were not staged because mandatory routing fields were missing.");
+                    warnings.Add($"{invalidRows} row(s) were not staged because quantity was missing/negative or mandatory routing fields were missing.");
 
                 return orders.Count == 0
-                    ? new EmailIntakeParseResult([], warnings, "NWF pallet-order CSV was recognised but contained no valid positive-pallet transport orders.")
+                    ? new EmailIntakeParseResult([], warnings, "NWF pallet-order CSV was recognised but contained no valid routed transport orders.")
                     : new EmailIntakeParseResult(orders, warnings, null);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)

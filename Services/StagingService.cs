@@ -394,7 +394,7 @@ public sealed class StagingService(TmsDbContext db)
             var lineDeliveryDate = DateOnlyOrNull(line, "deliveryDate") ?? DateOnlyOrNull(payload, "deliveryDate");
             var pallets = IntOrNull(line, "pallets") ?? IntOrNull(line, "palletQuantity") ?? (sourceLines.Count == 1 ? IntOrNull(payload, "pallets") : null);
             plannerReady |= !string.IsNullOrWhiteSpace(collectionSite) && !string.IsNullOrWhiteSpace(deliverySite)
-                && lineCollectionDate is not null && lineDeliveryDate is not null && pallets is > 0;
+                && lineCollectionDate is not null && lineDeliveryDate is not null && pallets is >= 0;
             db.OrderSourceLines.Add(new OrderSourceLine
             {
                 RevisionId = revision.Id,

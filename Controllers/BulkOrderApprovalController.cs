@@ -93,7 +93,17 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
             if (collectionDate != requestedDate) return $"Order belongs to {collectionDate:yyyy-MM-dd}, not the selected date.";
 
             var pallets = Int(payload, "pallets", "palletQty", "palletQuantity", "quantity");
-            if (pallets is null or <= 0) return "Zero or missing pallet quantity.";
+            if (pallets is null) return "Pallet quantity is missing.";
+            if (pallets < 0) return "Pallet quantity cannot be negative.";
+            if (pallets == 0)
+            {
+                var collectionSite = Text(payload, "collectionSite") ?? Text(payload, "collectionLocation") ?? Text(payload, "sellerName");
+                var deliverySite = Text(payload, "deliverySite") ?? Text(payload, "deliveryLocation") ?? Text(payload, "stallNumber");
+                if (string.IsNullOrWhiteSpace(collectionSite) || string.IsNullOrWhiteSpace(deliverySite))
+                    return "Zero-pallet order requires collection and delivery sites.";
+                if (!DateOnly.TryParse(Text(payload, "deliveryDate"), CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
+                    return "Zero-pallet order requires a valid delivery date.";
+            }
 
             if (Bool(payload, "plannerReady") == false) return "Order is not planner-ready.";
             if (string.Equals(Text(payload, "intakeStatus"), "PreOrder", StringComparison.OrdinalIgnoreCase))

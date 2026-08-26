@@ -33,8 +33,10 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
     {
         if (string.IsNullOrWhiteSpace(request.IdempotencyKey)) return BadRequest(new ErrorResponse("invalid_idempotency_key", "IdempotencyKey is required", HttpContext.TraceIdentifier));
         if (request.IdempotencyKey.Length > 200) return BadRequest(new ErrorResponse("invalid_idempotency_key", "IdempotencyKey must be 200 characters or fewer.", HttpContext.TraceIdentifier));
-        if (IsExplicitZeroPalletOrder(request))
-            return Ok(new { ignored = true, reason = "zero_pallet_order", message = "The source row has zero pallets and was retained as source evidence rather than staged as a transport order." });
+        if (IsNegativePalletOrder(request))
+            return BadRequest(new ErrorResponse("negative_pallet_quantity", "Order pallet quantity cannot be negative.", HttpContext.TraceIdentifier));
+        if (IsZeroPalletOrderWithoutCompleteRoute(request))
+            return BadRequest(new ErrorResponse("zero_pallet_route_required", "A zero-pallet order is valid only when collection site, delivery site, collection date, and delivery date are all supplied.", HttpContext.TraceIdentifier));
         var existing = await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(x => x.IdempotencyKey == request.IdempotencyKey, ct);
         if (existing is not null) return Ok(service.ToResponse(existing, Request));
         try
@@ -57,18 +59,18 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
         if (requests.Count == 0 || requests.Count > 500) return BadRequest(new ErrorResponse("invalid_batch", "Submit between 1 and 500 records.", HttpContext.TraceIdentifier));
         if (requests.Any(request => string.IsNullOrWhiteSpace(request.IdempotencyKey))) return BadRequest(new ErrorResponse("invalid_idempotency_key", "Every record needs an IdempotencyKey.", HttpContext.TraceIdentifier));
         if (requests.Any(request => request.IdempotencyKey.Length > 200)) return BadRequest(new ErrorResponse("invalid_idempotency_key", "Every IdempotencyKey must be 200 characters or fewer.", HttpContext.TraceIdentifier));
-        var filteredRequests = requests.Where(request => !IsExplicitZeroPalletOrder(request)).ToList();
-        var skippedZeroPallets = requests.Count - filteredRequests.Count;
-        if (filteredRequests.Count == 0)
-            return Accepted(new { received = requests.Count, existing = 0, created = 0, skippedZeroPallets, records = Array.Empty<StageImportResponse>() });
-        var keys = filteredRequests.Select(request => request.IdempotencyKey).ToList();
+        if (requests.Any(IsNegativePalletOrder))
+            return BadRequest(new ErrorResponse("negative_pallet_quantity", "Order pallet quantity cannot be negative.", HttpContext.TraceIdentifier));
+        if (requests.Any(IsZeroPalletOrderWithoutCompleteRoute))
+            return BadRequest(new ErrorResponse("zero_pallet_route_required", "Every zero-pallet order must include collection site, delivery site, collection date, and delivery date.", HttpContext.TraceIdentifier));
+        var keys = requests.Select(request => request.IdempotencyKey).ToList();
         if (keys.Distinct(StringComparer.OrdinalIgnoreCase).Count() != keys.Count) return BadRequest(new ErrorResponse("duplicate_batch_key", "Idempotency keys must be unique within the batch.", HttpContext.TraceIdentifier));
         var existing = await db.StagedImports.AsNoTracking().Where(item => keys.Contains(item.IdempotencyKey)).ToDictionaryAsync(item => item.IdempotencyKey, ct);
         var existingCount = existing.Count;
         var responses = new List<StageImportResponse>();
         try
         {
-            foreach (var request in filteredRequests)
+            foreach (var request in requests)
             {
                 if (existing.TryGetValue(request.IdempotencyKey, out var item)) responses.Add(service.ToResponse(item, Request));
                 else
@@ -80,7 +82,7 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
                 }
             }
             await db.SaveChangesAsync(ct);
-            return Accepted(new { received = requests.Count, existing = existingCount, created = responses.Count - existingCount, skippedZeroPallets, records = responses });
+            return Accepted(new { received = requests.Count, existing = existingCount, created = responses.Count - existingCount, skippedZeroPallets = 0, records = responses });
         }
         catch (ArgumentException ex)
         {
@@ -171,19 +173,48 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
         catch (KeyNotFoundException) { return NotFound(); }
     }
 
-    private static bool IsExplicitZeroPalletOrder(StageImportRequest request)
+    private static bool IsNegativePalletOrder(StageImportRequest request) =>
+        TryGetOrderPalletQuantity(request, out var quantity) && quantity < 0;
+
+    private static bool IsZeroPalletOrderWithoutCompleteRoute(StageImportRequest request) =>
+        TryGetOrderPalletQuantity(request, out var quantity) && quantity == 0 && !HasCompleteZeroPalletRoute(request.Payload);
+
+    private static bool TryGetOrderPalletQuantity(StageImportRequest request, out decimal quantity)
     {
+        quantity = 0;
         if (!string.Equals(request.EntityType, "order", StringComparison.OrdinalIgnoreCase)) return false;
         if (!TryGetProperty(request.Payload, "pallets", out var pallets)
             && !TryGetProperty(request.Payload, "palletQty", out pallets)
-            && !TryGetProperty(request.Payload, "palletQuantity", out pallets))
+            && !TryGetProperty(request.Payload, "palletQuantity", out pallets)
+            && !TryGetProperty(request.Payload, "quantity", out pallets))
             return false;
 
         return pallets.ValueKind switch
         {
-            JsonValueKind.Number => pallets.TryGetDecimal(out var number) && number <= 0,
-            JsonValueKind.String => decimal.TryParse(pallets.GetString(), out var number) && number <= 0,
+            JsonValueKind.Number => pallets.TryGetDecimal(out quantity),
+            JsonValueKind.String => decimal.TryParse(pallets.GetString(), out quantity),
             _ => false
+        };
+    }
+
+    private static bool HasCompleteZeroPalletRoute(JsonElement payload)
+    {
+        var collectionSite = Text(payload, "collectionSite") ?? Text(payload, "collectionLocation") ?? Text(payload, "sellerName");
+        var deliverySite = Text(payload, "deliverySite") ?? Text(payload, "deliveryLocation") ?? Text(payload, "stallNumber");
+        return !string.IsNullOrWhiteSpace(collectionSite)
+            && !string.IsNullOrWhiteSpace(deliverySite)
+            && DateOnly.TryParse(Text(payload, "collectionDate"), out _)
+            && DateOnly.TryParse(Text(payload, "deliveryDate"), out _);
+    }
+
+    private static string? Text(JsonElement payload, string name)
+    {
+        if (!TryGetProperty(payload, name, out var value)) return null;
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => string.IsNullOrWhiteSpace(value.GetString()) ? null : value.GetString()!.Trim(),
+            JsonValueKind.Number => value.GetRawText(),
+            _ => null
         };
     }
 

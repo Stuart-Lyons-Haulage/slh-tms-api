@@ -9,7 +9,7 @@ public sealed class NwfPalletOrderCsvParserTests
     private readonly NwfPalletOrderCsvParser parser = new();
 
     [Fact]
-    public void NwfCsv_StagesOnlyPositivePalletRows_AndUsesPoAsTmsReference()
+    public void NwfCsv_StagesZeroPalletRows_WhenRouteIsComplete_AndUsesPoAsTmsReference()
     {
         const string csv = """
 Haulier Name,Requested Ship Date,04. Collection Site,Customer Name,DepotID,Depot Description,Delivery Address,Sales Order ID,CustomerRef,Pallet Name,PalletQty,PO REF
@@ -23,8 +23,12 @@ Stuart Lyons,19/08/2026,Selsey,Morrisons,MOR06,Morrisons FRUITBRIDGWATER 718,TA6
 
         Assert.NotNull(result);
         Assert.Null(result!.IgnoredReason);
-        Assert.Equal(2, result.Orders.Count);
+        Assert.Equal(3, result.Orders.Count);
         Assert.Contains(result.Warnings, warning => warning.Contains("zero-pallet", StringComparison.OrdinalIgnoreCase));
+        var zero = Assert.Single(result.Orders.Where(order => order.Payload.GetProperty("salesOrderId").GetString() == "SO000367751"));
+        Assert.Equal(0, zero.Payload.GetProperty("pallets").GetInt32());
+        Assert.Equal("Drayton", zero.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("One Stop Tamworth", zero.Payload.GetProperty("stallNumber").GetString());
 
         var first = result.Orders[0].Payload;
         Assert.Equal("NWF", first.GetProperty("customerCode").GetString());
@@ -129,8 +133,12 @@ Stuart Lyons| 25/08/2026| Selsey| Tesco| ONE01| One Stop Tamworth| B78 1ST| SO00
 
         Assert.NotNull(result);
         Assert.Null(result!.IgnoredReason);
-        Assert.Equal(2, result.Orders.Count);
+        Assert.Equal(3, result.Orders.Count);
         Assert.Contains(result.Warnings, warning => warning.Contains("zero-pallet", StringComparison.OrdinalIgnoreCase));
+        var zero = Assert.Single(result.Orders.Where(order => order.Payload.GetProperty("salesOrderId").GetString() == "SO000368432"));
+        Assert.Equal(0, zero.Payload.GetProperty("pallets").GetInt32());
+        Assert.Equal("Selsey", zero.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("One Stop Tamworth", zero.Payload.GetProperty("stallNumber").GetString());
         var first = result.Orders[0].Payload;
         Assert.Equal("PO00500547/SO000368395/Drayton/ALD20", first.GetProperty("poNumber").GetString());
         Assert.Equal("NWF pallet order email body table.csv", first.GetProperty("sourceAttachmentName").GetString());
