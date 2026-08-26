@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -29,13 +30,25 @@ public sealed class SystemSyncController(
         var sageUtc = await db.StagedImports.AsNoTracking()
             .Where(item => item.EntityType == "sagehrsync" && item.Status == StagingStatus.Promoted)
             .MaxAsync(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc, ct);
+        var heartbeat = await db.StagedImports.AsNoTracking()
+            .Where(item => item.EntityType == "infomailboxheartbeat" && item.Status == StagingStatus.Promoted)
+            .OrderByDescending(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc)
+            .FirstOrDefaultAsync(ct);
+        var heartbeatUtc = heartbeat?.ReviewedAtUtc ?? heartbeat?.ReceivedAtUtc;
+        var latestOrderReceivedUtc = await db.StagedImports.AsNoTracking()
+            .Where(item => item.EntityType == "order" && item.Source != null && item.Source.Contains("Info mailbox"))
+            .MaxAsync(item => (DateTimeOffset?)item.ReceivedAtUtc, ct);
+        var latestInboxReceivedAtUtc = ReadPayloadDate(heartbeat?.PayloadJson, "latestInboxReceivedAtUtc");
+        var heartbeatFlowName = ReadPayloadText(heartbeat?.PayloadJson, "flowName");
+        var heartbeatFlowRunId = ReadPayloadText(heartbeat?.PayloadJson, "flowRunId");
 
         var providers = new[]
         {
             Provider("DOT / Falcon", dot.IsConfigured, trackingUtc, TimeSpan.FromMinutes(10), now),
             Provider("TachoMaster", tacho.IsConfigured, tachoUtc, TimeSpan.FromMinutes(15), now),
             Provider("Sage HR", sage.IsConfigured, sageUtc, TimeSpan.FromHours(30), now),
-            Provider("Fleetio", fleetio.IsConfigured, fleetioUtc, TimeSpan.FromMinutes(75), now)
+            Provider("Fleetio", fleetio.IsConfigured, fleetioUtc, TimeSpan.FromMinutes(75), now),
+            Provider("Info mailbox", true, heartbeatUtc, TimeSpan.FromMinutes(10), now, TimeSpan.FromMinutes(20))
         };
         var configured = providers.Where(item => item.Configured).ToArray();
         var status = configured.Any(item => item.State == "stale") ? "attention" : configured.Any(item => item.State == "pending") ? "pending" : "current";
@@ -51,9 +64,21 @@ public sealed class SystemSyncController(
                 dot = "continuous ingestion",
                 tachoMaster = "every 5 minutes",
                 sageHr = "05:30 Europe/London daily",
-                fleetio = "every hour"
+                fleetio = "every hour",
+                infoMailbox = "every 5 minutes heartbeat"
             },
-            providers
+            providers,
+            mailbox = new
+            {
+                mailbox = "info@lyonshaulage.com",
+                lastHeartbeatUtc = heartbeatUtc,
+                heartbeatAgeMinutes = heartbeatUtc is null ? null : Math.Round((now - heartbeatUtc.Value).TotalMinutes, 1),
+                latestInboxReceivedAtUtc,
+                lastOrderReceivedUtc = latestOrderReceivedUtc,
+                heartbeatFlowName,
+                heartbeatFlowRunId,
+                probe = "shared Outlook mailbox read + TMS API write"
+            }
         });
     }
 
@@ -71,10 +96,56 @@ public sealed class SystemSyncController(
         };
     }
 
-    private static ProviderSnapshot Provider(string name, bool configured, DateTimeOffset? lastUpdatedUtc, TimeSpan threshold, DateTimeOffset now)
+    private static ProviderSnapshot Provider(
+        string name,
+        bool configured,
+        DateTimeOffset? lastUpdatedUtc,
+        TimeSpan currentThreshold,
+        DateTimeOffset now,
+        TimeSpan? staleThreshold = null)
     {
-        var state = !configured ? "not-configured" : lastUpdatedUtc is null ? "pending" : now - lastUpdatedUtc > threshold ? "stale" : "current";
-        return new ProviderSnapshot(name, configured, state, lastUpdatedUtc, lastUpdatedUtc is null ? null : Math.Round((now - lastUpdatedUtc.Value).TotalMinutes, 1));
+        var age = lastUpdatedUtc is null ? (TimeSpan?)null : now - lastUpdatedUtc.Value;
+        var staleAfter = staleThreshold ?? currentThreshold;
+        var state = !configured
+            ? "not-configured"
+            : age is null
+                ? "pending"
+                : age > staleAfter
+                    ? "stale"
+                    : age > currentThreshold
+                        ? "pending"
+                        : "current";
+        return new ProviderSnapshot(name, configured, state, lastUpdatedUtc, age is null ? null : Math.Round(age.Value.TotalMinutes, 1));
+    }
+
+    private static DateTimeOffset? ReadPayloadDate(string? payloadJson, string property)
+    {
+        if (string.IsNullOrWhiteSpace(payloadJson)) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(payloadJson);
+            return document.RootElement.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String && value.TryGetDateTimeOffset(out var parsed)
+                ? parsed
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static string? ReadPayloadText(string? payloadJson, string property)
+    {
+        if (string.IsNullOrWhiteSpace(payloadJson)) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(payloadJson);
+            return document.RootElement.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private sealed record ProviderSnapshot(string Name, bool Configured, string State, DateTimeOffset? LastUpdatedUtc, double? AgeMinutes);
