@@ -192,7 +192,19 @@ public static class EmbeddedGeofenceEngine
             visits.AddRange(derived);
         }
 
-        LinkVisitsToRuns(visits, loads);
+        PlannerSourceMasterDataResolver? siteResolver = null;
+        try
+        {
+            siteResolver = await PlannerSourceMasterDataResolver.CreateAsync(db, ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // Site Master is stronger evidence when available, but geofence reconstruction
+            // must remain resilient when optional master-detail tables are unavailable.
+            db.ChangeTracker.Clear();
+        }
+
+        LinkVisitsToRuns(visits, loads, siteResolver);
         var activeVisits = visits.Where(x => x.ExitedAtUtc is null && now - x.LastInsideAtUtc <= TimeSpan.FromMinutes(15)).ToList();
         var confirmed = visits.Where(x => x.ConfirmedAtUtc is not null).ToList();
         var latestTracking = new[]
@@ -332,7 +344,7 @@ public static class EmbeddedGeofenceEngine
         if (visit.ConfirmedAtUtc is null && visit.DwellMinutes >= confirmMinutes) visit.ConfirmedAtUtc = at;
     }
 
-    private static void LinkVisitsToRuns(List<DerivedVisit> visits, IReadOnlyCollection<Load> loads)
+    private static void LinkVisitsToRuns(List<DerivedVisit> visits, IReadOnlyCollection<Load> loads, PlannerSourceMasterDataResolver? siteResolver)
     {
         var usedStops = new HashSet<Guid>();
         foreach (var visit in visits.OrderBy(x => x.EnteredAtUtc))
@@ -340,10 +352,7 @@ public static class EmbeddedGeofenceEngine
             var candidate = loads
                 .Where(load => load.VehicleId == visit.VehicleId && load.Status != LoadStatus.Cancelled)
                 .SelectMany(load => (load.Stops ?? []).Where(stop => !usedStops.Contains(stop.Id)).Select(stop => new { load, stop }))
-                .Where(x =>
-                    GeofencePlanningMatch.SamePhysicalSite(x.stop, visit.Fence) ||
-                    NamesOverlap(x.stop.Name, visit.Fence.Name) ||
-                    NamesOverlap(x.stop.Address, visit.Fence.Name))
+                .Where(x => StopMatchesFence(x.stop, visit.Fence, siteResolver))
                 .Select(x => new { x.load, x.stop, delta = x.stop.PlannedArrivalUtc is null ? double.MaxValue : Math.Abs((x.stop.PlannedArrivalUtc.Value - visit.EnteredAtUtc).TotalMinutes) })
                 .OrderBy(x => x.delta)
                 .ThenBy(x => x.stop.Sequence)
@@ -353,6 +362,16 @@ public static class EmbeddedGeofenceEngine
             visit.LoadStopId = candidate.stop.Id;
             usedStops.Add(candidate.stop.Id);
         }
+    }
+
+    private static bool StopMatchesFence(LoadStop stop, EmbeddedFence fence, PlannerSourceMasterDataResolver? siteResolver)
+    {
+        var canonical = siteResolver?.CanonicalGeofenceMatch(stop.Name, fence);
+        if (canonical is not null) return canonical.Value;
+
+        return GeofencePlanningMatch.SamePhysicalSite(stop, fence) ||
+               NamesOverlap(stop.Name, fence.Name) ||
+               NamesOverlap(stop.Address, fence.Name);
     }
 
     private static Site? MatchSite(EmbeddedFence fence, IReadOnlyCollection<Site> sites)

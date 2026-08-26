@@ -44,10 +44,7 @@ public sealed class PlannerSourceMasterDataResolver
         if (string.IsNullOrWhiteSpace(sourceLabel)) return PlannerSourceSiteResolution.Unresolved(sourceLabel);
 
         var embeddedFence = ResolveEmbeddedFence(sourceLabel);
-        var linkedByFence = embeddedFence is null ? null : _geofences
-            .Where(item => Normalize(item.Name) == Normalize(embeddedFence.Name) || Normalize(item.NormalizedName) == Normalize(embeddedFence.Name))
-            .OrderByDescending(item => item.UpdatedAtUtc)
-            .FirstOrDefault();
+        var linkedByFence = embeddedFence is null ? null : LinkedGeofence(embeddedFence.Name);
 
         var site = MatchSite(sourceLabel)
             ?? SiteFromLink(linkedByFence);
@@ -85,6 +82,38 @@ public sealed class PlannerSourceMasterDataResolver
             linkedGeofence?.Name ?? embeddedFence?.Name,
             site is not null,
             linkedGeofence is not null);
+    }
+
+    /// <summary>
+    /// Returns a canonical Site Master decision for a planned stop versus a physical
+    /// embedded geofence. True/false is authoritative when the physical fence has an
+    /// explicit Site Master link. Null means canonical evidence is unavailable and the
+    /// caller may use the legacy operational/fuzzy matching rules.
+    /// </summary>
+    public bool? CanonicalGeofenceMatch(string? sourceLabel, EmbeddedFence fence)
+    {
+        if (string.IsNullOrWhiteSpace(sourceLabel)) return null;
+
+        var linked = LinkedGeofence(fence.Name);
+        var linkedSite = SiteFromLink(linked);
+        if (linked is null || linkedSite is null) return null;
+
+        // An explicit manual geofence→Site link is stronger than historic locality/name
+        // exceptions. Resolve the planner label directly against Site Master aliases;
+        // if it cannot resolve, fail closed rather than attaching the physical visit to
+        // the wrong job merely because the names overlap.
+        var plannedSite = MatchSite(sourceLabel);
+        return plannedSite is null ? false : plannedSite.Id == linkedSite.Id;
+    }
+
+    private SiteGeofence? LinkedGeofence(string? fenceName)
+    {
+        if (string.IsNullOrWhiteSpace(fenceName)) return null;
+        var key = Normalize(fenceName);
+        return _geofences
+            .Where(item => Normalize(item.Name) == key || Normalize(item.NormalizedName) == key)
+            .OrderByDescending(item => item.UpdatedAtUtc)
+            .FirstOrDefault();
     }
 
     private Site? MatchSite(string value)
