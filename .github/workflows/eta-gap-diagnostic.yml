@@ -17,7 +17,7 @@ jobs:
       TV_WALLBOARD_ACCESS_KEY: ${{ secrets.TV_WALLBOARD_ACCESS_KEY }}
       PLANNING_DATE: '2026-08-26'
     steps:
-      - name: Inspect final ETA deadlines and wallboard risk inputs
+      - name: Compare TV and Ops active-run evidence
         shell: bash
         run: |
           set -euo pipefail
@@ -26,34 +26,70 @@ jobs:
 
           timing_file="$(mktemp)"
           eta_file="$(mktemp)"
+          loads_file="$(mktemp)"
+          tv_file="$(mktemp)"
+          progress_file="$(mktemp)"
 
           timing_status="$(curl --silent --show-error --output "$timing_file" --write-out '%{http_code}' "${headers[@]}" "$API_BASE/api/v1/run-timing?date=$PLANNING_DATE")"
           eta_status="$(curl --silent --show-error --output "$eta_file" --write-out '%{http_code}' "${headers[@]}" "$API_BASE/api/v1/operations/delivery-etas?date=$PLANNING_DATE")"
-          echo "timing=$timing_status etas=$eta_status"
+          loads_status="$(curl --silent --show-error --output "$loads_file" --write-out '%{http_code}' "${headers[@]}" "$API_BASE/api/v1/loads?date=$PLANNING_DATE")"
+          tv_status="$(curl --silent --show-error --output "$tv_file" --write-out '%{http_code}' "${headers[@]}" "$API_BASE/api/v1/tv-display/route-progress?date=$PLANNING_DATE")"
+          progress_status="$(curl --silent --show-error --output "$progress_file" --write-out '%{http_code}' "${headers[@]}" "$API_BASE/api/v1/run-progress?date=$PLANNING_DATE")"
+          echo "timing=$timing_status etas=$eta_status loads=$loads_status tv=$tv_status runProgress=$progress_status"
           test "$timing_status" = "200"
           test "$eta_status" = "200"
+          test "$loads_status" = "200"
+          test "$tv_status" = "200"
+          test "$progress_status" = "200"
 
-          jq -n --slurpfile timing "$timing_file" --slurpfile etas "$eta_file" '
+          jq -n \
+            --slurpfile timing "$timing_file" \
+            --slurpfile etas "$eta_file" \
+            --slurpfile loads "$loads_file" \
+            --slurpfile tv "$tv_file" \
+            --slurpfile progress "$progress_file" '
             ($timing[0].records // []) as $timingRecords |
             ($etas[0].records // []) as $etaRecords |
-            [ $timingRecords[] as $t |
-              ($etaRecords | map(select(.loadId == $t.loadId)) | sort_by(.sequence)) as $runEtas |
-              ($runEtas[0] // null) as $first |
-              ($runEtas[-1] // null) as $final |
-              {
-                loadReference: $t.loadReference,
-                nextStopName: $t.nextStopName,
-                nextEtaUtc: $t.nextEtaUtc,
-                finalEtaUtc: $t.finalEtaUtc,
-                nextDeadlineUtc: ($runEtas | map(select(.stopId == $t.nextStopId))[0].deliveryWindowEndUtc // $runEtas | map(select(.sequence == $t.nextStopSequence))[0].deliveryWindowEndUtc // null),
-                finalStopName: ($final.stopName // null),
-                finalStopEtaFromDeliveryFeedUtc: ($final.etaUtc // null),
-                finalDeliveryWindowStartUtc: ($final.deliveryWindowStartUtc // null),
-                finalDeliveryWindowEndUtc: ($final.deliveryWindowEndUtc // null),
-                finalDeliveryRisk: ($final.risk // null),
-                firstStopName: ($first.stopName // null),
-                firstPlannedOrEtaUtc: ($first.etaUtc // null)
-              }
-            ]'
+            ($loads[0] // []) as $loadRecords |
+            ($tv[0].runs // []) as $tvRuns |
+            ($progress[0].records // []) as $progressRecords |
+            {
+              counts: {
+                loads: ($loadRecords | length),
+                timingRuns: ($timingRecords | length),
+                timingCompleted: ([$timingRecords[] | select(.completed == true)] | length),
+                timingActive: ([$timingRecords[] | select(.completed != true)] | length),
+                tvRuns: ($tvRuns | length),
+                tvCompletePhase: ([$tvRuns[] | select((.phase // "") | ascii_downcase == "complete")] | length),
+                tvActive: ([$tvRuns[] | select(((.phase // "") | ascii_downcase) != "complete" and ((.completedStops // 0) < (.totalStops // 0)))] | length),
+                runProgressRuns: ($progressRecords | length),
+                runProgressCompleted: ([$progressRecords[] | select((.runState // "") == "Completed" or ((.totalStops // 0) > 0 and (.completedStops // 0) >= (.totalStops // 0)))] | length)
+              },
+              runs: [
+                $loadRecords[] as $l |
+                ($timingRecords | map(select(.loadId == $l.id))[0] // null) as $t |
+                ($tvRuns | map(select(.loadId == $l.id))[0] // null) as $v |
+                ($progressRecords | map(select(.loadId == $l.id))[0] // null) as $p |
+                ($etaRecords | map(select(.loadId == $l.id)) | sort_by(.sequence)) as $runEtas |
+                {
+                  loadId: $l.id,
+                  reference: $l.reference,
+                  loadStatus: $l.status,
+                  stopCount: (($l.stops // []) | length),
+                  timingCompleted: ($t.completed // null),
+                  timingNextStop: ($t.nextStopName // null),
+                  timingFinalEtaUtc: ($t.finalEtaUtc // null),
+                  tvPhase: ($v.phase // null),
+                  tvCompletedStops: ($v.completedStops // null),
+                  tvTotalStops: ($v.totalStops // null),
+                  tvNextStopId: ($v.nextStopId // null),
+                  tvEvidenceGaps: ($v.evidenceGaps // []),
+                  runProgressState: ($p.runState // null),
+                  runProgressCompletedStops: ($p.completedStops // null),
+                  runProgressTotalStops: ($p.totalStops // null),
+                  finalEtaFeed: (($runEtas[-1].etaUtc) // null)
+                }
+              ]
+            }'
 
-          rm -f "$timing_file" "$eta_file"
+          rm -f "$timing_file" "$eta_file" "$loads_file" "$tv_file" "$progress_file"
