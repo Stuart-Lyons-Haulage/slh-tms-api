@@ -86,4 +86,54 @@ public sealed class MasterDataBulkDeleteTests : IClassFixture<CustomWebFactory>
         var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TmsDbContext>();
         Assert.True(verifyDb.Sites.Any(site => site.Id == siteId));
     }
+
+    [Fact]
+    public async Task Bulk_force_delete_site_detaches_geofence_and_preserves_visit_history()
+    {
+        var siteId = Guid.NewGuid();
+        var geofenceId = Guid.NewGuid();
+        var visitId = Guid.NewGuid();
+        await using (var scope = _factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.Sites.Add(new Site { Id = siteId, ExternalCode = $"FD{Guid.NewGuid():N}"[..12], Name = "Force Delete Site", Active = false });
+            db.SiteGeofences.Add(new SiteGeofence
+            {
+                Id = geofenceId,
+                Name = "Force Delete Site",
+                NormalizedName = $"FORCE DELETE SITE {Guid.NewGuid():N}",
+                SiteId = siteId,
+                SiteNumber = "FD",
+                PolygonJson = "[]",
+                Active = true
+            });
+            db.GeofenceVisits.Add(new GeofenceVisit
+            {
+                Id = visitId,
+                GeofenceId = geofenceId,
+                VehicleIdentifier = "TEST-VEHICLE",
+                EnteredAtUtc = DateTimeOffset.UtcNow,
+                LastInsideAtUtc = DateTimeOffset.UtcNow,
+                Status = "Open"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClientWithUser(LyonsUser);
+        var response = await client.PostAsJsonAsync("/api/v1/master-data-cleanup/sites/bulk-delete", new
+        {
+            ids = new[] { siteId },
+            adminPassword = "DELETE",
+            forceHistoryOverride = true
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        await using var verifyScope = _factory.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        Assert.False(verifyDb.Sites.Any(site => site.Id == siteId));
+        var geofence = Assert.Single(verifyDb.SiteGeofences.Where(item => item.Id == geofenceId));
+        Assert.Null(geofence.SiteId);
+        Assert.Null(geofence.SiteNumber);
+        Assert.True(verifyDb.GeofenceVisits.Any(visit => visit.Id == visitId));
+    }
 }

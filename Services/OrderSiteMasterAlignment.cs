@@ -44,6 +44,7 @@ public static class OrderSiteMasterAlignment
         try
         {
             sites = await db.Sites.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
+            await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
         }
         catch (Exception ex) when (SchemaUnavailable(ex))
         {

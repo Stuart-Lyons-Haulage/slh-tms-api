@@ -51,7 +51,7 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
                 references = usage
             });
 
-        var removed = await Remove(entity, id, ct);
+        var removed = await Remove(entity, id, false, ct);
         if (removed is null) return NotFound(new { code = "master_data_not_found", message = "This master-data record no longer exists." });
 
         var auditRecorded = await TryAudit(Title(Singular(entity)), id, "Deleted", removed.Value.Snapshot, null, ct);
@@ -149,6 +149,18 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
                 continue;
             }
 
+            var forceSiteHistoryOverride = entity == "sites" && request.ForceHistoryOverride;
+            if (forceSiteHistoryOverride && GetActive(item))
+            {
+                blocked.Add(new
+                {
+                    id,
+                    label = Label(item),
+                    reason = "Archive this site before using the force delete override."
+                });
+                continue;
+            }
+
             var usage = directUsage[id];
             if (usage.Count == 0 && recoveryRegisterPayloads.Count > 0)
             {
@@ -159,7 +171,7 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
                     usage.Add(new { area = "Planning register", count = planningCount });
             }
 
-            if (usage.Count > 0)
+            if (usage.Count > 0 && !forceSiteHistoryOverride)
             {
                 blocked.Add(new
                 {
@@ -171,19 +183,26 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
                 continue;
             }
 
-            var removed = await Remove(entity, id, ct);
+            var removed = await Remove(entity, id, forceSiteHistoryOverride, ct);
             if (removed is null)
             {
                 notFound.Add(id);
                 continue;
             }
 
-            var auditRecorded = await TryAudit(Title(Singular(entity)), id, "BulkDeleted", removed.Value.Snapshot, null, ct);
+            var auditRecorded = await TryAudit(
+                Title(Singular(entity)),
+                id,
+                removed.Value.GeofencesDetached > 0 ? "BulkForceDeletedGeofenceLinksDetached" : "BulkDeleted",
+                removed.Value.Snapshot,
+                null,
+                ct);
             deleted.Add(new
             {
                 id,
                 label = Label(item),
                 integrationMappingsRemoved = removed.Value.MappingsRemoved,
+                geofenceLinksDetached = removed.Value.GeofencesDetached,
                 auditRecorded
             });
         }
@@ -198,7 +217,7 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
             deletedRows = deleted,
             blockedRows = blocked,
             notFoundRows = notFound,
-            message = $"{deleted.Count} {Singular(entity)} record{(deleted.Count == 1 ? "" : "s")} permanently deleted. {blocked.Count} blocked by live/history references."
+            message = $"{deleted.Count} {Singular(entity)} record{(deleted.Count == 1 ? "" : "s")} permanently deleted. {blocked.Count} blocked by live/history references.{(entity == "sites" && request.ForceHistoryOverride ? " Linked geofences were detached; geofence visits and history were retained." : string.Empty)}"
         });
     }
 
@@ -285,7 +304,7 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
         return result;
     }
 
-    private async Task<(int MappingsRemoved, string Snapshot)?> Remove(string entity, Guid id, CancellationToken ct)
+    private async Task<(int MappingsRemoved, int GeofencesDetached, string Snapshot)?> Remove(string entity, Guid id, bool detachSiteGeofences, CancellationToken ct)
     {
         var item = await Find(entity, id, ct);
         if (item is null) return null;
@@ -293,6 +312,20 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
 
         var mappings = await db.IntegrationMappings.Where(x => x.TmsEntityId == id).ToListAsync(ct);
         if (mappings.Count > 0) db.IntegrationMappings.RemoveRange(mappings);
+
+        var geofencesDetached = 0;
+        if (detachSiteGeofences && item is Site)
+        {
+            var linkedGeofences = await db.SiteGeofences.Where(x => x.SiteId == id).ToListAsync(ct);
+            foreach (var geofence in linkedGeofences)
+            {
+                // Keep the geofence and its visit history, but remove the deleted site's master link.
+                geofence.SiteId = null;
+                geofence.SiteNumber = null;
+                geofence.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            }
+            geofencesDetached = linkedGeofences.Count;
+        }
 
         switch (item)
         {
@@ -306,7 +339,7 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
         }
 
         await db.SaveChangesAsync(ct);
-        return (mappings.Count, snapshot);
+        return (mappings.Count, geofencesDetached, snapshot);
     }
 
     private async Task<bool> TryAudit(string entityType, Guid entityId, string action, string before, string? after, CancellationToken ct)
@@ -392,4 +425,7 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
     private static string Snapshot<T>(T value) => JsonSerializer.Serialize(value);
 }
 
-public sealed record BulkMasterDataDeleteRequest(IReadOnlyList<Guid> Ids, string? AdminPassword);
+public sealed record BulkMasterDataDeleteRequest(
+    IReadOnlyList<Guid> Ids,
+    string? AdminPassword,
+    bool ForceHistoryOverride = false);
