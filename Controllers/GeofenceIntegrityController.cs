@@ -24,6 +24,7 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
 
             var preparedLoads = GeofencePlanningMatch.PrepareLoads(loads);
             var fences = await EmbeddedGeofenceEngine.FenceStatusesAsync(db, ct);
+            var overrides = await ActiveOverridesByName(ct);
             List<Site> sites;
             try { sites = await GeofenceSiteResolver.LoadActiveSitesAsync(db, ct); }
             catch { sites = []; db.ChangeTracker.Clear(); }
@@ -80,6 +81,10 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
                 records = fences.Select(x =>
                 {
                     var diagnostic = linkDiagnostics[x.Fence.Id];
+                    overrides.TryGetValue(NormalizeName(x.Fence.Name), out var manual);
+                    var locationOnly = string.Equals(manual?.SiteNumber, "LOCATION_ONLY", StringComparison.OrdinalIgnoreCase);
+                    var siteNumber = x.SiteCode ?? (locationOnly ? null : manual?.SiteNumber ?? x.Fence.SiteNumber);
+                    var codedUnlinked = x.SiteId is null && !locationOnly && !string.IsNullOrWhiteSpace(siteNumber);
                     return new
                     {
                         id = x.Fence.Id,
@@ -89,17 +94,17 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
                         maxWaitMinutes = x.Fence.MaxWaitMinutes,
                         pendingEntryMinutes = x.Fence.PendingEntryMinutes,
                         pendingExitMinutes = x.Fence.PendingExitMinutes,
-                        siteNumber = x.SiteCode ?? (x.ManualOverride && x.SiteId is null ? null : x.Fence.SiteNumber),
+                        siteNumber,
                         siteId = x.SiteId,
                         siteName = x.SiteName,
                         siteCode = x.SiteCode,
                         manualOverride = x.ManualOverride,
-                        locationOnly = x.ManualOverride && x.SiteId is null,
+                        locationOnly,
                         active = true,
                         polygonValid = true,
                         geofenceAvailable = true,
                         siteLinked = x.SiteId != null,
-                        validationStatus = x.ManualOverride && x.SiteId is null ? "Location only" : x.SiteId == null ? "Unlinked" : "Valid",
+                        validationStatus = locationOnly ? "Location only" : x.SiteId != null ? "Valid" : codedUnlinked ? "Coded / needs Site promotion" : "Unlinked",
                         linkReason = diagnostic.Reason,
                         diagnostic.SafeToAutoLink,
                         diagnostic.SuggestedSiteId,
@@ -140,6 +145,21 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
         }
     }
 
+    private async Task<Dictionary<string, SiteGeofence>> ActiveOverridesByName(CancellationToken ct)
+    {
+        try
+        {
+            var rows = await db.SiteGeofences.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
+            return rows.GroupBy(x => NormalizeName(x.Name), StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.OrderByDescending(x => x.UpdatedAtUtc).First(), StringComparer.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            return new Dictionary<string, SiteGeofence>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
     private static object? Visit(DerivedVisit? visit)
     {
         if (visit is null) return null;
@@ -161,6 +181,8 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
                     : "Vehicle is currently inside the approved SLH geofence."
         };
     }
+
+    private static string NormalizeName(string value) => string.Join(' ', value.Trim().ToUpperInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries));
 
     private static DateOnly UkOperatingDate(DateTimeOffset value)
     {
