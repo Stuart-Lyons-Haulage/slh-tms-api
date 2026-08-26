@@ -23,9 +23,13 @@ public sealed class RunTimingController(
     ILogger<RunTimingController> logger) : ControllerBase
 {
     [HttpGet, AllowAnonymous]
-    public async Task<IActionResult> Get([FromQuery] DateOnly? date, CancellationToken ct)
+    public async Task<IActionResult> Get(
+        [FromHeader(Name = "X-TV-Display-Key")] string? displayKey,
+        [FromQuery] DateOnly? date,
+        CancellationToken ct)
     {
-        if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
+        var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct);
+        if (!pairedKeyAllowed && !TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
 
         var planningDate = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
         var loads = (await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct))
