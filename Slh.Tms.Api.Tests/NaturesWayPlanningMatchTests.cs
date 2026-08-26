@@ -60,8 +60,8 @@ public sealed class NaturesWayPlanningMatchTests
                     Id = Guid.NewGuid(),
                     Sequence = 1,
                     Name = "Collect · NWF-Selsey",
-                    Longitude = wrongCoordinate.Value.Longitude,
-                    Latitude = wrongCoordinate.Value.Latitude
+                    Longitude = wrongCoordinate.Longitude,
+                    Latitude = wrongCoordinate.Latitude
                 }
             ]
         };
