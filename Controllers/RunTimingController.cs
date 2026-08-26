@@ -43,6 +43,17 @@ public sealed class RunTimingController(
             return Ok(new RunTimingResponse(planningDate, DateTimeOffset.UtcNow, false, []));
         }
 
+        PlannerSourceMasterDataResolver? masterData = null;
+        try
+        {
+            masterData = await PlannerSourceMasterDataResolver.CreateAsync(db, ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Site Master resolution was unavailable while calculating final ETAs; embedded geofence coordinate fallback will remain active.");
+            db.ChangeTracker.Clear();
+        }
+
         var now = DateTimeOffset.UtcNow;
         var defaultIntermediateDwellMinutes = Math.Clamp(
             configuration.GetValue<int?>("Operations:DefaultIntermediateDwellMinutes") ?? 20,
@@ -80,6 +91,8 @@ public sealed class RunTimingController(
             string etaSource = "Unavailable";
             DateTimeOffset? finalEtaUtc = null;
             string finalEtaSource = "Unavailable";
+            string? etaUnavailableStopName = null;
+            string? etaUnavailableReason = null;
 
             if (!completed)
             {
@@ -104,6 +117,11 @@ public sealed class RunTimingController(
                         routeAnchorUtc = now + TimeSpan.FromMinutes(remainingDwell);
                         finalContainsEstimate = remainingDwell > 0;
                     }
+                    else
+                    {
+                        etaUnavailableStopName = nextStop?.Name;
+                        etaUnavailableReason = $"Current geofence '{currentVisit.Fence.Name}' is not linked to a planned stop for this run.";
+                    }
                 }
                 else if (timingDeparture?.ExitedAtUtc is DateTimeOffset departedAt)
                 {
@@ -113,12 +131,17 @@ public sealed class RunTimingController(
                         var previousStop = lastDeparture.LoadStopId is Guid previousStopId
                             ? orderedStops.FirstOrDefault(stop => stop.Id == previousStopId)
                             : null;
-                        routeOrigin = Origin(previousStop, lastDeparture.Fence);
+                        routeOrigin = Origin(previousStop, lastDeparture.Fence, masterData);
                     }
                     else
                     {
                         routeOrigin = OperationalRunOrigin.FenceCentre(timingDeparture.Fence);
                     }
+                }
+                else if (remainingStops.Count > 0)
+                {
+                    etaUnavailableStopName = nextStop?.Name;
+                    etaUnavailableReason = "No authoritative Lake Lane/customer geofence departure is available to anchor the remaining route.";
                 }
 
                 if (routeOrigin is not null && routeAnchorUtc is not null && routeStops.Count > 0)
@@ -130,9 +153,11 @@ public sealed class RunTimingController(
                     for (var index = 0; index < routeStops.Count; index++)
                     {
                         var stop = routeStops[index];
-                        var destination = OperationalStopCoordinates.Resolve(stop);
+                        var destination = OperationalStopCoordinates.Resolve(stop, masterData);
                         if (destination is null)
                         {
+                            etaUnavailableStopName = stop.Name;
+                            etaUnavailableReason = "No routable coordinate could be resolved from the plan, Site Master aliases/linked geofence, or approved DOT geofence.";
                             routeFailed = true;
                             break;
                         }
@@ -165,6 +190,8 @@ public sealed class RunTimingController(
                         catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException or Azure.Identity.AuthenticationFailedException)
                         {
                             logger.LogDebug(exception, "Could not calculate geofence-anchored ETA for run {Run} stop {Stop}.", load.Reference, stop.Name);
+                            etaUnavailableStopName = stop.Name;
+                            etaUnavailableReason = "The route provider could not calculate this remaining leg.";
                             routeFailed = true;
                             break;
                         }
@@ -179,6 +206,13 @@ public sealed class RunTimingController(
                     {
                         finalEtaSource = finalContainsEstimate ? "GeofenceEstimated" : "Geofence";
                     }
+                }
+                else if (routeStops.Count > 0 && etaUnavailableReason is null)
+                {
+                    etaUnavailableStopName = nextStop?.Name;
+                    etaUnavailableReason = routeOrigin is null
+                        ? "The authoritative departure exists, but its route origin could not be resolved."
+                        : "The remaining route does not yet have an authoritative timing anchor.";
                 }
             }
 
@@ -195,14 +229,21 @@ public sealed class RunTimingController(
                 finalEtaSource,
                 timingDeparture?.ExitedAtUtc,
                 currentVisit?.EnteredAtUtc,
-                currentVisit?.Fence.Name));
+                currentVisit?.Fence.Name,
+                etaUnavailableStopName,
+                etaUnavailableReason));
         }
 
         return Ok(new RunTimingResponse(planningDate, now, true, records));
     }
 
-    private static (decimal Longitude, decimal Latitude)? Origin(LoadStop? stop, EmbeddedFence fence) =>
-        stop is null ? OperationalRunOrigin.FenceCentre(fence) : OperationalStopCoordinates.Resolve(stop) ?? OperationalRunOrigin.FenceCentre(fence);
+    private static (decimal Longitude, decimal Latitude)? Origin(
+        LoadStop? stop,
+        EmbeddedFence fence,
+        PlannerSourceMasterDataResolver? masterData) =>
+        stop is null
+            ? OperationalRunOrigin.FenceCentre(fence)
+            : OperationalStopCoordinates.Resolve(stop, masterData) ?? OperationalRunOrigin.FenceCentre(fence);
 
     private static int PredictedDwellMinutes(EmbeddedGeofenceSnapshot snapshot, LoadStop stop, int fallbackMinutes)
     {
@@ -240,4 +281,6 @@ public sealed record RunTimingRecord(
     string FinalEtaSource,
     DateTimeOffset? PreviousGeofenceDepartureUtc,
     DateTimeOffset? DwellStartedAtUtc,
-    string? CurrentGeofenceName);
+    string? CurrentGeofenceName,
+    string? EtaUnavailableStopName,
+    string? EtaUnavailableReason);
