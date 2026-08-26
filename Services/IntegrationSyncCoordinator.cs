@@ -17,6 +17,8 @@ public sealed class IntegrationSyncCoordinator(
     FleetioClient fleetioClient,
     ILogger<IntegrationSyncCoordinator> logger)
 {
+    private static readonly SemaphoreSlim FleetioSyncGate = new(1, 1);
+
     public async Task<IntegrationSyncResult> SyncTachoMasterAsync(string actor, CancellationToken ct)
     {
         if (!tachoMaster.IsConfigured)
@@ -138,128 +140,163 @@ public sealed class IntegrationSyncCoordinator(
         if (!fleetioClient.IsConfigured)
             return new("Fleetio", false, DateTimeOffset.UtcNow, $"Fleetio is not configured: {string.Join(", ", fleetioClient.MissingSettings)}.");
 
-        var assets = await fleetioClient.GetVehiclesAsync(100, ct);
-        var vehicleAssets = assets.Where(asset => !IsTrailer(asset)).ToList();
-        var trailerAssets = assets.Where(IsTrailer).ToList();
-        var vehicles = await db.Vehicles.ToListAsync(ct);
-        var trailers = await db.Trailers.ToListAsync(ct);
-        var mappings = await SafeFleetioMappings(ct);
-        var matchedVehicleIds = new HashSet<Guid>();
-        var matchedTrailerIds = new HashSet<Guid>();
-        var createdVehicles = 0;
-        var updatedVehicles = 0;
-        var createdTrailers = 0;
-        var updatedTrailers = 0;
-        var quarantinedVehicles = 0;
-        var quarantinedTrailers = 0;
-        var mergedTrailerAliases = 0;
-        var now = DateTimeOffset.UtcNow;
-
-        foreach (var asset in vehicleAssets)
+        await FleetioSyncGate.WaitAsync(ct);
+        try
         {
-            var registration = BestVehicleRegistration(asset);
-            if (string.IsNullOrWhiteSpace(registration)) continue;
+            var assets = await fleetioClient.GetVehiclesAsync(100, ct);
+            var vehicleAssets = assets.Where(asset => !IsTrailer(asset)).ToList();
+            var trailerAssets = assets.Where(IsTrailer).ToList();
+            var vehicles = await db.Vehicles.ToListAsync(ct);
+            var trailers = await db.Trailers.ToListAsync(ct);
+            var mappings = await SafeFleetioMappings(ct);
+            var matchedVehicleIds = new HashSet<Guid>();
+            var matchedTrailerIds = new HashSet<Guid>();
+            var createdVehicles = 0;
+            var updatedVehicles = 0;
+            var createdTrailers = 0;
+            var updatedTrailers = 0;
+            var quarantinedVehicles = 0;
+            var quarantinedTrailers = 0;
+            var mergedTrailerAliases = 0;
+            var correctedVehicleMappings = 0;
+            var duplicateVehicleSourceRows = vehicleAssets
+                .Select(BestVehicleRegistration)
+                .Where(registration => !string.IsNullOrWhiteSpace(registration))
+                .GroupBy(registration => CanonicalVehicleRegistration(registration!), StringComparer.OrdinalIgnoreCase)
+                .Sum(group => Math.Max(0, group.Count() - 1));
+            var now = DateTimeOffset.UtcNow;
 
-            var mappedId = MappingTarget(mappings, asset.Id, "Vehicle");
-            var vehicle = mappedId is Guid id ? vehicles.FirstOrDefault(item => item.Id == id) : null;
-            vehicle ??= vehicles.FirstOrDefault(item => VehicleKeys(item.Registration, item.FleetNumber, item.FleetioName).Intersect(VehicleKeys(registration, asset.FleetNumber, asset.Name), StringComparer.OrdinalIgnoreCase).Any());
-
-            if (vehicle is null)
+            foreach (var asset in vehicleAssets)
             {
-                vehicle = new Vehicle { Registration = ClipRequired(registration, 20), Active = true };
-                db.Vehicles.Add(vehicle);
-                vehicles.Add(vehicle);
-                createdVehicles++;
+                var registration = BestVehicleRegistration(asset);
+                if (string.IsNullOrWhiteSpace(registration)) continue;
+
+                var mappedId = MappingTarget(mappings, asset.Id, "Vehicle");
+                var mappedVehicle = mappedId is Guid mappedVehicleId ? vehicles.FirstOrDefault(item => item.Id == mappedVehicleId) : null;
+                var registrationVehicle = FindVehicleByRegistration(vehicles, registration);
+                var vehicle = ResolveVehicleForFleetioAsset(vehicles, asset, mappedId);
+
+                if (registrationVehicle is not null && mappedVehicle is not null && registrationVehicle.Id != mappedVehicle.Id)
+                {
+                    correctedVehicleMappings++;
+                    logger.LogWarning(
+                        "Fleetio vehicle mapping {FleetioId} pointed to TMS vehicle {MappedVehicleId}, but registration {Registration} belongs to {RegistrationVehicleId}; repairing the mapping.",
+                        asset.Id, mappedVehicle.Id, registration, registrationVehicle.Id);
+                }
+
+                if (vehicle is null)
+                {
+                    vehicle = new Vehicle { Registration = ClipRequired(CanonicalVehicleRegistration(registration), 20), Active = true };
+                    db.Vehicles.Add(vehicle);
+                    vehicles.Add(vehicle);
+                    createdVehicles++;
+                }
+                else updatedVehicles++;
+
+                // If this is already the same registration after normalisation, keep the stored
+                // formatting. This avoids turning harmless historical spacing variants into a
+                // unique-index collision when an equivalent registration row already exists.
+                if (!string.Equals(CanonicalVehicleRegistration(vehicle.Registration), CanonicalVehicleRegistration(registration), StringComparison.OrdinalIgnoreCase))
+                    vehicle.Registration = ClipRequired(CanonicalVehicleRegistration(registration), 20);
+
+                vehicle.FleetNumber = Clip(asset.FleetNumber, 40) ?? vehicle.FleetNumber;
+                vehicle.FleetioId = Clip(asset.Id, 80);
+                vehicle.FleetioName = Clip(asset.Name, 160);
+                vehicle.FleetioStatus = Clip(asset.Status, 80);
+                vehicle.FleetioVor = asset.Vor;
+                vehicle.FleetioPmiDueUtc = asset.PmiDueUtc;
+                vehicle.FleetioMotDueUtc = asset.MotDueUtc;
+                vehicle.FleetioServiceStatus = Clip(asset.ServiceStatus, 160);
+                vehicle.FleetioLastSyncedUtc = now;
+                vehicle.Active = true;
+                matchedVehicleIds.Add(vehicle.Id);
+                UpsertMapping(mappings, asset.Id, asset.Name ?? registration, "Vehicle", vehicle.Id, actor);
             }
-            else updatedVehicles++;
 
-            vehicle.Registration = ClipRequired(registration, 20);
-            vehicle.FleetNumber = Clip(asset.FleetNumber, 40) ?? vehicle.FleetNumber;
-            vehicle.FleetioId = Clip(asset.Id, 80);
-            vehicle.FleetioName = Clip(asset.Name, 160);
-            vehicle.FleetioStatus = Clip(asset.Status, 80);
-            vehicle.FleetioVor = asset.Vor;
-            vehicle.FleetioPmiDueUtc = asset.PmiDueUtc;
-            vehicle.FleetioMotDueUtc = asset.MotDueUtc;
-            vehicle.FleetioServiceStatus = Clip(asset.ServiceStatus, 160);
-            vehicle.FleetioLastSyncedUtc = now;
-            vehicle.Active = true;
-            matchedVehicleIds.Add(vehicle.Id);
-            UpsertMapping(mappings, asset.Id, asset.Name ?? registration, "Vehicle", vehicle.Id, actor);
-        }
-
-        foreach (var asset in trailerAssets)
-        {
-            var fleetioName = asset.Name?.Trim();
-            var cNumber = asset.Registration?.Trim();
-            var preferred = !string.IsNullOrWhiteSpace(fleetioName) ? fleetioName : cNumber;
-            if (string.IsNullOrWhiteSpace(preferred)) continue;
-
-            var mappedId = MappingTarget(mappings, asset.Id, "Trailer");
-            var aliases = TrailerKeys(fleetioName, cNumber, preferred).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var matchingTms = trailers.Where(item => TrailerKeys(item.TrailerNumber).Any(aliases.Contains)).ToList();
-            var trailer = mappedId is Guid id ? trailers.FirstOrDefault(item => item.Id == id) : null;
-            trailer ??= matchingTms.FirstOrDefault(item => Normalise(item.TrailerNumber) == Normalise(preferred));
-            trailer ??= matchingTms.FirstOrDefault();
-
-            if (trailer is null)
+            foreach (var asset in trailerAssets)
             {
-                trailer = new Trailer { TrailerNumber = ClipRequired(preferred, 40), Type = Clip(asset.Type, 80), Active = true };
-                db.Trailers.Add(trailer);
-                trailers.Add(trailer);
-                createdTrailers++;
+                var fleetioName = asset.Name?.Trim();
+                var cNumber = asset.Registration?.Trim();
+                var preferred = !string.IsNullOrWhiteSpace(fleetioName) ? fleetioName : cNumber;
+                if (string.IsNullOrWhiteSpace(preferred)) continue;
+
+                var mappedId = MappingTarget(mappings, asset.Id, "Trailer");
+                var aliases = TrailerKeys(fleetioName, cNumber, preferred).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var matchingTms = trailers.Where(item => TrailerKeys(item.TrailerNumber).Any(aliases.Contains)).ToList();
+                var trailer = mappedId is Guid id ? trailers.FirstOrDefault(item => item.Id == id) : null;
+                trailer ??= matchingTms.FirstOrDefault(item => Normalise(item.TrailerNumber) == Normalise(preferred));
+                trailer ??= matchingTms.FirstOrDefault();
+
+                if (trailer is null)
+                {
+                    trailer = new Trailer { TrailerNumber = ClipRequired(preferred, 40), Type = Clip(asset.Type, 80), Active = true };
+                    db.Trailers.Add(trailer);
+                    trailers.Add(trailer);
+                    createdTrailers++;
+                }
+                else updatedTrailers++;
+
+                // Fleetio owns identity/status, but TMS owns capacities. If an old alias contains the
+                // capacity, carry it onto the canonical Fleetio trailer before retiring the alias.
+                trailer.StandardCapacity ??= matchingTms.Select(item => item.StandardCapacity).FirstOrDefault(value => value is not null);
+                trailer.EuroCapacity ??= matchingTms.Select(item => item.EuroCapacity).FirstOrDefault(value => value is not null);
+                trailer.TrailerNumber = ClipRequired(preferred, 40);
+                trailer.Type = Clip(asset.Type, 80) ?? trailer.Type;
+                trailer.Active = true;
+                matchedTrailerIds.Add(trailer.Id);
+                UpsertMapping(mappings, asset.Id, preferred, "Trailer", trailer.Id, actor);
+
+                foreach (var duplicate in matchingTms.Where(item => item.Id != trailer.Id))
+                {
+                    await ReassignTrailerLoadsAsync(duplicate.Id, trailer.Id, ct);
+                    foreach (var mapping in mappings.Where(item => item.TmsEntityType == "Trailer" && item.TmsEntityId == duplicate.Id))
+                        mapping.TmsEntityId = trailer.Id;
+                    duplicate.Active = false;
+                    mergedTrailerAliases++;
+                }
             }
-            else updatedTrailers++;
 
-            // Fleetio owns identity/status, but TMS owns capacities. If an old alias contains the
-            // capacity, carry it onto the canonical Fleetio trailer before retiring the alias.
-            trailer.StandardCapacity ??= matchingTms.Select(item => item.StandardCapacity).FirstOrDefault(value => value is not null);
-            trailer.EuroCapacity ??= matchingTms.Select(item => item.EuroCapacity).FirstOrDefault(value => value is not null);
-            trailer.TrailerNumber = ClipRequired(preferred, 40);
-            trailer.Type = Clip(asset.Type, 80) ?? trailer.Type;
-            trailer.Active = true;
-            matchedTrailerIds.Add(trailer.Id);
-            UpsertMapping(mappings, asset.Id, preferred, "Trailer", trailer.Id, actor);
-
-            foreach (var duplicate in matchingTms.Where(item => item.Id != trailer.Id))
+            // Fleetio is authoritative for fleet identity. An active TMS-only asset is quarantined so
+            // it cannot be allocated as if it were current fleet. Records are retained for history.
+            foreach (var vehicle in vehicles.Where(item => item.Active && !matchedVehicleIds.Contains(item.Id)))
             {
-                await ReassignTrailerLoadsAsync(duplicate.Id, trailer.Id, ct);
-                foreach (var mapping in mappings.Where(item => item.TmsEntityType == "Trailer" && item.TmsEntityId == duplicate.Id))
-                    mapping.TmsEntityId = trailer.Id;
-                duplicate.Active = false;
-                mergedTrailerAliases++;
+                vehicle.Active = false;
+                quarantinedVehicles++;
             }
-        }
+            foreach (var trailer in trailers.Where(item => item.Active && !matchedTrailerIds.Contains(item.Id)))
+            {
+                trailer.Active = false;
+                quarantinedTrailers++;
+            }
 
-        // Fleetio is authoritative for fleet identity. An active TMS-only asset is quarantined so
-        // it cannot be allocated as if it were current fleet. Records are retained for history.
-        foreach (var vehicle in vehicles.Where(item => item.Active && !matchedVehicleIds.Contains(item.Id)))
-        {
-            vehicle.Active = false;
-            quarantinedVehicles++;
+            await db.SaveChangesAsync(ct);
+            var changed = createdVehicles + updatedVehicles + createdTrailers + updatedTrailers + quarantinedVehicles + quarantinedTrailers + mergedTrailerAliases;
+            return new("Fleetio", true, now,
+                $"Fleetio canonical sync: {createdVehicles} vehicle(s) created, {updatedVehicles} updated, {createdTrailers} trailer(s) created, {updatedTrailers} updated, {mergedTrailerAliases} trailer alias(es) consolidated, {quarantinedVehicles} TMS-only vehicle(s) and {quarantinedTrailers} TMS-only trailer(s) quarantined, {correctedVehicleMappings} stale vehicle mapping(s) repaired, {duplicateVehicleSourceRows} duplicate source registration row(s) resolved against canonical vehicles. Trailer capacities were retained from TMS.", changed);
         }
-        foreach (var trailer in trailers.Where(item => item.Active && !matchedTrailerIds.Contains(item.Id)))
+        finally
         {
-            trailer.Active = false;
-            quarantinedTrailers++;
+            FleetioSyncGate.Release();
         }
-
-        await db.SaveChangesAsync(ct);
-        var changed = createdVehicles + updatedVehicles + createdTrailers + updatedTrailers + quarantinedVehicles + quarantinedTrailers + mergedTrailerAliases;
-        return new("Fleetio", true, now,
-            $"Fleetio canonical sync: {createdVehicles} vehicle(s) created, {updatedVehicles} updated, {createdTrailers} trailer(s) created, {updatedTrailers} updated, {mergedTrailerAliases} trailer alias(es) consolidated, {quarantinedVehicles} TMS-only vehicle(s) and {quarantinedTrailers} TMS-only trailer(s) quarantined. Trailer capacities were retained from TMS.", changed);
     }
 
     public async Task<IReadOnlyList<IntegrationSyncResult>> ForceAllAsync(string actor, CancellationToken ct)
     {
         var results = new List<IntegrationSyncResult>();
-        foreach (var sync in new Func<string, CancellationToken, Task<IntegrationSyncResult>>[] { SyncTachoMasterAsync, SyncSageHrAsync, SyncFleetioAsync })
+        var syncs = new (string Provider, Func<string, CancellationToken, Task<IntegrationSyncResult>> Sync)[]
+        {
+            ("TachoMaster", SyncTachoMasterAsync),
+            ("Sage HR", SyncSageHrAsync),
+            ("Fleetio", SyncFleetioAsync)
+        };
+
+        foreach (var (provider, sync) in syncs)
         {
             try { results.Add(await sync(actor, ct)); }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                logger.LogWarning(ex, "Forced integration sync failed.");
-                results.Add(new("Integration", false, DateTimeOffset.UtcNow, ex.GetBaseException().Message));
+                logger.LogWarning(ex, "{Provider} forced integration sync failed.", provider);
+                results.Add(new(provider, false, DateTimeOffset.UtcNow, ex.GetBaseException().Message));
             }
         }
         return results;
@@ -341,6 +378,48 @@ public sealed class IntegrationSyncCoordinator(
         return key.Length is >= 5 and <= 8 && key.Any(char.IsLetter) && key.Any(char.IsDigit);
     }
 
+    internal static string CanonicalVehicleRegistration(string? value) => Normalise(value);
+
+    internal static Vehicle? FindVehicleByRegistration(IEnumerable<Vehicle> vehicles, string registration)
+    {
+        var registrationKey = CanonicalVehicleRegistration(registration);
+        if (registrationKey.Length == 0) return null;
+        return vehicles.FirstOrDefault(item =>
+            string.Equals(CanonicalVehicleRegistration(item.Registration), registrationKey, StringComparison.OrdinalIgnoreCase));
+    }
+
+    internal static Vehicle? ResolveVehicleForFleetioAsset(IReadOnlyList<Vehicle> vehicles, FleetioVehicle asset, Guid? mappedId)
+    {
+        var registration = BestVehicleRegistration(asset);
+        if (string.IsNullOrWhiteSpace(registration)) return null;
+
+        // Registration is the database's unique vehicle identity and therefore wins over an old
+        // Fleetio mapping. This is the key guard against assigning an existing registration to a
+        // second Vehicle row and tripping IX_Vehicles_Registration.
+        var registrationVehicle = FindVehicleByRegistration(vehicles, registration);
+        if (registrationVehicle is not null) return registrationVehicle;
+
+        if (!string.IsNullOrWhiteSpace(asset.Id))
+        {
+            var directFleetioVehicle = vehicles.FirstOrDefault(item =>
+                !string.IsNullOrWhiteSpace(item.FleetioId) &&
+                string.Equals(item.FleetioId, asset.Id, StringComparison.OrdinalIgnoreCase));
+            if (directFleetioVehicle is not null) return directFleetioVehicle;
+        }
+
+        if (mappedId is Guid id)
+        {
+            var mappedVehicle = vehicles.FirstOrDefault(item => item.Id == id);
+            if (mappedVehicle is not null) return mappedVehicle;
+        }
+
+        var assetKeys = VehicleKeys(registration, asset.FleetNumber, asset.Name);
+        return vehicles.FirstOrDefault(item =>
+            VehicleKeys(item.Registration, item.FleetNumber, item.FleetioName)
+                .Intersect(assetKeys, StringComparer.OrdinalIgnoreCase)
+                .Any());
+    }
+
     private static IReadOnlyList<string> VehicleKeys(params string?[] values)
     {
         var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -349,7 +428,9 @@ public sealed class IntegrationSyncCoordinator(
             var key = Normalise(value);
             if (key.Length == 0) continue;
             keys.Add(key);
-            if (key.Length > 3) keys.Add(key[^3..]);
+            // Keep the historical trailing-H alias, but do not use the old last-three-character
+            // shortcut. Two unrelated registrations can share three characters and must never be
+            // merged during an authoritative fleet sync.
             if (key.EndsWith("H", StringComparison.OrdinalIgnoreCase) && key.Length > 4) keys.Add(key[..^1]);
         }
         return keys.ToList();
