@@ -1,0 +1,35 @@
+name: Temporary Info mailbox heartbeat OpenAPI patch
+
+on:
+  push:
+    branches:
+      - feature/info-mailbox-heartbeat-20260826
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/info-mailbox-heartbeat-20260826
+          fetch-depth: 0
+      - name: Apply connector patch
+        run: python3 tools/_temporary_info_mailbox_heartbeat_openapi.py
+      - name: Validate heartbeat package
+        run: |
+          python3 power-automate/info-mailbox-heartbeat/validate_workflow.py
+          python3 -m unittest discover -s power-automate/info-mailbox-heartbeat -p 'test_*.py'
+          grep -q "operationId: RecordInfoMailboxHeartbeat" openapi-power-automate.yaml
+      - name: Commit connector contract and remove temporary helpers
+        run: |
+          rm .github/workflows/_temporary_info_mailbox_heartbeat_openapi.yml
+          rm tools/_temporary_info_mailbox_heartbeat_openapi.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add openapi-power-automate.yaml .github/workflows/_temporary_info_mailbox_heartbeat_openapi.yml tools/_temporary_info_mailbox_heartbeat_openapi.py
+          git commit -m "Expose Info mailbox heartbeat to Power Automate"
+          git push origin HEAD:feature/info-mailbox-heartbeat-20260826
