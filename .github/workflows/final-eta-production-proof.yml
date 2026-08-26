@@ -22,11 +22,20 @@ jobs:
           set -euo pipefail
           test -n "$TV_WALLBOARD_ACCESS_KEY"
           body_file="$(mktemp)"
+          progress_file="$(mktemp)"
+          tv_file="$(mktemp)"
           status="$(curl --silent --show-error --output "$body_file" --write-out '%{http_code}' \
             -H "X-TMS-TV-Key: $TV_WALLBOARD_ACCESS_KEY" \
             "$API_BASE/api/v1/run-timing" || true)"
-          echo "[Run timing] HTTP $status"
+          progress_status="$(curl --silent --show-error --output "$progress_file" --write-out '%{http_code}' \
+            -H "X-TMS-TV-Key: $TV_WALLBOARD_ACCESS_KEY" \
+            "$API_BASE/api/v1/run-progress" || true)"
+          tv_status="$(curl --silent --show-error --output "$tv_file" --write-out '%{http_code}' \
+            -H "X-TMS-TV-Key: $TV_WALLBOARD_ACCESS_KEY" \
+            "$API_BASE/api/v1/tv-display/route-progress" || true)"
+          echo "[Run timing] HTTP $status | [Run progress] HTTP $progress_status | [TV route] HTTP $tv_status"
           test "$status" = "200"
+          test "$progress_status" = "200"
 
           summary="$(jq -c '{
             planningDate,
@@ -38,22 +47,37 @@ jobs:
             runsWithNextEta: ([.records[] | select(.nextEtaUtc != null)] | length),
             runsWithFinalEta: ([.records[] | select(.finalEtaUtc != null)] | length),
             finalEtaSources: ([.records[] | select(.finalEtaUtc != null) | .finalEtaSource] | group_by(.) | map({source: .[0], count: length})),
-            finalEtas: [.records[] | select(.finalEtaUtc != null) | {
+            run6: ([.records[] | select((.loadReference // "") | test("Run 6"; "i")) | {
               loadReference,
               nextStopName,
+              nextEtaUtc,
               finalEtaUtc,
               finalEtaSource,
               previousGeofenceDepartureUtc,
-              currentGeofenceName
-            }],
+              currentGeofenceName,
+              routeAnchorSource,
+              evidenceGaps,
+              preRouteDwellMinutes,
+              etaLegs
+            }] | first),
             missingAfterDeparture: [.records[] | select(.completed != true and .previousGeofenceDepartureUtc != null and .finalEtaUtc == null) | {
               loadReference,
               nextStopName,
               previousGeofenceDepartureUtc,
-              currentGeofenceName
+              currentGeofenceName,
+              routeAnchorSource,
+              evidenceGaps
             }]
           }' "$body_file")"
           echo "$summary" | jq .
+
+          echo '--- Run 6 Operations progression ---'
+          jq '[.records[] | select((.loadReference // "") | test("Run 6"; "i")) | {loadReference, runState, completedStops, totalStops, progressionFrontierSequence, nextStop, evidenceGaps, currentVisit, lastDeparture}]' "$progress_file"
+          if test "$tv_status" = "200"; then
+            echo '--- Run 6 TV route progression ---'
+            jq '[.runs[] | select((.reference // "") | test("Run 6"; "i")) | {reference, completedStops, totalStops, progressionFrontierSequence, nextStopId, focusStop, phase, trackingSource: $source, trackingFresh, trackingMoving, speedKph, evidenceGaps, stops}]' --arg source "$(jq -r '.trackingSource // "unknown"' "$tv_file")" "$tv_file"
+          fi
+
           {
             echo '### Production final ETA evidence'
             echo
@@ -72,4 +96,4 @@ jobs:
           fi
 
           jq -r '.records[] | select(.completed != true and .previousGeofenceDepartureUtc != null and .finalEtaUtc == null) | "::warning title=Final ETA gap \(.loadReference)::Departure anchor exists but cumulative final ETA is still unavailable for next stop \(.nextStopName // "unknown")."' "$body_file"
-          rm -f "$body_file"
+          rm -f "$body_file" "$progress_file" "$tv_file"
