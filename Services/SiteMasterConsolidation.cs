@@ -35,10 +35,19 @@ public static class SiteMasterConsolidation
         var canonicalizedGeofences = 0;
         var reviewKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        var staleReviews = await db.StagedImports
+        // Reconciliation can touch hundreds of Site aliases and geofence review rows.
+        // Load the small, relevant staging subset once so the per-record helpers use
+        // EF's tracked Local set instead of issuing one SQL query per alias/review.
+        await db.StagedImports
+            .Where(x => x.EntityType == "masterdetail:site" ||
+                        x.EntityType == SiteReviewType ||
+                        x.EntityType == GeofenceReviewType)
+            .LoadAsync(ct);
+
+        var staleReviews = db.StagedImports.Local
             .Where(x => (x.EntityType == SiteReviewType || x.EntityType == GeofenceReviewType) &&
                         x.Status == StagingStatus.PendingReview)
-            .ToListAsync(ct);
+            .ToList();
         foreach (var review in staleReviews)
         {
             review.Status = StagingStatus.Archived;
@@ -250,15 +259,16 @@ public static class SiteMasterConsolidation
         }
     }
 
-    private static async Task AddSiteAliasesAsync(
+    private static Task AddSiteAliasesAsync(
         TmsDbContext db,
         Site site,
         IEnumerable<string?> aliases,
         string source,
         CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         var key = $"masterdetail:site:{Normalize(site.ExternalCode).ToLowerInvariant()}";
-        var row = await db.StagedImports.FirstOrDefaultAsync(x => x.IdempotencyKey == key, ct);
+        var row = db.StagedImports.Local.FirstOrDefault(x => string.Equals(x.IdempotencyKey, key, StringComparison.OrdinalIgnoreCase));
         JsonObject payload;
         try
         {
@@ -283,7 +293,7 @@ public static class SiteMasterConsolidation
 
         if (row is null)
         {
-            db.StagedImports.Add(new StagedImport
+            row = new StagedImport
             {
                 EntityType = "masterdetail:site",
                 IdempotencyKey = key,
@@ -293,7 +303,8 @@ public static class SiteMasterConsolidation
                 ReviewedAtUtc = DateTimeOffset.UtcNow,
                 ReviewedBy = source,
                 ReviewNote = "Canonical Site aliases consolidated from legacy location masters."
-            });
+            };
+            db.StagedImports.Add(row);
         }
         else
         {
@@ -304,9 +315,11 @@ public static class SiteMasterConsolidation
             row.ReviewedAtUtc = DateTimeOffset.UtcNow;
             row.ReviewedBy = source;
         }
+
+        return Task.CompletedTask;
     }
 
-    private static async Task FlagReviewAsync(
+    private static Task FlagReviewAsync(
         TmsDbContext db,
         string entityType,
         string suffix,
@@ -315,14 +328,15 @@ public static class SiteMasterConsolidation
         ISet<string> reviewKeys,
         CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         var fullKey = $"{entityType}:{suffix}";
         var key = fullKey.Length <= 200 ? fullKey : fullKey[..200];
         reviewKeys.Add(key);
-        var row = await db.StagedImports.FirstOrDefaultAsync(x => x.IdempotencyKey == key, ct);
+        var row = db.StagedImports.Local.FirstOrDefault(x => string.Equals(x.IdempotencyKey, key, StringComparison.OrdinalIgnoreCase));
         var json = JsonSerializer.Serialize(payload);
         if (row is null)
         {
-            db.StagedImports.Add(new StagedImport
+            row = new StagedImport
             {
                 EntityType = entityType,
                 IdempotencyKey = key,
@@ -330,7 +344,8 @@ public static class SiteMasterConsolidation
                 Status = StagingStatus.PendingReview,
                 Source = source,
                 ReviewNote = "Site/geofence identity requires manual confirmation."
-            });
+            };
+            db.StagedImports.Add(row);
         }
         else
         {
@@ -342,6 +357,8 @@ public static class SiteMasterConsolidation
             row.ReviewedBy = null;
             row.ReviewNote = "Site/geofence identity requires manual confirmation.";
         }
+
+        return Task.CompletedTask;
     }
 
     private static string Normalize(string? value) =>
