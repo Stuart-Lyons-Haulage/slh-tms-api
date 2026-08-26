@@ -72,7 +72,7 @@ public sealed class SystemSyncController(
             {
                 mailbox = "info@lyonshaulage.com",
                 lastHeartbeatUtc = heartbeatUtc,
-                heartbeatAgeMinutes = heartbeatUtc is null ? null : Math.Round((now - heartbeatUtc.Value).TotalMinutes, 1),
+                heartbeatAgeMinutes = heartbeatUtc is null ? (double?)null : Math.Round((now - heartbeatUtc.Value).TotalMinutes, 1),
                 latestInboxReceivedAtUtc,
                 lastOrderReceivedUtc = latestOrderReceivedUtc,
                 heartbeatFlowName,
