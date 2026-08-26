@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Nodes;
 
 namespace Slh.Tms.Api.Services;
 
@@ -36,6 +37,20 @@ internal static class OperationalGeofencePayload
         var checksum = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         if (!string.Equals(checksum, ExpectedJsonSha256, StringComparison.Ordinal))
             throw new InvalidDataException($"Operational Falcon geofence payload checksum mismatch. Expected {ExpectedJsonSha256}, got {checksum}.");
-        return Encoding.UTF8.GetString(bytes);
+
+        // The reviewed DOT/Falcon export uses site_no=1 on 523 unrelated fences.
+        // It is a provider/default placeholder, not SLH Site Reference 1. Validate the
+        // immutable provider bytes first, then strip only that placeholder before any
+        // runtime/seed consumer can mistake it for Winchester Southbound.
+        var root = JsonNode.Parse(Encoding.UTF8.GetString(bytes))?.AsArray()
+            ?? throw new InvalidDataException("Operational Falcon geofence payload is not a JSON array.");
+        foreach (var node in root.OfType<JsonObject>())
+        {
+            var rawSiteNumber = node["site_no"]?.ToString();
+            if (GeofenceProviderSiteLinkPolicy.IsProviderPlaceholder(rawSiteNumber))
+                node["site_no"] = null;
+        }
+
+        return root.ToJsonString();
     }
 }

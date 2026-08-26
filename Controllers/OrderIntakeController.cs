@@ -58,7 +58,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         {
             if (ShouldStageMappingException(request, parsed))
                 return await StageMappingException(request, parsed, ct);
-            return Ok(new { ignored = true, reason = parsed.IgnoredReason, staged = 0, existing = 0, superseded = 0, warnings = parsed.Warnings });
+            return Ok(new { ignored = true, reason = parsed.IgnoredReason, staged = 0, existing = 0, superseded = 0, warnings = parsed.Warnings, outlookCategory = (string?)null });
         }
 
         var staged = 0;
@@ -124,7 +124,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             "Info mailbox intake {MessageId}: staged {Staged}, existing {Existing}, superseded {Superseded}, parser warnings {Warnings}.",
             request.MessageId, staged, existing, superseded, parsed.Warnings.Count);
 
-        return Accepted(new { ignored = false, staged, existing, superseded, warnings = parsed.Warnings, records });
+        return Accepted(new { ignored = false, staged, existing, superseded, warnings = parsed.Warnings, outlookCategory = "TMS Imported", records });
     }
 
     private async Task<EmailIntakeParseResult> ParseEmail(MailboxEmailIntakeRequest request, CancellationToken ct) =>
@@ -163,6 +163,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 existing = 1,
                 superseded = 0,
                 warnings = parsed.Warnings,
+                outlookCategory = "TMS Review",
                 records = new[]
                 {
                     new
@@ -230,6 +231,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             existing = 0,
             superseded = 0,
             warnings,
+            outlookCategory = "TMS Review",
             records = new[]
             {
                 new
@@ -259,8 +261,19 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var value = $"{sender} {subject} {body} {attachments}";
         if (LooksOperationalNoise(value))
             return false;
+        var hasAttachment = (request.Attachments ?? []).Any(item => item.IsInline != true);
+        var internalPlannerAttachment = sender.EndsWith("@lyonshaulage.com", StringComparison.OrdinalIgnoreCase) &&
+                                        hasAttachment &&
+                                        (value.Contains("load plan", StringComparison.OrdinalIgnoreCase) ||
+                                         value.Contains("daily times", StringComparison.OrdinalIgnoreCase) ||
+                                         value.Contains("aldi times", StringComparison.OrdinalIgnoreCase) ||
+                                         value.Contains("lyons collections", StringComparison.OrdinalIgnoreCase));
 
         var recognisedSource = sender.EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) ||
+               internalPlannerAttachment ||
+               sender.EndsWith("@apsgroup.uk.com", StringComparison.OrdinalIgnoreCase) ||
+               sender.EndsWith("@pmtransport.co.uk", StringComparison.OrdinalIgnoreCase) ||
+               sender.EndsWith("@vitacress.com", StringComparison.OrdinalIgnoreCase) ||
                sender.EndsWith("@langmeadherbs.co.uk", StringComparison.OrdinalIgnoreCase) ||
                sender.EndsWith("@langmeadfarms.co.uk", StringComparison.OrdinalIgnoreCase) ||
                sender.EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) ||
@@ -270,6 +283,9 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                value.Contains("Nature's Way", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("Langmead", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("Barfoots", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Market Week", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("PM Transport", StringComparison.OrdinalIgnoreCase) ||
+               value.Contains("Vitacress", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("Aldi", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("Waitrose", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("Weightrose", StringComparison.OrdinalIgnoreCase) ||
@@ -289,9 +305,16 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             value.Contains("purchase order", StringComparison.OrdinalIgnoreCase) ||
             value.Contains("delivery quantities", StringComparison.OrdinalIgnoreCase) ||
             value.Contains("booking form", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("market week", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("additional market", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("onward delivery", StringComparison.OrdinalIgnoreCase) ||
             value.Contains("confirmed collection", StringComparison.OrdinalIgnoreCase) ||
             value.Contains("confirmed collections", StringComparison.OrdinalIgnoreCase) ||
             value.Contains("confirmed ALDI", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("load plan", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("daily times", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("aldi times", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("lyons collections", StringComparison.OrdinalIgnoreCase) ||
             value.Contains("collection for", StringComparison.OrdinalIgnoreCase) ||
             value.Contains("delivery to", StringComparison.OrdinalIgnoreCase))
             return true;

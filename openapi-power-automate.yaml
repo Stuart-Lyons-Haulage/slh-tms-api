@@ -143,8 +143,8 @@ paths:
           required: true
           schema: { $ref: '#/definitions/MailboxEmailIntakeRequest' }
       responses:
-        '202': { description: Email parsed and one or more orders staged }
-        '200': { description: Email ignored or previously processed }
+        '202': { description: Email parsed and one or more orders staged, schema: { $ref: '#/definitions/EmailIntakeResponse' } }
+        '200': { description: Email ignored or previously processed, schema: { $ref: '#/definitions/EmailIntakeResponse' } }
   /customer-communications/pending:
     get:
       operationId: GetPendingCustomerAcknowledgements
@@ -256,6 +256,21 @@ definitions:
       attachments:
         type: array
         items: { $ref: '#/definitions/MailboxAttachmentRequest' }
+  EmailIntakeResponse:
+    type: object
+    properties:
+      ignored: { type: boolean }
+      reason: { type: string }
+      staged: { type: integer }
+      existing: { type: integer }
+      superseded: { type: integer }
+      outlookCategory: { type: string, description: "Apply this Outlook category to the source email when present. Expected values are TMS Imported or TMS Review." }
+      warnings: { type: array, items: { type: string } }
+      records:
+        type: array
+        items:
+          type: object
+          additionalProperties: true
   CommunicationSentRequest:
     type: object
     properties:

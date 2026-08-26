@@ -67,16 +67,12 @@ public static class GeofencePlanningMatch
         var locality = words.Skip(1).Where(word => !NoiseTokens.Contains(word)).ToList();
         if (locality.Count == 0) return siteText;
 
-        // Prefer the authoritative DOT/Falcon Nature's Way naming convention regardless
-        // of word order or brackets: NWF Drayton == Drayton (Natures Way).
         var naturesWayMatches = EmbeddedGeofenceEngine.ApprovedFences
             .Where(fence => IsNaturesWayFence(fence.Name))
             .Where(fence => ContainsAllWords(fence.Name, locality))
             .ToList();
         if (naturesWayMatches.Count == 1) return naturesWayMatches[0].Name;
 
-        // Runcton is the historic exception in the approved DOT export: its canonical
-        // fence is Vitacress Runcton. The NWF Collection category remains authoritative.
         var categoryMatches = EmbeddedGeofenceEngine.ApprovedFences
             .Where(fence => string.Equals(fence.Category, "NWF Collection", StringComparison.OrdinalIgnoreCase))
             .Where(fence => ContainsAllWords(fence.Name, locality))
@@ -88,9 +84,6 @@ public static class GeofencePlanningMatch
             .ToList();
         if (estateMatches.Count == 1) return estateMatches[0].Name;
 
-        // If no unique approved fence exists, preserve only the locality. Crucially,
-        // SamePhysicalSite will not use this fallback to link an NWF stop to a different
-        // business sharing that locality.
         return string.Join(' ', locality);
     }
 
@@ -106,9 +99,6 @@ public static class GeofencePlanningMatch
             var index = ordered.FindIndex(stop => stop.Id == primaryId);
             if (index < 0) continue;
 
-            // Consecutive planner lines can represent multiple jobs completed during
-            // one physical site visit (Run 1 AM currently has Runcton twice). Expand
-            // only across adjacent stops that resolve to the same Falcon site.
             for (var i = index - 1; i >= 0 && SamePhysicalSite(ordered[i], visit.Fence); i--)
                 completed.Add(ordered[i].Id);
             for (var i = index + 1; i < ordered.Count && SamePhysicalSite(ordered[i], visit.Fence); i++)
@@ -126,17 +116,12 @@ public static class GeofencePlanningMatch
         {
             var plannerLocality = NaturesWayLocalityTokens(StripOperationalPrefix(stop.Name));
 
-            // Accept DOT naming variants only when the fence explicitly identifies
-            // Nature's Way and the locality matches. This safely covers forms such as
-            // "Drayton (Natures Way)" without matching other Drayton businesses.
             if (IsNaturesWayFence(fence.Name))
             {
                 var fenceLocality = NaturesWayLocalityTokens(fence.Name);
                 if (plannerLocality.Count > 0 && plannerLocality.SetEquals(fenceLocality)) return true;
             }
 
-            // Also accept the single canonical approved fence selected by MatchText.
-            // This preserves the historic Vitacress Runcton mapping.
             var canonical = MatchText(stop.Name);
             return NormalizeName(canonical) == NormalizeName(fence.Name);
         }
@@ -150,11 +135,6 @@ public static class GeofencePlanningMatch
         return common.Count == 1 && common[0].Length >= 5 && (left.Count == 1 || right.Count == 1);
     }
 
-    /// <summary>
-    /// Lake Lane is SLH's route origin/depot geofence. It is execution evidence for
-    /// starting the first leg, not a customer stop and therefore is intentionally not
-    /// linked to a LoadStop.
-    /// </summary>
     public static bool IsLakeLaneFence(EmbeddedFence fence) => IsLakeLaneFence(fence.Name);
 
     public static bool IsLakeLaneFence(string? name)
@@ -177,15 +157,17 @@ public static class GeofencePlanningMatch
         if (visit.LoadStopId is null || visit.ExitedAtUtc is null) return false;
         if (visit.ConfirmedAtUtc is not null) return true;
 
-        // RoadTech can retain the same provider event while a vehicle is stationary.
-        // Once the next observed point proves that the vehicle has exited the fence,
-        // entry-to-exit duration is the authoritative dwell evidence even when the
-        // synthetic live observations used while stationary are no longer in history.
         return visit.ExitedAtUtc.Value - visit.EnteredAtUtc >= TimeSpan.FromMinutes(CredibleCompletedVisitMinutes);
     }
 
     private static string MatchStop(LoadStop stop)
     {
+        // Explicit planner NWF labels are the canonical operational identity. Import/site
+        // coordinates are useful routing evidence, but can be stale or temporarily linked
+        // to the wrong geofence while Master Data is being repaired. Never let that move an
+        // NWF stop to a different physical business/site.
+        if (IsNwfPlannerLabel(stop.Name)) return MatchText(stop.Name);
+
         var coordinateFence = FenceContaining(stop.Latitude, stop.Longitude);
         return coordinateFence?.Name ?? MatchText(stop.Name);
     }

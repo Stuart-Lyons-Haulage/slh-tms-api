@@ -81,6 +81,8 @@ jobs:
           {
             echo '### Production final ETA evidence'
             echo
+            echo 'Each run includes the HGV route-provider leg minutes, predicted dwell and cumulative arrival evidence used by the final ETA.'
+            echo
             echo '```json'
             echo "$summary" | jq .
             echo '```'

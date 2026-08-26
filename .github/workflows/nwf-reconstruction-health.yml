@@ -33,6 +33,28 @@ jobs:
           grep -Eq '"expectedGeofenceCount"[[:space:]]*:[[:space:]]*736' "$body_file"
           rm -f "$body_file"
 
+      - name: Sync canonical Site Master and geofence links
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$TV_WALLBOARD_ACCESS_KEY"
+          body_file="$(mktemp)"
+          status="$(curl --silent --show-error --output "$body_file" --write-out "%{http_code}" \
+            -X POST \
+            -H "X-TMS-TV-Key: $TV_WALLBOARD_ACCESS_KEY" \
+            "$API_BASE/api/v1/health/geofence-links/sync" || true)"
+          test "$status" = "200"
+          summary="$(jq -c '{promotedCustomers, archivedDuplicates, linkedGeofences, canonicalizedGeofences, needsReview, pendingSiteReviews, pendingGeofenceReviews, reprojected, planningDate, source, syncedAtUtc}' "$body_file")"
+          echo "$summary"
+          {
+            echo "### Site Master consolidation + geofence sync"
+            echo
+            echo '```json'
+            echo "$summary" | jq .
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          rm -f "$body_file"
+
       - name: Check Site Master geofence linkage
         shell: bash
         run: |

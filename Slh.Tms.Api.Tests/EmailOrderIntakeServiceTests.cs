@@ -57,14 +57,34 @@ public sealed class EmailOrderIntakeServiceTests
     {
         var result = service.Parse(new MailboxEmailIntakeRequest(
             "message-summerberry-spinneys", null, "info@lyonshaulage.com", "Ioana-Andreea.Pascalau@summerberry.co.uk", "Ioana",
-            "26.08.2026 Spinneys/JHF delivery", DateTimeOffset.Parse("2026-08-25T07:10:15Z"),
-            "Customer : Spinneys/JHF order\nDepot Date: 26.08.2026\nCollection : 25.08.2026- 17:00\nPallets : 5\nAdress of delivery : K&N facility", null, null, null));
+            "27.08.2026 Spinneys/JHF delivery", DateTimeOffset.Parse("2026-08-26T07:10:15Z"),
+            """
+            Customer : Spinneys/JHF order
+            Depot Date: 27.08.2026
+            Collection : 26.08.2026- 17:00
+            Pallets : 15
+            Adress of delivery : K&N facility
+            Building 1235, Eastern Perimeter Road,
+            London Heathrow Airport,
+            Hounslow,
+            TW6 2SQ
+            To be there not later than 8AM on the Depot Date
+            """, null, null, null));
 
         var order = Assert.Single(result.Orders);
-        Assert.Equal("TSBC", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("SPINNEYS/JHF", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("Spinneys/JHF", order.Payload.GetProperty("marketName").GetString());
         Assert.Equal("2026-08-26", order.Payload.GetProperty("collectionDate").GetString());
-        Assert.Equal("Spinneys/JHF", order.Payload.GetProperty("stallNumber").GetString());
-        Assert.Equal(5, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.Equal("2026-08-27", order.Payload.GetProperty("deliveryDate").GetString());
+        Assert.Equal("Summer Berry", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("K&N facility", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal(15, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.Equal("17:00", order.Payload.GetProperty("requestedTime").GetString());
+        Assert.Equal("08:00", order.Payload.GetProperty("deliveryRequestedTime").GetString());
+        Assert.Equal("Not later than", order.Payload.GetProperty("deliveryTimeConstraint").GetString());
+        Assert.Contains("TW6 2SQ", order.Payload.GetProperty("deliveryAddress").GetString());
+        Assert.Equal("High", order.Payload.GetProperty("intakeConfidence").GetString());
+        Assert.Contains(order.Warnings, warning => warning.Contains("inferred as Summer Berry", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -130,6 +150,121 @@ public sealed class EmailOrderIntakeServiceTests
         Assert.Contains(result.Orders, order => order.Payload.GetProperty("stallNumber").GetString() == "Aylesford" && order.Payload.GetProperty("pallets").GetInt32() == 3);
         Assert.Contains(result.Orders, order => order.Payload.GetProperty("stallNumber").GetString() == "Leyland" && order.Payload.GetProperty("pallets").GetInt32() == 1);
         Assert.All(result.Orders, order => Assert.Equal("2026-08-26", order.Payload.GetProperty("deliveryDate").GetString()));
+    }
+
+    [Fact]
+    public void DoubleHWaitroseColumnTable_StagesEachDepotColumn()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-doubleh-waitrose", null, "info@lyonshaulage.com", "Ramas@doubleh.co.uk", "Ramas",
+            "Waitrose order for dd 27.08 from Double H", DateTimeOffset.Parse("2026-08-26T07:07:37Z"),
+            """
+            Please see below Waitrose order for depot date 27.08 (collection today 26.08)
+
+            Depot date| 27.08| | | |
+             | Aylesford| Bracknell| Brinklow| Leyland|
+            Order Ref| X58520| J58713| R58625| Z57428| TOTAL
+            Trolleys| 21| 40| 39| 23| 123
+            """, null, null, null));
+
+        Assert.Equal(4, result.Orders.Count);
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("stallNumber").GetString() == "Aylesford" && order.Payload.GetProperty("pallets").GetInt32() == 21);
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("stallNumber").GetString() == "Leyland" && order.Payload.GetProperty("customerPo").GetString() == "Z57428");
+        Assert.All(result.Orders, order =>
+        {
+            Assert.Equal("WAITROSE", order.Payload.GetProperty("customerCode").GetString());
+            Assert.Equal("Double H", order.Payload.GetProperty("sellerName").GetString());
+            Assert.Equal("2026-08-26", order.Payload.GetProperty("collectionDate").GetString());
+            Assert.Equal("2026-08-27", order.Payload.GetProperty("deliveryDate").GetString());
+        });
+    }
+
+    [Fact]
+    public void InternalMorrisonsBridgwaterEmail_StagesEachCollectionLine()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-internal-bridgwater", null, "info@lyonshaulage.com", "michael@lyonshaulage.com", "Michael Lyons",
+            "Bridgewater load tomorrow", DateTimeOffset.Parse("2026-08-25T16:39:38Z"),
+            """
+            Load Number 20.
+
+            Tomorrow, please be at your first collection site for 06:30. Please plan your start time accordingly.
+
+            Collections list:
+            Merston  8p  Morrisons-Bridgwater
+            Runcton  8p  Morrisons-Bridgwater
+            Selsey  9p  Morrisons-Bridgwater
+
+            Once loaded please deliver to Morrisons-Bridgwater.
+
+            Morrisons-Bridgwater booking ref: X01392278
+            """, null, null, null));
+
+        Assert.Equal(3, result.Orders.Count);
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("sellerName").GetString() == "Merston" && order.Payload.GetProperty("pallets").GetInt32() == 8);
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("sellerName").GetString() == "Selsey" && order.Payload.GetProperty("pallets").GetInt32() == 9);
+        Assert.All(result.Orders, order =>
+        {
+            Assert.Equal("MORRISONS", order.Payload.GetProperty("customerCode").GetString());
+            Assert.Equal("Morrisons-Bridgwater", order.Payload.GetProperty("stallNumber").GetString());
+            Assert.Equal("2026-08-26", order.Payload.GetProperty("collectionDate").GetString());
+            Assert.Equal("2026-08-26", order.Payload.GetProperty("deliveryDate").GetString());
+            Assert.Equal("06:30", order.Payload.GetProperty("requestedTime").GetString());
+            Assert.Equal("X01392278", order.Payload.GetProperty("customerPo").GetString());
+        });
+    }
+
+    [Fact]
+    public void VitacressWaitroseLeylandReply_StagesOnwardDepotDelivery()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-vitacress-leyland", null, "info@lyonshaulage.com", "kay@lyonshaulage.com", "Kay Ryan",
+            "RE: Leyland", DateTimeOffset.Parse("2026-08-26T09:32:30Z"),
+            """
+            Morning Maciej
+
+            Booked in for you
+
+            From: Maciej Rybitwa <Maciej.Rybitwa@vitacress.com>
+            To: Waitrose Primary Transport; info <info@lyonshaulage.com>
+            Subject: Leyland
+
+            Morning
+            We will drop 7 plts into Bracknell tomorrow 27/08/26 around 07.30 for your onward delivery to Leyland.
+            """, null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("WAITROSE", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("2026-08-27", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("2026-08-27", order.Payload.GetProperty("deliveryDate").GetString());
+        Assert.Equal("Bracknell", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Leyland", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal(7, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.Equal("07:30", order.Payload.GetProperty("requestedTime").GetString());
+    }
+
+    [Fact]
+    public void PmTransportAdditionalMarketEmail_StagesShortMarketAmendmentForReview()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-additional-market", null, "info@lyonshaulage.com", "Keiran@PMTransport.co.uk", "Keiran",
+            "Additional market", DateTimeOffset.Parse("2026-08-26T09:33:04Z"),
+            """
+            Another 3pt sunstar spit please
+
+            All pallets will be ready about 6pm,
+
+            They may get 11pt ready for about 5 if needed
+            """, null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("PMTRANSPORT", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("2026-08-26", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("Sunstar", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Spitalfields", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal(3, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.Equal("18:00", order.Payload.GetProperty("requestedTime").GetString());
+        Assert.Contains(order.Warnings, warning => warning.Contains("11 pallets may be ready", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
