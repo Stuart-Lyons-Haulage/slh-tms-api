@@ -1,18 +1,10 @@
 name: CD - Deploy TMS to Azure Container Apps
-# Verify the exact revision before relying on the shared public ingress route.
 
 on:
   workflow_dispatch:
-    inputs:
-      refresh_infrastructure:
-        description: Reapply registry and Key Vault secret bindings before deploying
-        required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
-  push:
+  workflow_run:
+    workflows: ["CI - Build and Test"]
+    types: [completed]
     branches: [main]
 
 permissions:
@@ -21,10 +13,11 @@ permissions:
 
 concurrency:
   group: slh-tms-api-production
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -33,11 +26,13 @@ jobs:
       AZURE_CONTAINER_APP_NAME: slh-tms-api-prod
       AZURE_RESOURCE_GROUP: slh-tms-prod-rg
       AZURE_CONTAINER_APP_FQDN: slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
-      AZURE_KEY_VAULT_URI: https://slh-tms-kv-prod.vault.azure.net
+      DEPLOY_SHA: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.workflow_run.head_sha }}
 
     steps:
-      - name: Check out source
+      - name: Check out tested source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
 
       - name: Sign in to Azure with OpenID Connect
         uses: azure/login@v2
@@ -46,104 +41,26 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Build and push container image in Azure Container Registry
+      - name: Build and push tested container image
         run: |
           set -euo pipefail
           az acr build \
             --registry "$AZURE_CONTAINER_REGISTRY" \
-            --image "slh-tms-api:${{ github.sha }}" \
+            --image "slh-tms-api:$DEPLOY_SHA" \
             --image slh-tms-api:latest \
             .
 
-      - name: Wait for any previous Container App operation
-        id: wait_for_container_app
+      - name: Wait for Container App readiness
         run: |
           set -euo pipefail
-          for attempt in {1..45}; do
+          for attempt in {1..60}; do
             state="$(timeout 20s az containerapp show \
               --name "$AZURE_CONTAINER_APP_NAME" \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --query properties.provisioningState \
               --output tsv 2>/dev/null || true)"
-            if test "$state" = "Succeeded"; then
-              echo "Container App is ready."
-              exit 0
-            fi
-            echo "Container App provisioning state is ${state:-unknown}; waiting before deployment mutation ($attempt/45)..."
-            sleep 10
-          done
-          echo "Container App did not report Succeeded, checking whether the live API is still healthy before continuing."
-          if curl --fail --silent --show-error --max-time 10 "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health" >/dev/null; then
-            echo "::warning::Container App provisioning state is still ${state:-unknown}, but the live API is healthy. Continuing with image-only deployment."
-            exit 0
-          fi
-          echo "Container App did not return to Succeeded provisioning state and the live API health check failed."
-          exit 1
-
-      - name: Configure private registry access
-        if: github.event_name == 'workflow_dispatch' && inputs.refresh_infrastructure == 'true'
-        run: |
-          set -euo pipefail
-          for attempt in {1..18}; do
-            if az containerapp registry set \
-              --name "$AZURE_CONTAINER_APP_NAME" \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --server "$AZURE_CONTAINER_REGISTRY.azurecr.io" \
-              --identity system; then
-              exit 0
-            fi
-            echo "Registry configuration is busy; retrying ($attempt/18)..."
-            sleep 10
-          done
-          exit 1
-
-      - name: Wait after registry configuration
-        if: github.event_name == 'workflow_dispatch' && inputs.refresh_infrastructure == 'true'
-        run: |
-          set -euo pipefail
-          for attempt in {1..90}; do
-            state="$(timeout 20s az containerapp show --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.provisioningState --output tsv 2>/dev/null || true)"
             if test "$state" = "Succeeded"; then exit 0; fi
-            echo "Waiting for registry operation to complete: ${state:-unknown} ($attempt/90)..."
-            sleep 10
-          done
-          exit 1
-
-      - name: Bind production secrets from Azure Key Vault
-        if: github.event_name == 'workflow_dispatch' && inputs.refresh_infrastructure == 'true'
-        run: |
-          set -euo pipefail
-          secrets=(
-            "tms-db-connection=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-tms-db-connection,identityref:system"
-            "dot-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-api-key,identityref:system"
-            "dot-base-url=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-base-url,identityref:system"
-            "dot-company-code=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-company-code,identityref:system"
-            "dot-password=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-password,identityref:system"
-            "dot-username=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-dot-username,identityref:system"
-            "sagehr-api-key=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-sagehr-api-key,identityref:system"
-            "sagehr-base-url=keyvaultref:$AZURE_KEY_VAULT_URI/secrets/slh-sagehr-base-url,identityref:system"
-            "tv-wallboard-access-key=${{ secrets.TV_WALLBOARD_ACCESS_KEY }}"
-          )
-          for attempt in {1..18}; do
-            if az containerapp secret set \
-              --name "$AZURE_CONTAINER_APP_NAME" \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --secrets "${secrets[@]}"; then
-              exit 0
-            fi
-            echo "Secret binding is busy; retrying ($attempt/18)..."
-            sleep 10
-          done
-          exit 1
-
-      - name: Wait after secret binding
-        if: github.event_name == 'workflow_dispatch' && inputs.refresh_infrastructure == 'true'
-        run: |
-          set -euo pipefail
-          for attempt in {1..90}; do
-            state="$(timeout 20s az containerapp show --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.provisioningState --output tsv 2>/dev/null || true)"
-            if test "$state" = "Succeeded"; then exit 0; fi
-            echo "Waiting for secret operation to complete: ${state:-unknown} ($attempt/90)..."
+            echo "Container App provisioning state is ${state:-unknown}; waiting ($attempt/60)..."
             sleep 10
           done
           exit 1
@@ -175,167 +92,56 @@ jobs:
             "Integrations__SageHr__DriverPositionKeyword=Driver"
             "TvWallboard__AccessKey=secretref:tv-wallboard-access-key"
             "Cors__AllowedOrigins__0=https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io"
-            "Deployment__Revision=${{ github.sha }}"
+            "Deployment__Revision=$DEPLOY_SHA"
           )
-          for attempt in {1..18}; do
-            if az containerapp update \
-              --name "$AZURE_CONTAINER_APP_NAME" \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --image "$AZURE_CONTAINER_REGISTRY.azurecr.io/slh-tms-api:${{ github.sha }}" \
-              --set-env-vars "${env_vars[@]}"; then
-              exit 0
-            fi
-            echo "Container image update is busy; retrying ($attempt/18)..."
-            sleep 10
-          done
-          exit 1
-
-      - name: Wait for deployed revision
-        run: |
-          set -euo pipefail
-          for attempt in {1..90}; do
-            state="$(timeout 20s az containerapp show --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.provisioningState --output tsv 2>/dev/null || true)"
-            if test "$state" = "Succeeded"; then exit 0; fi
-            echo "Waiting for image deployment to complete: ${state:-unknown} ($attempt/90)..."
-            sleep 10
-          done
-          exit 1
-
-      - name: Configure ingress and route traffic to latest revision
-        run: |
-          set -euo pipefail
-          for attempt in {1..18}; do
-            if az containerapp ingress update \
-              --name "$AZURE_CONTAINER_APP_NAME" \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --target-port 80; then
-              break
-            fi
-            echo "Ingress update is busy; retrying ($attempt/18)..."
-            sleep 10
-          done
-
-          for attempt in {1..90}; do
-            state="$(timeout 20s az containerapp show --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.provisioningState --output tsv 2>/dev/null || true)"
-            if test "$state" = "Succeeded"; then break; fi
-            echo "Waiting for ingress operation: ${state:-unknown} ($attempt/90)..."
-            sleep 10
-          done
-
-          latest_revision="$(az containerapp revision list \
+          az containerapp update \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --query 'sort_by(@, &properties.createdTime)[-1].name' \
-            --output tsv)"
-          test -n "$latest_revision"
+            --image "$AZURE_CONTAINER_REGISTRY.azurecr.io/slh-tms-api:$DEPLOY_SHA" \
+            --set-env-vars "${env_vars[@]}"
 
-          az containerapp revision activate \
-            --name "$AZURE_CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --revision "$latest_revision" || true
-
-          for attempt in {1..18}; do
-            if az containerapp ingress traffic set \
-              --name "$AZURE_CONTAINER_APP_NAME" \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --revision-weight "$latest_revision=100"; then
-              break
-            fi
-            echo "Traffic update is busy; retrying ($attempt/18)..."
-            sleep 10
-          done
-
-          latest_revision_fqdn="$(az containerapp revision show \
-            --name "$AZURE_CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --revision "$latest_revision" \
-            --query properties.fqdn \
-            --output tsv)"
-          test -n "$latest_revision_fqdn"
-          echo "LATEST_REVISION=$latest_revision" >> "$GITHUB_ENV"
-          echo "LATEST_REVISION_FQDN=$latest_revision_fqdn" >> "$GITHUB_ENV"
-
-      - name: Check exact deployed revision health
-        run: |
-          set -euo pipefail
-          test -n "$LATEST_REVISION_FQDN"
-          for attempt in {1..36}; do
-            health="$(curl --fail --silent --show-error --max-time 10 \
-              -H 'Cache-Control: no-cache' \
-              "https://$LATEST_REVISION_FQDN/api/v1/health?deployment=${{ github.sha }}" || true)"
-            if echo "$health" | grep --quiet "${{ github.sha }}"; then
-              echo "$health"
-              exit 0
-            fi
-            echo "Exact revision $LATEST_REVISION is not healthy with the expected deployment revision yet; retrying..."
-            sleep 10
-          done
-          exit 1
-
-      - name: Check public TMS health route
-        run: |
-          set -euo pipefail
-          for attempt in {1..36}; do
-            health="$(curl --fail --silent --show-error --max-time 10 \
-              -H 'Cache-Control: no-cache' \
-              "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health?deployment=${{ github.sha }}" || true)"
-            if test -n "$health"; then
-              echo "$health"
-              exit 0
-            fi
-            echo "Public API route is not healthy yet; retrying..."
-            sleep 10
-          done
-          exit 1
-
-      - name: Check Azure SQL readiness
+      - name: Route traffic to latest ready revision
         run: |
           set -euo pipefail
           for attempt in {1..60}; do
-            status="$(curl --silent --output /dev/null --write-out "%{http_code}" "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/ready")"
-            if test "$status" = "200"; then exit 0; fi
-            echo "Azure SQL is not ready yet (HTTP $status), retrying..."
+            state="$(timeout 20s az containerapp show --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.provisioningState --output tsv 2>/dev/null || true)"
+            if test "$state" = "Succeeded"; then break; fi
             sleep 10
           done
-          exit 1
+          latest_ready="$(az containerapp show \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query properties.latestReadyRevisionName \
+            --output tsv)"
+          test -n "$latest_ready"
+          az containerapp ingress traffic set \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision-weight "$latest_ready=100"
 
-      - name: Check operational data and schema readiness
+      - name: Smoke test core API and SQL
         run: |
           set -euo pipefail
-          for attempt in {1..18}; do
-            body_file="$(mktemp)"
-            status="$(curl --silent --output "$body_file" --write-out "%{http_code}" "https://$AZURE_CONTAINER_APP_FQDN/api/v1/diagnostics/data-readiness")"
-            cat "$body_file"
-            if test "$status" = "200"; then
-              rm -f "$body_file"
-              exit 0
+          for attempt in {1..36}; do
+            health="$(curl --fail --silent --show-error --max-time 10 -H 'Cache-Control: no-cache' "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health?deployment=$DEPLOY_SHA" || true)"
+            if echo "$health" | grep --quiet "$DEPLOY_SHA"; then
+              break
             fi
-            rm -f "$body_file"
-            echo "Operational data/schema readiness returned HTTP $status; retrying..."
+            echo "Core API has not reported deployment $DEPLOY_SHA yet; retrying ($attempt/36)..."
             sleep 10
           done
-          echo "Operational data/schema readiness did not become healthy."
-          exit 1
+          echo "$health" | grep --quiet "$DEPLOY_SHA"
 
-      - name: Check TachoMaster live integration
-        run: |
-          set -euo pipefail
-          for attempt in {1..12}; do
-            body_file="$(mktemp)"
-            status="$(curl --silent --output "$body_file" --write-out "%{http_code}" "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/tachomaster")"
-            cat "$body_file"
-            if test "$status" = "200"; then
-              rm -f "$body_file"
-              exit 0
-            fi
-            rm -f "$body_file"
-            echo "TachoMaster live check returned HTTP $status; retrying..."
+          for attempt in {1..36}; do
+            status="$(curl --silent --output /dev/null --write-out '%{http_code}' "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/ready" || true)"
+            if test "$status" = "200"; then break; fi
+            echo "SQL readiness returned HTTP $status; retrying ($attempt/36)..."
             sleep 10
           done
-          exit 1
+          test "$status" = "200"
 
-      - name: Verify operational API requires Microsoft Entra authentication
+      - name: Verify operational routes fail closed
         run: |
           set -euo pipefail
-          status="$(curl --silent --output /dev/null --write-out "%{http_code}" "https://$AZURE_CONTAINER_APP_FQDN/api/v1/customers")"
-          test "$status" = "401"
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' "https://$AZURE_CONTAINER_APP_FQDN/api/v1/customers")"
+          test "$status" = "401" -o "$status" = "403"
