@@ -1,4 +1,5 @@
 name: CD - Deploy TMS to Azure Container Apps
+# Verify the exact revision before relying on the shared public ingress route.
 
 on:
   workflow_dispatch:
