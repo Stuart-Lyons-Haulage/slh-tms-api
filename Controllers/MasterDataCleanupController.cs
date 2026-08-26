@@ -81,6 +81,62 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
         var ids = request.Ids.Distinct().Take(250).ToList();
         if (ids.Count == 0) return BadRequest(new { code = "no_records_selected", message = "Select at least one row to delete." });
 
+        Dictionary<Guid, List<object>> directUsage;
+        List<string> recoveryRegisterPayloads;
+        try
+        {
+            directUsage = ids.ToDictionary(id => id, _ => new List<object>());
+
+            if (entity == "sites")
+            {
+                var geofenceCounts = await db.SiteGeofences.AsNoTracking()
+                    .Where(x => x.SiteId.HasValue && ids.Contains(x.SiteId.Value))
+                    .GroupBy(x => x.SiteId!.Value)
+                    .Select(group => new { Id = group.Key, Count = group.Count() })
+                    .ToListAsync(ct);
+
+                foreach (var row in geofenceCounts)
+                    directUsage[row.Id].Add(new { area = "Geofences", count = row.Count });
+            }
+            else
+            {
+                var runCounts = await db.Loads.AsNoTracking()
+                    .Where(x => x.DriverId.HasValue && ids.Contains(x.DriverId.Value))
+                    .GroupBy(x => x.DriverId!.Value)
+                    .Select(group => new { Id = group.Key, Count = group.Count() })
+                    .ToListAsync(ct);
+
+                foreach (var row in runCounts)
+                    directUsage[row.Id].Add(new { area = "Runs", count = row.Count });
+
+                var statusCounts = await db.DriverStatusLogs.AsNoTracking()
+                    .Where(x => x.DriverId.HasValue && ids.Contains(x.DriverId.Value))
+                    .GroupBy(x => x.DriverId!.Value)
+                    .Select(group => new { Id = group.Key, Count = group.Count() })
+                    .ToListAsync(ct);
+
+                foreach (var row in statusCounts)
+                    directUsage[row.Id].Add(new { area = "Driver status history", count = row.Count });
+            }
+
+            var needsRegisterCheck = ids.Any(id => directUsage[id].Count == 0);
+            recoveryRegisterPayloads = needsRegisterCheck
+                ? await db.StagedImports.AsNoTracking()
+                    .Where(x => x.EntityType.StartsWith("register:") && x.Status != StagingStatus.Rejected)
+                    .Select(x => x.PayloadJson)
+                    .ToListAsync(ct)
+                : new List<string>();
+        }
+        catch (Exception ex)
+        {
+            return Conflict(new
+            {
+                code = "reference_check_unavailable",
+                message = "The TMS could not safely prove that the selected records are unused, so nothing was deleted.",
+                detail = ex.GetBaseException().Message
+            });
+        }
+
         var deleted = new List<object>();
         var blocked = new List<object>();
         var notFound = new List<Guid>();
@@ -93,17 +149,14 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
                 continue;
             }
 
-            List<object> usage;
-            try { usage = await Usage(entity, id, ct); }
-            catch (Exception ex)
+            var usage = directUsage[id];
+            if (usage.Count == 0 && recoveryRegisterPayloads.Count > 0)
             {
-                blocked.Add(new
-                {
-                    id,
-                    reason = "The TMS could not safely prove this row is unused.",
-                    detail = ex.GetBaseException().Message
-                });
-                continue;
+                var token = id.ToString();
+                var planningCount = recoveryRegisterPayloads.Count(payload =>
+                    payload.Contains(token, StringComparison.OrdinalIgnoreCase));
+                if (planningCount > 0)
+                    usage.Add(new { area = "Planning register", count = planningCount });
             }
 
             if (usage.Count > 0)
@@ -161,8 +214,6 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
         SetActiveValue(item, active);
         if (item is SiteGeofence geofence) geofence.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
-        // Operational state is persisted first. Audit history is deliberately best-effort so
-        // a stale optional audit schema can never make Archive/Restore appear to fail.
         await db.SaveChangesAsync(ct);
         var auditRecorded = await TryAudit(Title(Singular(entity)), id, active ? "Restored" : "Archived", before, Snapshot(item), ct);
         return Ok(new { active, entity, id, auditRecorded });
@@ -227,8 +278,8 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
             }
         }
 
-        // Historic recovery-register loads can carry master GUIDs even when dbo.Loads is
-        // unavailable. Ordinary master-import evidence is intentionally not a delete blocker.
+        if (result.Count > 0) return result;
+
         Add("Planning register", await db.StagedImports.AsNoTracking().CountAsync(x =>
             x.EntityType.StartsWith("register:") && x.Status != StagingStatus.Rejected && x.PayloadJson.Contains(id.ToString()), ct));
         return result;
