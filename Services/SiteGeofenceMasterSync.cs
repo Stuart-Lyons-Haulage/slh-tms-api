@@ -1,0 +1,221 @@
+using System.Text.RegularExpressions;
+using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
+
+namespace Slh.Tms.Api.Services;
+
+public sealed record SiteGeofenceSyncResult(
+    int SitesCoded,
+    int GeofencesLinked,
+    int GeofencesUnlinked,
+    int GeofencesCanonicalized,
+    int SitesMissingGeofence,
+    IReadOnlyList<SiteGeofenceStatus> Sites);
+
+public sealed record SiteGeofenceStatus(
+    Guid SiteId,
+    string SiteCode,
+    string SiteName,
+    IReadOnlyList<string> LinkedGeofences,
+    bool GeofenceLinked,
+    bool NeedsReview);
+
+public static partial class SiteGeofenceMasterSync
+{
+    private const string LocationOnly = "LOCATION_ONLY";
+
+    private static readonly HashSet<string> IgnoredTokens = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "SITE", "DEPOT", "WAREHOUSE", "DISTRIBUTION", "CENTRE", "CENTER", "STORE", "MARKET",
+        "ROAD", "STREET", "LANE", "UNIT", "SERVICE", "SERVICES", "LIMITED", "LTD", "THE", "AND"
+    };
+
+    public static async Task<SiteGeofenceSyncResult> SyncAsync(TmsDbContext db, CancellationToken ct)
+    {
+        var sites = await db.Sites.Where(x => x.Active).OrderBy(x => x.Name).ThenBy(x => x.Id).ToListAsync(ct);
+        try
+        {
+            await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            sites = await db.Sites.Where(x => x.Active).OrderBy(x => x.Name).ThenBy(x => x.Id).ToListAsync(ct);
+        }
+
+        var fences = await db.SiteGeofences.Where(x => x.Active).OrderBy(x => x.Name).ToListAsync(ct);
+        var sitesCoded = CanonicalizeSiteCodes(sites, fences);
+        var linked = 0;
+        var unlinked = 0;
+        var canonicalized = 0;
+
+        foreach (var fence in fences)
+        {
+            if (string.Equals(fence.SiteNumber?.Trim(), LocationOnly, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var candidates = MatchingSites(fence.Name, sites);
+            if (candidates.Count == 1)
+            {
+                var site = candidates[0];
+                if (fence.SiteId != site.Id)
+                {
+                    fence.SiteId = site.Id;
+                    linked++;
+                }
+                if (!string.Equals(fence.SiteNumber, site.ExternalCode, StringComparison.OrdinalIgnoreCase))
+                {
+                    fence.SiteNumber = site.ExternalCode;
+                    canonicalized++;
+                }
+                fence.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                continue;
+            }
+
+            if (fence.SiteId is not null || !string.IsNullOrWhiteSpace(fence.SiteNumber))
+            {
+                fence.SiteId = null;
+                fence.SiteNumber = null;
+                fence.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                unlinked++;
+            }
+        }
+
+        await db.SaveChangesAsync(ct);
+        var status = BuildStatus(sites, fences);
+        return new SiteGeofenceSyncResult(
+            sitesCoded,
+            linked,
+            unlinked,
+            canonicalized,
+            status.Count(x => x.NeedsReview),
+            status);
+    }
+
+    public static async Task<IReadOnlyList<SiteGeofenceStatus>> GetStatusAsync(TmsDbContext db, CancellationToken ct)
+    {
+        var sites = await db.Sites.AsNoTracking().Where(x => x.Active).OrderBy(x => x.ExternalCode).ThenBy(x => x.Name).ToListAsync(ct);
+        try
+        {
+            await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            sites = await db.Sites.AsNoTracking().Where(x => x.Active).OrderBy(x => x.ExternalCode).ThenBy(x => x.Name).ToListAsync(ct);
+        }
+        var fences = await db.SiteGeofences.AsNoTracking().Where(x => x.Active).OrderBy(x => x.Name).ToListAsync(ct);
+        return BuildStatus(sites, fences);
+    }
+
+    public static async Task<SiteGeofenceStatus> LinkGeofenceAsync(TmsDbContext db, Guid geofenceId, string siteCode, CancellationToken ct)
+    {
+        var fence = await db.SiteGeofences.FirstOrDefaultAsync(x => x.Id == geofenceId && x.Active, ct)
+            ?? throw new KeyNotFoundException("Geofence not found.");
+        var sites = await db.Sites.Where(x => x.Active).ToListAsync(ct);
+        try { await MasterDetailStore.EnrichSitesAsync(db, sites, ct); } catch (Exception ex) when (ex is not OperationCanceledException) { }
+
+        var requested = sites.FirstOrDefault(x => string.Equals(x.ExternalCode, siteCode.Trim(), StringComparison.OrdinalIgnoreCase))
+            ?? throw new KeyNotFoundException("Site code not found.");
+        var candidates = MatchingSites(fence.Name, sites);
+        if (candidates.Count != 1 || candidates[0].Id != requested.Id)
+            throw new InvalidOperationException($"Geofence '{fence.Name}' is not a unique name-confirmed match for {requested.ExternalCode} · {requested.Name}.");
+
+        fence.SiteId = requested.Id;
+        fence.SiteNumber = requested.ExternalCode;
+        fence.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+        return BuildStatus(sites, new[] { fence }).First(x => x.SiteId == requested.Id);
+    }
+
+    internal static bool NameConfirms(string geofenceName, Site site)
+    {
+        var fenceTokens = Tokens(geofenceName);
+        if (fenceTokens.Count == 0) return false;
+        return SiteNames(site).Any(name => Tokens(name).Overlaps(fenceTokens));
+    }
+
+    private static List<Site> MatchingSites(string geofenceName, IReadOnlyList<Site> sites)
+        => sites.Where(site => NameConfirms(geofenceName, site)).ToList();
+
+    private static int CanonicalizeSiteCodes(IReadOnlyList<Site> sites, IReadOnlyList<SiteGeofence> fences)
+    {
+        var used = new HashSet<int>();
+        var retained = new Dictionary<Guid, int>();
+        foreach (var site in sites)
+        {
+            var match = SiteCodeRegex().Match(site.ExternalCode?.Trim() ?? string.Empty);
+            if (!match.Success || !int.TryParse(match.Groups[1].Value, out var number) || number <= 0 || !used.Add(number))
+                continue;
+            retained[site.Id] = number;
+        }
+
+        var next = 1;
+        var changed = 0;
+        foreach (var site in sites)
+        {
+            if (!retained.TryGetValue(site.Id, out var number))
+            {
+                while (used.Contains(next)) next++;
+                number = next;
+                used.Add(number);
+                next++;
+            }
+
+            var desired = $"SITE{number:D3}";
+            if (string.Equals(site.ExternalCode, desired, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            site.ExternalCode = desired;
+            changed++;
+            foreach (var fence in fences.Where(x => x.SiteId == site.Id))
+                fence.SiteNumber = desired;
+        }
+        return changed;
+    }
+
+    private static IReadOnlyList<SiteGeofenceStatus> BuildStatus(IReadOnlyList<Site> sites, IEnumerable<SiteGeofence> fences)
+    {
+        var fenceList = fences.ToList();
+        return sites
+            .OrderBy(x => ParseSiteNumber(x.ExternalCode))
+            .ThenBy(x => x.Name)
+            .Select(site =>
+            {
+                var linked = fenceList
+                    .Where(fence => fence.SiteId == site.Id && NameConfirms(fence.Name, site))
+                    .Select(fence => fence.Name)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(x => x)
+                    .ToList();
+                return new SiteGeofenceStatus(site.Id, site.ExternalCode, site.Name, linked, linked.Count > 0, linked.Count == 0);
+            })
+            .ToList();
+    }
+
+    private static int ParseSiteNumber(string? code)
+    {
+        var match = SiteCodeRegex().Match(code?.Trim() ?? string.Empty);
+        return match.Success && int.TryParse(match.Groups[1].Value, out var number) ? number : int.MaxValue;
+    }
+
+    private static IEnumerable<string?> SiteNames(Site site)
+    {
+        yield return site.Name;
+        yield return site.DriverTextName;
+        if (!string.IsNullOrWhiteSpace(site.Aliases))
+        {
+            foreach (var alias in site.Aliases.Split(new[] { ',', ';', '|', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                yield return alias;
+        }
+    }
+
+    private static HashSet<string> Tokens(string? value)
+        => Regex.Matches(value ?? string.Empty, "[A-Za-z0-9]+")
+            .Select(match => match.Value.ToUpperInvariant())
+            .Where(token => token.Length >= 4 && !IgnoredTokens.Contains(token) && !token.All(char.IsDigit))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    [GeneratedRegex("^SITE0*([1-9][0-9]*)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex SiteCodeRegex();
+}
