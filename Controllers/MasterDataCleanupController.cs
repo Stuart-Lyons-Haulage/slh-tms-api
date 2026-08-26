@@ -10,8 +10,10 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/v1/master-data-cleanup")]
 [Authorize]
-public sealed class MasterDataCleanupController(TmsDbContext db) : ControllerBase
+public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration configuration) : ControllerBase
 {
+    private const string DefaultBulkDeletePhrase = "DELETE";
+
     [HttpPost("{entity}/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
     public Task<IActionResult> Archive(string entity, Guid id, CancellationToken ct) => SetActive(entity, id, false, ct);
 
@@ -61,6 +63,89 @@ public sealed class MasterDataCleanupController(TmsDbContext db) : ControllerBas
             integrationMappingsRemoved = removed.Value.MappingsRemoved,
             auditRecorded,
             message = $"{Title(Singular(entity))} permanently deleted from the TMS master. Historical operational records were not removed."
+        });
+    }
+
+    [HttpPost("{entity}/bulk-delete"), Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> BulkDelete(string entity, BulkMasterDataDeleteRequest request, CancellationToken ct)
+    {
+        entity = Canonical(entity);
+        if (entity is not ("drivers" or "sites")) return Unsupported("bulk deleted");
+        if (!AdminPhraseAccepted(request.AdminPassword))
+            return Unauthorized(new
+            {
+                code = "admin_password_required",
+                message = "Enter the master-data delete password before bulk deleting records."
+            });
+
+        var ids = request.Ids.Distinct().Take(250).ToList();
+        if (ids.Count == 0) return BadRequest(new { code = "no_records_selected", message = "Select at least one row to delete." });
+
+        var deleted = new List<object>();
+        var blocked = new List<object>();
+        var notFound = new List<Guid>();
+        foreach (var id in ids)
+        {
+            var item = await Find(entity, id, ct);
+            if (item is null)
+            {
+                notFound.Add(id);
+                continue;
+            }
+
+            List<object> usage;
+            try { usage = await Usage(entity, id, ct); }
+            catch (Exception ex)
+            {
+                blocked.Add(new
+                {
+                    id,
+                    reason = "The TMS could not safely prove this row is unused.",
+                    detail = ex.GetBaseException().Message
+                });
+                continue;
+            }
+
+            if (usage.Count > 0)
+            {
+                blocked.Add(new
+                {
+                    id,
+                    label = Label(item),
+                    reason = $"This {Singular(entity)} is referenced by TMS history or live operational data.",
+                    references = usage
+                });
+                continue;
+            }
+
+            var removed = await Remove(entity, id, ct);
+            if (removed is null)
+            {
+                notFound.Add(id);
+                continue;
+            }
+
+            var auditRecorded = await TryAudit(Title(Singular(entity)), id, "BulkDeleted", removed.Value.Snapshot, null, ct);
+            deleted.Add(new
+            {
+                id,
+                label = Label(item),
+                integrationMappingsRemoved = removed.Value.MappingsRemoved,
+                auditRecorded
+            });
+        }
+
+        return Ok(new
+        {
+            entity,
+            requested = ids.Count,
+            deleted = deleted.Count,
+            blocked = blocked.Count,
+            notFound = notFound.Count,
+            deletedRows = deleted,
+            blockedRows = blocked,
+            notFoundRows = notFound,
+            message = $"{deleted.Count} {Singular(entity)} record{(deleted.Count == 1 ? "" : "s")} permanently deleted. {blocked.Count} blocked by live/history references."
         });
     }
 
@@ -227,6 +312,24 @@ public sealed class MasterDataCleanupController(TmsDbContext db) : ControllerBas
         }
     }
 
+    private bool AdminPhraseAccepted(string? value)
+    {
+        var configured = configuration["MasterDataCleanup:BulkDeletePassword"] ?? Environment.GetEnvironmentVariable("MasterDataCleanup__BulkDeletePassword");
+        var expected = string.IsNullOrWhiteSpace(configured) ? DefaultBulkDeletePhrase : configured.Trim();
+        return string.Equals(value?.Trim(), expected, StringComparison.Ordinal);
+    }
+
+    private static string Label(object item) => item switch
+    {
+        Driver x => $"{x.DisplayName} ({x.EmployeeNumber})",
+        Site x => $"{x.Name} ({x.ExternalCode})",
+        Vehicle x => x.Registration,
+        Trailer x => x.TrailerNumber,
+        Customer x => $"{x.Name} ({x.Code})",
+        SiteGeofence x => x.Name,
+        _ => item.GetType().Name
+    };
+
     private static string Canonical(string value) => value.Trim().ToLowerInvariant() switch
     {
         "driver" or "drivers" => "drivers", "vehicle" or "vehicles" => "vehicles",
@@ -237,3 +340,5 @@ public sealed class MasterDataCleanupController(TmsDbContext db) : ControllerBas
     private static string Title(string value) => value.Length == 0 ? value : char.ToUpperInvariant(value[0]) + value[1..];
     private static string Snapshot<T>(T value) => JsonSerializer.Serialize(value);
 }
+
+public sealed record BulkMasterDataDeleteRequest(IReadOnlyList<Guid> Ids, string? AdminPassword);
