@@ -25,7 +25,7 @@ replacement = r'''    internal static List<MarketRow> ParseTangmereRows(string b
         return rows.Where(row => !string.IsNullOrWhiteSpace(row.Customer)).ToList();
     }
 '''
-text, count = pattern.subn(replacement, text, count=1)
+text, count = pattern.subn(lambda _: replacement, text, count=1)
 if count != 1:
     raise RuntimeError("Could not replace Tangmere parser block")
 text = text.replace('CellText(row, Find(map, "deliveryaddress"))', 'CellText(row, Find(map, "deliveryaddress")) ?? CellText(row, Find(map, "deliveryaddess"))')
