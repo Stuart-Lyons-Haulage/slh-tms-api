@@ -15,6 +15,11 @@ public static class GeofencePlanningMatch
         "NWF", "NATURES", "WAY", "FOODS", "COLLECT", "COLLECTION", "DELIVER", "DELIVERY", "CUSTOMER", "RDC", "SITE", "DEPOT"
     };
 
+    private static readonly string[] OperationalPrefixes =
+    [
+        "COLLECT", "COLLECTION", "DELIVER", "DELIVERY"
+    ];
+
     public static IReadOnlyList<Load> PrepareLoads(IEnumerable<Load> loads) => loads.Select(PrepareLoad).ToList();
 
     public static Load PrepareLoad(Load load)
@@ -46,17 +51,21 @@ public static class GeofencePlanningMatch
 
     /// <summary>
     /// The planner deliberately shows concise labels such as "NWF-Runcton" while
-    /// DOT/Falcon uses forms such as "Runcton (Natures Way)". For NWF planner labels,
-    /// the locality is authoritative and the exact uploaded DOT fence name is returned.
+    /// DOT/Falcon uses forms such as "Runcton (Natures Way)". Source-line import adds
+    /// execution prefixes such as "Collect · NWF-Selsey"; those prefixes are presentation
+    /// semantics, not part of the physical-site identity, and are removed before matching.
+    /// For NWF planner labels, the locality is authoritative and the exact uploaded DOT
+    /// fence name is returned.
     /// </summary>
     public static string MatchText(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return value ?? string.Empty;
-        var words = Words(value);
-        if (words.Count < 2 || !words[0].Equals("NWF", StringComparison.OrdinalIgnoreCase)) return value;
+        var siteText = StripOperationalPrefix(value);
+        var words = Words(siteText);
+        if (words.Count < 2 || !words[0].Equals("NWF", StringComparison.OrdinalIgnoreCase)) return siteText;
 
         var locality = words.Skip(1).Where(word => !NoiseTokens.Contains(word)).ToList();
-        if (locality.Count == 0) return value;
+        if (locality.Count == 0) return siteText;
 
         // Prefer the authoritative DOT/Falcon Nature's Way naming convention regardless
         // of word order or brackets: NWF Drayton == Drayton (Natures Way).
@@ -115,7 +124,7 @@ public static class GeofencePlanningMatch
 
         if (IsNwfPlannerLabel(stop.Name))
         {
-            var plannerLocality = NaturesWayLocalityTokens(stop.Name);
+            var plannerLocality = NaturesWayLocalityTokens(StripOperationalPrefix(stop.Name));
 
             // Accept DOT naming variants only when the fence explicitly identifies
             // Nature's Way and the locality matches. This safely covers forms such as
@@ -216,8 +225,30 @@ public static class GeofencePlanningMatch
 
     private static bool IsNwfPlannerLabel(string? value)
     {
-        var words = Words(value);
+        var words = Words(StripOperationalPrefix(value));
         return words.Count >= 2 && words[0].Equals("NWF", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string StripOperationalPrefix(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return value ?? string.Empty;
+        var trimmed = value.Trim();
+
+        var separator = trimmed.IndexOf('·');
+        if (separator > 0)
+        {
+            var prefix = trimmed[..separator].Trim();
+            if (OperationalPrefixes.Contains(prefix, StringComparer.OrdinalIgnoreCase))
+                return trimmed[(separator + 1)..].Trim();
+        }
+
+        foreach (var prefix in OperationalPrefixes)
+        {
+            if (trimmed.StartsWith(prefix + " ", StringComparison.OrdinalIgnoreCase))
+                return trimmed[(prefix.Length + 1)..].Trim();
+        }
+
+        return trimmed;
     }
 
     private static bool IsNaturesWayFence(string? value)
