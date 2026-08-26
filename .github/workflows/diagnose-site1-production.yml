@@ -1,0 +1,34 @@
+name: Verify production geofence Site-1 repair
+
+on:
+  push:
+    branches:
+      - diagnose/post-site1-repair
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      API_BASE: https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+      TV_WALLBOARD_ACCESS_KEY: ${{ secrets.TV_WALLBOARD_ACCESS_KEY }}
+    steps:
+      - name: Inspect production geofence links
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$TV_WALLBOARD_ACCESS_KEY"
+          tmp="$(mktemp)"
+          status="$(curl --silent --show-error --output "$tmp" --write-out '%{http_code}' -H "X-TMS-TV-Key: $TV_WALLBOARD_ACCESS_KEY" "$API_BASE/api/v1/geofence-integrity")"
+          echo "status=$status"
+          test "$status" = "200"
+          jq '{
+            checkedAtUtc,
+            geofences,
+            site1Count: ([.records[] | select(.active == true and ((.siteCode // .siteNumber // "") | tostring) == "1")] | length),
+            site1Records: [.records[] | select(.active == true and ((.siteCode // .siteNumber // "") | tostring) == "1") | {name,siteNumber,siteCode,siteName,siteId,siteLinked,manualOverride,validationStatus}],
+            priority: [.records[] | select((.name|ascii_downcase|contains("selsey")) or (.name|ascii_downcase|contains("runcton")) or (.name|ascii_downcase|contains("merston")) or (.name|ascii_downcase|contains("drayton")) or (.name|ascii_downcase|contains("winchester southbound"))) | {name,siteNumber,siteCode,siteName,siteId,siteLinked,manualOverride,validationStatus}]
+          }' "$tmp"
+          rm -f "$tmp"
