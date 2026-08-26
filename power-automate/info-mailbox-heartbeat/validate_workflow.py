@@ -56,13 +56,27 @@ def validate(workflow):
     return errors
 
 
+def validate_openapi(text):
+    errors = []
+    if "/order-intake/email/heartbeat:" not in text:
+        errors.append("custom connector is missing the mailbox heartbeat path")
+    if "operationId: RecordInfoMailboxHeartbeat" not in text:
+        errors.append("custom connector is missing RecordInfoMailboxHeartbeat")
+    if "InfoMailboxHeartbeatRequest:" not in text or "InfoMailboxHeartbeatResponse:" not in text:
+        errors.append("custom connector is missing heartbeat request/response definitions")
+    return errors
+
+
 def main():
-    path = pathlib.Path(__file__).with_name("workflow.json")
-    errors = validate(json.loads(path.read_text(encoding="utf-8")))
+    directory = pathlib.Path(__file__).parent
+    workflow_path = directory / "workflow.json"
+    openapi_path = directory.parents[1] / "openapi-power-automate.yaml"
+    errors = validate(json.loads(workflow_path.read_text(encoding="utf-8")))
+    errors.extend(validate_openapi(openapi_path.read_text(encoding="utf-8")))
     if errors:
         print("\n".join(f"ERROR: {item}" for item in errors))
         return 1
-    print(f"Validated {path.name}: shared-mailbox heartbeat contract satisfied")
+    print(f"Validated {workflow_path.name}: shared-mailbox heartbeat + connector contract satisfied")
     return 0
 
 
