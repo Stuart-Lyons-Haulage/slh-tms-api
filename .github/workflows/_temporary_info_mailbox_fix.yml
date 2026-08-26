@@ -1,0 +1,69 @@
+name: Temporary Info Mailbox Intake Repair
+
+on:
+  push:
+    branches:
+      - fix/info-mailbox-precedence-categories-20260826
+    paths:
+      - .github/workflows/_temporary_info_mailbox_fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/info-mailbox-precedence-categories-20260826
+          fetch-depth: 0
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: |
+          dotnet restore Slh.Tms.Api.csproj
+          dotnet restore Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj
+
+      - name: Add behavior tests
+        run: python tools/_temporary_info_mailbox_fix.py tests
+
+      - name: Prove red
+        shell: bash
+        run: |
+          set +e
+          dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --filter 'FullyQualifiedName~ExplicitCollectFrom_OverridesSenderDomainCollectionMapping|FullyQualifiedName~ExplicitBodyDeliveryTo_OverridesConflictingSubjectDestination|FullyQualifiedName~MasterDataBodySignal_OverridesConflictingSubjectCustomer|FullyQualifiedName~BarfootsWaitroseWaveBody_StagesEveryWaveAsSeparateOrder|FullyQualifiedName~SainsburyImageLedTransportRequirements_AreEligibleForMappingReview'
+          code=$?
+          set -e
+          if [ "$code" -eq 0 ]; then
+            echo 'Expected new tests to fail before implementation.'
+            exit 1
+          fi
+          echo 'RED confirmed.'
+
+      - name: Apply implementation
+        run: |
+          python tools/_temporary_info_mailbox_fix.py implementation
+          python tools/_temporary_barfoots_patch.py
+
+      - name: Prove green
+        run: |
+          dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --filter 'FullyQualifiedName~ExplicitCollectFrom_OverridesSenderDomainCollectionMapping|FullyQualifiedName~ExplicitBodyDeliveryTo_OverridesConflictingSubjectDestination|FullyQualifiedName~MasterDataBodySignal_OverridesConflictingSubjectCustomer|FullyQualifiedName~BarfootsWaitroseWaveBody_StagesEveryWaveAsSeparateOrder|FullyQualifiedName~SainsburyImageLedTransportRequirements_AreEligibleForMappingReview'
+          python power-automate/info-mailbox-order-intake/test_validate_workflow.py
+          python power-automate/info-mailbox-order-intake/validate_workflow.py
+          dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release
+
+      - name: Commit verified implementation
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/_temporary_info_mailbox_fix.yml tools/_temporary_info_mailbox_fix.py tools/_temporary_barfoots_patch.py
+          git add Services/EmailOrderIntakeService.cs Controllers/OrderIntakeController.cs Slh.Tms.Api.Tests/EmailOrderIntakeServiceTests.cs power-automate/info-mailbox-order-intake/workflow.json power-automate/info-mailbox-order-intake/validate_workflow.py power-automate/info-mailbox-order-intake/test_validate_workflow.py
+          git commit -m 'Fix mailbox parsing precedence and result categories'
+          git push origin HEAD:fix/info-mailbox-precedence-categories-20260826
