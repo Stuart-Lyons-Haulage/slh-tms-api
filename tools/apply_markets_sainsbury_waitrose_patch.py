@@ -59,3 +59,10 @@ text = text.replace(
     1,
 )
 controller_path.write_text(text, encoding="utf-8")
+
+# The test project does not accept collection-expression shorthand in nested
+# List<object?[]> initializers; make those arrays explicit.
+test_path = ROOT / "Slh.Tms.Api.Tests" / "MarketsSainsburyWaitroseParserTests.cs"
+text = test_path.read_text(encoding="utf-8")
+text = re.sub(r'(?m)^(\s{12})\[([^\n]+)\](,?)$', r'\1new object?[] { \2 }\3', text)
+test_path.write_text(text, encoding="utf-8")
