@@ -129,14 +129,30 @@ public static partial class SiteGeofenceMasterSync
     }
 
     internal static bool NameConfirms(string geofenceName, Site site)
-    {
-        var fenceTokens = Tokens(geofenceName);
-        if (fenceTokens.Count == 0) return false;
-        return SiteNames(site).Any(name => Tokens(name).Overlaps(fenceTokens));
-    }
+        => MatchScore(geofenceName, site) > 0;
 
     private static List<Site> MatchingSites(string geofenceName, IReadOnlyList<Site> sites)
-        => sites.Where(site => NameConfirms(geofenceName, site)).ToList();
+    {
+        var scored = sites
+            .Select(site => new { Site = site, Score = MatchScore(geofenceName, site) })
+            .Where(x => x.Score > 0)
+            .ToList();
+        if (scored.Count == 0) return [];
+
+        var bestScore = scored.Max(x => x.Score);
+        return scored.Where(x => x.Score == bestScore).Select(x => x.Site).ToList();
+    }
+
+    private static int MatchScore(string geofenceName, Site site)
+    {
+        var fenceTokens = Tokens(geofenceName);
+        if (fenceTokens.Count == 0) return 0;
+        return SiteNames(site)
+            .Select(Tokens)
+            .Select(tokens => tokens.Count(fenceTokens.Contains))
+            .DefaultIfEmpty(0)
+            .Max();
+    }
 
     private static int CanonicalizeSiteCodes(IReadOnlyList<Site> sites, IReadOnlyList<SiteGeofence> fences)
     {
@@ -183,7 +199,12 @@ public static partial class SiteGeofenceMasterSync
             .Select(site =>
             {
                 var linked = fenceList
-                    .Where(fence => fence.SiteId == site.Id && NameConfirms(fence.Name, site))
+                    .Where(fence =>
+                    {
+                        if (fence.SiteId != site.Id) return false;
+                        var candidates = MatchingSites(fence.Name, sites);
+                        return candidates.Count == 1 && candidates[0].Id == site.Id;
+                    })
                     .Select(fence => fence.Name)
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .OrderBy(x => x)
@@ -212,6 +233,7 @@ public static partial class SiteGeofenceMasterSync
 
     private static HashSet<string> Tokens(string? value)
         => Regex.Matches(value ?? string.Empty, "[A-Za-z0-9]+")
+            .Cast<Match>()
             .Select(match => match.Value.ToUpperInvariant())
             .Where(token => token.Length >= 4 && !IgnoredTokens.Contains(token) && !token.All(char.IsDigit))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
