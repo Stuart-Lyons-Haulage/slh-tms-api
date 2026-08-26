@@ -1,0 +1,45 @@
+name: Temporary Markets Sainsbury Waitrose Patch
+
+on:
+  push:
+    branches:
+      - fix/markets-sainsbury-waitrose-intake-20260826
+    paths:
+      - .github/workflows/_temporary_markets_sainsbury_waitrose_patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: fix/markets-sainsbury-waitrose-intake-20260826
+          fetch-depth: 0
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Apply patch
+        run: python tools/apply_markets_sainsbury_waitrose_patch.py
+
+      - name: Test focused intake formats
+        run: dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --filter FullyQualifiedName~MarketsSainsburyWaitroseParserTests
+
+      - name: Test full suite
+        run: dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release
+
+      - name: Commit verified patch
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/_temporary_markets_sainsbury_waitrose_patch.yml tools/apply_markets_sainsbury_waitrose_patch.py
+          git add Controllers/OrderIntakeController.cs Services/MarketsSainsburyWaitroseParser.cs Slh.Tms.Api.Tests/MarketsSainsburyWaitroseParserTests.cs
+          git commit -m 'Fix Markets Sainsbury and Waitrose mailbox intake'
+          git push origin HEAD:fix/markets-sainsbury-waitrose-intake-20260826
