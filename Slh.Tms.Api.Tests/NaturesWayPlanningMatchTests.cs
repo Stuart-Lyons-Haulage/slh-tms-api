@@ -40,4 +40,34 @@ public sealed class NaturesWayPlanningMatchTests
         Assert.Contains(locality, fence.Name, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(fence.Name, GeofencePlanningMatch.MatchText(plannerLabel));
     }
+
+    [Fact]
+    public void Explicit_nwf_source_label_wins_over_conflicting_import_coordinate()
+    {
+        var merstonFence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences
+            .Where(fence => string.Equals(fence.Name, GeofencePlanningMatch.MatchText("NWF-Merston"), StringComparison.OrdinalIgnoreCase)));
+        var wrongCoordinate = Assert.NotNull(OperationalRunOrigin.FenceCentre(merstonFence));
+
+        var load = new Load
+        {
+            Id = Guid.NewGuid(),
+            Reference = "Run 99 AM",
+            PlanningDate = new DateOnly(2026, 8, 26),
+            Stops =
+            [
+                new LoadStop
+                {
+                    Id = Guid.NewGuid(),
+                    Sequence = 1,
+                    Name = "Collect · NWF-Selsey",
+                    Longitude = wrongCoordinate.Longitude,
+                    Latitude = wrongCoordinate.Latitude
+                }
+            ]
+        };
+
+        var prepared = GeofencePlanningMatch.PrepareLoad(load);
+
+        Assert.Equal(GeofencePlanningMatch.MatchText("NWF-Selsey"), prepared.Stops.Single().Name);
+    }
 }
