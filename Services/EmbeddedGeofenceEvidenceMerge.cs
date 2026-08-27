@@ -6,10 +6,9 @@ using Slh.Tms.Api.Models;
 namespace Slh.Tms.Api.Services;
 
 /// <summary>
-/// Presents durable geofence evidence to the live operational consumers. When active
-/// Site Master geofences exist in SQL, those polygons and the GeofenceVisits produced
-/// from them are authoritative. The embedded payload is retained only as a resilience
-/// fallback for environments where no active SQL geofence catalogue is available.
+/// Presents durable geofence evidence to the live operational consumers. Active SQL
+/// geofences remain the authoritative geometry, while current RoadTech reconstruction
+/// is retained as resilience evidence until the durable projection has caught up.
 /// </summary>
 public static class EmbeddedGeofenceEvidenceMerge
 {
@@ -41,18 +40,45 @@ public static class EmbeddedGeofenceEvidenceMerge
                 .Select(fence => fence!)
                 .ToList();
             var fenceById = sqlFences.ToDictionary(fence => fence.Id);
+            var fenceByName = sqlFences
+                .GroupBy(fence => Normalise(fence.Name), StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
 
-            // An active SQL catalogue is an explicit operational configuration. Do not
-            // re-introduce hits reconstructed from an older code-bundled polygon set.
-            // If a SQL polygon cannot be parsed it is intentionally excluded rather than
-            // silently falling back to different geometry.
+            // BuildAsync already reconstructed today's RoadTech evidence using the active
+            // SQL geofence catalogue. Keep those linked visits visible while the durable
+            // GeofenceVisits projection catches up. The previous implementation discarded
+            // every reconstructed visit whenever any SQL geofence existed, which could turn
+            // real completed stops back into zero progress if durable LoadId linkage lagged.
+            var combined = new Dictionary<Guid, DerivedVisit>();
+            foreach (var visit in snapshot.Visits)
+            {
+                if (visit.LoadId is not Guid loadId || !loadById.ContainsKey(loadId)) continue;
+                var activeFence = fenceById.GetValueOrDefault(visit.Fence.Id)
+                    ?? fenceByName.GetValueOrDefault(Normalise(visit.Fence.Name));
+                if (activeFence is null) continue;
+
+                combined[visit.Id] = new DerivedVisit
+                {
+                    Id = visit.Id,
+                    VehicleId = visit.VehicleId,
+                    VehicleIdentifier = visit.VehicleIdentifier,
+                    Fence = activeFence,
+                    LoadId = visit.LoadId,
+                    LoadStopId = visit.LoadStopId,
+                    EnteredAtUtc = visit.EnteredAtUtc,
+                    ConfirmedAtUtc = visit.ConfirmedAtUtc,
+                    ExitedAtUtc = visit.ExitedAtUtc,
+                    LastInsideAtUtc = visit.LastInsideAtUtc,
+                    DwellMinutes = visit.DwellMinutes
+                };
+            }
+
             var loadIds = loadById.Keys.ToList();
             var durableRows = await db.GeofenceVisits.AsNoTracking()
                 .Where(visit => visit.LoadId != null && loadIds.Contains(visit.LoadId.Value))
                 .OrderBy(visit => visit.EnteredAtUtc)
                 .ToListAsync(ct);
 
-            var visits = new List<DerivedVisit>();
             foreach (var row in durableRows)
             {
                 if (!fenceById.TryGetValue(row.GeofenceId, out var fence)) continue;
@@ -60,7 +86,25 @@ public static class EmbeddedGeofenceEvidenceMerge
                 var vehicleId = row.VehicleId ?? load.VehicleId;
                 if (vehicleId is null) continue;
 
-                visits.Add(new DerivedVisit
+                if (combined.TryGetValue(row.Id, out var current))
+                {
+                    // Current reconstruction may have repaired run/stop linkage that an
+                    // older durable row does not yet contain, so only fill missing identity
+                    // from durable storage while retaining the strongest timing evidence.
+                    current.LoadId ??= row.LoadId;
+                    current.LoadStopId ??= row.LoadStopId;
+                    if (current.VehicleId == Guid.Empty) current.VehicleId = vehicleId.Value;
+                    if (string.IsNullOrWhiteSpace(current.VehicleIdentifier)) current.VehicleIdentifier = row.VehicleIdentifier;
+                    current.Fence = fence;
+                    if (row.EnteredAtUtc < current.EnteredAtUtc) current.EnteredAtUtc = row.EnteredAtUtc;
+                    if (current.ConfirmedAtUtc is null && row.ConfirmedAtUtc is not null) current.ConfirmedAtUtc = row.ConfirmedAtUtc;
+                    if (current.ExitedAtUtc is null && row.ExitedAtUtc is not null) current.ExitedAtUtc = row.ExitedAtUtc;
+                    if (row.LastInsideAtUtc > current.LastInsideAtUtc) current.LastInsideAtUtc = row.LastInsideAtUtc;
+                    current.DwellMinutes = Math.Max(current.DwellMinutes, row.DwellMinutes);
+                    continue;
+                }
+
+                combined[row.Id] = new DerivedVisit
                 {
                     Id = row.Id,
                     VehicleId = vehicleId.Value,
@@ -73,10 +117,10 @@ public static class EmbeddedGeofenceEvidenceMerge
                     ExitedAtUtc = row.ExitedAtUtc,
                     LastInsideAtUtc = row.LastInsideAtUtc,
                     DwellMinutes = row.DwellMinutes
-                });
+                };
             }
 
-            return Snapshot(snapshot, sqlFences, visits);
+            return Snapshot(snapshot, sqlFences, combined.Values.OrderBy(visit => visit.EnteredAtUtc).ToList());
         }
         catch (OperationCanceledException)
         {
