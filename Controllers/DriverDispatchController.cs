@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -11,56 +12,104 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class DriverDispatchController(
     TmsDbContext db,
     SageHrClient sageHr,
-    TachoMasterClient tachoMaster,
     ILogger<DriverDispatchController> logger) : ControllerBase
 {
     private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+    private static readonly LoadStatus[] ExecutedStatuses = [LoadStatus.Dispatched, LoadStatus.InProgress, LoadStatus.Completed];
 
     [HttpGet]
     public async Task<IActionResult> Get([FromQuery] DateOnly? date, CancellationToken ct)
     {
         var planningDate = date ?? DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime).AddDays(1);
+        var weekStart = DriverDispatchAgencyRosterStore.WeekStart(planningDate);
+        var weekEnd = weekStart.AddDays(6);
+        var sageTask = ReadSageStateAsync(planningDate, ct);
+
         var loads = (await PlanningResilience.ReadLoadsAsync(db, planningDate, ct))
             .Where(load => load.Status != LoadStatus.Cancelled)
             .OrderBy(load => FirstPlanned(load) ?? DateTimeOffset.MaxValue)
             .ThenBy(load => load.Reference)
             .ToList();
         try { await LoadCommercialStore.EnrichAsync(db, loads, ct); }
-        catch (Exception exception) when (exception is not OperationCanceledException) { db.ChangeTracker.Clear(); }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Driver Dispatch commercial enrichment was unavailable for {Date}; the operational plan will still be returned.", planningDate);
+            db.ChangeTracker.Clear();
+        }
 
-        var drivers = await db.Drivers.AsNoTracking().Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToListAsync(ct);
-        await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
+        // The workbench must never rebuild seven resilient planning days or call seven live TachoMaster
+        // history endpoints just to render a planning sheet. One bounded SQL history query supplies the
+        // previous-run/day-number fallback; legal-hours compliance is rechecked at actual dispatch.
+        var historyStart = planningDate.AddDays(-7);
+        var history = await db.Loads.AsNoTracking()
+            .Include(load => load.Stops)
+            .Where(load => load.DriverId != null && load.PlanningDate >= historyStart && load.PlanningDate < planningDate && load.Status != LoadStatus.Cancelled)
+            .OrderByDescending(load => load.PlanningDate)
+            .ThenByDescending(load => load.CreatedAtUtc)
+            .ToListAsync(ct);
+
+        var activityStart = planningDate.AddDays(-28);
+        var recentActivity = await db.Loads.AsNoTracking()
+            .Where(load => load.DriverId != null && load.PlanningDate >= activityStart && load.PlanningDate < planningDate && ExecutedStatuses.Contains(load.Status))
+            .Select(load => new { DriverId = load.DriverId!.Value, load.PlanningDate })
+            .ToListAsync(ct);
+
+        var roster = await DriverDispatchAgencyRosterStore.ReadForDateAsync(db, planningDate, ct);
+        var driverCandidates = await db.Drivers.AsNoTracking().Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToListAsync(ct);
         var vehicles = await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(ct);
         var trailers = await db.Trailers.AsNoTracking().Where(trailer => trailer.Active).OrderBy(trailer => trailer.TrailerNumber).ToListAsync(ct);
         var vehicleById = vehicles.ToDictionary(vehicle => vehicle.Id);
+        var sage = await sageTask;
 
-        var history = new List<Load>();
-        for (var offset = 1; offset <= 7; offset++)
+        var previousWeekStart = weekStart.AddDays(-7);
+        var previousWeekEnd = weekStart.AddDays(-1);
+        var previousWeekDriverIds = recentActivity
+            .Where(item => item.PlanningDate >= previousWeekStart && item.PlanningDate <= previousWeekEnd)
+            .Select(item => item.DriverId)
+            .ToHashSet();
+        var regularRecentDriverIds = recentActivity
+            .GroupBy(item => item.DriverId)
+            .Where(group => group.Select(item => item.PlanningDate).Distinct().Count() >= 3)
+            .Select(group => group.Key)
+            .ToHashSet();
+        var currentDayDriverIds = loads.Where(load => load.DriverId is not null).Select(load => load.DriverId!.Value).ToHashSet();
+
+        var selectedDrivers = driverCandidates.Where(driver =>
         {
-            var historyDate = planningDate.AddDays(-offset);
-            try
-            {
-                history.AddRange((await PlanningResilience.ReadLoadsAsync(db, historyDate, ct))
-                    .Where(load => load.Status != LoadStatus.Cancelled && load.DriverId is not null));
-            }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            {
-                logger.LogWarning(exception, "Driver Dispatch could not read run history for {Date}.", historyDate);
-                db.ChangeTracker.Clear();
-            }
-        }
+            var employeeKey = Normalise(driver.EmployeeNumber);
+            var sageEmployee = sage.Available && sage.ActiveEmployeeNumbers.Contains(employeeKey);
+            var persistedCasual = driver.DriverType?.Contains("casual", StringComparison.OrdinalIgnoreCase) == true ||
+                                  driver.DriverType?.Contains("zero", StringComparison.OrdinalIgnoreCase) == true;
+            var persistedAgency = PersistedAgency(driver);
+            var operationallyRelevant = roster.ContainsKey(driver.Id) || currentDayDriverIds.Contains(driver.Id) ||
+                                        previousWeekDriverIds.Contains(driver.Id) || regularRecentDriverIds.Contains(driver.Id);
 
-        var tachoWorkEvidenceTask = ReadTachoWorkEvidenceAsync(planningDate, ct);
-        var leaveTask = LeaveByEmployeeNumber(planningDate, ct);
-        var dispatchStatesTask = DriverDispatchStateStore.ReadAsync(db, loads.Select(load => load.Id), ct);
-        await Task.WhenAll(tachoWorkEvidenceTask, leaveTask, dispatchStatesTask);
-        var tachoWorkEvidence = tachoWorkEvidenceTask.Result;
-        var leave = leaveTask.Result;
-        var dispatchStates = dispatchStatesTask.Result;
+            if (sageEmployee || persistedCasual) return true;
+            if (persistedAgency) return operationallyRelevant;
+            if (sage.Available) return operationallyRelevant;
+            return PersistedEmployee(driver) || operationallyRelevant;
+        }).ToList();
+
+        await MasterDetailStore.EnrichDriversAsync(db, selectedDrivers, ct);
+
+        // Re-apply the rule after enrichment because AgencyName/Coding are audited detail fields rather
+        // than physical Driver columns. When Sage HR is available it is the employed-population gate.
+        selectedDrivers = selectedDrivers.Where(driver =>
+        {
+            var employeeKey = Normalise(driver.EmployeeNumber);
+            var sageEmployee = sage.Available && sage.ActiveEmployeeNumbers.Contains(employeeKey);
+            var operationallyRelevant = roster.ContainsKey(driver.Id) || currentDayDriverIds.Contains(driver.Id) ||
+                                        previousWeekDriverIds.Contains(driver.Id) || regularRecentDriverIds.Contains(driver.Id);
+            if (IsAgency(driver)) return operationallyRelevant;
+            if (CanonicalType(driver) == "Casual") return true;
+            return sage.Available ? sageEmployee || operationallyRelevant : true;
+        }).OrderBy(driver => driver.DisplayName).ToList();
+
+        var dispatchStates = await DriverDispatchStateStore.ReadAsync(db, loads.Select(load => load.Id), ct);
         var southboundRuns = loads.Where(IsSouthbound).Where(load => load.DriverId is null).ToList();
 
         var rows = new List<DriverDispatchDriver>();
-        foreach (var driver in drivers)
+        foreach (var driver in selectedDrivers)
         {
             var allocated = loads.Where(load => load.DriverId == driver.Id).OrderBy(load => FirstPlanned(load) ?? DateTimeOffset.MaxValue).ToList();
             var previous = history.Where(load => load.DriverId == driver.Id)
@@ -68,10 +117,11 @@ public sealed class DriverDispatchController(
                 .ThenByDescending(load => load.CreatedAtUtc)
                 .FirstOrDefault();
             var previousVehicle = previous?.VehicleId is Guid previousVehicleId && vehicleById.TryGetValue(previousVehicleId, out var foundVehicle) ? foundVehicle : null;
-            var consecutive = ConsecutiveWorkedDays(history, driver, planningDate, tachoWorkEvidence);
+            var consecutive = ConsecutiveWorkedDays(history, driver, planningDate);
             var dayNumber = consecutive + 1;
             var employeeKey = Normalise(driver.EmployeeNumber);
-            leave.TryGetValue(employeeKey, out var absence);
+            sage.Leave.TryGetValue(employeeKey, out var absence);
+            roster.TryGetValue(driver.Id, out var rosterEntry);
 
             Guid? suggestedRunId = null;
             string? suggestedRunReference = null;
@@ -95,9 +145,10 @@ public sealed class DriverDispatchController(
             {
                 suggestion = $"Day {dayNumber} · Code 3 · keep to straightforward work.";
             }
-            else if (string.Equals(driver.Coding?.Trim(), "4", StringComparison.OrdinalIgnoreCase) || IsAgency(driver))
+            else if (IsAgency(driver))
             {
-                suggestion = $"Agency{(string.IsNullOrWhiteSpace(driver.AgencyName) ? string.Empty : $" · {driver.AgencyName}")} · use after suitable employed/casual drivers.";
+                var availability = rosterEntry is null ? string.Empty : $" · booked to {rosterEntry.ThroughDate:ddd dd/MM}";
+                suggestion = $"Agency{(string.IsNullOrWhiteSpace(driver.AgencyName) ? string.Empty : $" · {driver.AgencyName}")}{availability} · use after suitable employed/casual drivers.";
             }
             else if (previousVehicle is not null)
             {
@@ -132,15 +183,20 @@ public sealed class DriverDispatchController(
                 allocated.Count,
                 suggestedRunId,
                 suggestedRunReference,
-                suggestion));
+                suggestion,
+                rosterEntry?.FromDate,
+                rosterEntry?.ThroughDate));
         }
 
         return Ok(new
         {
             planningDate,
+            weekStart,
+            weekEnd,
             generatedAtUtc = DateTimeOffset.UtcNow,
-            leaveSource = sageHr.IsConfigured ? "Sage HR" : "Unavailable",
-            dayNumberSource = tachoWorkEvidence.Count > 0 ? "TachoMaster duty with TMS executed-run fallback" : "TMS executed-run fallback",
+            leaveSource = sage.Available ? "Sage HR" : "Unavailable",
+            driverPopulationSource = sage.Available ? "Active Sage HR employees + Casual + relevant Agency" : "Canonical Driver Master + relevant Agency fallback",
+            dayNumberSource = "TMS executed-run history; live TachoMaster compliance is rechecked at dispatch",
             drivers = rows.OrderBy(row => TypeOrder(row.DriverType)).ThenBy(row => row.DisplayName),
             vehicles,
             trailers,
@@ -173,6 +229,130 @@ public sealed class DriverDispatchController(
                 })
             })
         });
+    }
+
+    [HttpPost("drivers"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> AddOrRosterDriver(DriverDispatchAddDriverRequest request, CancellationToken ct)
+    {
+        var name = request.DisplayName?.Trim();
+        if (string.IsNullOrWhiteSpace(name)) return BadRequest(new { message = "Enter the driver's name." });
+
+        var type = CanonicalRequestedType(request.DriverType);
+        if (type is null) return BadRequest(new { message = "Driver type must be Employed, Casual or Agency." });
+        if (type != "Agency" && string.IsNullOrWhiteSpace(request.EmployeeNumber))
+            return BadRequest(new { message = "Enter the employee number for an employed/casual driver, or use Sync Drivers first." });
+        if (type == "Agency" && string.IsNullOrWhiteSpace(request.AgencyName))
+            return BadRequest(new { message = "Enter the agency name for a new agency driver." });
+        if (type == "Agency" && (request.Days is null || request.Days < 1 || request.Days > 7))
+            return BadRequest(new { message = "Tell Dispatch how many days we have the agency driver (1 to 7)." });
+
+        var employeeNumber = request.EmployeeNumber?.Trim();
+        Driver? driver = null;
+        if (!string.IsNullOrWhiteSpace(employeeNumber))
+            driver = await db.Drivers.FirstOrDefaultAsync(item => item.Active && item.EmployeeNumber == employeeNumber, ct);
+
+        if (driver is null)
+        {
+            var nameMatches = await db.Drivers.Where(item => item.Active && item.DisplayName.ToUpper() == name.ToUpper()).ToListAsync(ct);
+            if (nameMatches.Count > 1)
+                return Conflict(new { message = "More than one active Driver Master record has that name. Sync Drivers and select the canonical record before adding it to Dispatch." });
+            driver = nameMatches.SingleOrDefault();
+        }
+
+        var created = false;
+        if (driver is null)
+        {
+            employeeNumber ??= type == "Agency"
+                ? $"AGY-{DateTime.UtcNow:yyMMdd}-{Guid.NewGuid().ToString("N")[..6].ToUpperInvariant()}"
+                : throw new InvalidOperationException("Employee number was validated above.");
+
+            if (await db.Drivers.AnyAsync(item => item.EmployeeNumber == employeeNumber, ct))
+                return Conflict(new { message = "That employee number already exists in Driver Master. Use Sync Drivers or enter the existing driver instead." });
+
+            driver = new Driver
+            {
+                EmployeeNumber = employeeNumber,
+                DisplayName = name,
+                DriverType = type,
+                DriverGroup = type == "Agency" ? request.AgencyName!.Trim() : type,
+                Active = true
+            };
+            db.Drivers.Add(driver);
+            await db.SaveChangesAsync(ct);
+            created = true;
+        }
+
+        await MasterDetailStore.EnrichDriversAsync(db, [driver], ct);
+        if (type == "Agency" && !IsAgency(driver) && !created)
+            return Conflict(new { message = "That name belongs to a non-agency Driver Master record. Use the existing driver or Sync Drivers before creating another identity." });
+
+        driver.DriverType = type;
+        driver.DriverGroup = type == "Agency" ? request.AgencyName!.Trim() : driver.DriverGroup ?? type;
+        driver.AgencyName = type == "Agency" ? request.AgencyName!.Trim() : driver.AgencyName;
+        if (type == "Agency") driver.Coding = "4";
+        await db.SaveChangesAsync(ct);
+
+        var actor = User.Identity?.Name ?? "TMS planner";
+        await MasterDetailStore.SaveAsync(db, "driver", driver.EmployeeNumber, JsonSerializer.Serialize(new
+        {
+            driver.EmployeeNumber,
+            driver.DisplayName,
+            driver.TachoName,
+            driver.MobileNumber,
+            driver.DriverType,
+            driver.DriverGroup,
+            driver.Skills,
+            driver.Coding,
+            driver.AgencyName,
+            driver.Notes,
+            driver.TachoMasterDriverId,
+            driver.TachoCardNumber,
+            driver.TachoDriveAvailableTodayMinutes,
+            driver.TachoDriveAvailableWeekMinutes,
+            driver.TachoWorkAvailableWeekMinutes,
+            driver.DrivingLicenceNumber,
+            driver.LicenceExpiry,
+            driver.LicenceStatus,
+            driver.LastTachoSyncUtc,
+            driver.Active
+        }), created ? "Driver Dispatch provisional add" : "Driver Dispatch roster update", actor, ct);
+
+        DriverDispatchAgencyRosterEntry? rosterEntry = null;
+        if (type == "Agency")
+        {
+            var fromDate = request.StartDate ?? DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
+            rosterEntry = await DriverDispatchAgencyRosterStore.UpsertAsync(db, driver, fromDate, request.Days!.Value, actor, ct);
+        }
+
+        return Ok(new
+        {
+            created,
+            driverId = driver.Id,
+            driver.DisplayName,
+            driver.EmployeeNumber,
+            driverType = type,
+            roster = rosterEntry,
+            message = type == "Agency"
+                ? created
+                    ? $"{driver.DisplayName} was added provisionally and placed on the agency roster. Sync Drivers will bind the TachoMaster identity when it is available."
+                    : $"{driver.DisplayName} already existed and was added to the agency roster."
+                : created
+                    ? $"{driver.DisplayName} was added to Driver Master. Run Sync Drivers to bind the live TachoMaster identity."
+                    : $"{driver.DisplayName} already exists in Driver Master."
+        });
+    }
+
+    [HttpPost("agency-roster"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> AddAgencyRoster(DriverDispatchAgencyRosterRequest request, CancellationToken ct)
+    {
+        if (request.Days < 1 || request.Days > 7) return BadRequest(new { message = "Agency availability must be between 1 and 7 days." });
+        var driver = await db.Drivers.FirstOrDefaultAsync(item => item.Active && item.Id == request.DriverId, ct);
+        if (driver is null) return NotFound(new { message = "The driver could not be found." });
+        await MasterDetailStore.EnrichDriversAsync(db, [driver], ct);
+        if (!IsAgency(driver)) return BadRequest(new { message = "Only Agency drivers can be added to the weekly agency roster." });
+        var actor = User.Identity?.Name ?? "TMS planner";
+        var entry = await DriverDispatchAgencyRosterStore.UpsertAsync(db, driver, request.StartDate, request.Days, actor, ct);
+        return Ok(entry);
     }
 
     [HttpPut("{loadId:guid}/start-time"), Authorize(Policy = "TmsWrite")]
@@ -213,131 +393,73 @@ public sealed class DriverDispatchController(
         return Ok(state);
     }
 
-    private async Task<Dictionary<string, LeaveState>> LeaveByEmployeeNumber(DateOnly date, CancellationToken ct)
+    private async Task<SageDispatchState> ReadSageStateAsync(DateOnly date, CancellationToken ct)
     {
-        var result = new Dictionary<string, LeaveState>(StringComparer.OrdinalIgnoreCase);
-        if (!sageHr.IsConfigured) return result;
+        if (!sageHr.IsConfigured) return SageDispatchState.Unavailable;
         try
         {
-            var employeeTask = sageHr.GetActiveEmployeesAsync(ct);
-            var leaveTask = sageHr.GetOutOfOfficeAsync(date, ct);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(6));
+            var employeeTask = sageHr.GetActiveEmployeesAsync(timeout.Token);
+            var leaveTask = sageHr.GetOutOfOfficeAsync(date, timeout.Token);
             await Task.WhenAll(employeeTask, leaveTask);
+
             var employees = employeeTask.Result.ToDictionary(employee => employee.Id);
+            var activeNumbers = employeeTask.Result
+                .Where(employee => !string.IsNullOrWhiteSpace(employee.EmployeeNumber))
+                .Select(employee => Normalise(employee.EmployeeNumber))
+                .Where(value => value.Length > 0)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var leave = new Dictionary<string, LeaveState>(StringComparer.OrdinalIgnoreCase);
             foreach (var item in leaveTask.Result)
             {
                 if (!employees.TryGetValue(item.EmployeeId, out var employee) || string.IsNullOrWhiteSpace(employee.EmployeeNumber)) continue;
-                result[Normalise(employee.EmployeeNumber)] = new LeaveState(item.Policy?.Name, item.Details, item.IsPartOfDay);
+                leave[Normalise(employee.EmployeeNumber)] = new LeaveState(item.Policy?.Name, item.Details, item.IsPartOfDay);
             }
+            return new SageDispatchState(true, activeNumbers, leave);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning("Sage HR exceeded the 6 second Driver Dispatch budget on {Date}; the canonical Driver Master fallback will be used.", date);
+            return SageDispatchState.Unavailable;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            logger.LogWarning(exception, "Sage HR leave was unavailable for Driver Dispatch on {Date}; allocations remain editable but no leave suggestion will be made.", date);
+            logger.LogWarning(exception, "Sage HR was unavailable for Driver Dispatch on {Date}; the canonical Driver Master fallback will be used.", date);
+            return SageDispatchState.Unavailable;
         }
-        return result;
     }
 
-    private async Task<Dictionary<DateOnly, HashSet<string>>> ReadTachoWorkEvidenceAsync(DateOnly planningDate, CancellationToken ct)
-    {
-        var result = new Dictionary<DateOnly, HashSet<string>>();
-        if (!tachoMaster.IsConfigured) return result;
-
-        // Limit concurrent history calls so the workbench stays responsive without hammering the upstream service.
-        using var gate = new SemaphoreSlim(3, 3);
-        var days = Enumerable.Range(1, 7).Select(offset => planningDate.AddDays(-offset)).ToArray();
-        var tasks = days.Select(async day =>
-        {
-            await gate.WaitAsync(ct);
-            try
-            {
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                timeout.CancelAfter(TimeSpan.FromSeconds(12));
-                var duties = await tachoMaster.GetDriverDutyStatusesAsync(day, timeout.Token);
-                var identities = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var duty in duties)
-                {
-                    AddIdentity(identities, "M", duty.MemberCode > 0 ? duty.MemberCode.ToString(System.Globalization.CultureInfo.InvariantCulture) : null);
-                    AddIdentity(identities, "C", duty.CardNumber);
-                    AddIdentity(identities, "E", duty.EmployeeNumber);
-                    AddIdentity(identities, "N", duty.DriverName);
-                }
-                return (Day: day, Success: true, Identities: identities);
-            }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-            {
-                logger.LogWarning("TachoMaster history timed out for Driver Dispatch day-number evidence on {Date}; executed TMS run history will be used for that date.", day);
-                return (Day: day, Success: false, Identities: new HashSet<string>(StringComparer.OrdinalIgnoreCase));
-            }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            {
-                logger.LogWarning(exception, "TachoMaster history was unavailable for Driver Dispatch day-number evidence on {Date}; executed TMS run history will be used for that date.", day);
-                return (Day: day, Success: false, Identities: new HashSet<string>(StringComparer.OrdinalIgnoreCase));
-            }
-            finally
-            {
-                gate.Release();
-            }
-        });
-
-        foreach (var item in await Task.WhenAll(tasks))
-            if (item.Success) result[item.Day] = item.Identities;
-        return result;
-    }
-
-    private static int ConsecutiveWorkedDays(
-        IEnumerable<Load> history,
-        Driver driver,
-        DateOnly planningDate,
-        IReadOnlyDictionary<DateOnly, HashSet<string>> tachoWorkEvidence)
+    private static int ConsecutiveWorkedDays(IEnumerable<Load> history, Driver driver, DateOnly planningDate)
     {
         var executedTmsDates = history
-            .Where(load => load.DriverId == driver.Id && load.Status is LoadStatus.Dispatched or LoadStatus.InProgress or LoadStatus.Completed)
+            .Where(load => load.DriverId == driver.Id && ExecutedStatuses.Contains(load.Status))
             .Select(load => load.PlanningDate)
             .ToHashSet();
 
         var count = 0;
         for (var day = planningDate.AddDays(-1); ; day = day.AddDays(-1))
         {
-            var worked = tachoWorkEvidence.TryGetValue(day, out var identities)
-                ? DriverPresentInTacho(driver, identities)
-                : executedTmsDates.Contains(day);
-            if (!worked) break;
+            if (!executedTmsDates.Contains(day)) break;
             count++;
             if (count >= 7) break;
         }
         return count;
     }
 
-    private static bool DriverPresentInTacho(Driver driver, HashSet<string> identities)
-    {
-        if (StableIdentityMatch(identities, "M", driver.TachoMasterDriverId)) return true;
-        if (StableIdentityMatch(identities, "C", driver.TachoCardNumber)) return true;
-        if (StableIdentityMatch(identities, "E", driver.EmployeeNumber)) return true;
-
-        var hasStableIdentity = !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId)
-            || !string.IsNullOrWhiteSpace(driver.TachoCardNumber)
-            || !string.IsNullOrWhiteSpace(driver.EmployeeNumber);
-        if (hasStableIdentity) return false;
-
-        return StableIdentityMatch(identities, "N", driver.TachoName)
-            || StableIdentityMatch(identities, "N", driver.DisplayName);
-    }
-
-    private static bool StableIdentityMatch(HashSet<string> identities, string prefix, string? value)
-    {
-        var normalized = Normalise(value);
-        return normalized.Length > 0 && identities.Contains($"{prefix}:{normalized}");
-    }
-
-    private static void AddIdentity(HashSet<string> identities, string prefix, string? value)
-    {
-        var normalized = Normalise(value);
-        if (normalized.Length > 0) identities.Add($"{prefix}:{normalized}");
-    }
-
     private static DateTimeOffset? FirstPlanned(Load load) => load.Stops.OrderBy(stop => stop.Sequence).Select(stop => stop.PlannedArrivalUtc).FirstOrDefault(value => value is not null);
-    private static string CanonicalType(Driver driver) => IsAgency(driver) ? "Agency" : driver.DriverType?.Contains("casual", StringComparison.OrdinalIgnoreCase) == true ? "Casual" : "Employed";
+    private static string CanonicalType(Driver driver) => IsAgency(driver) ? "Agency" : driver.DriverType?.Contains("casual", StringComparison.OrdinalIgnoreCase) == true || driver.DriverType?.Contains("zero", StringComparison.OrdinalIgnoreCase) == true ? "Casual" : "Employed";
     private static bool IsAgency(Driver driver) => new[] { driver.DriverType, driver.DriverGroup, driver.AgencyName }.Any(value => value?.Contains("agency", StringComparison.OrdinalIgnoreCase) == true) || string.Equals(driver.Coding?.Trim(), "4", StringComparison.OrdinalIgnoreCase);
+    private static bool PersistedAgency(Driver driver) => new[] { driver.DriverType, driver.DriverGroup }.Any(value => value?.Contains("agency", StringComparison.OrdinalIgnoreCase) == true);
+    private static bool PersistedEmployee(Driver driver) => driver.DriverType?.Contains("employ", StringComparison.OrdinalIgnoreCase) == true || driver.DriverType?.Contains("casual", StringComparison.OrdinalIgnoreCase) == true || driver.DriverType?.Contains("zero", StringComparison.OrdinalIgnoreCase) == true;
     private static int TypeOrder(string type) => type == "Employed" ? 0 : type == "Casual" ? 1 : 2;
+    private static string? CanonicalRequestedType(string? value)
+    {
+        if (string.Equals(value?.Trim(), "Agency", StringComparison.OrdinalIgnoreCase)) return "Agency";
+        if (string.Equals(value?.Trim(), "Casual", StringComparison.OrdinalIgnoreCase)) return "Casual";
+        if (string.Equals(value?.Trim(), "Employed", StringComparison.OrdinalIgnoreCase)) return "Employed";
+        return null;
+    }
     private static bool IsSouthbound(Load load)
     {
         var text = $"{load.Reference} {load.PlannerNotes}";
@@ -347,9 +469,21 @@ public sealed class DriverDispatchController(
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     private sealed record LeaveState(string? PolicyName, string? Details, bool IsPartOfDay);
+    private sealed record SageDispatchState(bool Available, HashSet<string> ActiveEmployeeNumbers, Dictionary<string, LeaveState> Leave)
+    {
+        public static SageDispatchState Unavailable { get; } = new(false, new HashSet<string>(StringComparer.OrdinalIgnoreCase), new Dictionary<string, LeaveState>(StringComparer.OrdinalIgnoreCase));
+    }
 }
 
 public sealed record DriverDispatchStartTimeRequest(string? StartTime);
+public sealed record DriverDispatchAddDriverRequest(
+    string? DisplayName,
+    string? EmployeeNumber,
+    string? DriverType,
+    string? AgencyName,
+    DateOnly? StartDate,
+    int? Days);
+public sealed record DriverDispatchAgencyRosterRequest(Guid DriverId, DateOnly StartDate, int Days);
 public sealed record DriverDispatchDriver(
     Guid DriverId,
     string EmployeeNumber,
@@ -378,4 +512,6 @@ public sealed record DriverDispatchDriver(
     int AssignedRunCount,
     Guid? SuggestedRunId,
     string? SuggestedRunReference,
-    string? Suggestion);
+    string? Suggestion,
+    DateOnly? AgencyBookedFrom,
+    DateOnly? AgencyBookedThrough);
