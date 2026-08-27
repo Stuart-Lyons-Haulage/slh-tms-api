@@ -102,9 +102,9 @@ public sealed class PlannerSourceMasterDataResolver
 
     /// <summary>
     /// Returns a canonical Site Master decision for a planned stop versus a physical
-    /// embedded geofence. True/false is authoritative when the physical fence has an
-    /// explicit Site Master link. Null means canonical evidence is unavailable and the
-    /// caller may use the legacy operational/fuzzy matching rules.
+    /// embedded geofence. True/false is authoritative when both sides resolve to Site
+    /// Master identity. Null means canonical evidence is incomplete and the caller may
+    /// use the proven physical/fuzzy matching rules instead of rejecting real telemetry.
     /// </summary>
     public bool? CanonicalGeofenceMatch(string? sourceLabel, EmbeddedFence fence)
     {
@@ -115,7 +115,7 @@ public sealed class PlannerSourceMasterDataResolver
         if (linked is null || linkedSite is null) return null;
 
         var plannedSite = MatchSite(sourceLabel);
-        return plannedSite is null ? false : plannedSite.Id == linkedSite.Id;
+        return plannedSite is null ? null : plannedSite.Id == linkedSite.Id;
     }
 
     private SiteGeofence? LinkedGeofence(string? fenceName)
