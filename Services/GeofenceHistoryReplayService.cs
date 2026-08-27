@@ -29,24 +29,16 @@ public sealed class GeofenceHistoryReplayService(
             logger.LogWarning(exception, "RoadTech provider history could not be refreshed for {PlanningDate}; stored SQL telemetry will still be replayed.", planningDate);
         }
 
-        // The historical projection deliberately reads the persisted telemetry back from
-        // SQL. This makes replay independent from a transient provider outage and ensures
-        // records captured before the latest geofence matching changes are included.
-        var storedHistory = await ReadStoredHistoryAsync(planningDate, ct);
-        var replayHistoryCount = storedHistory
-            .Where(record => record.Latitude is not null && record.Longitude is not null)
-            .Select(record => $"{record.VehicleIdentifier}|{record.ProviderEventId}")
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Count();
-
+        var storedHistoryCount = await CountStoredHistoryAsync(planningDate, ct);
         var loads = await ReadLoadsAsync(planningDate, ct);
         if (loads.Count == 0)
-            return new GeofenceHistoryReplayResult(planningDate, replayHistoryCount, 0, 0, 0, EmptySiteDiagnostics(), DateTimeOffset.UtcNow, storedHistory.Count, providerHistory.Count);
+            return new GeofenceHistoryReplayResult(planningDate, storedHistoryCount, 0, 0, 0, EmptySiteDiagnostics(), DateTimeOffset.UtcNow, storedHistoryCount, providerHistory.Count);
 
-        // BuildAsync replays persisted VehicleTrackingEvents in chronological order using
-        // the current active SQL SiteGeofences. Persisting that derived snapshot is safer
-        // than feeding old events into the live state machine, where an already-open visit
-        // could otherwise be mixed with earlier historical points.
+        // BuildAsync reads the persisted VehicleTrackingEvents for only the vehicles on the
+        // operating day's runs, in chronological order, and uses the current active SQL
+        // SiteGeofences. Persisting that derived snapshot is safer than feeding old events
+        // into the live state machine, where an open current visit could be mixed with an
+        // earlier historical point.
         var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
         var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, geofenceLoads, ct);
         await EmbeddedGeofenceSqlProjection.PersistAsync(db, snapshot, ct);
@@ -67,8 +59,8 @@ public sealed class GeofenceHistoryReplayService(
             .ToList();
 
         logger.LogInformation(
-            "Replayed {HistoryCount} stored RoadTech records ({ProviderCount} provider records refreshed first) for {PlanningDate} through the current SQL geofence projection; reconstructed {VisitCount} durable visits, {LinkedCount} linked visits and {DepartureCount} departures. Priority sites: {PrioritySites}.",
-            replayHistoryCount,
+            "Replayed stored RoadTech history ({StoredCount} records in operating window; {ProviderCount} provider records refreshed first) for {PlanningDate} through the current SQL geofence projection; reconstructed {VisitCount} durable visits, {LinkedCount} linked visits and {DepartureCount} departures. Priority sites: {PrioritySites}.",
+            storedHistoryCount,
             providerHistory.Count,
             planningDate,
             snapshot.Visits.Count,
@@ -78,35 +70,21 @@ public sealed class GeofenceHistoryReplayService(
 
         return new GeofenceHistoryReplayResult(
             planningDate,
-            replayHistoryCount,
+            storedHistoryCount,
             snapshot.Visits.Count,
             snapshot.Visits.Count(x => x.LoadStopId is not null),
             snapshot.Visits.Count(x => x.ExitedAtUtc is not null),
             siteDiagnostics,
             DateTimeOffset.UtcNow,
-            storedHistory.Count,
+            storedHistoryCount,
             providerHistory.Count);
     }
 
-    private async Task<List<DotTelemetryRecord>> ReadStoredHistoryAsync(DateOnly planningDate, CancellationToken ct)
+    private async Task<int> CountStoredHistoryAsync(DateOnly planningDate, CancellationToken ct)
     {
         var (fromUtc, toUtc) = UtcOperatingWindow(planningDate);
-        var rows = await db.VehicleTrackingEvents.AsNoTracking()
-            .Where(row => row.EventTimeUtc >= fromUtc.AddHours(-2) && row.EventTimeUtc < toUtc.AddHours(12))
-            .OrderBy(row => row.EventTimeUtc)
-            .ToListAsync(ct);
-
-        return rows.Select(row => new DotTelemetryRecord(
-            row.ProviderEventId,
-            row.VehicleIdentifier,
-            row.EventTimeUtc,
-            row.Latitude,
-            row.Longitude,
-            row.SpeedKph,
-            row.IgnitionOn,
-            row.IsMoving,
-            row.MatchStatus,
-            row.RawPayload)).ToList();
+        return await db.VehicleTrackingEvents.AsNoTracking()
+            .CountAsync(row => row.EventTimeUtc >= fromUtc.AddHours(-2) && row.EventTimeUtc < toUtc.AddHours(12), ct);
     }
 
     private async Task<List<Load>> ReadLoadsAsync(DateOnly planningDate, CancellationToken ct)
