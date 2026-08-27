@@ -85,6 +85,8 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
         if (register) await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
         else await db.SaveChangesAsync(ct);
 
+        await RecordMessageEvent(load, request, receipt.Provider, receipt.MobileSuffix, receipt.MessageId, ct);
+
         return Accepted(new
         {
             receipt.MessageId,
@@ -92,6 +94,29 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
             receipt.Provider,
             load.Status
         });
+    }
+
+    private async Task RecordMessageEvent(Load load, RunDriverMessageRequest request, string? provider, string? mobileSuffix, string? messageId, CancellationToken ct)
+    {
+        try
+        {
+            var message = request.Message.Trim().Replace("\r", string.Empty).Replace("\n", " · ");
+            if (message.Length > 700) message = message[..700] + "…";
+            db.DriverStatusLogs.Add(new DriverStatusLog
+            {
+                LoadId = load.Id,
+                DriverId = load.DriverId,
+                Status = request.Dispatch ? "Driver dispatched" : "Driver text update sent",
+                Notes = $"{(request.Dispatch ? "Dispatch" : "Plain text update")} sent via {provider ?? "SMS"} to ***{mobileSuffix}. Message ID {messageId ?? "not returned"}. {message}",
+                CapturedBy = User.Identity?.Name ?? "TMS planner"
+            });
+            await db.SaveChangesAsync(ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // Dispatch/SMS must not fail merely because the auxiliary timeline table is unavailable.
+            db.ChangeTracker.Clear();
+        }
     }
 
     private static bool IsSchemaUnavailable(Exception exception)
