@@ -15,6 +15,7 @@ namespace Slh.Tms.Api.Services;
 public sealed class DotTrackingClient
 {
     private const string ProviderName = "RoadTech Falcon";
+    private static readonly TimeSpan CurrentTelemetryBudget = TimeSpan.FromSeconds(8);
     private readonly HttpClient _httpClient;
     private readonly DotTrackingOptions _options;
     private readonly ILogger<DotTrackingClient> _logger;
@@ -36,7 +37,8 @@ public sealed class DotTrackingClient
     /// <summary>
     /// Reads the latest telemetry for the configured RoadTech company.
     /// RoadTech requires an APIKEY header, a login SID and a POST request to
-    /// /api/Falcon/GetCurrentTelemetry.
+    /// /api/Falcon/GetCurrentTelemetry. Current telemetry is deliberately bounded
+    /// so a slow provider cannot hold wallboard/ETA requests open indefinitely.
     /// </summary>
     public async Task<IReadOnlyList<RoadTechTelemetryItem>> GetLatestVehicleEventsAsync(
         CancellationToken cancellationToken = default)
@@ -49,25 +51,34 @@ public sealed class DotTrackingClient
 
         ValidateConfiguration();
 
-        var sid = await LoginAsync(cancellationToken);
-        var results = new List<RoadTechTelemetryItem>();
-        var offset = 0;
-
-        for (var page = 0; page < _options.MaxPages; page++)
+        using var currentRequest = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        currentRequest.CancelAfter(CurrentTelemetryBudget);
+        try
         {
-            var response = await GetTelemetryPageAsync(sid, DateOnly.FromDateTime(DateTime.UtcNow), offset, _options.OnlyLive ? 1 : 0, cancellationToken);
-            results.AddRange(response.Data);
+            var sid = await LoginAsync(currentRequest.Token);
+            var results = new List<RoadTechTelemetryItem>();
+            var offset = 0;
 
-            if (!response.MoreData || response.RecordCount == 0)
+            for (var page = 0; page < _options.MaxPages; page++)
             {
-                break;
+                var response = await GetTelemetryPageAsync(sid, DateOnly.FromDateTime(DateTime.UtcNow), offset, _options.OnlyLive ? 1 : 0, currentRequest.Token);
+                results.AddRange(response.Data);
+
+                if (!response.MoreData || response.RecordCount == 0)
+                {
+                    break;
+                }
+
+                offset += response.RecordCount;
             }
 
-            offset += response.RecordCount;
+            _logger.LogInformation("{Provider} returned {Count} current telemetry records.", ProviderName, results.Count);
+            return results;
         }
-
-        _logger.LogInformation("{Provider} returned {Count} current telemetry records.", ProviderName, results.Count);
-        return results;
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException($"{Provider} current telemetry exceeded the {CurrentTelemetryBudget.TotalSeconds:0}-second live request budget.", exception);
+        }
     }
 
     private void ValidateConfiguration()
