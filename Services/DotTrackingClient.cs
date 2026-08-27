@@ -77,7 +77,7 @@ public sealed class DotTrackingClient
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new TimeoutException($"{Provider} current telemetry exceeded the {CurrentTelemetryBudget.TotalSeconds:0}-second live request budget.", exception);
+            throw new TimeoutException($"{ProviderName} current telemetry exceeded the {CurrentTelemetryBudget.TotalSeconds:0}-second live request budget.", exception);
         }
     }
 
