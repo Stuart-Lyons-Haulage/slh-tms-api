@@ -4,7 +4,7 @@ namespace Slh.Tms.Api.Authorization;
 
 internal static class TmsAccessPolicy
 {
-    private static readonly string[] DefaultAllowedDomains = ["lyonshaulage.com"];
+    private static readonly string[] DefaultAllowedDomains = ["lyonshaulage.com", "stuartlyonshaulage.co.uk"];
     private static readonly string[] TrustedSignInClaimTypes =
     [
         "preferred_username",
