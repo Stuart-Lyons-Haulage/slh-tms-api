@@ -29,24 +29,27 @@ public sealed class GeofenceHistoryReplayService(
             logger.LogWarning(exception, "RoadTech provider history could not be refreshed for {PlanningDate}; stored SQL telemetry will still be replayed.", planningDate);
         }
 
+        // The historical projection deliberately reads the persisted telemetry back from
+        // SQL. This makes replay independent from a transient provider outage and ensures
+        // records captured before the latest geofence matching changes are included.
         var storedHistory = await ReadStoredHistoryAsync(planningDate, ct);
-        var replayHistory = providerHistory
-            .Concat(storedHistory)
+        var replayHistoryCount = storedHistory
             .Where(record => record.Latitude is not null && record.Longitude is not null)
-            .GroupBy(record => $"{record.VehicleIdentifier}|{record.ProviderEventId}", StringComparer.OrdinalIgnoreCase)
-            .Select(group => group.OrderByDescending(record => record.EventTimeUtc).First())
-            .OrderBy(record => record.EventTimeUtc)
-            .ToList();
-
-        if (replayHistory.Count > 0)
-            await GeofenceRunProgression.ProcessTelemetryAsync(db, replayHistory, ct);
+            .Select(record => $"{record.VehicleIdentifier}|{record.ProviderEventId}")
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count();
 
         var loads = await ReadLoadsAsync(planningDate, ct);
         if (loads.Count == 0)
-            return new GeofenceHistoryReplayResult(planningDate, replayHistory.Count, 0, 0, 0, EmptySiteDiagnostics(), DateTimeOffset.UtcNow, storedHistory.Count, providerHistory.Count);
+            return new GeofenceHistoryReplayResult(planningDate, replayHistoryCount, 0, 0, 0, EmptySiteDiagnostics(), DateTimeOffset.UtcNow, storedHistory.Count, providerHistory.Count);
 
+        // BuildAsync replays persisted VehicleTrackingEvents in chronological order using
+        // the current active SQL SiteGeofences. Persisting that derived snapshot is safer
+        // than feeding old events into the live state machine, where an already-open visit
+        // could otherwise be mixed with earlier historical points.
         var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
         var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, geofenceLoads, ct);
+        await EmbeddedGeofenceSqlProjection.PersistAsync(db, snapshot, ct);
         snapshot = await EmbeddedGeofenceEvidenceMerge.MergeDurableProjectionAsync(db, snapshot, loads, ct);
 
         var siteDiagnostics = PrioritySites
@@ -64,9 +67,8 @@ public sealed class GeofenceHistoryReplayService(
             .ToList();
 
         logger.LogInformation(
-            "Replayed {HistoryCount} RoadTech records ({StoredCount} stored, {ProviderCount} provider) for {PlanningDate} through active SQL geofences; reconstructed {VisitCount} durable visits, {LinkedCount} linked visits and {DepartureCount} departures. Priority sites: {PrioritySites}.",
-            replayHistory.Count,
-            storedHistory.Count,
+            "Replayed {HistoryCount} stored RoadTech records ({ProviderCount} provider records refreshed first) for {PlanningDate} through the current SQL geofence projection; reconstructed {VisitCount} durable visits, {LinkedCount} linked visits and {DepartureCount} departures. Priority sites: {PrioritySites}.",
+            replayHistoryCount,
             providerHistory.Count,
             planningDate,
             snapshot.Visits.Count,
@@ -76,7 +78,7 @@ public sealed class GeofenceHistoryReplayService(
 
         return new GeofenceHistoryReplayResult(
             planningDate,
-            replayHistory.Count,
+            replayHistoryCount,
             snapshot.Visits.Count,
             snapshot.Visits.Count(x => x.LoadStopId is not null),
             snapshot.Visits.Count(x => x.ExitedAtUtc is not null),
@@ -90,7 +92,7 @@ public sealed class GeofenceHistoryReplayService(
     {
         var (fromUtc, toUtc) = UtcOperatingWindow(planningDate);
         var rows = await db.VehicleTrackingEvents.AsNoTracking()
-            .Where(row => row.EventTimeUtc >= fromUtc && row.EventTimeUtc < toUtc)
+            .Where(row => row.EventTimeUtc >= fromUtc.AddHours(-2) && row.EventTimeUtc < toUtc.AddHours(12))
             .OrderBy(row => row.EventTimeUtc)
             .ToListAsync(ct);
 
