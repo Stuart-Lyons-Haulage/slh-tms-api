@@ -1,0 +1,113 @@
+name: Verify Production Wallboard Geofences and ETAs
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - 'CD - Deploy TMS to Azure Container Apps'
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-wallboard:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    env:
+      API_BASE: https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+      TV_WALLBOARD_ACCESS_KEY: ${{ secrets.TV_WALLBOARD_ACCESS_KEY }}
+    steps:
+      - name: Allow RoadTech Site Master processing cycle
+        if: github.event_name == 'workflow_run'
+        shell: bash
+        run: sleep 90
+
+      - name: Verify current runs, geofence hits and final ETAs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$TV_WALLBOARD_ACCESS_KEY"
+          planning_date="$(TZ=Europe/London date +%F)"
+          headers=(-H "X-TMS-TV-Key: $TV_WALLBOARD_ACCESS_KEY" -H "X-TV-Display-Key: $TV_WALLBOARD_ACCESS_KEY")
+
+          progress_file="$(mktemp)"
+          route_file="$(mktemp)"
+          eta_file="$(mktemp)"
+          tv_file="$(mktemp)"
+          trap 'rm -f "$progress_file" "$route_file" "$eta_file" "$tv_file"' EXIT
+
+          request() {
+            local label="$1"
+            local output="$2"
+            local url="$3"
+            local status
+            status="$(curl --silent --show-error --max-time 120 --output "$output" --write-out '%{http_code}' "${headers[@]}" "$url" || true)"
+            echo "[$label] HTTP $status"
+            if test "$status" != "200"; then
+              cat "$output" || true
+              return 1
+            fi
+          }
+
+          request 'Run progress' "$progress_file" "$API_BASE/api/v1/run-progress?date=$planning_date"
+          request 'TV route progress' "$route_file" "$API_BASE/api/v1/tv-display/route-progress?date=$planning_date"
+          request 'Operations delivery ETAs' "$eta_file" "$API_BASE/api/v1/operations/delivery-etas?date=$planning_date"
+          request 'TV live runs' "$tv_file" "$API_BASE/api/v1/tv-display/live-runs?date=$planning_date"
+
+          run_count="$(jq -r '.count // 0' "$progress_file")"
+          linked_runs="$(jq -r '.geofenceLinkedRuns // 0' "$progress_file")"
+          linked_stops="$(jq -r '.geofenceLinkedStops // 0' "$progress_file")"
+          hit_runs="$(jq -r '.geofenceHitRuns // 0' "$progress_file")"
+          hit_stops="$(jq -r '.geofenceHitStops // 0' "$progress_file")"
+          visit_count="$(jq -r '.geofenceVisitCount // 0' "$progress_file")"
+          latest_hit="$(jq -r '[.records[]?.stopDwell[]? | (.siteDepartureUtc // .siteArrivalUtc) | select(. != null)] | max // empty' "$progress_file")"
+
+          eta_records="$(jq -r '(.records // []) | length' "$eta_file")"
+          final_destination_count="$(jq -r '(.records // []) | sort_by(.loadId, .sequence) | group_by(.loadId) | map(sort_by(.sequence) | last) | map(select((.stopName // "") != "")) | length' "$eta_file")"
+          final_eta_count="$(jq -r '(.records // []) | sort_by(.loadId, .sequence) | group_by(.loadId) | map(sort_by(.sequence) | last) | map(select(.etaUtc != null)) | length' "$eta_file")"
+          final_live_eta_count="$(jq -r '(.records // []) | sort_by(.loadId, .sequence) | group_by(.loadId) | map(sort_by(.sequence) | last) | map(select(.etaUtc != null and (.source == "Live" or .source == "Estimated"))) | length' "$eta_file")"
+
+          tv_run_count="$(jq -r '.runCount // 0' "$tv_file")"
+          tv_final_stop_count="$(jq -r '(.runs // []) | map(select((.finalStop // "") != "")) | length' "$tv_file")"
+          tv_eta_count="$(jq -r '(.runs // []) | map(select(.etaUtc != null)) | length' "$tv_file")"
+
+          echo "planningDate=$planning_date runs=$run_count linkedRuns=$linked_runs linkedStops=$linked_stops hitRuns=$hit_runs hitStops=$hit_stops visits=$visit_count latestHit=${latest_hit:-none}"
+          echo "deliveryEtaRecords=$eta_records finalDestinations=$final_destination_count finalEtas=$final_eta_count finalLiveOrEstimatedEtas=$final_live_eta_count"
+          echo "tvRuns=$tv_run_count tvFinalStops=$tv_final_stop_count tvEtas=$tv_eta_count"
+
+          {
+            echo '### Production wallboard verification'
+            echo
+            echo "- Planning date: **$planning_date**"
+            echo "- Runs visible to Run Progress: **$run_count**"
+            echo "- Configured geofence-linked runs/stops: **$linked_runs / $linked_stops**"
+            echo "- Runs/stops with actual Site Master geofence evidence: **$hit_runs / $hit_stops**"
+            echo "- Durable geofence visits on those runs: **$visit_count**"
+            echo "- Latest run geofence evidence: **${latest_hit:-none}**"
+            echo "- Operations final destinations / ETAs: **$final_destination_count / $final_eta_count**"
+            echo "- Operations live or estimated final ETAs: **$final_live_eta_count**"
+            echo "- TV runs / final destinations / ETAs: **$tv_run_count / $tv_final_stop_count / $tv_eta_count**"
+            echo
+            echo '#### Run Progress metrics'
+            echo '```json'
+            jq '{planningDate, source, count, geofenceCount, geofenceConfiguredRuns, geofenceLinkedRuns, geofenceLinkedStops, geofenceTotalStops, geofenceHitRuns, geofenceHitStops, geofenceVisitCount, trackingEventCount, latestTrackingUtc}' "$progress_file"
+            echo '```'
+            echo
+            echo '#### TV final destination / ETA sample'
+            echo '```json'
+            jq '{planningDate, runCount, runs: [(.runs // [])[] | {reference, vehicle, driver, nextStop, finalStop, etaTarget, etaUtc, etaSource, state}] | .[0:25]}' "$tv_file"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          test "$run_count" -gt 0
+          test "$linked_runs" -gt 0
+          test "$linked_stops" -gt 0
+          test "$hit_runs" -gt 0
+          test "$visit_count" -gt 0
+          test "$eta_records" -gt 0
+          test "$final_destination_count" -gt 0
+          test "$final_eta_count" -gt 0
+          test "$tv_run_count" -gt 0
+          test "$tv_final_stop_count" -gt 0
+          test "$tv_eta_count" -gt 0
