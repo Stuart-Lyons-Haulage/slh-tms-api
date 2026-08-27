@@ -77,32 +77,37 @@ public sealed class DriverDispatchController(
         var selectedDrivers = driverCandidates.Where(driver =>
         {
             var employeeKey = Normalise(driver.EmployeeNumber);
-            var sageEmployee = sage.Available && sage.ActiveEmployeeNumbers.Contains(employeeKey);
+            var sageDriver = sage.Available && sage.ActiveDriverEmployeeNumbers.Contains(employeeKey);
             var persistedCasual = driver.DriverType?.Contains("casual", StringComparison.OrdinalIgnoreCase) == true ||
                                   driver.DriverType?.Contains("zero", StringComparison.OrdinalIgnoreCase) == true;
             var persistedAgency = PersistedAgency(driver);
             var operationallyRelevant = roster.ContainsKey(driver.Id) || currentDayDriverIds.Contains(driver.Id) ||
                                         previousWeekDriverIds.Contains(driver.Id) || regularRecentDriverIds.Contains(driver.Id);
 
-            if (sageEmployee || persistedCasual) return true;
             if (persistedAgency) return operationallyRelevant;
-            if (sage.Available) return operationallyRelevant;
-            return PersistedEmployee(driver) || operationallyRelevant;
+            if (sage.Available) return sageDriver;
+            return persistedCasual || PersistedEmployee(driver) || operationallyRelevant;
         }).ToList();
 
         await MasterDetailStore.EnrichDriversAsync(db, selectedDrivers, ct);
 
         // Re-apply the rule after enrichment because AgencyName/Coding are audited detail fields rather
-        // than physical Driver columns. When Sage HR is available it is the employed-population gate.
+        // than physical Driver columns. Sage HR's Drivers team / Driver position is the employed driver gate.
         selectedDrivers = selectedDrivers.Where(driver =>
         {
             var employeeKey = Normalise(driver.EmployeeNumber);
-            var sageEmployee = sage.Available && sage.ActiveEmployeeNumbers.Contains(employeeKey);
+            var sageDriver = sage.Available && sage.ActiveDriverEmployeeNumbers.Contains(employeeKey);
             var operationallyRelevant = roster.ContainsKey(driver.Id) || currentDayDriverIds.Contains(driver.Id) ||
                                         previousWeekDriverIds.Contains(driver.Id) || regularRecentDriverIds.Contains(driver.Id);
             if (IsAgency(driver)) return operationallyRelevant;
-            if (CanonicalType(driver) == "Casual") return true;
-            return sage.Available ? sageEmployee || operationallyRelevant : true;
+            if (sage.Available) return sageDriver;
+
+            // If Sage HR is temporarily unavailable, fail conservatively to genuine driver evidence
+            // rather than falling back to every active row in dbo.Drivers.
+            return CanonicalType(driver) == "Casual" ||
+                   IsOperationalDriverGroup(driver.DriverGroup) ||
+                   !string.IsNullOrWhiteSpace(driver.TachoCardNumber) ||
+                   operationallyRelevant;
         }).OrderBy(driver => driver.DisplayName).ToList();
 
         var dispatchStates = await DriverDispatchStateStore.ReadAsync(db, loads.Select(load => load.Id), ct);
@@ -195,7 +200,7 @@ public sealed class DriverDispatchController(
             weekEnd,
             generatedAtUtc = DateTimeOffset.UtcNow,
             leaveSource = sage.Available ? "Sage HR" : "Unavailable",
-            driverPopulationSource = sage.Available ? "Active Sage HR employees + Casual + relevant Agency" : "Canonical Driver Master + relevant Agency fallback",
+            driverPopulationSource = sage.Available ? "Sage HR driver roles + relevant Agency" : "Canonical driver evidence + relevant Agency fallback",
             dayNumberSource = "TMS executed-run history; live TachoMaster compliance is rechecked at dispatch",
             drivers = rows.OrderBy(row => TypeOrder(row.DriverType)).ThenBy(row => row.DisplayName),
             vehicles,
@@ -404,8 +409,9 @@ public sealed class DriverDispatchController(
             var leaveTask = sageHr.GetOutOfOfficeAsync(date, timeout.Token);
             await Task.WhenAll(employeeTask, leaveTask);
 
-            var employees = employeeTask.Result.ToDictionary(employee => employee.Id);
-            var activeNumbers = employeeTask.Result
+            var driverEmployees = employeeTask.Result.Where(IsSageDriver).ToList();
+            var employees = driverEmployees.ToDictionary(employee => employee.Id);
+            var activeNumbers = driverEmployees
                 .Where(employee => !string.IsNullOrWhiteSpace(employee.EmployeeNumber))
                 .Select(employee => Normalise(employee.EmployeeNumber))
                 .Where(value => value.Length > 0)
@@ -430,6 +436,10 @@ public sealed class DriverDispatchController(
         }
     }
 
+    private bool IsSageDriver(SageHrEmployee employee) =>
+        (!string.IsNullOrWhiteSpace(sageHr.DriverTeamName) && string.Equals(employee.Team, sageHr.DriverTeamName, StringComparison.OrdinalIgnoreCase)) ||
+        (!string.IsNullOrWhiteSpace(sageHr.DriverPositionKeyword) && employee.Position?.Contains(sageHr.DriverPositionKeyword, StringComparison.OrdinalIgnoreCase) == true);
+
     private static int ConsecutiveWorkedDays(IEnumerable<Load> history, Driver driver, DateOnly planningDate)
     {
         var executedTmsDates = history
@@ -452,6 +462,9 @@ public sealed class DriverDispatchController(
     private static bool IsAgency(Driver driver) => new[] { driver.DriverType, driver.DriverGroup, driver.AgencyName }.Any(value => value?.Contains("agency", StringComparison.OrdinalIgnoreCase) == true) || string.Equals(driver.Coding?.Trim(), "4", StringComparison.OrdinalIgnoreCase);
     private static bool PersistedAgency(Driver driver) => new[] { driver.DriverType, driver.DriverGroup }.Any(value => value?.Contains("agency", StringComparison.OrdinalIgnoreCase) == true);
     private static bool PersistedEmployee(Driver driver) => driver.DriverType?.Contains("employ", StringComparison.OrdinalIgnoreCase) == true || driver.DriverType?.Contains("casual", StringComparison.OrdinalIgnoreCase) == true || driver.DriverType?.Contains("zero", StringComparison.OrdinalIgnoreCase) == true;
+    private static bool IsOperationalDriverGroup(string? value) =>
+        value?.Contains("driver", StringComparison.OrdinalIgnoreCase) == true ||
+        value?.Contains("tramp", StringComparison.OrdinalIgnoreCase) == true;
     private static int TypeOrder(string type) => type == "Employed" ? 0 : type == "Casual" ? 1 : 2;
     private static string? CanonicalRequestedType(string? value)
     {
@@ -469,7 +482,7 @@ public sealed class DriverDispatchController(
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     private sealed record LeaveState(string? PolicyName, string? Details, bool IsPartOfDay);
-    private sealed record SageDispatchState(bool Available, HashSet<string> ActiveEmployeeNumbers, Dictionary<string, LeaveState> Leave)
+    private sealed record SageDispatchState(bool Available, HashSet<string> ActiveDriverEmployeeNumbers, Dictionary<string, LeaveState> Leave)
     {
         public static SageDispatchState Unavailable { get; } = new(false, new HashSet<string>(StringComparer.OrdinalIgnoreCase), new Dictionary<string, LeaveState>(StringComparer.OrdinalIgnoreCase));
     }
