@@ -1,6 +1,5 @@
 using System.Linq;
 using System.Runtime.CompilerServices;
-using System.Security.Claims;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Authentication;
@@ -9,6 +8,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Slh.Tms.Api.Authorization;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Models.Integrations;
@@ -20,6 +20,7 @@ using Slh.Tms.Api.Services;
 var builder = WebApplication.CreateBuilder(args);
 var tenantId = builder.Configuration["Entra:TenantId"] ?? throw new InvalidOperationException("Entra:TenantId is required");
 var audience = builder.Configuration["Entra:Audience"] ?? throw new InvalidOperationException("Entra:Audience is required");
+var allowedTmsDomains = builder.Configuration.GetSection("Entra:AllowedDomains").Get<string[]>() ?? ["lyonshaulage.com"];
 var deploymentRevision = builder.Configuration["Deployment:Revision"] ?? "local";
 
 builder.Services.AddControllers().AddJsonOptions(options =>
@@ -147,7 +148,7 @@ builder.Services.AddAuthorization(options =>
 {
     var tmsAccessPolicy = new AuthorizationPolicyBuilder()
         .RequireAuthenticatedUser()
-        .RequireAssertion(context => IsLyonsUser(context.User))
+        .RequireAssertion(context => TmsAccessPolicy.IsCompanyUser(context.User, allowedTmsDomains))
         .Build();
     options.DefaultPolicy = tmsAccessPolicy;
     options.FallbackPolicy = tmsAccessPolicy;
@@ -155,15 +156,6 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("TmsWrite", tmsAccessPolicy);
     options.AddPolicy("TmsApprove", tmsAccessPolicy);
 });
-
-static bool IsLyonsUser(ClaimsPrincipal user)
-{
-    var values = user.Claims
-        .Where(claim => claim.Type is "preferred_username" or "upn" or "email" || claim.Type == ClaimTypes.Email || claim.Type == ClaimTypes.Name)
-        .Select(claim => claim.Value)
-        .Where(value => !string.IsNullOrWhiteSpace(value));
-    return values.Any(value => value.EndsWith("@lyonshaulage.com", StringComparison.OrdinalIgnoreCase));
-}
 
 static string ReadSetting(IConfiguration configuration, string fallback, params string[] keys) =>
     keys.Select(key => configuration[key]).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim() ?? fallback;

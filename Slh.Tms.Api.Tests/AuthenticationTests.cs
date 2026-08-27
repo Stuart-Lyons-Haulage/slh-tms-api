@@ -55,6 +55,45 @@ public class AuthenticationTests : IClassFixture<CustomWebFactory>
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
+    [Theory]
+    [InlineData("planner@lyonshaulage.com")]
+    [InlineData("PLANNER@LYONSHAULAGE.COM")]
+    public async Task Authenticated_company_domain_user_is_authorised_without_individual_allow_list(string userName)
+    {
+        var client = _factory.CreateClientWithUser(userName);
+
+        var response = await client.GetAsync("/api/v1/customers");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("planner@example.com")]
+    [InlineData("planner@lyonshaulage.com.evil.example")]
+    [InlineData("planner@evil-lyonshaulage.com")]
+    [InlineData("planner@lyonshaulage.co.uk")]
+    [InlineData("planner@lyonshaulage.com other@example.com")]
+    public async Task Authenticated_external_or_lookalike_domain_user_is_forbidden(string userName)
+    {
+        var client = _factory.CreateClientWithUser(userName);
+
+        var response = await client.GetAsync("/api/v1/customers");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Authorisation_uses_verified_entra_sign_in_claims_not_display_name()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Test-User", LyonsUser);
+        client.DefaultRequestHeaders.Add("X-Test-Name-Only", "true");
+
+        var response = await client.GetAsync("/api/v1/customers");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
     [Fact]
     public async Task Valid_authorised_request_succeeds()
     {

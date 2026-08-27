@@ -5,6 +5,7 @@ param sqlAdminLogin string
 @secure() param sqlAdminPassword string
 param entraTenantId string
 param entraAudience string
+param entraAllowedDomain string = 'lyonshaulage.com'
 
 resource plan 'Microsoft.Web/serverfarms@2023-12-01' = { name: '${appName}-plan' location: location sku: { name: 'B1' tier: 'Basic' } properties: { reserved: true } }
 resource app 'Microsoft.Web/sites@2023-12-01' = {
@@ -23,6 +24,7 @@ resource app 'Microsoft.Web/sites@2023-12-01' = {
       appSettings: [
         { name: 'Entra__TenantId', value: entraTenantId }
         { name: 'Entra__Audience', value: entraAudience }
+        { name: 'Entra__AllowedDomains__0', value: entraAllowedDomain }
       ]
     }
   }

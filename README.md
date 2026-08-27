@@ -170,6 +170,7 @@ Set production configuration on the Container App using Key Vault-backed secret 
 | `ConnectionStrings__TmsDb` | Azure SQL connection string |
 | `Entra__TenantId` | Microsoft Entra tenant ID |
 | `Entra__Audience` | API application audience, normally `api://<API-CLIENT-ID>` |
+| `Entra__AllowedDomains__0` | Company sign-in email/UPN domain authorised for TMS access, currently `lyonshaulage.com` |
 | `Cors__AllowedOrigins__0` | Local development origin |
 | `Cors__AllowedOrigins__1` | Production portal origin |
 | `Deployment__Revision` | Git SHA exposed by health checks |
