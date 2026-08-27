@@ -15,19 +15,39 @@ public sealed class GeofenceHistoryReplayService(
 
     public async Task<GeofenceHistoryReplayResult> ReplayAsync(DateOnly planningDate, CancellationToken ct)
     {
-        var historical = (await client.GetHistoricalVehicleEventsAsync(planningDate, ct))
-            .Select(DotTelemetryRecord.FromProvider)
+        var providerHistory = new List<DotTelemetryRecord>();
+        try
+        {
+            providerHistory = (await client.GetHistoricalVehicleEventsAsync(planningDate, ct))
+                .Select(DotTelemetryRecord.FromProvider)
+                .ToList();
+            await store.PersistAsync(providerHistory, ct, markAsLiveReceipt: false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            logger.LogWarning(exception, "RoadTech provider history could not be refreshed for {PlanningDate}; stored SQL telemetry will still be replayed.", planningDate);
+        }
+
+        var storedHistory = await ReadStoredHistoryAsync(planningDate, ct);
+        var replayHistory = providerHistory
+            .Concat(storedHistory)
+            .Where(record => record.Latitude is not null && record.Longitude is not null)
+            .GroupBy(record => $"{record.VehicleIdentifier}|{record.ProviderEventId}", StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.OrderByDescending(record => record.EventTimeUtc).First())
+            .OrderBy(record => record.EventTimeUtc)
             .ToList();
 
-        await store.PersistAsync(historical, ct, markAsLiveReceipt: false);
+        if (replayHistory.Count > 0)
+            await GeofenceRunProgression.ProcessTelemetryAsync(db, replayHistory, ct);
 
         var loads = await ReadLoadsAsync(planningDate, ct);
         if (loads.Count == 0)
-            return new GeofenceHistoryReplayResult(planningDate, historical.Count, 0, 0, 0, EmptySiteDiagnostics(), DateTimeOffset.UtcNow);
+            return new GeofenceHistoryReplayResult(planningDate, replayHistory.Count, 0, 0, 0, EmptySiteDiagnostics(), DateTimeOffset.UtcNow, storedHistory.Count, providerHistory.Count);
 
         var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
         var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, geofenceLoads, ct);
-        await EmbeddedGeofenceSqlProjection.PersistAsync(db, snapshot, ct);
+        snapshot = await EmbeddedGeofenceEvidenceMerge.MergeDurableProjectionAsync(db, snapshot, loads, ct);
 
         var siteDiagnostics = PrioritySites
             .Select(site =>
@@ -44,8 +64,10 @@ public sealed class GeofenceHistoryReplayService(
             .ToList();
 
         logger.LogInformation(
-            "Replayed {HistoryCount} RoadTech records for {PlanningDate}; reconstructed {VisitCount} visits, {LinkedCount} linked visits and {DepartureCount} departures. Priority sites: {PrioritySites}.",
-            historical.Count,
+            "Replayed {HistoryCount} RoadTech records ({StoredCount} stored, {ProviderCount} provider) for {PlanningDate} through active SQL geofences; reconstructed {VisitCount} durable visits, {LinkedCount} linked visits and {DepartureCount} departures. Priority sites: {PrioritySites}.",
+            replayHistory.Count,
+            storedHistory.Count,
+            providerHistory.Count,
             planningDate,
             snapshot.Visits.Count,
             snapshot.Visits.Count(x => x.LoadStopId is not null),
@@ -54,12 +76,35 @@ public sealed class GeofenceHistoryReplayService(
 
         return new GeofenceHistoryReplayResult(
             planningDate,
-            historical.Count,
+            replayHistory.Count,
             snapshot.Visits.Count,
             snapshot.Visits.Count(x => x.LoadStopId is not null),
             snapshot.Visits.Count(x => x.ExitedAtUtc is not null),
             siteDiagnostics,
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow,
+            storedHistory.Count,
+            providerHistory.Count);
+    }
+
+    private async Task<List<DotTelemetryRecord>> ReadStoredHistoryAsync(DateOnly planningDate, CancellationToken ct)
+    {
+        var (fromUtc, toUtc) = UtcOperatingWindow(planningDate);
+        var rows = await db.VehicleTrackingEvents.AsNoTracking()
+            .Where(row => row.EventTimeUtc >= fromUtc && row.EventTimeUtc < toUtc)
+            .OrderBy(row => row.EventTimeUtc)
+            .ToListAsync(ct);
+
+        return rows.Select(row => new DotTelemetryRecord(
+            row.ProviderEventId,
+            row.VehicleIdentifier,
+            row.EventTimeUtc,
+            row.Latitude,
+            row.Longitude,
+            row.SpeedKph,
+            row.IgnitionOn,
+            row.IsMoving,
+            row.MatchStatus,
+            row.RawPayload)).ToList();
     }
 
     private async Task<List<Load>> ReadLoadsAsync(DateOnly planningDate, CancellationToken ct)
@@ -93,6 +138,22 @@ public sealed class GeofenceHistoryReplayService(
         return merged.Values.Where(load => load.Status != LoadStatus.Cancelled).ToList();
     }
 
+    private static (DateTimeOffset FromUtc, DateTimeOffset ToUtc) UtcOperatingWindow(DateOnly planningDate)
+    {
+        try
+        {
+            var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+            var fromLocal = planningDate.ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
+            var toLocal = planningDate.AddDays(1).ToDateTime(TimeOnly.MinValue, DateTimeKind.Unspecified);
+            return (new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(fromLocal, zone)), new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(toLocal, zone)));
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            var from = new DateTimeOffset(planningDate.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc));
+            return (from, from.AddDays(1));
+        }
+    }
+
     private static IReadOnlyList<GeofenceHistoryReplaySiteDiagnostic> EmptySiteDiagnostics() =>
         PrioritySites.Select(site => new GeofenceHistoryReplaySiteDiagnostic(site, 0, 0, 0, 0, null)).ToList();
 
@@ -123,7 +184,9 @@ public sealed record GeofenceHistoryReplayResult(
     int LinkedVisits,
     int Departures,
     IReadOnlyList<GeofenceHistoryReplaySiteDiagnostic> PrioritySites,
-    DateTimeOffset CompletedAtUtc);
+    DateTimeOffset CompletedAtUtc,
+    int StoredTrackingRecords = 0,
+    int ProviderTrackingRecords = 0);
 
 public sealed record GeofenceHistoryReplaySiteDiagnostic(
     string Site,
