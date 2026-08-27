@@ -58,6 +58,15 @@ public sealed class DriverPlanningController(TmsDbContext db, IConfiguration con
             db.ChangeTracker.Clear();
         }
 
+        // SQL Loads and the resilient Planning Register can temporarily contain the same
+        // real-world run under different GUIDs. The Dashboard must report one operational
+        // run, not one row per persistence copy.
+        loads = PlanningResilience.CollapseLogicalDuplicates(loads)
+            .OrderBy(load => load.PlanningDate)
+            .ThenBy(load => load.Reference)
+            .Take(2000)
+            .ToList();
+
         try { await LoadCommercialStore.EnrichAsync(db, loads, ct); }
         catch (Exception exception) when (IsSchemaUnavailable(exception)) { db.ChangeTracker.Clear(); }
 
