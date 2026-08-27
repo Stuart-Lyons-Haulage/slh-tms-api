@@ -36,7 +36,8 @@ public sealed class RunProgressController(
             {
                 // Keep Operations progression on the same current Falcon evidence as
                 // the Hisense route board. SQL remains the resilience fallback when
-                // RoadTech is temporarily unavailable.
+                // RoadTech is temporarily unavailable. The background ingestion service
+                // applies these positions to the authoritative Site Master geofences.
                 using var liveRefresh = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 liveRefresh.CancelAfter(LiveRefreshBudget);
                 var trackingRecords = (await trackingClient.GetLatestVehicleEventsAsync(liveRefresh.Token))
@@ -66,45 +67,35 @@ public sealed class RunProgressController(
                 refreshWarning = "Live Falcon refresh was unavailable; progression is using the latest stored tracking evidence.";
             }
 
-            // Production planning is register-backed. Do not probe the absent legacy
-            // Loads table here: doing so only generates false operational warnings.
-            var loads = (await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct))
+            // Current production runs can exist in either the planning register or the
+            // live SQL Loads table. Use the shared resilient merger so wallboard progress
+            // sees exactly the same current-day runs as the rest of the TMS.
+            var loads = (await PlanningResilience.ReadLoadsAsync(db, planningDate, ct))
                 .Where(x => x.Status != LoadStatus.Cancelled)
                 .OrderBy(x => x.Reference)
                 .ToList();
 
-            // The planner intentionally uses concise operational labels such as
-            // NWF-Merston, while Falcon calls the same fence Merston (Natures Way).
-            // Match on a cloned view so the planner-facing labels remain unchanged.
+            // Embedded reconstruction remains an in-memory resilience source for tracking
+            // coverage. MergeDurableProjectionAsync replaces its visit evidence with active
+            // SQL/Site Master GeofenceVisits whenever the authoritative SQL catalogue exists.
             var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
             var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, geofenceLoads, ct);
-
-            // A temporary RoadTech/history gap must never erase an ENTER/EXIT that was
-            // already proved on an earlier refresh. Merge the durable SQL projection
-            // before calculating wallboard status and stop completion.
             snapshot = await EmbeddedGeofenceEvidenceMerge.MergeDurableProjectionAsync(db, snapshot, loads, ct);
 
-            // The same refresh that reads fresh RoadTech GPS now also publishes the
-            // reconstructed ENTER/EXIT state immediately. This keeps every consumer
-            // (Operations wallboard, TV wallboard and geofence health) on the same
-            // current evidence instead of waiting for the background projection cycle.
-            try
-            {
-                await EmbeddedGeofenceSqlProjection.PersistAsync(db, snapshot, ct);
-            }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            {
-                db.ChangeTracker.Clear();
-                logger.LogWarning(
-                    exception,
-                    "Fresh RoadTech geofence projection failed for Operations progression on {PlanningDate}; returning the live reconstructed snapshot.",
-                    planningDate);
-                refreshWarning = string.Join(" ", new[]
-                {
-                    refreshWarning,
-                    "Fresh geofence progress could not be written to the shared SQL projection on this refresh."
-                }.Where(value => !string.IsNullOrWhiteSpace(value)));
-            }
+            // Do not persist the embedded reconstruction from a wallboard read. Durable
+            // ENTER/EXIT evidence is written by GeofenceRunProgression from the active SQL
+            // SiteGeofences during RoadTech ingestion.
+            var geofenceCoverage = await RunGeofenceConfigurationCoverage.CalculateAsync(db, loads, ct);
+            var geofenceHitRuns = snapshot.Visits
+                .Where(visit => visit.LoadId is not null)
+                .Select(visit => visit.LoadId!.Value)
+                .Distinct()
+                .Count();
+            var geofenceHitStops = snapshot.Visits
+                .Where(visit => visit.LoadStopId is not null)
+                .Select(visit => visit.LoadStopId!.Value)
+                .Distinct()
+                .Count();
 
             // Movement/ignition/card evidence is deliberately included on run-progress
             // itself. The wallboard must not depend on the separate TV route-progress
@@ -118,16 +109,25 @@ public sealed class RunProgressController(
                 tachoEvidence.ByLoadId.GetValueOrDefault(load.Id),
                 liveByLoad.GetValueOrDefault(load.Id))).ToList();
 
+            var activeGeofenceCount = geofenceCoverage.ActiveGeofenceCount > 0
+                ? geofenceCoverage.ActiveGeofenceCount
+                : snapshot.Fences.Count;
+
             return Ok(new
             {
                 planningDate,
                 calculatedAtUtc = now,
                 count = records.Count,
-                source = "RoadTechCurrent+StoredLive+DurableGeofenceProjection+PlanningRegister",
-                geofenceAvailable = snapshot.Fences.Count > 0,
-                geofenceCount = snapshot.Fences.Count,
+                source = "PlanningResilience+RoadTechCurrent+SiteMasterSqlGeofences+DurableGeofenceVisits",
+                geofenceAvailable = activeGeofenceCount > 0,
+                geofenceCount = activeGeofenceCount,
+                geofenceConfiguredRuns = geofenceCoverage.LinkedRuns,
+                geofenceLinkedRuns = geofenceCoverage.LinkedRuns,
+                geofenceLinkedStops = geofenceCoverage.LinkedStops,
+                geofenceTotalStops = geofenceCoverage.TotalStops,
+                geofenceHitRuns,
+                geofenceHitStops,
                 geofenceVisitCount = snapshot.Visits.Count,
-                geofenceLinkedRuns = snapshot.Visits.Where(x => x.LoadId != null).Select(x => x.LoadId!.Value).Distinct().Count(),
                 trackingEventCount = snapshot.TrackingEventCount,
                 latestTrackingUtc = LatestTracking(snapshot.LatestTrackingUtc, liveByLoad.Values),
                 tachoAvailable = tachoEvidence.Available,
@@ -138,14 +138,26 @@ public sealed class RunProgressController(
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            logger.LogError(exception, "Embedded geofence run progression failed for {PlanningDate}.", planningDate);
+            logger.LogError(exception, "Geofence run progression failed for {PlanningDate}.", planningDate);
             db.ChangeTracker.Clear();
 
             List<Load> loads;
-            try { loads = await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct); }
-            catch { loads = []; db.ChangeTracker.Clear(); }
+            try
+            {
+                loads = (await PlanningResilience.ReadLoadsAsync(db, planningDate, ct))
+                    .Where(load => load.Status != LoadStatus.Cancelled)
+                    .ToList();
+            }
+            catch
+            {
+                loads = [];
+                db.ChangeTracker.Clear();
+            }
+
             var liveByLoad = await ResolveLiveByLoadAsync(db, loads, ct);
             var tachoEvidence = await RunTachoEvidenceResolver.ResolveAsync(db, tachoMaster, loads, planningDate, logger, ct);
+            var geofenceCoverage = await RunGeofenceConfigurationCoverage.CalculateAsync(db, loads, ct);
+            var durableHits = await DurableHitCoverageAsync(db, loads, ct);
 
             var records = loads.OrderBy(x => x.Reference).Select(load =>
             {
@@ -186,11 +198,14 @@ public sealed class RunProgressController(
                 };
             }).ToList();
 
-            var geofenceCount = 0;
-            try { geofenceCount = EmbeddedGeofenceEngine.ApprovedFences.Count; }
-            catch (Exception geofenceException) when (geofenceException is not OperationCanceledException)
+            var geofenceCount = geofenceCoverage.ActiveGeofenceCount;
+            if (geofenceCount == 0)
             {
-                logger.LogError(geofenceException, "Approved geofence payload could not be initialised while building safe run-progress fallback.");
+                try { geofenceCount = EmbeddedGeofenceEngine.ApprovedFences.Count; }
+                catch (Exception geofenceException) when (geofenceException is not OperationCanceledException)
+                {
+                    logger.LogError(geofenceException, "Approved geofence fallback payload could not be initialised while building safe run-progress fallback.");
+                }
             }
 
             return Ok(new
@@ -198,19 +213,24 @@ public sealed class RunProgressController(
                 planningDate,
                 calculatedAtUtc = now,
                 count = records.Count,
-                source = "PlanningRegister+StoredLiveSafeFallback",
+                source = "PlanningResilience+StoredLiveSafeFallback",
                 geofenceAvailable = geofenceCount > 0,
                 geofenceCount,
-                geofenceVisitCount = 0,
-                geofenceLinkedRuns = 0,
+                geofenceConfiguredRuns = geofenceCoverage.LinkedRuns,
+                geofenceLinkedRuns = geofenceCoverage.LinkedRuns,
+                geofenceLinkedStops = geofenceCoverage.LinkedStops,
+                geofenceTotalStops = geofenceCoverage.TotalStops,
+                geofenceHitRuns = durableHits.HitRuns,
+                geofenceHitStops = durableHits.HitStops,
+                geofenceVisitCount = durableHits.Visits,
                 latestTrackingUtc = LatestTracking(null, liveByLoad.Values),
                 tachoAvailable = tachoEvidence.Available,
                 tachoWarning = tachoEvidence.Warning,
                 warning = string.Join(" ", new[]
                 {
                     geofenceCount > 0
-                    ? "Approved SLH geofences are loaded, but live progression could not be calculated from tracking on this refresh. Stored live movement remains active."
-                    : "Live run progression could not be calculated and the approved geofence payload was unavailable on this refresh. Stored live movement remains active.",
+                    ? "Live progression reconstruction could not be calculated on this refresh. Configured Site Master linkage and durable geofence evidence remain visible with stored live movement."
+                    : "Live run progression could not be calculated and no active geofence catalogue was available on this refresh. Stored live movement remains active.",
                     tachoEvidence.Warning
                 }.Where(value => !string.IsNullOrWhiteSpace(value))),
                 records
@@ -387,6 +407,35 @@ public sealed class RunProgressController(
         }
     }
 
+    private static async Task<DurableHitCoverage> DurableHitCoverageAsync(
+        TmsDbContext db,
+        IReadOnlyCollection<Load> loads,
+        CancellationToken ct)
+    {
+        try
+        {
+            var loadIds = loads.Select(load => load.Id).Distinct().ToList();
+            if (loadIds.Count == 0) return new DurableHitCoverage(0, 0, 0);
+            var rows = await db.GeofenceVisits.AsNoTracking()
+                .Where(visit => visit.LoadId != null && loadIds.Contains(visit.LoadId.Value))
+                .Select(visit => new { visit.LoadId, visit.LoadStopId })
+                .ToListAsync(ct);
+            return new DurableHitCoverage(
+                rows.Where(row => row.LoadId is not null).Select(row => row.LoadId!.Value).Distinct().Count(),
+                rows.Where(row => row.LoadStopId is not null).Select(row => row.LoadStopId!.Value).Distinct().Count(),
+                rows.Count);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            db.ChangeTracker.Clear();
+            return new DurableHitCoverage(0, 0, 0);
+        }
+    }
+
     private static DateTimeOffset? LatestTracking(
         DateTimeOffset? snapshotLatest,
         IEnumerable<VehicleLiveStatus?> liveStatuses)
@@ -426,4 +475,6 @@ public sealed class RunProgressController(
             return DateOnly.FromDateTime(value.UtcDateTime);
         }
     }
+
+    private sealed record DurableHitCoverage(int HitRuns, int HitStops, int Visits);
 }
