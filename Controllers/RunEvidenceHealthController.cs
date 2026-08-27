@@ -27,12 +27,14 @@ public sealed class RunEvidenceHealthController(
         if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
 
         var planningDate = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
-        var loads = (await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct))
+        var loads = (await PlanningResilience.ReadLoadsAsync(db, planningDate, ct))
             .Where(load => load.Status != LoadStatus.Cancelled)
             .OrderBy(load => load.Reference)
             .ToList();
         var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
         var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, geofenceLoads, ct);
+        snapshot = await EmbeddedGeofenceEvidenceMerge.MergeDurableProjectionAsync(db, snapshot, loads, ct);
+        var geofenceCoverage = await RunGeofenceConfigurationCoverage.CalculateAsync(db, loads, ct);
         var tacho = await RunTachoEvidenceResolver.ResolveAsync(db, tachoMaster, loads, planningDate, logger, ct);
         var trackingCoverageResult = await TrackingCoverageAsync(loads, planningDate, ct);
         var trackingCoverage = trackingCoverageResult.Vehicles;
@@ -104,6 +106,16 @@ public sealed class RunEvidenceHealthController(
         var completedRuns = runEvidence.Count(run => run.completionEvidence == "FinalGeofenceArrival");
         var runsWithProgress = runEvidence.Count(run => run.geofenceVisits > 0);
         var runsWithDeparture = runEvidence.Count(run => run.geofenceDepartures > 0);
+        var hitRunCount = snapshot.Visits
+            .Where(visit => visit.LoadId is not null)
+            .Select(visit => visit.LoadId!.Value)
+            .Distinct()
+            .Count();
+        var hitStopCount = snapshot.Visits
+            .Where(visit => visit.LoadStopId is not null)
+            .Select(visit => visit.LoadStopId!.Value)
+            .Distinct()
+            .Count();
         var evidenceGapRuns = runEvidence
             .Where(run => run.geofenceVisits == 0 || run.tachoStatus is "NoTachoDuty" or "Mismatch" or "Unavailable")
             .Select(run => new
@@ -122,7 +134,7 @@ public sealed class RunEvidenceHealthController(
         {
             planningDate,
             checkedAtUtc = DateTimeOffset.UtcNow,
-            source = "PlanningRegister+RoadTechFalcon+EmbeddedGeofences+TachoMaster",
+            source = "PlanningResilience+RoadTechFalcon+SiteMasterSqlGeofences+DurableGeofenceVisits+TachoMaster",
             tracking = new
             {
                 observationCount = snapshot.TrackingEventCount,
@@ -136,10 +148,16 @@ public sealed class RunEvidenceHealthController(
             },
             geofences = new
             {
+                activeFenceCount = geofenceCoverage.ActiveGeofenceCount,
                 approvedFenceCount = snapshot.Fences.Count,
+                configuredLinkedRunCount = geofenceCoverage.LinkedRuns,
+                configuredLinkedStopCount = geofenceCoverage.LinkedStops,
+                totalPlannedStops = geofenceCoverage.TotalStops,
+                linkedRunCount = geofenceCoverage.LinkedRuns,
+                hitRunCount,
+                hitStopCount,
                 visitCount = snapshot.Visits.Count,
                 departureCount = snapshot.Visits.Count(visit => visit.ExitedAtUtc is not null),
-                linkedRunCount = snapshot.Visits.Where(visit => visit.LoadId is not null).Select(visit => visit.LoadId!.Value).Distinct().Count(),
                 runsWithProgress,
                 runsWithDeparture,
                 completedRuns,
@@ -184,20 +202,25 @@ public sealed class RunEvidenceHealthController(
         string? warning = null;
         try
         {
-            // Keep this query bounded and index-friendly. The previous version generated a
-            // large SQL IN predicate from every registration/fleet alias. On production data
-            // that could exceed the health request window before any coverage was returned.
-            // Read the operating-day sample fields once, then apply canonical alias matching
-            // in memory using exactly the same resolver as run execution.
-            storedEvents = await db.VehicleTrackingEvents.AsNoTracking()
-                .Where(item => item.EventTimeUtc >= fromUtc && item.EventTimeUtc < toUtc)
-                .OrderBy(item => item.EventTimeUtc)
-                .Select(item => new TrackingStoredSample(
-                    item.VehicleIdentifier,
-                    item.EventTimeUtc,
-                    item.Latitude,
-                    item.Longitude))
-                .ToListAsync(ct);
+            // Keep this query bounded to the identifiers that belong to the vehicles on
+            // the resilient current-day run set. This avoids a fleet-wide day scan while
+            // retaining the same canonical alias matching used by live execution.
+            var plannedIdentifiers = aliasesByVehicle.Values
+                .SelectMany(aliases => aliases)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            storedEvents = plannedIdentifiers.Count == 0
+                ? []
+                : await db.VehicleTrackingEvents.AsNoTracking()
+                    .Where(item => item.EventTimeUtc >= fromUtc && item.EventTimeUtc < toUtc &&
+                                   plannedIdentifiers.Contains(item.VehicleIdentifier))
+                    .OrderBy(item => item.EventTimeUtc)
+                    .Select(item => new TrackingStoredSample(
+                        item.VehicleIdentifier,
+                        item.EventTimeUtc,
+                        item.Latitude,
+                        item.Longitude))
+                    .ToListAsync(ct);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
