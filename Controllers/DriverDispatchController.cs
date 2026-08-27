@@ -33,7 +33,7 @@ public sealed class DriverDispatchController(
         try { await LoadCommercialStore.EnrichAsync(db, loads, ct); }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            logger.LogWarning(exception, "Driver Dispatch commercial enrichment was unavailable for {Date}; the operational plan will still be returned.", planningDate);
+            logger.LogWarning(exception, "Driver Dispatch commercial enrichment was unavailable; the operational plan will still be returned.");
             db.ChangeTracker.Clear();
         }
 
@@ -426,12 +426,12 @@ public sealed class DriverDispatchController(
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            logger.LogWarning("Sage HR exceeded the 6 second Driver Dispatch budget on {Date}; the canonical Driver Master fallback will be used.", date);
+            logger.LogWarning("Sage HR exceeded the 6 second Driver Dispatch budget; the canonical Driver Master fallback will be used.");
             return SageDispatchState.Unavailable;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            logger.LogWarning(exception, "Sage HR was unavailable for Driver Dispatch on {Date}; the canonical Driver Master fallback will be used.", date);
+            logger.LogWarning(exception, "Sage HR was unavailable for Driver Dispatch; the canonical Driver Master fallback will be used.");
             return SageDispatchState.Unavailable;
         }
     }
