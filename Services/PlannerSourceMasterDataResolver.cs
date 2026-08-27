@@ -14,7 +14,7 @@ public sealed class PlannerSourceMasterDataResolver
 {
     private static readonly HashSet<string> PlannerPrefixes = new(StringComparer.OrdinalIgnoreCase)
     {
-        "BAR", "BARFOOTS", "LAN", "LANGMEADS", "SB", "GHS", "SLH", "WAITROSE", "MORRISONS", "ALDI"
+        "BAR", "BARFOOTS", "LAN", "LANGMEADS", "SB", "GHS", "SLH", "NWF", "WAITROSE", "MORRISONS", "ALDI"
     };
 
     private readonly IReadOnlyList<Site> _sites;
@@ -120,23 +120,44 @@ public sealed class PlannerSourceMasterDataResolver
 
     private Site? MatchSite(string value)
     {
+        // First honour an exact planner/Site Master identity. This prevents a stripped
+        // locality such as "Sittingbourne" from making an exact "Morrisons-Sittingbourne"
+        // match look ambiguous when both names exist in Master Data.
+        var rawKey = Normalize(value);
+        var direct = ExactSites(rawKey);
+        if (direct.Count == 1) return direct[0];
+
+        var geofenceKey = Normalize(GeofencePlanningMatch.MatchText(value));
+        if (geofenceKey.Length > 0 && geofenceKey != rawKey)
+        {
+            var geofenceExact = ExactSites(geofenceKey);
+            if (geofenceExact.Count == 1) return geofenceExact[0];
+        }
+
         var keys = PlannerSiteVariants(value)
-            .Where(item => !string.IsNullOrWhiteSpace(item))
             .Select(Normalize)
-            .Where(item => item.Length > 0)
+            .Where(item => item.Length > 0 && item != rawKey && item != geofenceKey)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        var exact = _sites.Where(site => SiteCandidates(site).Any(candidate => keys.Contains(Normalize(candidate), StringComparer.OrdinalIgnoreCase))).ToList();
-        if (exact.Select(site => site.Id).Distinct().Count() == 1) return exact[0];
+        foreach (var key in keys)
+        {
+            var exact = ExactSites(key);
+            if (exact.Count == 1) return exact[0];
+        }
 
         var fuzzy = _sites.Where(site => SiteCandidates(site).Any(candidate =>
         {
             var candidateKey = Normalize(candidate);
-            return candidateKey.Length >= 5 && keys.Any(key => key.Length >= 5 && (key.Contains(candidateKey, StringComparison.Ordinal) || candidateKey.Contains(key, StringComparison.Ordinal)));
+            return candidateKey.Length >= 5 && keys.Any(key => key.Length >= 5 &&
+                (key.Contains(candidateKey, StringComparison.Ordinal) || candidateKey.Contains(key, StringComparison.Ordinal)));
         })).ToList();
         return fuzzy.Select(site => site.Id).Distinct().Count() == 1 ? fuzzy[0] : null;
     }
+
+    private List<Site> ExactSites(string key) => key.Length == 0
+        ? []
+        : _sites.Where(site => SiteCandidates(site).Any(candidate => Normalize(candidate) == key)).ToList();
 
     private static IEnumerable<string> PlannerSiteVariants(string value)
     {
