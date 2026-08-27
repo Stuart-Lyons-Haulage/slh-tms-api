@@ -11,23 +11,26 @@ namespace Slh.Tms.Api.Services;
 
 /// <summary>
 /// Reconstructs the imported planner plan from its durable per-run audit rows when the
-/// operational Loads row and planningload register row are no longer available. This is a
-/// read-only recovery projection: real Loads/planning-register rows always take precedence.
+/// operational Loads row and planningload register row are no longer available. Both planner
+/// import paths are supported: grouped plan imports (plannerplanrun) and preserved source-line
+/// imports (plannerplansourcerun). This is read-only recovery; real Loads/register rows win.
 /// </summary>
 internal static class PlannerPlanAuditProjection
 {
-    private const string EntityType = "plannerplanrun";
+    private const string PlanEntityType = "plannerplanrun";
+    private const string SourceLineEntityType = "plannerplansourcerun";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
 
     public static async Task<List<Load>> ReadLoadsAsync(TmsDbContext db, DateOnly? date, CancellationToken ct)
     {
         var query = db.StagedImports.AsNoTracking()
-            .Where(row => row.EntityType == EntityType && row.Status == StagingStatus.Promoted);
+            .Where(row => (row.EntityType == PlanEntityType || row.EntityType == SourceLineEntityType) && row.Status == StagingStatus.Promoted);
 
         if (date is DateOnly day)
         {
-            var prefix = $"planimport:{day:yyyyMMdd}:";
-            query = query.Where(row => row.IdempotencyKey.StartsWith(prefix));
+            var planPrefix = $"planimport:{day:yyyyMMdd}:";
+            var sourcePrefix = $"planimport-source:{day:yyyyMMdd}:";
+            query = query.Where(row => row.IdempotencyKey.StartsWith(planPrefix) || row.IdempotencyKey.StartsWith(sourcePrefix));
         }
 
         var rows = await query
@@ -41,8 +44,15 @@ internal static class PlannerPlanAuditProjection
         var drivers = await db.Drivers.AsNoTracking().Where(item => item.Active).ToListAsync(ct);
         var vehicles = await db.Vehicles.AsNoTracking().Where(item => item.Active).ToListAsync(ct);
         var trailers = await db.Trailers.AsNoTracking().Where(item => item.Active).ToListAsync(ct);
-        var result = new List<Load>();
+        List<TransportOrder> orders;
+        try { orders = await db.TransportOrders.AsNoTracking().ToListAsync(ct); }
+        catch (Exception exception) when (exception is not OperationCanceledException) { db.ChangeTracker.Clear(); orders = []; }
 
+        PlannerSourceMasterDataResolver? siteResolver = null;
+        try { siteResolver = await PlannerSourceMasterDataResolver.CreateAsync(db, ct); }
+        catch (Exception exception) when (exception is not OperationCanceledException) { db.ChangeTracker.Clear(); }
+
+        var result = new List<Load>();
         foreach (var row in rows)
         {
             PlannerPlanRunRequest? run;
@@ -58,7 +68,11 @@ internal static class PlannerPlanAuditProjection
             var trailer = ResolveTrailer(trailers, run.Trailer);
             var capacity = PlannerPlanImportRules.Capacity(run);
             var loadId = row.Id;
-            var stops = BuildStops(loadId, planningDate, run.Stops);
+            var sourceLineImport = string.Equals(row.EntityType, SourceLineEntityType, StringComparison.OrdinalIgnoreCase);
+            var stops = sourceLineImport
+                ? BuildSourceLineStops(loadId, planningDate, run.Stops, orders, siteResolver)
+                : BuildGroupedStops(loadId, planningDate, run.Stops, orders, siteResolver);
+            var trailerResolved = !sourceLineImport || string.IsNullOrWhiteSpace(run.Trailer) || trailer is not null;
 
             result.Add(new Load
             {
@@ -68,7 +82,7 @@ internal static class PlannerPlanAuditProjection
                 DriverId = driver?.Id,
                 VehicleId = vehicle?.Id,
                 TrailerId = trailer?.Id,
-                Status = driver is not null && vehicle is not null ? LoadStatus.Planned : LoadStatus.Draft,
+                Status = driver is not null && vehicle is not null && trailerResolved ? LoadStatus.Planned : LoadStatus.Draft,
                 PalletSpacesUsed = capacity.StandardEquivalentUsed,
                 TotalPalletSpaces = capacity.StandardEquivalentCapacity,
                 CapacityType = "Mixed Standard/Euro",
@@ -78,6 +92,8 @@ internal static class PlannerPlanAuditProjection
             });
         }
 
+        // It is possible for the same run to have historic audits from both import paths.
+        // The most recently reviewed audit is authoritative for recovery.
         return result
             .GroupBy(load => load.Reference, StringComparer.OrdinalIgnoreCase)
             .Select(group => group.OrderByDescending(load => load.CreatedAtUtc).First())
@@ -86,47 +102,119 @@ internal static class PlannerPlanAuditProjection
             .ToList();
     }
 
-    private static List<LoadStop> BuildStops(Guid loadId, DateOnly planningDate, IReadOnlyCollection<PlannerPlanStopRequest> sourceRows)
+    private static List<LoadStop> BuildSourceLineStops(
+        Guid loadId,
+        DateOnly planningDate,
+        IReadOnlyCollection<PlannerPlanStopRequest> sourceRows,
+        IReadOnlyCollection<TransportOrder> orders,
+        PlannerSourceMasterDataResolver? siteResolver)
+    {
+        var ordered = sourceRows.OrderBy(stop => stop.Sequence).ToList();
+        var stops = new List<LoadStop>();
+
+        // Source-line imports deliberately preserve every collection line as its own stop.
+        foreach (var row in ordered.Where(item => !string.IsNullOrWhiteSpace(item.CollectionSite)))
+        {
+            var site = ResolveSite(siteResolver, row.CollectionSite);
+            stops.Add(new LoadStop
+            {
+                Id = StableGuid(loadId, $"source-collect:{stops.Count + 1}:{row.Sequence}:{Normalize(row.CollectionSite)}:{Normalize(row.Reference)}"),
+                LoadId = loadId,
+                Sequence = stops.Count + 1,
+                Name = Clip($"Collect · {row.CollectionSite}", 200)!,
+                Address = Clip(WithAddress(GroupDetail([row]), site.Address), 500),
+                PlannerNote = Clip($"Recovered from preserved planner source line {row.Sequence}.", 1000),
+                Latitude = site.Latitude,
+                Longitude = site.Longitude,
+                PlannedArrivalUtc = ParsePlannerTime(planningDate, row.CollectFrom ?? row.CollectTo)
+            });
+        }
+
+        // Deliveries use the same site/deadline grouping as the source-line importer.
+        foreach (var group in GroupBySiteAndWindow(ordered, item => item.DeliverySite, item => Clean(item.Deadline)))
+        {
+            var site = ResolveSite(siteResolver, group.Site);
+            var firstOrder = FirstOrder(group.Rows, orders);
+            stops.Add(new LoadStop
+            {
+                Id = StableGuid(loadId, $"source-deliver:{stops.Count + 1}:{Normalize(group.Site)}:{group.WindowKey}"),
+                LoadId = loadId,
+                OrderId = firstOrder?.Id,
+                Sequence = stops.Count + 1,
+                Name = Clip($"Deliver · {group.Site}", 200)!,
+                Address = Clip(WithAddress(GroupDetail(group.Rows), site.Address), 500),
+                PlannerNote = Clip("Recovered from preserved planner source-line delivery group.", 1000),
+                Latitude = site.Latitude,
+                Longitude = site.Longitude,
+                PlannedArrivalUtc = EarliestPlannerTime(planningDate, group.Rows.Select(item => item.Deadline))
+            });
+        }
+
+        return stops;
+    }
+
+    private static List<LoadStop> BuildGroupedStops(
+        Guid loadId,
+        DateOnly planningDate,
+        IReadOnlyCollection<PlannerPlanStopRequest> sourceRows,
+        IReadOnlyCollection<TransportOrder> orders,
+        PlannerSourceMasterDataResolver? siteResolver)
     {
         var ordered = sourceRows.OrderBy(stop => stop.Sequence).ToList();
         var stops = new List<LoadStop>();
 
         foreach (var group in GroupBySiteAndWindow(ordered, row => row.CollectionSite, row => $"{Clean(row.CollectFrom)}-{Clean(row.CollectTo)}"))
         {
+            var site = ResolveSite(siteResolver, group.Site);
             stops.Add(new LoadStop
             {
                 Id = StableGuid(loadId, $"collect:{stops.Count + 1}:{Normalize(group.Site)}:{group.WindowKey}"),
                 LoadId = loadId,
                 Sequence = stops.Count + 1,
                 Name = Clip($"Collect · {group.Site}", 200)!,
-                Address = Clip(GroupDetail(group.Rows), 500),
+                Address = Clip(WithAddress(GroupDetail(group.Rows), site.Address), 500),
+                Latitude = site.Latitude,
+                Longitude = site.Longitude,
                 PlannedArrivalUtc = EarliestPlannerTime(planningDate, group.Rows.Select(row => row.CollectFrom ?? row.CollectTo))
             });
         }
 
         foreach (var group in GroupBySiteAndWindow(ordered, row => row.DeliverySite, row => Clean(row.Deadline)))
         {
+            var site = ResolveSite(siteResolver, group.Site);
+            var firstOrder = FirstOrder(group.Rows, orders);
             stops.Add(new LoadStop
             {
                 Id = StableGuid(loadId, $"deliver:{stops.Count + 1}:{Normalize(group.Site)}:{group.WindowKey}"),
                 LoadId = loadId,
+                OrderId = firstOrder?.Id,
                 Sequence = stops.Count + 1,
                 Name = Clip($"Deliver · {group.Site}", 200)!,
-                Address = Clip(GroupDetail(group.Rows), 500),
+                Address = Clip(WithAddress(GroupDetail(group.Rows), site.Address), 500),
+                Latitude = site.Latitude,
+                Longitude = site.Longitude,
                 PlannedArrivalUtc = EarliestPlannerTime(planningDate, group.Rows.Select(row => row.Deadline))
             });
         }
 
         if (stops.Count > 0) return stops;
 
-        return ordered.Select((row, index) => new LoadStop
+        return ordered.Select((row, index) =>
         {
-            Id = StableGuid(loadId, $"stop:{index + 1}:{Normalize(PlannerPlanImportRules.StopName(row))}"),
-            LoadId = loadId,
-            Sequence = index + 1,
-            Name = Clip(PlannerPlanImportRules.StopName(row), 200)!,
-            Address = Clip(GroupDetail([row]), 500),
-            PlannedArrivalUtc = ParsePlannerTime(planningDate, row.CollectFrom ?? row.Deadline)
+            var label = PlannerPlanImportRules.StopName(row);
+            var site = ResolveSite(siteResolver, !string.IsNullOrWhiteSpace(row.DeliverySite) ? row.DeliverySite : row.CollectionSite);
+            return new LoadStop
+            {
+                Id = StableGuid(loadId, $"stop:{index + 1}:{Normalize(label)}"),
+                LoadId = loadId,
+                OrderId = ExactOrder(row.Reference, orders)?.Id,
+                Sequence = index + 1,
+                Name = Clip(label, 200)!,
+                Address = Clip(WithAddress(GroupDetail([row]), site.Address), 500),
+                Latitude = site.Latitude,
+                Longitude = site.Longitude,
+                PlannedArrivalUtc = ParsePlannerTime(planningDate, row.CollectFrom ?? row.Deadline)
+            };
         }).ToList();
     }
 
@@ -147,6 +235,35 @@ internal static class PlannerPlanAuditProjection
         }
         return groups;
     }
+
+    private static TransportOrder? FirstOrder(IEnumerable<PlannerPlanStopRequest> rows, IReadOnlyCollection<TransportOrder> orders)
+    {
+        foreach (var row in rows.OrderBy(item => item.Sequence))
+        {
+            var order = ExactOrder(row.Reference, orders);
+            if (order is not null) return order;
+        }
+        return null;
+    }
+
+    private static TransportOrder? ExactOrder(string? reference, IReadOnlyCollection<TransportOrder> orders)
+    {
+        if (string.IsNullOrWhiteSpace(reference)) return null;
+        var normalized = Normalize(reference);
+        var matches = orders.Where(order => Normalize(order.Reference) == normalized).Take(2).ToList();
+        return matches.Count == 1 ? matches[0] : null;
+    }
+
+    private static (string? Address, decimal? Latitude, decimal? Longitude) ResolveSite(PlannerSourceMasterDataResolver? resolver, string? label)
+    {
+        if (resolver is null || string.IsNullOrWhiteSpace(label)) return (null, null, null);
+        var site = resolver.Resolve(label);
+        return (site.Address, site.Latitude, site.Longitude);
+    }
+
+    private static string WithAddress(string detail, string? address) => string.IsNullOrWhiteSpace(address)
+        ? detail
+        : string.IsNullOrWhiteSpace(detail) ? address.Trim() : $"{detail} · {address.Trim()}";
 
     private static string GroupDetail(IEnumerable<PlannerPlanStopRequest> rows) => string.Join(" | ", rows
         .OrderBy(row => row.Sequence)
