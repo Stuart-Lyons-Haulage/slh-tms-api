@@ -15,6 +15,12 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class PlannerSourceLineImportController(TmsDbContext db) : ControllerBase
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
+    private static readonly HashSet<string> SiteNoise = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "NWF", "NATURES", "WAY", "FOODS", "BAR", "BARFOOTS", "LAN", "LANGMEADS", "SB", "GHS", "SLH",
+        "WAITROSE", "MORRISONS", "ALDI", "COLLECT", "COLLECTION", "DELIVER", "DELIVERY", "SITE", "RDC",
+        "CHILL", "FRV", "PLUS3C", "PLUS10C"
+    };
 
     [HttpPost("import-source-plan"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> ImportSourcePlan(PlannerPlanImportRequest request, CancellationToken ct)
@@ -45,6 +51,25 @@ public sealed class PlannerSourceLineImportController(TmsDbContext db) : Control
         foreach (var run in request.Runs.OrderBy(run => NaturalRunNumber(run.RunRef)).ThenBy(run => run.RunRef, StringComparer.OrdinalIgnoreCase))
         {
             var tmsReference = PlannerPlanImportRules.TmsReference(request.PlanningDate, run.RunRef);
+
+            if (IsStandbyRun(run))
+            {
+                var existingStandby = await db.Loads.SingleOrDefaultAsync(load => load.Reference == tmsReference, ct);
+                if (existingStandby is not null && existingStandby.Status != LoadStatus.Completed)
+                {
+                    await db.LoadStops.Where(stop => stop.LoadId == existingStandby.Id).ExecuteDeleteAsync(ct);
+                    existingStandby.Status = LoadStatus.Cancelled;
+                    existingStandby.DriverId = null;
+                    existingStandby.VehicleId = null;
+                    existingStandby.TrailerId = null;
+                    await db.SaveChangesAsync(ct);
+                }
+
+                held++;
+                results.Add(new PlannerPlanRunResult(run.RunRef, tmsReference, "ExcludedStandby", "Green", 0m, "Standby rows are not operational runs and were excluded from Planner/Live Runs."));
+                continue;
+            }
+
             var capacity = PlannerPlanImportRules.Capacity(run);
 
             if (!run.IncludeInImport)
@@ -242,20 +267,39 @@ public sealed class PlannerSourceLineImportController(TmsDbContext db) : Control
     {
         if (!string.IsNullOrWhiteSpace(row.Reference))
         {
-            var exact = orders.FirstOrDefault(order => !used.Contains(order.Id) && string.Equals(order.Reference, row.Reference, StringComparison.OrdinalIgnoreCase));
-            if (exact is not null) return exact;
+            var reference = Normalize(row.Reference);
+            var exactReference = orders.Where(order => !used.Contains(order.Id) && Normalize(order.Reference) == reference).Take(2).ToList();
+            if (exactReference.Count == 1) return exactReference[0];
         }
+
         if (row.Pallets is null || decimal.Truncate(row.Pallets.Value) != row.Pallets.Value) return null;
         var pallets = decimal.ToInt32(row.Pallets.Value);
-        var collection = Normalize(row.CollectionSite);
-        var delivery = Normalize(row.DeliverySite);
         var candidates = orders.Where(order =>
             !used.Contains(order.Id) &&
-            order.CollectionDate == date &&
+            (order.CollectionDate == date || order.DeliveryDate == date) &&
             (order.Pallets ?? 0) == pallets &&
-            Normalize(order.SellerName) == collection &&
-            Normalize(order.StallNumber) == delivery).Take(2).ToList();
+            SameOperationalSite(order.SellerName, row.CollectionSite) &&
+            SameOperationalSite(order.StallNumber, row.DeliverySite)).Take(2).ToList();
         return candidates.Count == 1 ? candidates[0] : null;
+    }
+
+    private static bool SameOperationalSite(string? left, string? right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right)) return false;
+        if (Normalize(left) == Normalize(right)) return true;
+        var leftTokens = SiteTokens(left);
+        var rightTokens = SiteTokens(right);
+        return leftTokens.Count > 0 && rightTokens.Count > 0 && leftTokens.SetEquals(rightTokens);
+    }
+
+    private static HashSet<string> SiteTokens(string? value)
+    {
+        var spaced = new string((value ?? string.Empty)
+            .Select(character => char.IsLetterOrDigit(character) ? char.ToUpperInvariant(character) : ' ')
+            .ToArray());
+        return spaced.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(token => token.Length > 1 && !SiteNoise.Contains(token) && !token.EndsWith("C", StringComparison.Ordinal))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 
     private static IEnumerable<(string Site, string Deadline, List<PlannerPlanStopRequest> Rows)> GroupDeliveries(IEnumerable<PlannerPlanStopRequest> rows)
@@ -353,6 +397,17 @@ public sealed class PlannerSourceLineImportController(TmsDbContext db) : Control
     {
         var digits = new string((value ?? string.Empty).Where(char.IsDigit).ToArray());
         return int.TryParse(digits, out var number) ? number : int.MaxValue;
+    }
+
+    private static bool IsStandbyRun(PlannerPlanRunRequest run)
+    {
+        if ($"{run.PlannerRun} {run.RunType}".Contains("standby", StringComparison.OrdinalIgnoreCase)) return true;
+        var labels = (run.Stops ?? [])
+            .SelectMany(stop => new[] { stop.CollectionSite, stop.DeliverySite })
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value!.Trim())
+            .ToList();
+        return labels.Count > 0 && labels.All(value => value.StartsWith("Standby", StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool IsPlaceholder(string? value) => string.Equals(value?.Trim(), "c/o", StringComparison.OrdinalIgnoreCase) || string.Equals(value?.Trim(), "tbc", StringComparison.OrdinalIgnoreCase);
