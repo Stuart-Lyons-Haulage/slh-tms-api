@@ -174,6 +174,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                 x.Id,
                 x.Reference,
                 x.Status,
+                x.TrailerId,
                 x.PalletSpacesUsed,
                 x.TotalPalletSpaces,
                 x.CapacityType,
@@ -186,7 +187,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
     [Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> Allocate([FromBody] PalletAllocationRequest request, CancellationToken ct)
     {
-        if (request.Pallets < 0) return BadRequest(new { message = "Allocated pallets cannot be negative." });
+        if (request.Pallets < 0) return BadRequest(new { message = "Allocated load units cannot be negative." });
         var orders = await ReadOrders(request.Date, ct);
         var order = orders.SingleOrDefault(x => x.Id == request.OrderId);
         if (order is null) return NotFound(new { message = "The order could not be found for this planning date." });
@@ -194,7 +195,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         var loads = await ReadLoads(request.Date, ct);
         var load = loads.SingleOrDefault(x => x.Id == request.LoadId);
         if (load is null) return NotFound(new { message = "The selected run could not be found for this planning date." });
-        if (load.Status == LoadStatus.Cancelled) return BadRequest(new { message = "Pallets cannot be allocated to a cancelled run." });
+        if (load.Status == LoadStatus.Cancelled) return BadRequest(new { message = "Load units cannot be allocated to a cancelled run." });
 
         var latest = await ReadLatestAllocations(request.Date, ct);
         latest.TryGetValue((request.OrderId, request.LoadId, request.SourceLineId), out var previous);
@@ -211,7 +212,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         var allocatedElsewhere = latest.Values.Where(x => x.OrderId == order.Id && x.LoadId != request.LoadId &&
             (request.SourceLineId is null || x.SourceLineId is null || x.SourceLineId == request.SourceLineId)).Sum(x => Math.Max(x.Pallets, 0));
         if (allocatedElsewhere + request.Pallets > permitted.Value)
-            return Conflict(new { message = "Allocation exceeds the approved pallet quantity.", approvedPallets = permitted, allocatedElsewhere, requestedPallets = request.Pallets });
+            return Conflict(new { message = "Allocation exceeds the approved load-unit quantity.", approvedPallets = permitted, allocatedElsewhere, requestedPallets = request.Pallets });
         var now = DateTimeOffset.UtcNow;
         var payload = new AllocationState(request.OrderId, request.LoadId, request.Pallets, request.Date, now, User.Identity?.Name, request.SourceLineId);
         var allocationKey = $"palletallocation:{request.OrderId:N}:{request.LoadId:N}:{request.SourceLineId?.ToString("N") ?? "order"}:{now:yyyyMMddHHmmssfff}:{Guid.NewGuid():N}";
@@ -225,7 +226,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             Status = StagingStatus.Promoted,
             ReviewedAtUtc = now,
             ReviewedBy = User.Identity?.Name,
-            ReviewNote = $"Run pallet allocation changed from {previousPallets} to {request.Pallets}. {request.Note}".Trim()
+            ReviewNote = $"Run load-unit allocation changed from {previousPallets} to {request.Pallets}. {request.Note}".Trim()
         });
         await db.SaveChangesAsync(ct);
         db.ChangeTracker.Clear();
@@ -250,6 +251,8 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             overplannedPallets = Math.Max(totalPlanned - ordered, 0),
             runCapacityStatus = capacity?.Status,
             runUtilisationPercent = capacity?.UtilisationPercent,
+            trolleyUtilisationPercent = capacity?.TrolleyUtilisationPercent,
+            trolleyPositionsRemaining = capacity?.TrolleyPositionsRemaining,
             updatedAtUtc = now
         });
     }
@@ -383,37 +386,50 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         decimal standard = 0;
         decimal euro = 0;
         decimal unknown = 0;
+        decimal trolleys = 0;
 
         foreach (var order in orders.Where(x => x.Status != OrderStatus.Cancelled))
         {
             details.TryGetValue(Normalise(order.Reference), out var detail);
             sourceLines.TryGetValue(order.Id, out var orderSourceLines);
             orderSourceLines ??= [];
-            int pallets;
-            var hasExplicit = latest.Keys.Any(key => key.OrderId == order.Id);
-            if (hasExplicit)
-            {
-                pallets = latest.Values.Where(x => x.OrderId == order.Id && x.LoadId == loadId).Sum(x => Math.Max(x.Pallets, 0));
-            }
-            else
-            {
-                if (!target.Stops.Any(stop => stop.OrderId == order.Id)) continue;
-                pallets = EffectiveOrderedPallets(order, detail);
-            }
-            if (pallets <= 0) continue;
-
             var collection = Collection(detail, order);
             var destination = Destination(detail, order);
             var lineUnitTypes = orderSourceLines.Select(x => x.PalletType).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             var sourceUnitType = detail?.PalletType ?? (lineUnitTypes.Count == 1 ? lineUnitTypes[0] : lineUnitTypes.Count > 1 ? "Mixed" : null);
-            var handling = PalletHandlingRules.Resolve(order.CustomerCode, collection, destination, sourceUnitType);
-            if (!handling.IsPallet) continue;
+            var parentHandling = PalletHandlingRules.Resolve(order.CustomerCode, collection, destination, sourceUnitType);
 
-            switch (handling.PalletType)
+            var hasExplicit = latest.Keys.Any(key => key.OrderId == order.Id);
+            if (hasExplicit)
             {
-                case "Standard": standard += pallets; break;
-                case "Euro": euro += pallets; break;
-                default: unknown += pallets; break;
+                var loadAllocations = latest.Values
+                    .Where(x => x.OrderId == order.Id && x.LoadId == loadId && x.Pallets > 0)
+                    .ToList();
+                foreach (var allocation in loadAllocations)
+                {
+                    var line = allocation.SourceLineId is Guid sourceLineId
+                        ? orderSourceLines.SingleOrDefault(x => x.Id == sourceLineId)
+                        : null;
+                    var handling = line is null
+                        ? parentHandling
+                        : PalletHandlingRules.Resolve(order.CustomerCode, line.CollectionSite, line.DeliverySite, line.PalletType);
+                    AddCapacityUnits(handling, allocation.Pallets, ref standard, ref euro, ref unknown, ref trolleys);
+                }
+                continue;
+            }
+
+            if (!target.Stops.Any(stop => stop.OrderId == order.Id)) continue;
+            if (orderSourceLines.Count > 0)
+            {
+                foreach (var line in orderSourceLines.Where(line => (line.Pallets ?? 0) > 0))
+                {
+                    var handling = PalletHandlingRules.Resolve(order.CustomerCode, line.CollectionSite, line.DeliverySite, line.PalletType);
+                    AddCapacityUnits(handling, Math.Max(line.Pallets ?? 0, 0), ref standard, ref euro, ref unknown, ref trolleys);
+                }
+            }
+            else
+            {
+                AddCapacityUnits(parentHandling, EffectiveOrderedPallets(order, detail), ref standard, ref euro, ref unknown, ref trolleys);
             }
         }
 
@@ -430,8 +446,17 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             catch (Exception ex) when (SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); }
         }
 
-        var capacity = PalletCapacityCalculator.Calculate(standard, euro, unknown, standardCapacity, euroCapacity);
-        var capacityLabel = $"Standard/Euro · {capacity.Status} · {capacity.UtilisationPercent:0.0}%";
+        var capacity = PalletCapacityCalculator.Calculate(
+            standard,
+            euro,
+            unknown,
+            standardCapacity,
+            euroCapacity,
+            trolleys,
+            PalletCapacityCalculator.DefaultTrolleyCapacity);
+        var capacityLabel = trolleys > 0
+            ? $"Standard/Euro/Trolley · {capacity.Status} · {capacity.UtilisationPercent:0.0}% · trolley {capacity.TrolleyPositionsUsed:0.##}/{capacity.TrolleyCapacity:0.##}"
+            : $"Standard/Euro · {capacity.Status} · {capacity.UtilisationPercent:0.0}%";
 
         try
         {
@@ -453,6 +478,32 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         registered.CapacityType = capacityLabel;
         await PlanningRegisterStore.SaveLoadAsync(db, registered, User.Identity?.Name, ct);
         return capacity;
+    }
+
+    private static void AddCapacityUnits(
+        PalletHandlingResult handling,
+        int quantity,
+        ref decimal standard,
+        ref decimal euro,
+        ref decimal unknown,
+        ref decimal trolleys)
+    {
+        if (quantity <= 0) return;
+        if (string.Equals(handling.LoadUnitType, "Trolley", StringComparison.OrdinalIgnoreCase))
+        {
+            trolleys += quantity;
+            return;
+        }
+
+        // Trays and crates retain their own operational colour in Pallet Control but do not consume
+        // the pallet/trolley capacity ratio until SLH defines a trailer footprint rule for them.
+        if (!handling.IsPallet) return;
+        switch (handling.PalletType)
+        {
+            case "Standard": standard += quantity; break;
+            case "Euro": euro += quantity; break;
+            default: unknown += quantity; break;
+        }
     }
 
     private static int EffectiveOrderedPallets(TransportOrder order, OrderDetail? detail)
