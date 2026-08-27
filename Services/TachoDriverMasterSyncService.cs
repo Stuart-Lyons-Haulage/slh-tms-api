@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
@@ -55,7 +56,7 @@ public sealed class TachoDriverMasterSyncService(
             return new(false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 "TachoMaster is not configured, so the canonical Driver Master was not changed.", now);
 
-        var directory = new TachoLiveWorkerDirectory(httpClientFactory.CreateClient(), options, logger);
+        var directory = new TachoLiveWorkerDirectory(httpClientFactory.CreateClient(), options);
         IReadOnlyList<TachoLiveWorker> workers;
         try
         {
@@ -68,7 +69,7 @@ public sealed class TachoDriverMasterSyncService(
                 $"TachoMaster live worker directory could not be read: {ex.GetBaseException().Message}. No Driver Master records were intentionally changed.", now);
         }
 
-        // A tiny/empty provider result must never quarantine the real driver population.
+        // A tiny or unexpectedly collapsed provider result must never quarantine the real driver population.
         if (workers.Count < 25)
             return new(false, workers.Count, 0, 0, 0, 0, 0, 0, 0, 0, CountDuplicateNames(workers), workers.Count(worker => string.IsNullOrWhiteSpace(worker.CardNumber)),
                 $"TachoMaster returned only {workers.Count} live worker(s). Canonicalisation was stopped because that is below the safety floor.", now);
@@ -105,9 +106,8 @@ public sealed class TachoDriverMasterSyncService(
         var detailByKey = detailRows
             .GroupBy(row => row.IdempotencyKey, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
-        var profileRows = await db.StagedImports
-            .Where(row => row.EntityType == ProfileType)
-            .ToDictionaryAsync(row => row.IdempotencyKey, StringComparer.OrdinalIgnoreCase, ct);
+        var profileRowList = await db.StagedImports.Where(row => row.EntityType == ProfileType).ToListAsync(ct);
+        var profileRows = profileRowList.ToDictionary(row => row.IdempotencyKey, StringComparer.OrdinalIgnoreCase);
 
         var liveNameCounts = workers
             .GroupBy(worker => TachoDriverIdentityRules.NormalisePerson(worker.DisplayName), StringComparer.OrdinalIgnoreCase)
@@ -120,9 +120,10 @@ public sealed class TachoDriverMasterSyncService(
         var matchedByCard = 0;
         var matchedByName = 0;
 
+        await using var transaction = await db.Database.BeginTransactionAsync(ct);
         foreach (var worker in workers.OrderBy(worker => worker.DisplayName, StringComparer.OrdinalIgnoreCase).ThenBy(worker => worker.MemberCode))
         {
-            var member = worker.MemberCode.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var member = worker.MemberCode.ToString(CultureInfo.InvariantCulture);
             var strong = drivers.Where(driver =>
                     TachoDriverIdentityRules.MemberMatches(driver.TachoMasterDriverId, member) ||
                     TachoDriverIdentityRules.CardsMatch(driver.TachoCardNumber, worker.CardNumber))
@@ -170,10 +171,23 @@ public sealed class TachoDriverMasterSyncService(
             }
             else updated++;
 
+            // Strong duplicates are always safe. Name-only aliases are merged only when TachoMaster
+            // has exactly one live person with that name and the alias has no conflicting member/card.
             var duplicates = strong.Where(driver => driver.Id != canonical.Id).ToList();
-            foreach (var duplicate in duplicates)
+            var workerName = TachoDriverIdentityRules.NormalisePerson(worker.DisplayName);
+            if (workerName.Length > 0 && liveNameCounts.GetValueOrDefault(workerName) == 1)
             {
-                await MergeDuplicateAsync(canonical, duplicate, detailRows, ct);
+                duplicates.AddRange(drivers
+                    .Where(driver => driver.Id != canonical.Id && !claimedDriverIds.Contains(driver.Id))
+                    .Where(driver => !duplicates.Any(existing => existing.Id == driver.Id))
+                    .Where(driver => IdentityCompatible(driver, worker))
+                    .Where(driver => TachoDriverIdentityRules.NormalisePerson(driver.TachoName) == workerName ||
+                                     TachoDriverIdentityRules.NormalisePerson(driver.DisplayName) == workerName));
+            }
+
+            foreach (var duplicate in duplicates.DistinctBy(driver => driver.Id).ToList())
+            {
+                await MergeDuplicateAsync(canonical, duplicate, detailRows, actor, ct);
                 retired++;
             }
 
@@ -184,30 +198,26 @@ public sealed class TachoDriverMasterSyncService(
             UpsertProfile(profileRows, worker, actor, now);
         }
 
-        var archiveUnmatched = workers.Count >= Math.Max(25, (int)Math.Floor(Math.Max(1, activeBefore) * 0.35m));
         var archived = 0;
-        if (archiveUnmatched)
+        foreach (var driver in drivers.Where(driver => driver.Active && !claimedDriverIds.Contains(driver.Id)))
         {
-            foreach (var driver in drivers.Where(driver => driver.Active && !claimedDriverIds.Contains(driver.Id)))
+            driver.Active = false;
+            archived++;
+            db.MasterDataAudits.Add(new MasterDataAudit
             {
-                driver.Active = false;
-                archived++;
-                db.MasterDataAudits.Add(new MasterDataAudit
+                EntityType = "Driver",
+                EntityId = driver.Id,
+                Action = "ArchivedNotInTachoMaster",
+                ChangedBy = actor,
+                ChangesJson = JsonSerializer.Serialize(new
                 {
-                    EntityType = "Driver",
-                    EntityId = driver.Id,
-                    Action = "ArchivedNotInTachoMaster",
-                    ChangedBy = actor,
-                    ChangesJson = JsonSerializer.Serialize(new
-                    {
-                        reason = "Not present in the current TachoMaster live worker directory",
-                        driver.EmployeeNumber,
-                        driver.DisplayName,
-                        driver.TachoMasterDriverId,
-                        driver.TachoCardNumber
-                    }, JsonOptions)
-                });
-            }
+                    reason = "Not present in the current TachoMaster live worker directory",
+                    driver.EmployeeNumber,
+                    driver.DisplayName,
+                    driver.TachoMasterDriverId,
+                    driver.TachoCardNumber
+                }, JsonOptions)
+            });
         }
 
         db.StagedImports.Add(new StagedImport
@@ -233,6 +243,7 @@ public sealed class TachoDriverMasterSyncService(
         });
 
         await db.SaveChangesAsync(ct);
+        await transaction.CommitAsync(ct);
         var activeAfter = await db.Drivers.CountAsync(driver => driver.Active, ct);
         var message = $"TachoMaster canonical Driver Master: {workers.Count} live worker(s), {activeAfter} active canonical TMS driver(s), {created} created, {retired} duplicate record(s) retired and {archived} stale/non-live TMS driver(s) archived. Member Code and card are authoritative; Sage HR remains employed-staff enrichment.";
         return new(true, workers.Count, activeAfter, created, updated, retired, archived, matchedByMember, matchedByCard, matchedByName,
@@ -289,7 +300,7 @@ public sealed class TachoDriverMasterSyncService(
     {
         var score = Math.Min(loadCount, 100) * 10;
         if (driver.Active) score += 100;
-        if (TachoDriverIdentityRules.MemberMatches(driver.TachoMasterDriverId, worker.MemberCode.ToString())) score += 800;
+        if (TachoDriverIdentityRules.MemberMatches(driver.TachoMasterDriverId, worker.MemberCode.ToString(CultureInfo.InvariantCulture))) score += 800;
         if (TachoDriverIdentityRules.CardsMatch(driver.TachoCardNumber, worker.CardNumber)) score += 600;
         if (!driver.EmployeeNumber.StartsWith("TM-", StringComparison.OrdinalIgnoreCase)) score += 40;
         if (!string.IsNullOrWhiteSpace(driver.MobileNumber)) score += 20;
@@ -304,13 +315,13 @@ public sealed class TachoDriverMasterSyncService(
     private static bool IdentityCompatible(Driver driver, TachoLiveWorker worker)
     {
         if (!string.IsNullOrWhiteSpace(driver.TachoMasterDriverId) &&
-            !TachoDriverIdentityRules.MemberMatches(driver.TachoMasterDriverId, worker.MemberCode.ToString())) return false;
+            !TachoDriverIdentityRules.MemberMatches(driver.TachoMasterDriverId, worker.MemberCode.ToString(CultureInfo.InvariantCulture))) return false;
         if (!string.IsNullOrWhiteSpace(driver.TachoCardNumber) && !string.IsNullOrWhiteSpace(worker.CardNumber) &&
             !TachoDriverIdentityRules.CardsMatch(driver.TachoCardNumber, worker.CardNumber)) return false;
         return true;
     }
 
-    private async Task MergeDuplicateAsync(Driver canonical, Driver duplicate, IReadOnlyCollection<StagedImport> detailRows, CancellationToken ct)
+    private async Task MergeDuplicateAsync(Driver canonical, Driver duplicate, IReadOnlyCollection<StagedImport> detailRows, string actor, CancellationToken ct)
     {
         canonical.MobileNumber ??= duplicate.MobileNumber;
         canonical.DriverType ??= duplicate.DriverType;
@@ -323,27 +334,51 @@ public sealed class TachoDriverMasterSyncService(
         canonical.LicenceExpiry ??= duplicate.LicenceExpiry;
         canonical.LicenceStatus ??= duplicate.LicenceStatus;
 
+        // If the canonical record was created from TachoMaster but the duplicate owns a real
+        // payroll/agency reference (including Sage HR employee number), move that stable CRM key
+        // onto the canonical record. The retired duplicate receives a unique audit-only key first.
+        var canonicalOldEmployee = canonical.EmployeeNumber;
+        var duplicateOldEmployee = duplicate.EmployeeNumber;
+        if (canonical.EmployeeNumber.StartsWith("TM-", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(duplicate.EmployeeNumber) &&
+            !duplicate.EmployeeNumber.StartsWith("TM-", StringComparison.OrdinalIgnoreCase))
+        {
+            duplicate.EmployeeNumber = RetiredEmployeeNumber(duplicate.Id);
+            await db.SaveChangesAsync(ct);
+            canonical.EmployeeNumber = duplicateOldEmployee;
+            ArchiveDetail(detailRows, canonicalOldEmployee, canonical.EmployeeNumber, canonical.Id);
+        }
+
         foreach (var load in await db.Loads.Where(load => load.DriverId == duplicate.Id).ToListAsync(ct)) load.DriverId = canonical.Id;
         try
         {
             foreach (var run in await db.PlanProposalRuns.Where(run => run.DriverId == duplicate.Id).ToListAsync(ct)) run.DriverId = canonical.Id;
             foreach (var candidate in await db.PlanProposalCandidates.Where(candidate => candidate.DriverId == duplicate.Id).ToListAsync(ct)) candidate.DriverId = canonical.Id;
         }
-        catch (Exception ex) when (SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); }
+        catch (Exception ex) when (SchemaUnavailable(ex))
+        {
+            logger.LogWarning(ex, "Optional planning proposal driver references could not be reassigned while merging driver {DuplicateDriverId}.", duplicate.Id);
+        }
 
         try
         {
             foreach (var mapping in await db.IntegrationMappings.Where(mapping => mapping.TmsEntityType == "Driver" && mapping.TmsEntityId == duplicate.Id).ToListAsync(ct))
                 mapping.TmsEntityId = canonical.Id;
         }
-        catch (Exception ex) when (SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); }
+        catch (Exception ex) when (SchemaUnavailable(ex))
+        {
+            logger.LogWarning(ex, "Driver integration mappings could not be reassigned while merging driver {DuplicateDriverId}.", duplicate.Id);
+        }
 
         try
         {
             foreach (var audit in await db.MasterDataAudits.Where(audit => audit.EntityType == "Driver" && audit.EntityId == duplicate.Id).ToListAsync(ct))
                 audit.EntityId = canonical.Id;
         }
-        catch (Exception ex) when (SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); }
+        catch (Exception ex) when (SchemaUnavailable(ex))
+        {
+            logger.LogWarning(ex, "Driver audit history could not be reassigned while merging driver {DuplicateDriverId}.", duplicate.Id);
+        }
 
         var duplicateIdText = duplicate.Id.ToString();
         var planningRows = await db.StagedImports
@@ -358,6 +393,7 @@ public sealed class TachoDriverMasterSyncService(
                 load.DriverId = canonical.Id;
                 row.PayloadJson = JsonSerializer.Serialize(load, JsonOptions);
                 row.ReviewedAtUtc = DateTimeOffset.UtcNow;
+                row.ReviewedBy = actor;
                 row.ReviewNote = $"Driver identity merged from {duplicate.Id} to canonical {canonical.Id}.";
             }
             catch (JsonException) { }
@@ -374,32 +410,26 @@ public sealed class TachoDriverMasterSyncService(
                 var node = JsonNode.Parse(row.PayloadJson) as JsonObject;
                 if (node is not null)
                 {
-                    node["entityId"] = canonical.Id;
+                    node["entityId"] = canonical.Id.ToString();
                     row.PayloadJson = node.ToJsonString(JsonOptions);
                 }
             }
             catch (JsonException) { }
         }
 
-        foreach (var detail in detailRows.Where(row => string.Equals(row.IdempotencyKey, DetailKey(duplicate.EmployeeNumber), StringComparison.OrdinalIgnoreCase)))
-        {
-            detail.Status = StagingStatus.Archived;
-            detail.ReviewedAtUtc = DateTimeOffset.UtcNow;
-            detail.ReviewNote = $"Duplicate Driver Master detail retired into canonical driver {canonical.EmployeeNumber} ({canonical.Id}).";
-        }
-
+        ArchiveDetail(detailRows, duplicateOldEmployee, canonical.EmployeeNumber, canonical.Id);
         duplicate.Active = false;
         db.MasterDataAudits.Add(new MasterDataAudit
         {
             EntityType = "Driver",
             EntityId = canonical.Id,
             Action = "MergedDuplicateTachoIdentity",
-            ChangedBy = "TachoMaster canonical sync",
+            ChangedBy = actor,
             ChangesJson = JsonSerializer.Serialize(new
             {
                 canonicalDriverId = canonical.Id,
                 duplicateDriverId = duplicate.Id,
-                duplicate.EmployeeNumber,
+                duplicateEmployeeNumber = duplicateOldEmployee,
                 duplicate.DisplayName,
                 duplicate.TachoMasterDriverId,
                 duplicate.TachoCardNumber
@@ -407,14 +437,27 @@ public sealed class TachoDriverMasterSyncService(
         });
     }
 
+    private static void ArchiveDetail(IReadOnlyCollection<StagedImport> detailRows, string? employeeNumber, string canonicalEmployeeNumber, Guid canonicalId)
+    {
+        if (string.IsNullOrWhiteSpace(employeeNumber)) return;
+        foreach (var detail in detailRows.Where(row => string.Equals(row.IdempotencyKey, DetailKey(employeeNumber), StringComparison.OrdinalIgnoreCase)))
+        {
+            detail.Status = StagingStatus.Archived;
+            detail.ReviewedAtUtc = DateTimeOffset.UtcNow;
+            detail.ReviewNote = $"Duplicate Driver Master detail retired into canonical driver {canonicalEmployeeNumber} ({canonicalId}).";
+        }
+    }
+
     private static void ApplyWorker(Driver driver, TachoLiveWorker worker, TachoDriverProfile? profile, DateTimeOffset now)
     {
-        driver.DisplayName = string.IsNullOrWhiteSpace(driver.DisplayName) ? worker.DisplayName : driver.DisplayName;
+        if (string.IsNullOrWhiteSpace(driver.DisplayName)) driver.DisplayName = worker.DisplayName;
         driver.TachoName = worker.DisplayName;
-        driver.TachoMasterDriverId = worker.MemberCode.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        driver.TachoMasterDriverId = worker.MemberCode.ToString(CultureInfo.InvariantCulture);
         driver.TachoCardNumber = Clean(worker.CardNumber);
         driver.AgencyName = Clean(worker.AgencyName) ?? driver.AgencyName;
-        if (string.IsNullOrWhiteSpace(driver.DriverType) || string.Equals(driver.DriverType, "Agency", StringComparison.OrdinalIgnoreCase) || string.Equals(driver.DriverType, "Casual", StringComparison.OrdinalIgnoreCase))
+        if (string.IsNullOrWhiteSpace(driver.DriverType) ||
+            string.Equals(driver.DriverType, "Agency", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(driver.DriverType, "Casual", StringComparison.OrdinalIgnoreCase))
             driver.DriverType = Clean(worker.WorkerType) ?? driver.DriverType;
         driver.LicenceExpiry = ParseDate(worker.DrivingLicenceExpiry) ?? driver.LicenceExpiry;
         driver.TachoDriveAvailableTodayMinutes = profile?.DriveAvailableTodayMinutes;
@@ -438,7 +481,7 @@ public sealed class TachoDriverMasterSyncService(
         return $"TM-{Guid.NewGuid():N}"[..40];
     }
 
-    private static void UpsertDetail(Dictionary<string, StagedImport> rows, Driver driver, TachoLiveWorker worker, string actor, DateTimeOffset now)
+    private void UpsertDetail(Dictionary<string, StagedImport> rows, Driver driver, TachoLiveWorker worker, string actor, DateTimeOffset now)
     {
         var key = DetailKey(driver.EmployeeNumber);
         if (!rows.TryGetValue(key, out var row))
@@ -451,6 +494,7 @@ public sealed class TachoDriverMasterSyncService(
                 Source = "TachoMaster canonical Driver Master",
                 ReceivedAtUtc = now
             };
+            db.StagedImports.Add(row);
             rows[key] = row;
         }
         row.EntityType = DetailType;
@@ -484,9 +528,9 @@ public sealed class TachoDriverMasterSyncService(
         row.ReviewNote = "Canonical TachoMaster identity with TMS CRM enrichment. North/Preload legacy fields are intentionally not retained.";
     }
 
-    private static void UpsertProfile(Dictionary<string, StagedImport> rows, TachoLiveWorker worker, string actor, DateTimeOffset now)
+    private void UpsertProfile(Dictionary<string, StagedImport> rows, TachoLiveWorker worker, string actor, DateTimeOffset now)
     {
-        var key = $"tachodriverprofile:{TachoDriverIdentityRules.NormaliseIdentifier(worker.MemberCode.ToString())}";
+        var key = $"tachodriverprofile:{TachoDriverIdentityRules.NormaliseIdentifier(worker.MemberCode.ToString(CultureInfo.InvariantCulture))}";
         if (!rows.TryGetValue(key, out var row))
         {
             row = new StagedImport
@@ -497,9 +541,11 @@ public sealed class TachoDriverMasterSyncService(
                 Source = "TachoMaster live Worker List",
                 ReceivedAtUtc = now
             };
+            db.StagedImports.Add(row);
             rows[key] = row;
         }
         row.Status = StagingStatus.Promoted;
+        row.Source = "TachoMaster live Worker List";
         row.PayloadJson = JsonSerializer.Serialize(worker, JsonOptions);
         row.ReviewedAtUtc = now;
         row.ReviewedBy = actor;
@@ -510,11 +556,17 @@ public sealed class TachoDriverMasterSyncService(
         .GroupBy(worker => TachoDriverIdentityRules.NormalisePerson(worker.DisplayName), StringComparer.OrdinalIgnoreCase)
         .Count(group => group.Key.Length > 0 && group.Select(worker => worker.MemberCode).Distinct().Count() > 1);
 
+    private static string RetiredEmployeeNumber(Guid id) => $"MERGED-{id:N}"[..Math.Min(40, $"MERGED-{id:N}".Length)];
     private static string DetailKey(string employeeNumber) => $"masterdetail:driver:{NormaliseKey(employeeNumber)}";
     private static string NormaliseKey(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
     private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     private static string? Clip(string? value, int max) => string.IsNullOrWhiteSpace(value) ? null : value.Trim()[..Math.Min(value.Trim().Length, max)];
-    private static DateOnly? ParseDate(string? value) => DateOnly.TryParse(value, out var parsed) ? parsed : null;
+    private static DateOnly? ParseDate(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        if (DateOnly.TryParse(value, CultureInfo.GetCultureInfo("en-GB"), DateTimeStyles.AllowWhiteSpaces, out var gb)) return gb;
+        return DateOnly.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AllowWhiteSpaces, out var invariant) ? invariant : null;
+    }
     private static bool SchemaUnavailable(Exception exception)
     {
         var message = exception.GetBaseException().Message;
@@ -574,10 +626,8 @@ public sealed record TachoLiveWorker(
     string? DqcExpiry,
     string RawSourceJson);
 
-internal sealed class TachoLiveWorkerDirectory(HttpClient httpClient, TachoMasterOptions options, ILogger logger)
+internal sealed class TachoLiveWorkerDirectory(HttpClient httpClient, TachoMasterOptions options)
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
-
     public async Task<IReadOnlyList<TachoLiveWorker>> GetLiveWorkersAsync(CancellationToken ct)
     {
         httpClient.Timeout = TimeSpan.FromSeconds(30);
