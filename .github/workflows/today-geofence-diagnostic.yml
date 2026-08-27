@@ -23,15 +23,37 @@ jobs:
           set -euo pipefail
           planning_date="$(TZ=Europe/London date +%F)"
           echo "planningDate=$planning_date"
+
+          echo '--- wait for merged production wallboard loads ---'
+          load_count=0
+          for attempt in {1..60}; do
+            curl --fail --silent --show-error --max-time 90 \
+              -H "X-TMS-TV-Key: $TV_WALLBOARD_ACCESS_KEY" \
+              -H "X-TV-Display-Key: $TV_WALLBOARD_ACCESS_KEY" \
+              "$API_BASE/api/v1/loads?date=$planning_date" \
+              | tee /tmp/loads.json >/dev/null
+            load_count="$(jq 'length' /tmp/loads.json)"
+            echo "wallboardLoadCount=$load_count attempt=$attempt"
+            if test "$load_count" -gt 1; then break; fi
+            sleep 10
+          done
+          test "$load_count" -gt 1
+          jq '{count:length,references:[.[].reference]}' /tmp/loads.json
+
           echo '--- tracking/geofence health ---'
           curl --fail --silent --show-error --max-time 90 "$API_BASE/api/v1/health/tracking/geofences" | tee /tmp/geofence-health.json | jq .
+
           echo '--- run progress evidence ---'
           curl --fail --silent --show-error --max-time 180 \
             -H "X-TMS-TV-Key: $TV_WALLBOARD_ACCESS_KEY" \
             -H "X-TV-Display-Key: $TV_WALLBOARD_ACCESS_KEY" \
             "$API_BASE/api/v1/run-progress?date=$planning_date" \
             | tee /tmp/run-progress.json \
-            | jq '{planningDate,source,count,geofenceCount,geofenceConfiguredRuns,geofenceLinkedRuns,geofenceLinkedStops,geofenceTotalStops,geofenceHitRuns,geofenceHitStops,geofenceVisitCount,trackingEventCount,latestTrackingUtc, runsWithEvidence:[.records[]?|select((.stopDwell//[])|length>0)|{run:(.loadReference//.reference),completedStops,progressPercent,stopDwell}]}'
+            | jq '{planningDate,source,count,geofenceCount,geofenceConfiguredRuns,geofenceLinkedRuns,geofenceLinkedStops,geofenceTotalStops,geofenceHitRuns,geofenceHitStops,geofenceVisitCount,trackingEventCount,latestTrackingUtc, runsWithEvidence:[.records[]?|select((.stopDwell//[])|length>0)|{run:(.loadReference//.reference),vehicleRegistration,completedStops,totalStops,progressPercent,runState,stopDwell}]}'
+
+          echo '--- Run 2 focused progression ---'
+          jq '[.records[]? | select(((.loadReference // .reference // "") | test("run[[:space:]]*0*2$"; "i"))) | {run:(.loadReference//.reference),vehicleRegistration,completedStops,totalStops,progressPercent,runState,currentVisit,lastDeparture,nextStop,stopDwell,linkageException,tacho}]' /tmp/run-progress.json
+
           echo '--- unlinked durable visits today ---'
           jq -r '"storedTrackingEvents24h=\(.storedTrackingEvents24h) vehiclesWithEvidence24h=\(.vehiclesWithGeofenceEvidence24h) vehiclesWithoutEvidence24h=\(.vehiclesWithoutGeofenceEvidence24h) activeVisits=\(.activeGeofenceVisits) latestStored=\(.latestStoredTrackingEventUtc) latestGeofence=\(.latestGeofenceEventUtc)"' /tmp/geofence-health.json
           jq -r '"runCount=\(.count) linkedRuns=\(.geofenceLinkedRuns) linkedStops=\(.geofenceLinkedStops) hitRuns=\(.geofenceHitRuns) hitStops=\(.geofenceHitStops) visits=\(.geofenceVisitCount) trackingEvents=\(.trackingEventCount)"' /tmp/run-progress.json
