@@ -38,33 +38,20 @@ public static class RunGeofenceConfigurationCoverage
             db.ChangeTracker.Clear();
         }
 
-        var totalStops = loads.Where(load => load.Status != LoadStatus.Cancelled).SelectMany(load => load.Stops ?? []).Count();
         if (resolver is null)
-            return new RunGeofenceCoverage(activeGeofenceCount, 0, 0, totalStops, new Dictionary<Guid, RunGeofenceStopCoverage>());
+            return new RunGeofenceCoverage(activeGeofenceCount, 0, 0, loads.SelectMany(load => load.Stops ?? []).Count());
 
         var linkedRuns = 0;
         var linkedStops = 0;
-        var stopCoverage = new Dictionary<Guid, RunGeofenceStopCoverage>();
+        var totalStops = 0;
 
         foreach (var load in loads.Where(load => load.Status != LoadStatus.Cancelled))
         {
             var runLinked = false;
             foreach (var stop in load.Stops ?? [])
             {
+                totalStops++;
                 var resolution = resolver.Resolve(stop.Name);
-                stopCoverage[stop.Id] = new RunGeofenceStopCoverage(
-                    stop.Id,
-                    stop.Sequence,
-                    stop.Name,
-                    resolution.SiteMatched,
-                    resolution.SiteId,
-                    resolution.SiteNumber,
-                    resolution.SiteName,
-                    resolution.GeofenceLinked,
-                    resolution.GeofenceId,
-                    resolution.GeofenceName,
-                    resolution.EvidenceNote);
-
                 if (!resolution.GeofenceLinked) continue;
                 linkedStops++;
                 runLinked = true;
@@ -72,7 +59,7 @@ public static class RunGeofenceConfigurationCoverage
             if (runLinked) linkedRuns++;
         }
 
-        return new RunGeofenceCoverage(activeGeofenceCount, linkedRuns, linkedStops, totalStops, stopCoverage);
+        return new RunGeofenceCoverage(activeGeofenceCount, linkedRuns, linkedStops, totalStops);
     }
 }
 
@@ -80,18 +67,4 @@ public sealed record RunGeofenceCoverage(
     int ActiveGeofenceCount,
     int LinkedRuns,
     int LinkedStops,
-    int TotalStops,
-    IReadOnlyDictionary<Guid, RunGeofenceStopCoverage> Stops);
-
-public sealed record RunGeofenceStopCoverage(
-    Guid StopId,
-    int Sequence,
-    string StopName,
-    bool SiteMatched,
-    Guid? SiteId,
-    string? SiteNumber,
-    string? SiteName,
-    bool GeofenceLinked,
-    Guid? GeofenceId,
-    string? GeofenceName,
-    string EvidenceNote);
+    int TotalStops);
