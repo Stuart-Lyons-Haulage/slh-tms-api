@@ -30,6 +30,13 @@ public sealed class DriverMasterClassificationService(TmsDbContext db, ILogger<D
     public async Task<DriverMasterClassificationResult> ApplyAsync(string actor, CancellationToken ct)
     {
         var now = DateTimeOffset.UtcNow;
+
+        // Historical syncs can have left more than one StagedImport row with the same Tacho
+        // profile idempotency key. The canonical sync materialises those rows as a dictionary,
+        // so duplicate keys can abort the whole Driver Master cleanse before any driver is merged.
+        // Retain the newest row at the canonical key and archive/re-key older copies for audit.
+        await RepairDuplicateProfileKeysAsync(actor, now, ct);
+
         var drivers = await db.Drivers.Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
 
@@ -169,6 +176,35 @@ public sealed class DriverMasterClassificationService(TmsDbContext db, ILogger<D
             drivers.Count, typeNormalised, groupNormalised, agencyGroupsApplied, emailsRetained, legacyFieldsRemoved);
 
         return new DriverMasterClassificationResult(drivers.Count, typeNormalised, groupNormalised, agencyGroupsApplied, emailsRetained, legacyFieldsRemoved, now);
+    }
+
+    private async Task RepairDuplicateProfileKeysAsync(string actor, DateTimeOffset now, CancellationToken ct)
+    {
+        var rows = await db.StagedImports
+            .Where(row => row.EntityType == ProfileType)
+            .OrderByDescending(row => row.ReviewedAtUtc ?? row.ReceivedAtUtc)
+            .ThenByDescending(row => row.ReceivedAtUtc)
+            .ToListAsync(ct);
+
+        var retired = 0;
+        foreach (var group in rows.GroupBy(row => row.IdempotencyKey, StringComparer.OrdinalIgnoreCase).Where(group => group.Count() > 1))
+        {
+            var keep = group.First();
+            keep.Status = StagingStatus.Promoted;
+            foreach (var duplicate in group.Skip(1))
+            {
+                duplicate.Status = StagingStatus.Archived;
+                duplicate.IdempotencyKey = $"{group.Key}:retired:{duplicate.Id:N}";
+                duplicate.ReviewedAtUtc = now;
+                duplicate.ReviewedBy = actor;
+                duplicate.ReviewNote = $"Duplicate historical Tacho driver profile retired; canonical row {keep.Id} retained at {group.Key}.";
+                retired++;
+            }
+        }
+
+        if (retired == 0) return;
+        await db.SaveChangesAsync(ct);
+        logger.LogWarning("Retired/re-keyed {Count} duplicate historical Tacho driver profile staging row(s) before canonical Driver Master sync.", retired);
     }
 
     internal static string CanonicalType(string? currentType, string? workerType, string? agency)

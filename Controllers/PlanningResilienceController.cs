@@ -10,8 +10,9 @@ namespace Slh.Tms.Api.Controllers;
 /// <summary>
 /// Shared production-safe planning readers. Production can contain current runs in the
 /// planning register, the legacy/live Loads table, and the durable planner-plan import audit.
-/// Real planning/live rows always win. The import audit is a final read-only recovery source
-/// so a reset cannot make the wallboards collapse to only the runs that still have live rows.
+/// Real planning/live rows always win. If an imported run survives only in audit, it is
+/// materialised back into the Planning Register so it is not merely visible to Dashboard/TV:
+/// it becomes writable by Driver Dispatch, routing, allocation and downstream execution too.
 /// </summary>
 internal static class PlanningResilience
 {
@@ -46,10 +47,10 @@ internal static class PlanningResilience
             db.ChangeTracker.Clear();
         }
 
-        // Planner imports are also durably audited as one promoted plannerplanrun row per
-        // imported run. If a planning-day reset removes the operational Load row, that audit
-        // still represents an imported run and must remain visible to Operations and TV.
-        // Never replace a real active live/register row with the audit projection.
+        // Planner imports are durably audited as one promoted plannerplanrun row per imported
+        // run. If a reset removed the operational row, recover it into the Planning Register.
+        // This closes the old split where Dashboard/TV could see an audit-only run but Driver
+        // Dispatch could neither select nor save it. Never replace a real active row with audit.
         try
         {
             var audited = await PlannerPlanAuditProjection.ReadLoadsAsync(db, date, ct);
@@ -60,6 +61,18 @@ internal static class PlanningResilience
             foreach (var load in audited)
             {
                 if (activeReferences.Contains(load.Reference)) continue;
+
+                try
+                {
+                    await PlanningRegisterStore.SaveLoadAsync(db, load, "system:planner-audit-recovery", ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Visibility remains available even if the recovery write is temporarily
+                    // unavailable. A later read will retry materialisation automatically.
+                    db.ChangeTracker.Clear();
+                }
+
                 merged[load.Id] = load;
                 activeReferences.Add(load.Reference);
             }
@@ -103,7 +116,17 @@ internal static class PlanningResilience
 
         try
         {
-            return (await PlannerPlanAuditProjection.ReadLoadsAsync(db, null, ct)).SingleOrDefault(load => load.Id == id);
+            var recovered = (await PlannerPlanAuditProjection.ReadLoadsAsync(db, null, ct)).SingleOrDefault(load => load.Id == id);
+            if (recovered is null) return null;
+            try
+            {
+                await PlanningRegisterStore.SaveLoadAsync(db, recovered, "system:planner-audit-recovery", ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                db.ChangeTracker.Clear();
+            }
+            return recovered;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

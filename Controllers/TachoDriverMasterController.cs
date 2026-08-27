@@ -16,9 +16,16 @@ public sealed class TachoDriverMasterController(
     public async Task<IActionResult> Sync(CancellationToken ct)
     {
         var actor = User.Identity?.Name ?? "TMS user";
+
+        // Repair/normalise persisted Driver Master detail before the canonical pass. In
+        // particular this retires duplicate historical Tacho profile staging keys which would
+        // otherwise make the sync's identity dictionary fail before any drivers are consolidated.
+        await classification.ApplyAsync(actor, ct);
+
         var result = await sync.SyncAsync(actor, ct);
         if (!result.Success) return StatusCode(StatusCodes.Status502BadGateway, result);
 
+        // Reapply controlled Type/Group/Agency/email rules to the newly canonical population.
         await classification.ApplyAsync(actor, ct);
         return Ok(result);
     }
