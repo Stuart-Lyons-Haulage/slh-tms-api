@@ -24,18 +24,20 @@ public sealed class IntegrationSyncCoordinator(
         if (!tachoMaster.IsConfigured)
             return new("TachoMaster", false, DateTimeOffset.UtcNow, $"TachoMaster is not configured: {string.Join(", ", tachoMaster.MissingSettings)}.");
 
-        var profiles = await tachoMaster.GetDriverProfilesAsync(ct);
-        var drivers = await db.Drivers.Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToListAsync(ct);
-        await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
-
-        var byMemberCode = profiles.GroupBy(profile => profile.MemberCode).ToDictionary(group => group.Key, group => group.First());
-        var byEmployee = UniqueLookup(profiles.Where(profile => !string.IsNullOrWhiteSpace(profile.EmployeeNumber)), profile => Normalise(profile.EmployeeNumber));
-        var byName = UniqueLookup(profiles, profile => NormalisePersonName(profile.DriverName));
-        var matched = 0;
-        var matchedMemberCodes = new HashSet<int>();
-
-        foreach (var driver in drivers)
+        try
         {
+            var profiles = await tachoMaster.GetDriverProfilesAsync(ct);
+            var drivers = await db.Drivers.Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToListAsync(ct);
+            await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
+
+            var byMemberCode = profiles.GroupBy(profile => profile.MemberCode).ToDictionary(group => group.Key, group => group.First());
+            var byEmployee = UniqueLookup(profiles.Where(profile => !string.IsNullOrWhiteSpace(profile.EmployeeNumber)), profile => Normalise(profile.EmployeeNumber));
+            var byName = UniqueLookup(profiles, profile => NormalisePersonName(profile.DriverName));
+            var matched = 0;
+            var matchedMemberCodes = new HashSet<int>();
+
+            foreach (var driver in drivers)
+            {
             TachoDriverProfile? profile = null;
 
             // Stable identities first. TachoMaster member code and tachograph card must win over
@@ -67,12 +69,20 @@ public sealed class IntegrationSyncCoordinator(
             await MasterDetailStore.SaveAsync(db, "driver", driver.EmployeeNumber, JsonSerializer.Serialize(driver), "TachoMaster driver directory", actor, ct);
             matched++;
             matchedMemberCodes.Add(profile.MemberCode);
-        }
+            }
 
-        await db.SaveChangesAsync(ct);
-        var unmatchedProfiles = profiles.Select(profile => profile.MemberCode).Distinct().Count(code => !matchedMemberCodes.Contains(code));
-        return new("TachoMaster", true, DateTimeOffset.UtcNow,
-            $"TachoMaster matched {matched} of {drivers.Count} active TMS drivers; {unmatchedProfiles} TachoMaster member profile(s) remain unmatched. Identity order: member code, tacho card, employee number, name.", matched);
+            await db.SaveChangesAsync(ct);
+            var unmatchedProfiles = profiles.Select(profile => profile.MemberCode).Distinct().Count(code => !matchedMemberCodes.Contains(code));
+            return new("TachoMaster", true, DateTimeOffset.UtcNow,
+                $"TachoMaster matched {matched} of {drivers.Count} active TMS drivers; {unmatchedProfiles} TachoMaster member profile(s) remain unmatched. Identity order: member code, tacho card, employee number, name.", matched);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "TachoMaster driver directory sync failed.");
+            var status = ex is HttpRequestException http && http.StatusCode is not null ? $" HTTP {(int)http.StatusCode}." : string.Empty;
+            return new("TachoMaster", false, DateTimeOffset.UtcNow,
+                $"TachoMaster sync failed.{status} {ex.GetBaseException().Message} No TMS driver records were intentionally updated by the sync result.");
+        }
     }
 
     public async Task<IntegrationSyncResult> SyncSageHrAsync(string actor, CancellationToken ct)

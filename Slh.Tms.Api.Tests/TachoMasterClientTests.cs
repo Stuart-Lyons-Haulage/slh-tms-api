@@ -14,6 +14,37 @@ namespace Slh.Tms.Api.Tests;
 public sealed class TachoMasterClientTests
 {
     [Fact]
+    public async Task Transient_provider_failure_is_retried_but_auth_failure_is_not_retried_as_a_5xx()
+    {
+        var handler = new RetryAndAuthHandler();
+        var client = new TachoMasterClient(new HttpClient(handler), new TachoMasterOptions
+        {
+            Enabled = true,
+            BaseUrl = "https://api-v1-alpha.roadtech.co.uk",
+            ApiKey = "test-key",
+            Username = "planner",
+            Password = "secret"
+        }, NullLogger<TachoMasterClient>.Instance);
+
+        var profiles = await client.GetDriverProfilesAsync();
+        Assert.Single(profiles);
+        Assert.Equal(2, handler.LoginAttempts);
+
+        var authHandler = new RetryAndAuthHandler { AlwaysRejectLogin = true };
+        var authClient = new TachoMasterClient(new HttpClient(authHandler), new TachoMasterOptions
+        {
+            Enabled = true,
+            BaseUrl = "https://api-v1-alpha.roadtech.co.uk",
+            ApiKey = "test-key",
+            Username = "planner",
+            Password = "secret"
+        }, NullLogger<TachoMasterClient>.Instance);
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => authClient.GetDriverProfilesAsync());
+        Assert.Equal(2, authHandler.LoginAttempts); // two credential forms, no 5xx retry loop
+    }
+
+    [Fact]
     public async Task Current_vehicle_status_uses_documented_duty_member_and_metric_fields()
     {
         var handler = new TachoMasterHandler();
@@ -241,5 +272,36 @@ public sealed class TachoMasterClientTests
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
             };
         }
+    }
+
+    private sealed class RetryAndAuthHandler : HttpMessageHandler
+    {
+        public int LoginAttempts { get; private set; }
+        public bool AlwaysRejectLogin { get; init; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            if (path == "/api/auth/login")
+            {
+                LoginAttempts++;
+                if (AlwaysRejectLogin) return Task.FromResult(Response(HttpStatusCode.Unauthorized, "invalid credentials"));
+                if (LoginAttempts == 1) return Task.FromResult(Response(HttpStatusCode.BadGateway, "temporary provider outage"));
+                return Task.FromResult(Response(HttpStatusCode.OK, "{\"token\":\"sid-123\"}"));
+            }
+
+            var payload = path switch
+            {
+                "/api/Member/GetMembersLong" => "{\"moreData\":false,\"recordCount\":1,\"data\":[{\"memCode\":42,\"cName\":\"Jane\",\"sName\":\"Driver\",\"cardNoShort\":\"DB123456789\"}]}",
+                "/api/Member/GetMemberMetrics" => "{\"moreData\":false,\"recordCount\":0,\"data\":[]}",
+                _ => throw new InvalidOperationException($"Unexpected test request {request.RequestUri}")
+            };
+            return Task.FromResult(Response(HttpStatusCode.OK, payload));
+        }
+
+        private static HttpResponseMessage Response(HttpStatusCode status, string body) => new(status)
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json")
+        };
     }
 }

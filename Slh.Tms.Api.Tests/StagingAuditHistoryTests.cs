@@ -83,6 +83,45 @@ public sealed class StagingAuditHistoryTests : IClassFixture<CustomWebFactory>
             history.RootElement.EnumerateArray().Select(x => x.GetProperty("eventType").GetString()));
     }
 
+    [Fact]
+    public async Task Reject_is_idempotent_and_preserves_the_original_audit_evidence()
+    {
+        var client = factory.CreateClientWithUser(Planner, "Tms.Approve");
+        var id = await StageOrder(client, "reject-idempotent", 4);
+
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsync($"/api/v1/staging/{id}/reject", Json("{\"note\":\"Not a transport order\"}"))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsync($"/api/v1/staging/{id}/reject", Json("{\"note\":\"stale retry\"}"))).StatusCode);
+
+        using var history = JsonDocument.Parse(await (await client.GetAsync($"/api/v1/staging/{id}/history")).Content.ReadAsStringAsync());
+        Assert.Equal(new[] { "Received", "Rejected" }, history.RootElement.EnumerateArray().Select(x => x.GetProperty("eventType").GetString()));
+        Assert.Equal("Not a transport order", history.RootElement[1].GetProperty("note").GetString());
+    }
+
+    [Fact]
+    public async Task Reject_of_an_already_approved_row_returns_conflict_instead_of_500()
+    {
+        var id = Guid.NewGuid();
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<Slh.Tms.Api.Data.TmsDbContext>();
+            db.StagedImports.Add(new StagedImport
+            {
+                Id = id,
+                EntityType = "order",
+                IdempotencyKey = "reject-approved",
+                PayloadJson = "{}",
+                Status = StagingStatus.Approved,
+                Source = "test"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var response = await factory.CreateClientWithUser(Planner, "Tms.Approve").PostAsync($"/api/v1/staging/{id}/reject", Json("{\"note\":\"stale\"}"));
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal("staging_already_reviewed", body.RootElement.GetProperty("code").GetString());
+    }
+
     private static async Task<Guid> StageOrder(HttpClient client, string key, int pallets)
     {
         var reference = $"PO-{key.ToUpperInvariant()}";

@@ -431,31 +431,36 @@ public sealed class TachoMasterClient
  
     private async Task<string> LoginAsync(CancellationToken cancellationToken)
     {
+        string? lastFailure = null;
         foreach (var password in PasswordAttempts(options.Password))
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, "auth/login");
-            request.Headers.Add("APIKEY", options.ApiKey);
-            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-            request.Content = JsonContent.Create(new
+            using var response = await SendWithRetryAsync(() =>
             {
-                User = options.Username,
-                Pass = password,
-                OsVersion = "1.0",
-                OsName = "Azure Container App",
-                PcName = Environment.MachineName,
-                AuthType = "password"
-            });
-            using var response = await httpClient.SendAsync(request, cancellationToken);
+                var request = new HttpRequestMessage(HttpMethod.Post, "auth/login");
+                request.Headers.Add("APIKEY", options.ApiKey);
+                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                request.Content = JsonContent.Create(new
+                {
+                    User = options.Username,
+                    Pass = password,
+                    OsVersion = "1.0",
+                    OsName = "Azure Container App",
+                    PcName = Environment.MachineName,
+                    AuthType = "password"
+                });
+                return request;
+            }, "login", cancellationToken);
             if (response.IsSuccessStatusCode)
             {
                 var payload = await response.Content.ReadAsStringAsync(cancellationToken);
                 return ExtractSessionId(payload);
             }
- 
-            if (response.StatusCode is not (HttpStatusCode.InternalServerError or HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden or HttpStatusCode.BadRequest)) break;
+
+            lastFailure = await FailureDetailAsync(response, "login", cancellationToken);
+            if (response.StatusCode is not (HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden or HttpStatusCode.BadRequest)) break;
         }
- 
-        throw new HttpRequestException("TachoMaster login failed.");
+
+        throw new HttpRequestException($"TachoMaster login failed. {lastFailure ?? "No response was received."}");
     }
  
     private async Task<List<TachoDuty>> GetDutiesAsync(string sid, DateOnly date, CancellationToken cancellationToken)
@@ -465,10 +470,13 @@ public sealed class TachoMasterClient
         var (fromUtc, toUtc) = OperatingWindowUtc(date);
         for (var page = 0; page < options.MaxPages; page++)
         {
-            using var request = CreateRequest(HttpMethod.Post, "Duty/GetDutyTransactions", sid);
-            request.Content = JsonContent.Create(new { From = fromUtc.ToString("O"), To = toUtc.ToString("O"), Offset = offset, WithWtd = true });
-            using var response = await httpClient.SendAsync(request, cancellationToken);
-            response.EnsureSuccessStatusCode();
+            using var response = await SendWithRetryAsync(() =>
+            {
+                var retryRequest = CreateRequest(HttpMethod.Post, "Duty/GetDutyTransactions", sid);
+                retryRequest.Content = JsonContent.Create(new { From = fromUtc.ToString("O"), To = toUtc.ToString("O"), Offset = offset, WithWtd = true });
+                return retryRequest;
+            }, "Duty/GetDutyTransactions", cancellationToken);
+            await EnsureSuccessAsync(response, "Duty/GetDutyTransactions", cancellationToken);
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             var envelope = await JsonSerializer.DeserializeAsync<TachoDutyEnvelope>(stream, JsonOptions, cancellationToken) ?? new TachoDutyEnvelope();
             var pageData = envelope.DutyNew ?? new TachoPage<TachoDuty>();
@@ -486,10 +494,13 @@ public sealed class TachoMasterClient
         var offset = 0;
         for (var page = 0; page < options.MaxPages; page++)
         {
-            using var request = CreateRequest(HttpMethod.Post, "Member/GetMemberMetrics", sid);
-            request.Content = JsonContent.Create(new { Offset = offset });
-            using var response = await httpClient.SendAsync(request, cancellationToken);
-            response.EnsureSuccessStatusCode();
+            using var response = await SendWithRetryAsync(() =>
+            {
+                var retryRequest = CreateRequest(HttpMethod.Post, "Member/GetMemberMetrics", sid);
+                retryRequest.Content = JsonContent.Create(new { Offset = offset });
+                return retryRequest;
+            }, "Member/GetMemberMetrics", cancellationToken);
+            await EnsureSuccessAsync(response, "Member/GetMemberMetrics", cancellationToken);
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             var pageData = await JsonSerializer.DeserializeAsync<TachoPage<TachoMemberMetric>>(stream, JsonOptions, cancellationToken) ?? new TachoPage<TachoMemberMetric>();
             result.AddRange(pageData.Data);
@@ -516,10 +527,13 @@ public sealed class TachoMasterClient
         var offset = 0;
         for (var page = 0; page < options.MaxPages; page++)
         {
-            using var request = CreateRequest(HttpMethod.Post, "Member/GetMembersLong", sid);
-            request.Content = JsonContent.Create(new { Offset = offset, OnlyLiveMembers = false });
-            using var response = await httpClient.SendAsync(request, cancellationToken);
-            response.EnsureSuccessStatusCode();
+            using var response = await SendWithRetryAsync(() =>
+            {
+                var retryRequest = CreateRequest(HttpMethod.Post, "Member/GetMembersLong", sid);
+                retryRequest.Content = JsonContent.Create(new { Offset = offset, OnlyLiveMembers = false });
+                return retryRequest;
+            }, "Member/GetMembersLong", cancellationToken);
+            await EnsureSuccessAsync(response, "Member/GetMembersLong", cancellationToken);
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             var pageData = await JsonSerializer.DeserializeAsync<TachoPage<TachoMember>>(stream, JsonOptions, cancellationToken) ?? new TachoPage<TachoMember>();
             result.AddRange(pageData.Data);
@@ -537,6 +551,53 @@ public sealed class TachoMasterClient
         request.Headers.Add("SID", sid);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         return request;
+    }
+
+    private async Task<HttpResponseMessage> SendWithRetryAsync(
+        Func<HttpRequestMessage> requestFactory,
+        string operation,
+        CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 3;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                using var request = requestFactory();
+                var response = await httpClient.SendAsync(request, cancellationToken);
+                if (!IsTransient(response.StatusCode) || attempt == maxAttempts) return response;
+
+                logger.LogWarning("TachoMaster {Operation} returned transient HTTP {StatusCode}; retrying attempt {Attempt} of {MaxAttempts}.", operation, (int)response.StatusCode, attempt + 1, maxAttempts);
+                response.Dispose();
+            }
+            catch (HttpRequestException) when (attempt < maxAttempts)
+            {
+                logger.LogWarning("TachoMaster {Operation} failed at transport level; retrying attempt {Attempt} of {MaxAttempts}.", operation, attempt + 1, maxAttempts);
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(200 * attempt), cancellationToken);
+        }
+
+        throw new InvalidOperationException($"TachoMaster {operation} failed without a response.");
+    }
+
+    private static bool IsTransient(HttpStatusCode statusCode) =>
+        statusCode == HttpStatusCode.RequestTimeout ||
+        statusCode == (HttpStatusCode)429 ||
+        (int)statusCode >= 500;
+
+    private static async Task EnsureSuccessAsync(HttpResponseMessage response, string operation, CancellationToken cancellationToken)
+    {
+        if (response.IsSuccessStatusCode) return;
+        throw new HttpRequestException(await FailureDetailAsync(response, operation, cancellationToken), null, response.StatusCode);
+    }
+
+    private static async Task<string> FailureDetailAsync(HttpResponseMessage response, string operation, CancellationToken cancellationToken)
+    {
+        var detail = await response.Content.ReadAsStringAsync(cancellationToken);
+        detail = string.IsNullOrWhiteSpace(detail) ? response.ReasonPhrase ?? "no provider detail" : detail.Trim();
+        if (detail.Length > 300) detail = detail[..300];
+        return $"TachoMaster {operation} returned {(int)response.StatusCode} ({response.ReasonPhrase}). Provider detail: {detail}";
     }
  
     private static string DriverName(TachoMember member)

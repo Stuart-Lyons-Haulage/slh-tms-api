@@ -169,6 +169,18 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
     {
         try { return Ok(await service.ReviewAndPromote(id, false, request.Note, User, ct)); }
         catch (KeyNotFoundException) { return NotFound(); }
+        catch (InvalidOperationException ex)
+        {
+            return Conflict(new ErrorResponse("staging_already_reviewed", ex.Message, HttpContext.TraceIdentifier));
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return Conflict(new ErrorResponse("staging_review_conflict", "This staged item was reviewed by another user. Refresh the review queue.", HttpContext.TraceIdentifier));
+        }
+        catch (DbUpdateException ex)
+        {
+            return UnprocessableEntity(new ErrorResponse("staging_review_persistence_failed", $"The rejection could not be recorded: {ex.GetBaseException().Message}", HttpContext.TraceIdentifier));
+        }
     }
 
     private static bool IsExplicitZeroPalletOrder(StageImportRequest request)

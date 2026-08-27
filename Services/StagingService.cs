@@ -81,7 +81,12 @@ public sealed class StagingService(TmsDbContext db)
     public async Task<StagedImport> ReviewAndPromote(Guid id, bool approve, string? note, ClaimsPrincipal user, CancellationToken ct)
     {
         var item = await db.StagedImports.SingleOrDefaultAsync(x => x.Id == id, ct) ?? throw new KeyNotFoundException("Staged item not found");
-        if (item.Status != StagingStatus.PendingReview) throw new InvalidOperationException("Only PendingReview items can be reviewed");
+        // Reject is intentionally idempotent. The review screen can have stale rows
+        // after another user has acted, but repeating a rejection must not create a
+        // second decision event or turn a harmless refresh into a 500.
+        if (!approve && item.Status == StagingStatus.Rejected) return item;
+        if (item.Status != StagingStatus.PendingReview)
+            throw new InvalidOperationException($"This staged item has already been reviewed ({item.Status}). Refresh the review queue before trying again.");
         var actor = user.Identity?.Name ?? user.FindFirstValue("oid");
         item.ReviewedAtUtc = DateTimeOffset.UtcNow; item.ReviewedBy = actor; item.ReviewNote = note;
         if (!approve)
