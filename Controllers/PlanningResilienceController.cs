@@ -54,13 +54,14 @@ internal static class PlanningResilience
         try
         {
             var audited = await PlannerPlanAuditProjection.ReadLoadsAsync(db, date, ct);
-            var activeReferences = merged.Values
+            var activeKeys = merged.Values
                 .Where(load => load.Status != LoadStatus.Cancelled)
-                .Select(load => load.Reference)
+                .Select(LogicalRunKey)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
             foreach (var load in audited)
             {
-                if (activeReferences.Contains(load.Reference)) continue;
+                var logicalKey = LogicalRunKey(load);
+                if (activeKeys.Contains(logicalKey)) continue;
 
                 try
                 {
@@ -74,7 +75,7 @@ internal static class PlanningResilience
                 }
 
                 merged[load.Id] = load;
-                activeReferences.Add(load.Reference);
+                activeKeys.Add(logicalKey);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -82,7 +83,7 @@ internal static class PlanningResilience
             db.ChangeTracker.Clear();
         }
 
-        return merged.Values
+        return CollapseLogicalDuplicates(merged.Values)
             .OrderBy(x => x.PlanningDate)
             .ThenBy(x => x.Reference)
             .Take(2000)
@@ -91,6 +92,83 @@ internal static class PlanningResilience
 
     internal static bool KeepRegisteredOverLiveTombstone(Load registered, Load live) =>
         live.Status == LoadStatus.Cancelled && registered.Status != LoadStatus.Cancelled;
+
+    /// <summary>
+    /// SQL Loads and the Planning Register can temporarily contain the same real-world run
+    /// under different GUIDs after resilient import/recovery writes. Consumers must see one
+    /// operational run, not one row per persistence copy. The UK planning date plus normalised
+    /// run reference is the logical identity; the strongest operational copy wins and missing
+    /// allocation/capacity detail is retained from its duplicate copy.
+    /// </summary>
+    internal static List<Load> CollapseLogicalDuplicates(IEnumerable<Load> loads)
+    {
+        var result = new List<Load>();
+        foreach (var group in loads.GroupBy(LogicalRunKey, StringComparer.OrdinalIgnoreCase))
+        {
+            var candidates = group
+                .OrderByDescending(OperationalScore)
+                .ThenByDescending(load => load.CreatedAtUtc)
+                .ThenBy(load => load.Id)
+                .ToList();
+            if (candidates.Count == 0) continue;
+
+            var preferred = candidates[0];
+            foreach (var duplicate in candidates.Skip(1))
+                MergeMissingOperationalData(preferred, duplicate);
+            result.Add(preferred);
+        }
+        return result;
+    }
+
+    internal static string LogicalRunKey(Load load)
+    {
+        var reference = new string((load.Reference ?? string.Empty)
+            .Where(char.IsLetterOrDigit)
+            .Select(char.ToUpperInvariant)
+            .ToArray());
+        var internalPrefix = $"PLAN{load.PlanningDate:yyyyMMdd}";
+        if (reference.StartsWith(internalPrefix, StringComparison.OrdinalIgnoreCase))
+            reference = reference[internalPrefix.Length..];
+        if (string.IsNullOrWhiteSpace(reference)) reference = $"ID{load.Id:N}";
+        return $"{load.PlanningDate:yyyyMMdd}|{reference}";
+    }
+
+    private static int OperationalScore(Load load)
+    {
+        var score = load.Status switch
+        {
+            LoadStatus.Completed => 6000,
+            LoadStatus.InProgress => 5000,
+            LoadStatus.Dispatched => 4000,
+            LoadStatus.Planned => 3000,
+            LoadStatus.Draft => 2000,
+            LoadStatus.Cancelled => 0,
+            _ => 1000
+        };
+        if (load.DriverId is not null) score += 300;
+        if (load.VehicleId is not null) score += 300;
+        if (load.TrailerId is not null) score += 200;
+        if (load.PalletSpacesUsed is not null) score += 30;
+        if (load.TotalPalletSpaces is not null) score += 30;
+        if (!string.IsNullOrWhiteSpace(load.CapacityType)) score += 20;
+        if (!string.IsNullOrWhiteSpace(load.PlannerNotes)) score += 20;
+        score += Math.Min(load.Stops.Count, 20) * 5;
+        return score;
+    }
+
+    private static void MergeMissingOperationalData(Load preferred, Load duplicate)
+    {
+        preferred.DriverId ??= duplicate.DriverId;
+        preferred.VehicleId ??= duplicate.VehicleId;
+        preferred.TrailerId ??= duplicate.TrailerId;
+        preferred.PalletSpacesUsed ??= duplicate.PalletSpacesUsed;
+        preferred.TotalPalletSpaces ??= duplicate.TotalPalletSpaces;
+        preferred.CapacityType ??= duplicate.CapacityType;
+        preferred.DepotSplits ??= duplicate.DepotSplits;
+        preferred.TemperatureC ??= duplicate.TemperatureC;
+        if (string.IsNullOrWhiteSpace(preferred.PlannerNotes) && !string.IsNullOrWhiteSpace(duplicate.PlannerNotes))
+            preferred.PlannerNotes = duplicate.PlannerNotes;
+    }
 
     public static async Task<Load?> ReadLoadAsync(TmsDbContext db, Guid id, CancellationToken ct)
     {

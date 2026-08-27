@@ -35,4 +35,79 @@ public sealed class PlanningResilienceTests
 
         Assert.False(PlanningResilience.KeepRegisteredOverLiveTombstone(registered, live));
     }
+
+    [Fact]
+    public void Same_planning_run_under_different_ids_is_returned_once()
+    {
+        var date = new DateOnly(2026, 8, 28);
+        var driverId = Guid.NewGuid();
+        var vehicleId = Guid.NewGuid();
+        var trailerId = Guid.NewGuid();
+        var core = new Load
+        {
+            Id = Guid.NewGuid(),
+            PlanningDate = date,
+            Reference = "PLAN-20260828-Run 7",
+            Status = LoadStatus.Planned,
+            DriverId = driverId,
+            VehicleId = vehicleId
+        };
+        var register = new Load
+        {
+            Id = Guid.NewGuid(),
+            PlanningDate = date,
+            Reference = "Run 7",
+            Status = LoadStatus.Planned,
+            DriverId = driverId,
+            VehicleId = vehicleId,
+            TrailerId = trailerId
+        };
+
+        var rows = PlanningResilience.CollapseLogicalDuplicates([core, register]);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(driverId, row.DriverId);
+        Assert.Equal(vehicleId, row.VehicleId);
+        Assert.Equal(trailerId, row.TrailerId);
+    }
+
+    [Fact]
+    public void Executed_copy_wins_but_keeps_missing_allocation_detail_from_duplicate()
+    {
+        var date = new DateOnly(2026, 8, 28);
+        var trailerId = Guid.NewGuid();
+        var liveId = Guid.NewGuid();
+        var live = new Load
+        {
+            Id = liveId,
+            PlanningDate = date,
+            Reference = "Run 9 PM",
+            Status = LoadStatus.InProgress
+        };
+        var register = new Load
+        {
+            Id = Guid.NewGuid(),
+            PlanningDate = date,
+            Reference = "PLAN-20260828-Run 9 PM",
+            Status = LoadStatus.Planned,
+            TrailerId = trailerId
+        };
+
+        var row = Assert.Single(PlanningResilience.CollapseLogicalDuplicates([register, live]));
+
+        Assert.Equal(liveId, row.Id);
+        Assert.Equal(LoadStatus.InProgress, row.Status);
+        Assert.Equal(trailerId, row.TrailerId);
+    }
+
+    [Fact]
+    public void Same_reference_on_different_days_remains_separate()
+    {
+        var first = new Load { Id = Guid.NewGuid(), PlanningDate = new DateOnly(2026, 8, 28), Reference = "Run 4", Status = LoadStatus.Planned };
+        var second = new Load { Id = Guid.NewGuid(), PlanningDate = new DateOnly(2026, 8, 29), Reference = "Run 4", Status = LoadStatus.Planned };
+
+        var rows = PlanningResilience.CollapseLogicalDuplicates([first, second]);
+
+        Assert.Equal(2, rows.Count);
+    }
 }
