@@ -553,9 +553,13 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         root["sourceEmailSubject"] = request.Subject;
         root["sourceEmailReceivedAt"] = request.ReceivedAtUtc;
         root["sourceEmailMessageId"] = request.MessageId;
+        root["sourceMessageId"] = request.MessageId;
         root["sourceInternetMessageId"] = request.InternetMessageId;
         root["sourceConversationId"] = request.ConversationId;
         root["sourceEmailWebLink"] = request.WebLink;
+        root["sourceWebLink"] = request.WebLink;
+        root["sourceSubject"] = request.Subject;
+        root["sourceReceivedAtUtc"] = request.ReceivedAtUtc;
         root["sourceBodyFormat"] = request.BodyFormat;
         root["sourceImportance"] = request.Importance;
         root["importCorrelationId"] = request.CorrelationId;

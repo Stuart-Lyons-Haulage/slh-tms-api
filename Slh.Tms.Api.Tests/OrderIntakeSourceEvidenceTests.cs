@@ -25,6 +25,9 @@ public sealed class OrderIntakeSourceEvidenceTests
         var enriched = OrderIntakeController.EnrichSourceEvidence(payload, request);
 
         Assert.Equal("conversation-1", enriched.GetProperty("sourceConversationId").GetString());
+        Assert.Equal("outlook-id", enriched.GetProperty("sourceMessageId").GetString());
+        Assert.Equal("PO 123", enriched.GetProperty("sourceSubject").GetString());
+        Assert.Equal("https://outlook.example/message", enriched.GetProperty("sourceWebLink").GetString());
         Assert.Equal("correlation-1", enriched.GetProperty("importCorrelationId").GetString());
         Assert.Equal("Pending Review", enriched.GetProperty("reviewStatus").GetString());
         var attachment = Assert.Single(enriched.GetProperty("sourceAttachments").EnumerateArray());
