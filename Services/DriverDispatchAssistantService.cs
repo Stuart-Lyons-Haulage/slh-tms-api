@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Controllers;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Tracking;
@@ -18,7 +19,6 @@ public sealed record DriverDispatchAssistantSuggestion(
 public static class DriverDispatchAssistantService
 {
     private const string DriverDetailType = "masterdetail:driver";
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
 
     public static async Task<IReadOnlyDictionary<Guid, DriverDispatchAssistantSuggestion>> BuildAsync(
         TmsDbContext db,
