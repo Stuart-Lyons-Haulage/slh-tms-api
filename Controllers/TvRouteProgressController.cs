@@ -179,6 +179,8 @@ public sealed class TvRouteProgressController(
                 linkageException,
                 trackingFresh,
                 trackingMoving,
+                ignitionOn = trackingFresh ? live?.IgnitionOn : null,
+                driverCardPresent = trackingFresh ? !string.IsNullOrWhiteSpace(live?.CurrentDriverCardNumber) : (bool?)null,
                 trackingObservedAtUtc = freshnessAtUtc,
                 trackingAgeSeconds = trackingAge is null ? (int?)null : (int)Math.Max(0, Math.Floor(trackingAge.Value.TotalSeconds)),
                 speedKph = trackingFresh ? live?.SpeedKph : null,
