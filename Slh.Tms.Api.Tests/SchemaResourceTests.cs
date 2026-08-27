@@ -19,6 +19,8 @@ public sealed class SchemaResourceTests
         Assert.Contains("Slh.Tms.Api.Database.024_Integration_Mappings.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.027_Integration_Mappings_Repair.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.031_Order_Import_Audit_History.sql", resources);
+        Assert.Contains("Slh.Tms.Api.Database.032_Order_Movement_Source_Lines.sql", resources);
+        Assert.Contains("Slh.Tms.Api.Database.036_Order_Review_Schema_Repair.sql", resources);
     }
 
     [Fact]
