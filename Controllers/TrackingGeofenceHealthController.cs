@@ -66,6 +66,14 @@ public sealed class TrackingGeofenceHealthController(
                 .ToList();
 
             var since = now - EvidenceWindow;
+            var storedTrackingEvents24h = await db.VehicleTrackingEvents.AsNoTracking()
+                .CountAsync(item => item.ProviderName == "RoadTech Falcon" && item.EventTimeUtc >= since, ct);
+            var latestStoredTrackingEventUtc = await db.VehicleTrackingEvents.AsNoTracking()
+                .Where(item => item.ProviderName == "RoadTech Falcon")
+                .OrderByDescending(item => item.EventTimeUtc)
+                .Select(item => (DateTimeOffset?)item.EventTimeUtc)
+                .FirstOrDefaultAsync(ct);
+
             var visits = await db.GeofenceVisits.AsNoTracking()
                 .Where(visit => visit.EnteredAtUtc >= since || visit.ExitedAtUtc >= since || visit.ExitedAtUtc == null)
                 .OrderByDescending(visit => visit.EnteredAtUtc)
@@ -89,13 +97,15 @@ public sealed class TrackingGeofenceHealthController(
                 configured = true,
                 evidenceWindowHours = (int)EvidenceWindow.TotalHours,
                 providerVehicles = latestByIdentifier.Count,
+                storedTrackingEvents24h,
+                latestStoredTrackingEventUtc,
                 vehiclesWithGeofenceEvidence24h = withEvidence,
                 vehiclesWithoutGeofenceEvidence24h = Math.Max(0, latestByIdentifier.Count - withEvidence),
                 activeGeofenceVisits = activeVisits,
                 newestProviderEventUtc = latestByIdentifier.Count == 0 ? (DateTimeOffset?)null : latestByIdentifier.Max(record => record.EventTimeUtc),
                 latestGeofenceEventUtc,
                 checkedAtUtc = now,
-                note = "A vehicle without a geofence event in the last 24 hours is an attention signal, not proof of tracker failure; it may not have crossed an approved fence."
+                note = "Provider freshness, stored tracking freshness and geofence evidence are reported separately so ingestion faults can be distinguished from missing fence crossings."
             };
 
             if (!includeDetails) return new BuildResult(summary, [], null);
