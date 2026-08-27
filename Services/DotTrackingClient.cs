@@ -15,6 +15,8 @@ namespace Slh.Tms.Api.Services;
 public sealed class DotTrackingClient
 {
     private const string ProviderName = "RoadTech Falcon";
+    private const string CurrentTelemetryEndpoint = "Falcon/GetCurrentTelemetry";
+    private const string HistoricalTelemetryEndpoint = "Falcon/GetHistoricalTelemetry";
     private static readonly TimeSpan CurrentTelemetryBudget = TimeSpan.FromSeconds(8);
     private readonly HttpClient _httpClient;
     private readonly DotTrackingOptions _options;
@@ -61,7 +63,13 @@ public sealed class DotTrackingClient
 
             for (var page = 0; page < _options.MaxPages; page++)
             {
-                var response = await GetTelemetryPageAsync(sid, DateOnly.FromDateTime(DateTime.UtcNow), offset, _options.OnlyLive ? 1 : 0, currentRequest.Token);
+                var response = await GetTelemetryPageAsync(
+                    CurrentTelemetryEndpoint,
+                    sid,
+                    DateOnly.FromDateTime(DateTime.UtcNow),
+                    offset,
+                    _options.OnlyLive ? 1 : 0,
+                    currentRequest.Token);
                 results.AddRange(response.Data);
 
                 if (!response.MoreData || response.RecordCount == 0)
@@ -95,11 +103,11 @@ public sealed class DotTrackingClient
     }
 
     /// <summary>
-    /// Replays a complete Falcon operating day through the same telemetry endpoint
-    /// used for live tracking. Supplying the requested day with OnlyLive=0 asks
-    /// Falcon for the full dated telemetry stream, including vehicles that are no
-    /// longer currently live/signed on. Offset pagination is preserved so later
-    /// journeys cannot silently disappear.
+    /// Replays a complete Falcon operating day through RoadTech's documented
+    /// /api/Falcon/GetHistoricalTelemetry endpoint. This is intentionally separate
+    /// from GetCurrentTelemetry: a current fleet snapshot is not a movement trail
+    /// and therefore cannot reconstruct geofence ENTER/EXIT crossings.
+    /// Offset pagination is preserved so later journeys cannot silently disappear.
     /// </summary>
     public async Task<IReadOnlyList<RoadTechTelemetryItem>> GetHistoricalVehicleEventsAsync(
         DateOnly day,
@@ -114,7 +122,13 @@ public sealed class DotTrackingClient
 
         for (var page = 0; page < _options.MaxPages; page++)
         {
-            var response = await GetTelemetryPageAsync(sid, day, offset, 0, cancellationToken);
+            var response = await GetTelemetryPageAsync(
+                HistoricalTelemetryEndpoint,
+                sid,
+                day,
+                offset,
+                0,
+                cancellationToken);
             results.AddRange(response.Data);
 
             if (!response.MoreData || response.RecordCount == 0)
@@ -126,7 +140,7 @@ public sealed class DotTrackingClient
         }
 
         _logger.LogInformation(
-            "{Provider} returned {Count} full-day telemetry records for {Day}.",
+            "{Provider} returned {Count} historical telemetry records for {Day}.",
             ProviderName,
             results.Count,
             day);
@@ -183,13 +197,14 @@ public sealed class DotTrackingClient
     private static bool IsProviderHash(string value) => value.All(Uri.IsHexDigit) && value.Length is 32 or 40 or 64;
 
     private async Task<RoadTechTelemetryPage> GetTelemetryPageAsync(
+        string endpoint,
         string sid,
         DateOnly day,
         int offset,
         int onlyLive,
         CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, "Falcon/GetCurrentTelemetry");
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
         request.Headers.Add("APIKEY", _options.ApiKey);
         request.Headers.Add("SID", sid);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
@@ -201,7 +216,11 @@ public sealed class DotTrackingClient
             onlyLive), options: RoadTechJson.Options);
 
         using var response = await _httpClient.SendAsync(request, cancellationToken);
-        if (!response.IsSuccessStatusCode) throw new HttpRequestException(await RoadTechFailureDetail(response, "Falcon/GetCurrentTelemetry", cancellationToken), null, response.StatusCode);
+        if (!response.IsSuccessStatusCode)
+            throw new HttpRequestException(
+                await RoadTechFailureDetail(response, endpoint, cancellationToken),
+                null,
+                response.StatusCode);
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         var page = await JsonSerializer.DeserializeAsync<RoadTechTelemetryPage>(
