@@ -8,6 +8,7 @@ namespace Slh.Tms.Api.Services;
 public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTrackingTelemetryStore> logger)
 {
     private static readonly ConcurrentDictionary<string, byte> NormalisedProviderIdentifiers = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan MaximumLiveFutureSkew = TimeSpan.FromMinutes(5);
 
     public async Task PersistAsync(IEnumerable<DotTelemetryRecord> records, CancellationToken ct, bool markAsLiveReceipt = true)
     {
@@ -45,27 +46,43 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
                 }
             }
 
+            // GetCurrentTelemetry is a receipt-time assertion that this is the vehicle's
+            // current position. A provider timestamp materially in the future must never
+            // poison the operating-day history or make a wallboard wait until tomorrow.
+            // In that exceptional case use the current receipt as the safe live timestamp;
+            // historical replay remains provider-time based so its movement chronology is
+            // preserved and can repair previously stored rows from the authoritative page.
+            var eventTimeUtc = record.EventTimeUtc;
+            if (markAsLiveReceipt && eventTimeUtc > receivedAt.Add(MaximumLiveFutureSkew))
+            {
+                logger.LogWarning(
+                    "RoadTech returned future event time {ProviderEventTimeUtc} for {VehicleIdentifier}; normalising current telemetry to receipt time {ReceivedAtUtc}.",
+                    eventTimeUtc,
+                    canonicalIdentifier,
+                    receivedAt);
+                eventTimeUtc = receivedAt;
+            }
+
             var hasGps = record.Latitude is not null && record.Longitude is not null;
             if (hasGps)
             {
-                var existsLocally = db.VehicleTrackingEvents.Local.Any(item =>
+                var existing = db.VehicleTrackingEvents.Local.FirstOrDefault(item =>
                     item.ProviderName == "RoadTech Falcon" &&
-                    item.ProviderEventId == record.ProviderEventId);
+                    item.ProviderEventId == record.ProviderEventId)
+                    ?? await db.VehicleTrackingEvents.FirstOrDefaultAsync(
+                        item =>
+                            item.ProviderName == "RoadTech Falcon" &&
+                            item.ProviderEventId == record.ProviderEventId,
+                        ct);
 
-                var exists = existsLocally || await db.VehicleTrackingEvents.AnyAsync(
-                    item =>
-                        item.ProviderName == "RoadTech Falcon" &&
-                        item.ProviderEventId == record.ProviderEventId,
-                    ct);
-
-                if (!exists)
+                if (existing is null)
                 {
                     db.VehicleTrackingEvents.Add(new VehicleTrackingEvent
                     {
                         ProviderName = "RoadTech Falcon",
                         ProviderEventId = record.ProviderEventId,
                         VehicleIdentifier = canonicalIdentifier,
-                        EventTimeUtc = record.EventTimeUtc,
+                        EventTimeUtc = eventTimeUtc,
                         Latitude = record.Latitude!.Value,
                         Longitude = record.Longitude!.Value,
                         SpeedKph = record.SpeedKph,
@@ -74,6 +91,24 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
                         RawPayload = record.RawPayload,
                         MatchStatus = "Received"
                     });
+                }
+                else if (!markAsLiveReceipt)
+                {
+                    // Historical replay is a repair pass, not insert-only ingestion. If a
+                    // provider event already exists with an earlier parsing/normalisation
+                    // mistake, overwrite the telemetry facts from the newly fetched Falcon
+                    // history. This is what allows today's replay to move bad future-dated
+                    // events back into the correct operating-day window before geofence
+                    // projection is rebuilt.
+                    existing.VehicleIdentifier = canonicalIdentifier;
+                    existing.EventTimeUtc = eventTimeUtc;
+                    existing.Latitude = record.Latitude!.Value;
+                    existing.Longitude = record.Longitude!.Value;
+                    existing.SpeedKph = record.SpeedKph;
+                    existing.IgnitionOn = record.IgnitionOn;
+                    existing.IsMoving = record.IsMoving;
+                    existing.RawPayload = record.RawPayload;
+                    existing.MatchStatus = "Received";
                 }
             }
 
@@ -89,7 +124,7 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
                 live = new VehicleLiveStatus
                 {
                     VehicleIdentifier = canonicalIdentifier,
-                    LastEventTimeUtc = record.EventTimeUtc,
+                    LastEventTimeUtc = eventTimeUtc,
                     LastReceivedAtUtc = receivedAt,
                     Latitude = record.Latitude!.Value,
                     Longitude = record.Longitude!.Value,
@@ -115,9 +150,9 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
 
                 // Do not roll the stored position backwards if RoadTech includes an older
                 // event in the current-fleet response.
-                if (record.EventTimeUtc >= live.LastEventTimeUtc)
+                if (eventTimeUtc >= live.LastEventTimeUtc)
                 {
-                    live.LastEventTimeUtc = record.EventTimeUtc;
+                    live.LastEventTimeUtc = eventTimeUtc;
                     live.Latitude = record.Latitude!.Value;
                     live.Longitude = record.Longitude!.Value;
                     live.SpeedKph = record.SpeedKph;
