@@ -103,10 +103,11 @@ if (fleetioOptions.BaseUrl.EndsWith("/api/v2", StringComparison.OrdinalIgnoreCas
 builder.Services.AddSingleton(fleetioOptions);
 builder.Services.AddScoped<AzureSmsDispatchService>();
 builder.Services.AddScoped<IntegrationSyncCoordinator>();
+builder.Services.AddTransient<TachoMasterRetryHandler>();
 builder.Services.AddHttpClient<DriverSmsDispatchService>();
 builder.Services.AddHttpClient<SageHrClient>();
 builder.Services.AddHttpClient<DotTrackingClient>();
-builder.Services.AddHttpClient<TachoMasterClient>();
+builder.Services.AddHttpClient<TachoMasterClient>().AddHttpMessageHandler<TachoMasterRetryHandler>();
 builder.Services.AddHttpClient<AzureMapsRouteClient>();
 builder.Services.AddHttpClient<FleetioClient>();
 builder.Services.AddHostedService<DotTrackingIngestionService>();
