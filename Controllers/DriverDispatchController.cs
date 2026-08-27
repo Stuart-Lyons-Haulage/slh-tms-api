@@ -111,7 +111,20 @@ public sealed class DriverDispatchController(
         }).OrderBy(driver => driver.DisplayName).ToList();
 
         var dispatchStates = await DriverDispatchStateStore.ReadAsync(db, loads.Select(load => load.Id), ct);
-        var southboundRuns = loads.Where(IsSouthbound).Where(load => load.DriverId is null).ToList();
+        var unavailableDriverIds = selectedDrivers
+            .Where(driver => sage.Leave.ContainsKey(Normalise(driver.EmployeeNumber)))
+            .Select(driver => driver.Id)
+            .ToHashSet();
+        var assistedPlan = await DriverDispatchAssistantService.BuildAsync(
+            db,
+            planningDate,
+            selectedDrivers,
+            loads,
+            history,
+            vehicles,
+            trailers,
+            unavailableDriverIds,
+            ct);
 
         var rows = new List<DriverDispatchDriver>();
         foreach (var driver in selectedDrivers)
@@ -127,9 +140,13 @@ public sealed class DriverDispatchController(
             var employeeKey = Normalise(driver.EmployeeNumber);
             sage.Leave.TryGetValue(employeeKey, out var absence);
             roster.TryGetValue(driver.Id, out var rosterEntry);
+            assistedPlan.TryGetValue(driver.Id, out var assisted);
 
             Guid? suggestedRunId = null;
             string? suggestedRunReference = null;
+            Guid? suggestedVehicleId = null;
+            string? suggestedVehicleRegistration = null;
+            int? assistantScore = null;
             string? suggestion = null;
             var previousFinal = previous?.Stops.OrderBy(stop => stop.Sequence).LastOrDefault();
             if (absence is not null)
@@ -140,11 +157,14 @@ public sealed class DriverDispatchController(
             {
                 suggestion = allocated.Count == 1 ? "Already allocated." : $"{allocated.Count} runs already allocated.";
             }
-            else if (dayNumber >= 5 && previousFinal?.Latitude >= 52.5m && southboundRuns.FirstOrDefault() is { } southbound)
+            else if (assisted is not null)
             {
-                suggestedRunId = southbound.Id;
-                suggestedRunReference = RunDisplayLabel.For(southbound);
-                suggestion = $"Day {dayNumber} · finished north · prioritise {suggestedRunReference} to bring the driver south/home.";
+                suggestedRunId = assisted.LoadId;
+                suggestedRunReference = assisted.LoadReference;
+                suggestedVehicleId = assisted.VehicleId;
+                suggestedVehicleRegistration = assisted.VehicleRegistration;
+                assistantScore = assisted.Score;
+                suggestion = assisted.Reason;
             }
             else if (string.Equals(driver.Coding?.Trim(), "3", StringComparison.OrdinalIgnoreCase))
             {
@@ -188,6 +208,9 @@ public sealed class DriverDispatchController(
                 allocated.Count,
                 suggestedRunId,
                 suggestedRunReference,
+                suggestedVehicleId,
+                suggestedVehicleRegistration,
+                assistantScore,
                 suggestion,
                 rosterEntry?.FromDate,
                 rosterEntry?.ThroughDate));
@@ -202,6 +225,7 @@ public sealed class DriverDispatchController(
             leaveSource = sage.Available ? "Sage HR" : "Unavailable",
             driverPopulationSource = sage.Available ? "Sage HR driver roles + relevant Agency" : "Canonical driver evidence + relevant Agency fallback",
             dayNumberSource = "TMS executed-run history; live TachoMaster compliance is rechecked at dispatch",
+            assistantSource = "Explainable matching using live/last Falcon position, work-day continuity, Driver skills/coding, route direction and learned regular vehicle preference",
             drivers = rows.OrderBy(row => TypeOrder(row.DriverType)).ThenBy(row => row.DisplayName),
             vehicles,
             trailers,
@@ -525,6 +549,9 @@ public sealed record DriverDispatchDriver(
     int AssignedRunCount,
     Guid? SuggestedRunId,
     string? SuggestedRunReference,
+    Guid? SuggestedVehicleId,
+    string? SuggestedVehicleRegistration,
+    int? AssistantScore,
     string? Suggestion,
     DateOnly? AgencyBookedFrom,
     DateOnly? AgencyBookedThrough);
