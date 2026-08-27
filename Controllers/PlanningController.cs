@@ -42,27 +42,16 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
     {
         if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
 
+        var loads = await PlanningResilience.ReadLoadsAsync(db, date, ct);
         try
         {
-            var query = db.Loads.AsNoTracking().Include(load => load.Stops).AsQueryable();
-            if (date is not null) query = query.Where(load => load.PlanningDate == date);
-            var loads = await query.OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).Take(500).ToListAsync(ct);
             await LoadCommercialStore.EnrichAsync(db, loads, ct);
-            if (loads.Count > 0) return Ok(loads);
-
-            var registerLoads = await PlanningRegisterStore.ReadLoadsAsync(db, date, ct);
-            return Ok(registerLoads.Count > 0 ? registerLoads : loads);
-        }
-        catch (Exception exception) when (IsSchemaUnavailable(exception))
-        {
-            db.ChangeTracker.Clear();
-            return Ok(await PlanningRegisterStore.ReadLoadsAsync(db, date, ct));
         }
         catch (Exception) when (!ct.IsCancellationRequested)
         {
             db.ChangeTracker.Clear();
-            return Ok(await PlanningRegisterStore.ReadLoadsAsync(db, date, ct));
         }
+        return Ok(loads);
     }
 
     [HttpPost("loads"), Authorize(Policy = "TmsWrite")]
