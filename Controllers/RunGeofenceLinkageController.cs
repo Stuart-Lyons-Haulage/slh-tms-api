@@ -1,6 +1,5 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
@@ -15,29 +14,23 @@ public sealed class RunGeofenceLinkageController(TmsDbContext db) : ControllerBa
     [HttpGet]
     public async Task<IActionResult> Get([FromQuery] DateOnly date, CancellationToken ct)
     {
-        var loads = await ReadLoadsAsync(date, ct);
+        // Use the same merged planning source and the same reconstructed + durable
+        // RoadTech evidence as Run Progress. The old diagnostics endpoint only read
+        // durable GeofenceVisits by exact LoadStopId, so the progress bar could advance
+        // while this panel incorrectly continued to report "LINKED · NO HIT".
+        var loads = (await PlanningResilience.ReadLoadsAsync(db, date, ct))
+            .Where(load => load.Status != LoadStatus.Cancelled)
+            .ToList();
         var resolver = await PlannerSourceMasterDataResolver.CreateAsync(db, ct);
-        var loadIds = loads.Select(load => load.Id).ToHashSet();
-        var stopIds = loads.SelectMany(load => load.Stops ?? []).Select(stop => stop.Id).ToHashSet();
-
-        List<GeofenceVisit> visits;
-        try
-        {
-            visits = await db.GeofenceVisits.AsNoTracking()
-                .Where(visit =>
-                    (visit.LoadId != null && loadIds.Contains(visit.LoadId.Value)) ||
-                    (visit.LoadStopId != null && stopIds.Contains(visit.LoadStopId.Value)))
-                .OrderBy(visit => visit.EnteredAtUtc)
-                .ToListAsync(ct);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            db.ChangeTracker.Clear();
-            visits = [];
-        }
+        var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
+        var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, date, geofenceLoads, ct);
+        snapshot = await EmbeddedGeofenceEvidenceMerge.MergeDurableProjectionAsync(db, snapshot, loads, ct);
+        var visits = snapshot.Visits
+            .Where(visit => visit.LoadId is not null)
+            .OrderBy(visit => visit.EnteredAtUtc)
+            .ToList();
 
         var rows = loads
-            .Where(load => load.Status != LoadStatus.Cancelled)
             .OrderBy(load => load.Reference)
             .SelectMany(load =>
             {
@@ -46,7 +39,11 @@ public sealed class RunGeofenceLinkageController(TmsDbContext db) : ControllerBa
                 return stops.Select(stop =>
                 {
                     var resolution = resolver.Resolve(stop.Name);
-                    var stopVisits = visits.Where(visit => visit.LoadStopId == stop.Id).OrderBy(visit => visit.EnteredAtUtc).ToList();
+                    var stopVisits = visits
+                        .Where(visit => visit.LoadId == load.Id && visit.LoadStopId == stop.Id)
+                        .OrderBy(visit => visit.EnteredAtUtc)
+                        .ToList();
+                    var latestVisit = stopVisits.LastOrDefault();
                     var issue = !resolution.SiteMatched
                         ? "SiteNameNotResolved"
                         : !resolution.GeofenceLinked
@@ -66,11 +63,12 @@ public sealed class RunGeofenceLinkageController(TmsDbContext db) : ControllerBa
                         siteCode = resolution.SiteNumber,
                         siteName = resolution.SiteName,
                         geofenceLinked = resolution.GeofenceLinked,
-                        geofenceName = resolution.GeofenceName,
+                        geofenceName = latestVisit?.Fence.Name ?? resolution.GeofenceName,
                         issue,
-                        visitRecorded = stopVisits.Count > 0,
-                        latestEnterUtc = stopVisits.LastOrDefault()?.EnteredAtUtc,
-                        latestExitUtc = stopVisits.LastOrDefault()?.ExitedAtUtc,
+                        visitRecorded = latestVisit is not null,
+                        latestEnterUtc = latestVisit?.EnteredAtUtc,
+                        latestExitUtc = latestVisit?.ExitedAtUtc,
+                        confirmedAtUtc = latestVisit?.ConfirmedAtUtc,
                         evidence = resolution.EvidenceNote
                     };
                 });
@@ -78,47 +76,20 @@ public sealed class RunGeofenceLinkageController(TmsDbContext db) : ControllerBa
             .ToList();
 
         var issues = rows.Where(row => row.issue is not null).ToList();
+        var hitRuns = rows.Where(row => row.visitRecorded).Select(row => row.loadId).Distinct().Count();
         return Ok(new
         {
             planningDate = date,
-            runs = loads.Count(load => load.Status != LoadStatus.Cancelled),
+            runs = loads.Count,
             stops = rows.Count,
             siteNameUnresolved = issues.Count(row => row.issue == "SiteNameNotResolved"),
             siteMatchedButGeofenceUnlinked = issues.Count(row => row.issue == "SiteMatchedGeofenceUnlinked"),
             linkedStops = rows.Count(row => row.siteMatched && row.geofenceLinked),
             stopsWithVisitEvidence = rows.Count(row => row.visitRecorded),
+            runsWithVisitEvidence = hitRuns,
             issues,
             records = rows,
             checkedAtUtc = DateTimeOffset.UtcNow
         });
-    }
-
-    private async Task<List<Load>> ReadLoadsAsync(DateOnly date, CancellationToken ct)
-    {
-        var merged = new Dictionary<Guid, Load>();
-        try
-        {
-            foreach (var load in await PlanningRegisterStore.ReadLoadsAsync(db, date, ct))
-                merged[load.Id] = load;
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            db.ChangeTracker.Clear();
-        }
-
-        try
-        {
-            var sqlLoads = await db.Loads.AsNoTracking()
-                .Include(load => load.Stops)
-                .Where(load => load.PlanningDate == date)
-                .ToListAsync(ct);
-            foreach (var load in sqlLoads) merged[load.Id] = load;
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            db.ChangeTracker.Clear();
-        }
-
-        return merged.Values.ToList();
     }
 }
