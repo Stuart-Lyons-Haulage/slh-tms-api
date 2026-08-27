@@ -49,7 +49,9 @@ public sealed class RunProgressLiveRefreshTests
     public async Task Operations_progress_refreshes_the_same_live_falcon_evidence_as_the_tv_route_board()
     {
         // Regression: the Hisense route board refreshed Falcon before deriving visits,
-        // while Operations read SQL only and therefore showed zero linked/progressing runs.
+        // while Operations read SQL only and therefore showed zero hit/progressing runs.
+        // This fixture deliberately has no Site Master linkage, so configuration linkage
+        // remains zero while the Falcon hit evidence must still be visible independently.
         var fence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences.Where(item => item.Name.Trim() == "Swindon (Aldi)"));
         var longitude = fence.Points.Average(point => point.Longitude);
         var latitude = fence.Points.Average(point => point.Latitude);
@@ -121,7 +123,8 @@ public sealed class RunProgressLiveRefreshTests
         using var document = JsonDocument.Parse(JsonSerializer.Serialize(response.Value, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
         var root = document.RootElement;
 
-        Assert.Equal(1, root.GetProperty("geofenceLinkedRuns").GetInt32());
+        Assert.Equal(0, root.GetProperty("geofenceLinkedRuns").GetInt32());
+        Assert.Equal(1, root.GetProperty("geofenceHitRuns").GetInt32());
         Assert.True(root.GetProperty("trackingEventCount").GetInt32() >= 1);
         var record = Assert.Single(root.GetProperty("records").EnumerateArray());
         Assert.Equal(loadId, record.GetProperty("loadId").GetGuid());
