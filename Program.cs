@@ -104,6 +104,7 @@ builder.Services.AddSingleton(fleetioOptions);
 builder.Services.AddScoped<AzureSmsDispatchService>();
 builder.Services.AddScoped<IntegrationSyncCoordinator>();
 builder.Services.AddScoped<TachoDriverMasterSyncService>();
+builder.Services.AddScoped<DriverMasterClassificationService>();
 builder.Services.AddTransient<TachoMasterRetryHandler>();
 builder.Services.AddHttpClient<DriverSmsDispatchService>();
 builder.Services.AddHttpClient<SageHrClient>();
@@ -114,6 +115,7 @@ builder.Services.AddHttpClient<FleetioClient>();
 builder.Services.AddHostedService<DotTrackingIngestionService>();
 builder.Services.AddHostedService<IntegrationBackgroundSyncService>();
 builder.Services.AddHostedService<TachoDriverMasterBackgroundService>();
+builder.Services.AddHostedService<DriverMasterClassificationBackgroundService>();
 
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
 
