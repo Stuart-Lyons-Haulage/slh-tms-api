@@ -27,17 +27,7 @@ public sealed class RoadTechHistoryRepairTests
         await db.SaveChangesAsync();
 
         var store = new DotTrackingTelemetryStore(db, NullLogger<DotTrackingTelemetryStore>.Instance);
-        var corrected = new DotTelemetryRecord(
-            "event-1",
-            "AB12 CDE",
-            new DateTimeOffset(2026, 8, 27, 12, 1, 0, TimeSpan.Zero),
-            50.7581m,
-            -0.7794m,
-            22m,
-            true,
-            true,
-            "Received",
-            "corrected");
+        var corrected = Record("event-1", "AB12 CDE", new DateTimeOffset(2026, 8, 27, 12, 1, 0, TimeSpan.Zero), 50.7581m, -0.7794m, "corrected");
 
         await store.PersistAsync([corrected], CancellationToken.None, markAsLiveReceipt: false);
 
@@ -63,17 +53,7 @@ public sealed class RoadTechHistoryRepairTests
         await db.SaveChangesAsync();
 
         var store = new DotTrackingTelemetryStore(db, NullLogger<DotTrackingTelemetryStore>.Instance);
-        var historical = new DotTelemetryRecord(
-            "event-2",
-            "AB12 CDE",
-            new DateTimeOffset(2026, 8, 27, 8, 0, 0, TimeSpan.Zero),
-            50.0m,
-            -0.5m,
-            10m,
-            true,
-            true,
-            "Received",
-            "historical");
+        var historical = Record("event-2", "AB12 CDE", new DateTimeOffset(2026, 8, 27, 8, 0, 0, TimeSpan.Zero), 50.0m, -0.5m, "historical");
 
         await store.PersistAsync([historical], CancellationToken.None, markAsLiveReceipt: false);
 
@@ -82,6 +62,59 @@ public sealed class RoadTechHistoryRepairTests
         Assert.Equal(51.0m, live.Latitude);
         Assert.Equal(-1.0m, live.Longitude);
     }
+
+    [Fact]
+    public void Current_future_timestamp_is_normalised_to_receipt_time()
+    {
+        var receivedAt = new DateTimeOffset(2026, 8, 27, 12, 0, 0, TimeSpan.Zero);
+        var future = Record("live-1", "AB12 CDE", new DateTimeOffset(2026, 8, 28, 18, 1, 0, TimeSpan.Zero), 50.1m, -0.6m, "live");
+
+        var normalised = DotTrackingIngestionService.NormaliseCurrentEventTimes([future], receivedAt);
+
+        Assert.Equal(receivedAt, Assert.Single(normalised).EventTimeUtc);
+    }
+
+    [Fact]
+    public void Today_history_uses_current_vehicle_clock_to_remove_systematic_future_skew()
+    {
+        var now = new DateTimeOffset(2026, 8, 27, 12, 5, 0, TimeSpan.Zero);
+        var current = new[]
+        {
+            Record("current", "AB12 CDE", new DateTimeOffset(2026, 8, 27, 12, 1, 0, TimeSpan.Zero), 50.2m, -0.7m, "current")
+        };
+        var history = new[]
+        {
+            Record("hist-1", "AB12 CDE", new DateTimeOffset(2026, 8, 28, 17, 31, 0, TimeSpan.Zero), 50.0m, -0.5m, "history-1"),
+            Record("hist-2", "AB12 CDE", new DateTimeOffset(2026, 8, 28, 18, 1, 0, TimeSpan.Zero), 50.1m, -0.6m, "history-2")
+        };
+
+        var normalised = DotTrackingIngestionService.NormaliseHistoricalEventTimes(history, current, new DateOnly(2026, 8, 27), now);
+
+        Assert.Equal(new DateTimeOffset(2026, 8, 27, 11, 31, 0, TimeSpan.Zero), normalised[0].EventTimeUtc);
+        Assert.Equal(new DateTimeOffset(2026, 8, 27, 12, 1, 0, TimeSpan.Zero), normalised[1].EventTimeUtc);
+        Assert.Equal(TimeSpan.FromMinutes(30), normalised[1].EventTimeUtc - normalised[0].EventTimeUtc);
+    }
+
+    [Fact]
+    public void Legitimate_today_history_is_not_shifted()
+    {
+        var now = new DateTimeOffset(2026, 8, 27, 12, 5, 0, TimeSpan.Zero);
+        var current = new[]
+        {
+            Record("current", "AB12 CDE", new DateTimeOffset(2026, 8, 27, 12, 1, 0, TimeSpan.Zero), 50.2m, -0.7m, "current")
+        };
+        var history = new[]
+        {
+            Record("hist", "AB12 CDE", new DateTimeOffset(2026, 8, 27, 11, 45, 0, TimeSpan.Zero), 50.0m, -0.5m, "history")
+        };
+
+        var normalised = DotTrackingIngestionService.NormaliseHistoricalEventTimes(history, current, new DateOnly(2026, 8, 27), now);
+
+        Assert.Equal(history[0].EventTimeUtc, Assert.Single(normalised).EventTimeUtc);
+    }
+
+    private static DotTelemetryRecord Record(string id, string vehicle, DateTimeOffset time, decimal latitude, decimal longitude, string payload) =>
+        new(id, vehicle, time, latitude, longitude, 22m, true, true, "Received", payload);
 
     private static TmsDbContext CreateDb()
     {
