@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Models.Tracking;
 
 namespace Slh.Tms.Api.Services;
 
@@ -81,9 +82,6 @@ public static class DriverDispatchAssistantService
             }
         }
 
-        // Global greedy matching: highest-confidence Driver↔Run pairing wins and both are then reserved.
-        // This makes the proposed plan coherent instead of independently suggesting the same Run to
-        // several drivers. The planner still decides whether to accept any suggestion.
         var usedDrivers = new HashSet<Guid>();
         var usedLoads = new HashSet<Guid>();
         var result = new Dictionary<Guid, DriverDispatchAssistantSuggestion>();
@@ -101,7 +99,6 @@ public static class DriverDispatchAssistantService
                 candidate.Reason);
         }
 
-        // A regular/yesterday vehicle suggestion is still useful even when there is no unallocated Run.
         foreach (var context in contexts.Values.Where(item => !result.ContainsKey(item.Driver.Id) && item.SuggestedVehicle is not null))
         {
             result[context.Driver.Id] = new DriverDispatchAssistantSuggestion(
