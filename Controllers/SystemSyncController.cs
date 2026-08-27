@@ -24,11 +24,21 @@ public sealed class SystemSyncController(
     {
         var now = DateTimeOffset.UtcNow;
         var trackingUtc = await db.VehicleLiveStatuses.AsNoTracking().MaxAsync(item => (DateTimeOffset?)item.LastEventTimeUtc, ct);
-        var tachoUtc = await db.Drivers.AsNoTracking().MaxAsync(item => (DateTimeOffset?)item.LastTachoSyncUtc, ct);
+
+        // Driver.LastTachoSyncUtc is runtime-only / NotMapped and cannot be translated by EF.
+        // Use persisted successful Tacho receipts instead so the dashboard feed-health endpoint
+        // cannot fail with HTTP 500 while still reporting the most recent platform evidence.
+        var tachoUtc = await db.StagedImports.AsNoTracking()
+            .Where(item => item.Status == StagingStatus.Promoted &&
+                (item.EntityType == "tachodrivermastersync" ||
+                 item.EntityType == "tachomastersync" ||
+                 item.EntityType == "tachodriverprofile"))
+            .MaxAsync(item => (DateTimeOffset?)(item.ReviewedAtUtc ?? item.ReceivedAtUtc), ct);
+
         var fleetioUtc = await db.Vehicles.AsNoTracking().MaxAsync(item => (DateTimeOffset?)item.FleetioLastSyncedUtc, ct);
         var sageUtc = await db.StagedImports.AsNoTracking()
             .Where(item => item.EntityType == "sagehrsync" && item.Status == StagingStatus.Promoted)
-            .MaxAsync(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc, ct);
+            .MaxAsync(item => (DateTimeOffset?)(item.ReviewedAtUtc ?? item.ReceivedAtUtc), ct);
 
         var providers = new[]
         {
@@ -39,7 +49,7 @@ public sealed class SystemSyncController(
         };
         var configured = providers.Where(item => item.Configured).ToArray();
         var status = configured.Any(item => item.State == "stale") ? "attention" : configured.Any(item => item.State == "pending") ? "pending" : "current";
-        var lastPlatformUpdateUtc = providers.Where(item => item.LastUpdatedUtc is not null).Max(item => item.LastUpdatedUtc);
+        var lastPlatformUpdateUtc = providers.Select(item => item.LastUpdatedUtc).Max();
         return Ok(new
         {
             status,
