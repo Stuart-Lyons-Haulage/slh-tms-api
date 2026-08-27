@@ -35,7 +35,8 @@ jobs:
           route_file="$(mktemp)"
           eta_file="$(mktemp)"
           tv_file="$(mktemp)"
-          trap 'rm -f "$progress_file" "$route_file" "$eta_file" "$tv_file"' EXIT
+          source_file="$(mktemp)"
+          trap 'rm -f "$progress_file" "$route_file" "$eta_file" "$tv_file" "$source_file"' EXIT
 
           request() {
             local label="$1"
@@ -50,10 +51,16 @@ jobs:
             fi
           }
 
+          request 'Wallboard source parity' "$source_file" "$API_BASE/api/v1/operations/wallboard-source-health?date=$planning_date"
           request 'Run progress' "$progress_file" "$API_BASE/api/v1/run-progress?date=$planning_date"
           request 'TV route progress' "$route_file" "$API_BASE/api/v1/tv-display/route-progress?date=$planning_date"
           request 'Operations delivery ETAs' "$eta_file" "$API_BASE/api/v1/operations/delivery-etas?date=$planning_date"
           request 'TV live runs' "$tv_file" "$API_BASE/api/v1/tv-display/live-runs?date=$planning_date"
+
+          imported_plan_runs="$(jq -r '.importedPlanRuns // 0' "$source_file")"
+          resilient_wallboard_runs="$(jq -r '.wallboardRuns // 0' "$source_file")"
+          all_imported_visible="$(jq -r '.allImportedRunsVisible // false' "$source_file")"
+          missing_imported_runs="$(jq -r '(.missingImportedRuns // []) | join(", ")' "$source_file")"
 
           run_count="$(jq -r '.count // 0' "$progress_file")"
           linked_runs="$(jq -r '.geofenceLinkedRuns // 0' "$progress_file")"
@@ -72,7 +79,8 @@ jobs:
           tv_final_stop_count="$(jq -r '(.runs // []) | map(select((.finalStop // "") != "")) | length' "$tv_file")"
           tv_eta_count="$(jq -r '(.runs // []) | map(select(.etaUtc != null)) | length' "$tv_file")"
 
-          echo "planningDate=$planning_date runs=$run_count linkedRuns=$linked_runs linkedStops=$linked_stops hitRuns=$hit_runs hitStops=$hit_stops visits=$visit_count latestHit=${latest_hit:-none}"
+          echo "planningDate=$planning_date importedPlanRuns=$imported_plan_runs resilientWallboardRuns=$resilient_wallboard_runs allImportedVisible=$all_imported_visible missing=${missing_imported_runs:-none}"
+          echo "runs=$run_count linkedRuns=$linked_runs linkedStops=$linked_stops hitRuns=$hit_runs hitStops=$hit_stops visits=$visit_count latestHit=${latest_hit:-none}"
           echo "deliveryEtaRecords=$eta_records finalDestinations=$final_destination_count finalEtas=$final_eta_count finalLiveOrEstimatedEtas=$final_live_eta_count"
           echo "tvRuns=$tv_run_count tvFinalStops=$tv_final_stop_count tvEtas=$tv_eta_count"
 
@@ -80,6 +88,10 @@ jobs:
             echo '### Production wallboard verification'
             echo
             echo "- Planning date: **$planning_date**"
+            echo "- Durable imported plan runs: **$imported_plan_runs**"
+            echo "- Resilient wallboard source runs: **$resilient_wallboard_runs**"
+            echo "- All imported runs visible: **$all_imported_visible**"
+            echo "- Missing imported runs: **${missing_imported_runs:-none}**"
             echo "- Runs visible to Run Progress: **$run_count**"
             echo "- Configured geofence-linked runs/stops: **$linked_runs / $linked_stops**"
             echo "- Runs/stops with actual Site Master geofence evidence: **$hit_runs / $hit_stops**"
@@ -88,6 +100,11 @@ jobs:
             echo "- Operations final destinations / ETAs: **$final_destination_count / $final_eta_count**"
             echo "- Operations live or estimated final ETAs: **$final_live_eta_count**"
             echo "- TV runs / final destinations / ETAs: **$tv_run_count / $tv_final_stop_count / $tv_eta_count**"
+            echo
+            echo '#### Wallboard source parity'
+            echo '```json'
+            jq . "$source_file"
+            echo '```'
             echo
             echo '#### Run Progress metrics'
             echo '```json'
@@ -100,7 +117,10 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          test "$run_count" -gt 0
+          test "$imported_plan_runs" -gt 0
+          test "$all_imported_visible" = "true"
+          test "$resilient_wallboard_runs" -ge "$imported_plan_runs"
+          test "$run_count" -ge "$imported_plan_runs"
           test "$linked_runs" -gt 0
           test "$linked_stops" -gt 0
           test "$hit_runs" -gt 0
