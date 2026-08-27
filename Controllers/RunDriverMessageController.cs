@@ -121,6 +121,14 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
     private async Task<RunDispatchReadinessResponse> AssessReadiness(Load load, Driver driver, Vehicle vehicle, int routeDrivingMinutes, CancellationToken ct)
     {
         var minutes = Math.Max(1, routeDrivingMinutes);
+
+        // Tacho member/card identities are retained in the audited Driver Master detail store on
+        // legacy production schemas. Dispatch must enrich the allocated driver before matching it
+        // to the live duty/card or a correctly synced CRM record can appear to have no identity.
+        await MasterDetailStore.EnrichDriversAsync(db, [driver], ct);
+        if (string.IsNullOrWhiteSpace(driver.TachoMasterDriverId) && string.IsNullOrWhiteSpace(driver.TachoCardNumber))
+            return Blocked(minutes, 0, "The allocated Driver Master record has no TachoMaster member number or driver card identity. Sync the Driver Master from TachoMaster before dispatch.");
+
         IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> statuses;
         try
         {
@@ -137,7 +145,7 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
             : ExecutionIdentityResolver.VehicleAliasVariants(vehicle.Registration).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var tacho = ExecutionIdentityResolver.MatchLiveDriverIdentityForVehicle(vehicleAliases, driver, statuses);
         if (tacho is null)
-            return Blocked(minutes, 0, "No live driver card, Falcon driver identity or TachoMaster duty was matched to this driver and vehicle. Confirm the driver has signed on before dispatch.");
+            return Blocked(minutes, 0, "The Driver Master identity is present, but no live driver card, Falcon identity or TachoMaster duty is currently attached to this vehicle. Confirm the driver has signed on in this vehicle before dispatch.");
         if (!ExecutionIdentityResolver.DriverMatches(driver, tacho))
             return Blocked(minutes, 0, $"Live card/driver evidence is present for {tacho.DriverName}, but it does not match the planned driver. Correct the allocation before dispatch.", tacho);
 
