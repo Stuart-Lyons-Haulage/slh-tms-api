@@ -48,7 +48,7 @@ public sealed class DotTrackingClientTests
     }
 
     [Fact]
-    public async Task RoadTech_history_uses_current_telemetry_endpoint_with_requested_day_and_all_vehicles()
+    public async Task RoadTech_history_uses_documented_historical_telemetry_endpoint_with_requested_day()
     {
         var handler = new CapturingHandler();
         var client = new DotTrackingClient(new HttpClient(handler), new DotTrackingOptions
@@ -66,7 +66,7 @@ public sealed class DotTrackingClientTests
         Assert.Equal(new[]
         {
             "https://api-v1-alpha.roadtech.co.uk/api/auth/login",
-            "https://api-v1-alpha.roadtech.co.uk/api/Falcon/GetCurrentTelemetry"
+            "https://api-v1-alpha.roadtech.co.uk/api/Falcon/GetHistoricalTelemetry"
         }, handler.Requests.Select(request => request.RequestUri!.ToString()));
 
         using var payload = JsonDocument.Parse(handler.Bodies[1]);
