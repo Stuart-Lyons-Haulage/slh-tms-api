@@ -14,6 +14,7 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
     {
         var batch = records.ToList();
         var receivedAt = DateTimeOffset.UtcNow;
+        var futureCeiling = receivedAt.Add(MaximumLiveFutureSkew);
 
         foreach (var record in batch)
         {
@@ -53,7 +54,7 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
             // historical replay remains provider-time based so its movement chronology is
             // preserved and can repair previously stored rows from the authoritative page.
             var eventTimeUtc = record.EventTimeUtc;
-            if (markAsLiveReceipt && eventTimeUtc > receivedAt.Add(MaximumLiveFutureSkew))
+            if (markAsLiveReceipt && eventTimeUtc > futureCeiling)
             {
                 logger.LogWarning(
                     "RoadTech returned future event time {ProviderEventTimeUtc} for {VehicleIdentifier}; normalising current telemetry to receipt time {ReceivedAtUtc}.",
@@ -92,14 +93,14 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
                         MatchStatus = "Received"
                     });
                 }
-                else if (!markAsLiveReceipt)
+                else if (!markAsLiveReceipt || existing.EventTimeUtc > futureCeiling)
                 {
-                    // Historical replay is a repair pass, not insert-only ingestion. If a
-                    // provider event already exists with an earlier parsing/normalisation
-                    // mistake, overwrite the telemetry facts from the newly fetched Falcon
-                    // history. This is what allows today's replay to move bad future-dated
-                    // events back into the correct operating-day window before geofence
-                    // projection is rebuilt.
+                    // Historical replay is a repair pass, not insert-only ingestion. Also
+                    // allow the authoritative current snapshot to repair a matching row that
+                    // was previously poisoned with a future provider timestamp. Without this
+                    // exception, provider-event deduplication would preserve the bad timestamp
+                    // forever even though every subsequent current poll proves the position is
+                    // being observed now.
                     existing.VehicleIdentifier = canonicalIdentifier;
                     existing.EventTimeUtc = eventTimeUtc;
                     existing.Latitude = record.Latitude!.Value;
@@ -148,9 +149,10 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
                 live.LastReceivedAtUtc = receivedAt;
                 live.UpdatedAtUtc = receivedAt;
 
-                // Do not roll the stored position backwards if RoadTech includes an older
-                // event in the current-fleet response.
-                if (eventTimeUtc >= live.LastEventTimeUtc)
+                // Normal operation must not roll position backwards. A stored live timestamp
+                // that is itself in the future is different: it is poisoned state, and the
+                // newly normalised current snapshot is the evidence needed to recover it.
+                if (live.LastEventTimeUtc > futureCeiling || eventTimeUtc >= live.LastEventTimeUtc)
                 {
                     live.LastEventTimeUtc = eventTimeUtc;
                     live.Latitude = record.Latitude!.Value;
