@@ -87,20 +87,19 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
 
                 try
                 {
-                    var hasAuthoritativeSqlGeofences = await db.SiteGeofences.AsNoTracking()
-                        .AnyAsync(fence => fence.Active, stoppingToken);
-                    if (!hasAuthoritativeSqlGeofences)
-                    {
-                        // Only use the code-bundled payload when the SQL/Site Master catalogue is
-                        // genuinely unavailable. It must not overwrite operator-maintained geometry.
-                        await EmbeddedGeofenceSqlProjection.RefreshOperatingDaysAsync(db, projectionDays, stoppingToken);
-                    }
+                    // Rebuild the durable GeofenceVisits projection from the stored RoadTech
+                    // event stream on every current-day cycle and for both recovery days after
+                    // a history refresh. EmbeddedGeofenceEngine now reads the active SQL Site
+                    // Master polygons first, so this safely backfills records captured before
+                    // the geofence interpretation was corrected instead of limiting projection
+                    // to the old no-SQL-fences fallback case.
+                    await EmbeddedGeofenceSqlProjection.RefreshOperatingDaysAsync(db, projectionDays, stoppingToken);
                 }
                 catch (Exception exception) when (!stoppingToken.IsCancellationRequested)
                 {
                     // Projection failure must be visible but must not interrupt current RoadTech
-                    // GPS ingestion. The next poll will retry the authoritative live processor.
-                    logger.LogWarning(exception, "Geofence fallback projection failed; current tracking remains available and Site Master hit processing will retry next poll.");
+                    // GPS ingestion. The next poll will retry from the persisted event stream.
+                    logger.LogWarning(exception, "Geofence history projection failed; current tracking remains available and stored RoadTech history will retry next poll.");
                 }
             }
             catch (InvalidOperationException exception) { logger.LogDebug(exception, "DOT tracking ingestion is not configured."); }
