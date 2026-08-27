@@ -10,6 +10,8 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController, Route("api/v1/loads"), Authorize]
 public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatchService sms, TachoMasterClient tachoMaster) : ControllerBase
 {
+    private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+
     [HttpPost("{id:guid}/dispatch-readiness")]
     public async Task<IActionResult> DispatchReadiness(Guid id, RunDispatchReadinessRequest request, CancellationToken ct)
     {
@@ -114,7 +116,6 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            // Dispatch/SMS must not fail merely because the auxiliary timeline table is unavailable.
             db.ChangeTracker.Clear();
         }
     }
@@ -147,12 +148,26 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
     {
         var minutes = Math.Max(1, routeDrivingMinutes);
 
-        // Tacho member/card identities are retained in the audited Driver Master detail store on
-        // legacy production schemas. Dispatch must enrich the allocated driver before matching it
-        // to the live duty/card or a correctly synced CRM record can appear to have no identity.
         await MasterDetailStore.EnrichDriversAsync(db, [driver], ct);
         if (string.IsNullOrWhiteSpace(driver.TachoMasterDriverId) && string.IsNullOrWhiteSpace(driver.TachoCardNumber))
             return Blocked(minutes, 0, "The allocated Driver Master record has no TachoMaster member number or driver card identity. Sync the Driver Master from TachoMaster before dispatch.");
+
+        // Planners normally allocate and send tomorrow's work the day before. A future duty cannot
+        // have a live card in the planned vehicle yet, so require canonical identity/licence/route
+        // now and defer the live-card/remaining-hours proof to the operating-day readiness feed.
+        var ukToday = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
+        if (load.PlanningDate > ukToday)
+            return new RunDispatchReadinessResponse(
+                true,
+                "FutureDuty",
+                $"Future duty for {load.PlanningDate:dd/MM/yyyy}: canonical TachoMaster identity, Driver Master compliance and route checks passed. Live card and remaining hours will be revalidated when the duty becomes current.",
+                minutes,
+                0,
+                driver.TachoName ?? driver.DisplayName,
+                vehicle.Registration,
+                null,
+                driver.TachoDriveAvailableTodayMinutes,
+                driver.TachoWorkAvailableWeekMinutes);
 
         IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> statuses;
         try
