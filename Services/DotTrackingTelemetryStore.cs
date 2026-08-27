@@ -188,6 +188,7 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
         CancellationToken ct)
     {
         var repairCeiling = receivedAt.Add(MaximumStoredFutureRepairWindow);
+        var globalAnchor = currentAnchors.Values.Max();
         var futureRows = await db.VehicleTrackingEvents
             .Where(item =>
                 item.ProviderName == "RoadTech Falcon" &&
@@ -199,7 +200,8 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
         foreach (var group in futureRows.GroupBy(row => ExecutionIdentityResolver.NormaliseVehicle(row.VehicleIdentifier), StringComparer.OrdinalIgnoreCase))
         {
             if (string.IsNullOrWhiteSpace(group.Key)) continue;
-            if (!currentAnchors.TryGetValue(group.Key, out var currentAnchor)) continue;
+            if (!currentAnchors.TryGetValue(group.Key, out var currentAnchor))
+                currentAnchor = globalAnchor;
             var newestFuture = group.Max(row => row.EventTimeUtc);
             var skew = newestFuture - currentAnchor;
             if (skew <= MaximumLiveFutureSkew || skew > MaximumStoredFutureRepairWindow) continue;

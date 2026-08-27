@@ -124,6 +124,35 @@ public sealed class RoadTechHistoryRepairTests
     }
 
     [Fact]
+    public async Task Current_snapshot_repairs_future_stored_trail_without_vehicle_anchor()
+    {
+        await using var db = CreateDb();
+        var currentTime = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var futureTime = currentTime.AddHours(29);
+        db.VehicleTrackingEvents.Add(new VehicleTrackingEvent
+        {
+            ProviderName = "RoadTech Falcon",
+            ProviderEventId = "future-unmatched",
+            VehicleIdentifier = "UNKNOWN-FALCON-KEY",
+            EventTimeUtc = futureTime,
+            Latitude = 51.1m,
+            Longitude = -1.1m,
+            RawPayload = "future",
+            MatchStatus = "Received"
+        });
+        await db.SaveChangesAsync();
+
+        var store = new DotTrackingTelemetryStore(db, NullLogger<DotTrackingTelemetryStore>.Instance);
+        var current = Record("current", "AB12 CDE", currentTime, 50.7581m, -0.7794m, "current");
+
+        await store.PersistAsync([current], CancellationToken.None, markAsLiveReceipt: true);
+
+        var repaired = await db.VehicleTrackingEvents.SingleAsync(row => row.ProviderEventId == "future-unmatched");
+        Assert.Equal(currentTime, repaired.EventTimeUtc);
+        Assert.Contains("ClockRepaired", repaired.MatchStatus);
+    }
+
+    [Fact]
     public async Task Historical_replay_does_not_refresh_live_status()
     {
         await using var db = CreateDb();
