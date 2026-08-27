@@ -187,19 +187,18 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
         DateTimeOffset futureCeiling,
         CancellationToken ct)
     {
-        var identifiers = currentAnchors.Keys.ToList();
         var repairCeiling = receivedAt.Add(MaximumStoredFutureRepairWindow);
         var futureRows = await db.VehicleTrackingEvents
             .Where(item =>
                 item.ProviderName == "RoadTech Falcon" &&
-                identifiers.Contains(item.VehicleIdentifier) &&
                 item.EventTimeUtc > futureCeiling &&
                 item.EventTimeUtc <= repairCeiling)
             .ToListAsync(ct);
 
         var repaired = 0;
-        foreach (var group in futureRows.GroupBy(row => row.VehicleIdentifier, StringComparer.OrdinalIgnoreCase))
+        foreach (var group in futureRows.GroupBy(row => ExecutionIdentityResolver.NormaliseVehicle(row.VehicleIdentifier), StringComparer.OrdinalIgnoreCase))
         {
+            if (string.IsNullOrWhiteSpace(group.Key)) continue;
             if (!currentAnchors.TryGetValue(group.Key, out var currentAnchor)) continue;
             var newestFuture = group.Max(row => row.EventTimeUtc);
             var skew = newestFuture - currentAnchor;

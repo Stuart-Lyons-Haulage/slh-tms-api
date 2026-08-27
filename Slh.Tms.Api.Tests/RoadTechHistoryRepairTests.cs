@@ -91,7 +91,7 @@ public sealed class RoadTechHistoryRepairTests
             {
                 ProviderName = "RoadTech Falcon",
                 ProviderEventId = "future-1",
-                VehicleIdentifier = "AB12CDE",
+                VehicleIdentifier = "AB12 CDE",
                 EventTimeUtc = futureOne,
                 Latitude = 51.0m,
                 Longitude = -1.0m,
