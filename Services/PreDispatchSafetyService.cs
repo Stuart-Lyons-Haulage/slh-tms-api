@@ -46,6 +46,10 @@ public sealed class PreDispatchSafetyService
             checks.Add(Check("DriverActive", driver?.Active == true, "Critical", driver?.Active == true
                 ? "Allocated driver is active."
                 : "Allocated driver is missing or inactive."));
+
+            // Driving-licence validation is intentionally paused. SLH currently uses Driver Hire
+            // for licence checks and will only re-enable an automated dispatch gate once an
+            // authoritative Driver Hire integration is available.
         }
 
         if (load.VehicleId is Guid vehicleId)
@@ -86,9 +90,9 @@ public sealed class PreDispatchSafetyService
         if (load.PalletSpacesUsed is decimal used && load.TotalPalletSpaces is decimal capacity && capacity >= 0)
         {
             checks.Add(Check("CapacityWithinLimit", capacity == 0 ? used == 0 : used <= capacity, "Critical",
-                capacity == 0 ? (used == 0 ? "No pallet capacity is required." : "Pallets are planned but run capacity is zero.")
-                : used <= capacity ? $"Planned pallets {used:0.##}/{capacity:0.##} are within capacity."
-                : $"Planned pallets {used:0.##} exceed capacity {capacity:0.##}."));
+                capacity == 0 ? (used == 0 ? "No load capacity is required." : "Load units are planned but run capacity is zero.")
+                : used <= capacity ? $"Planned load {used:0.##}/{capacity:0.##} is within capacity."
+                : $"Planned load {used:0.##} exceeds capacity {capacity:0.##}."));
         }
         else
         {

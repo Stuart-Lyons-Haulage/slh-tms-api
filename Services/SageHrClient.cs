@@ -5,7 +5,7 @@ using Slh.Tms.Api.Models.Integrations;
 
 namespace Slh.Tms.Api.Services;
 
-/// <summary>Read-only Sage HR employee client. Credentials are runtime-only Key Vault values.</summary>
+/// <summary>Read-only Sage HR employee and leave client. Credentials are runtime-only Key Vault values.</summary>
 public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, ILogger<SageHrClient> logger)
 {
     public bool IsConfigured => options.Enabled && !string.IsNullOrWhiteSpace(options.BaseUrl) && !string.IsNullOrWhiteSpace(options.ApiKey);
@@ -26,17 +26,12 @@ public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, I
 
     public async Task<IReadOnlyList<SageHrEmployee>> GetActiveEmployeesAsync(CancellationToken cancellationToken = default)
     {
-        if (!options.Enabled) throw new InvalidOperationException("Sage HR integration is disabled.");
-        if (string.IsNullOrWhiteSpace(options.BaseUrl) || string.IsNullOrWhiteSpace(options.ApiKey))
-            throw new InvalidOperationException("Sage HR runtime settings are incomplete.");
-        httpClient.BaseAddress = new Uri(NormaliseBaseUrl(options.BaseUrl));
-        httpClient.Timeout = TimeSpan.FromSeconds(30);
+        EnsureConfigured();
+        ConfigureClient();
         var employees = new List<SageHrEmployee>();
         for (var page = 1; page <= 100; page++)
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, $"employees?page={page}&team_history=true&employment_status_history=true&position_history=true");
-            request.Headers.Add("X-Auth-Token", options.ApiKey);
-            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            using var request = Request(HttpMethod.Get, $"employees?page={page}&team_history=true&employment_status_history=true&position_history=true");
             using var response = await httpClient.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
@@ -51,6 +46,49 @@ public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, I
         }
         logger.LogInformation("Retrieved {Count} active Sage HR employees.", employees.Count);
         return employees;
+    }
+
+    /// <summary>
+    /// Returns Sage HR's approved/current out-of-office view for a selected date. This is a
+    /// read-only planning signal used to prevent a driver on leave being suggested for dispatch.
+    /// </summary>
+    public async Task<IReadOnlyList<SageHrOutOfOffice>> GetOutOfOfficeAsync(DateOnly date, CancellationToken cancellationToken = default)
+    {
+        EnsureConfigured();
+        ConfigureClient();
+        using var request = Request(HttpMethod.Get, $"leave-management/out-of-office-today?date={Uri.EscapeDataString(date.ToString("yyyy-MM-dd"))}");
+        using var response = await httpClient.SendAsync(request, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            var detail = await response.Content.ReadAsStringAsync(cancellationToken);
+            throw new HttpRequestException($"Sage HR leave returned {(int)response.StatusCode} ({response.ReasonPhrase}). {ClipDetail(detail)}", null, response.StatusCode);
+        }
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        var payload = await JsonSerializer.DeserializeAsync<SageHrOutOfOfficePage>(stream, SageHrJson.Options, cancellationToken)
+            ?? new SageHrOutOfOfficePage([]);
+        logger.LogInformation("Retrieved {Count} Sage HR out-of-office records for {Date}.", payload.Data.Count, date);
+        return payload.Data;
+    }
+
+    private void EnsureConfigured()
+    {
+        if (!options.Enabled) throw new InvalidOperationException("Sage HR integration is disabled.");
+        if (string.IsNullOrWhiteSpace(options.BaseUrl) || string.IsNullOrWhiteSpace(options.ApiKey))
+            throw new InvalidOperationException("Sage HR runtime settings are incomplete.");
+    }
+
+    private void ConfigureClient()
+    {
+        httpClient.BaseAddress = new Uri(NormaliseBaseUrl(options.BaseUrl));
+        httpClient.Timeout = TimeSpan.FromSeconds(30);
+    }
+
+    private HttpRequestMessage Request(HttpMethod method, string path)
+    {
+        var request = new HttpRequestMessage(method, path);
+        request.Headers.Add("X-Auth-Token", options.ApiKey);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        return request;
     }
 
     private static string NormaliseBaseUrl(string value)
@@ -73,4 +111,17 @@ public sealed record SageHrEmployee(
     [property: JsonPropertyName("mobile_phone")] string? MobilePhone);
 public sealed record SageHrEmployeePage(List<SageHrEmployee> Data, SageHrMeta? Meta);
 public sealed record SageHrMeta([property: JsonPropertyName("next_page")] int? NextPage);
+
+public sealed record SageHrOutOfOffice(
+    long Id,
+    [property: JsonPropertyName("employee_id")] long EmployeeId,
+    [property: JsonPropertyName("start_date")] string? StartDate,
+    [property: JsonPropertyName("end_date")] string? EndDate,
+    [property: JsonPropertyName("is_part_of_day")] bool IsPartOfDay,
+    double? Hours,
+    string? Details,
+    SageHrLeavePolicy? Policy);
+public sealed record SageHrLeavePolicy(string? Name);
+public sealed record SageHrOutOfOfficePage(List<SageHrOutOfOffice> Data);
+
 internal static class SageHrJson { internal static readonly JsonSerializerOptions Options = new() { PropertyNameCaseInsensitive = true }; }
