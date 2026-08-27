@@ -18,10 +18,33 @@ public static class EmbeddedGeofenceEngine
 
     public static IReadOnlyList<EmbeddedFence> ApprovedFences => Fences.Value;
 
+    public static async Task<IReadOnlyList<EmbeddedFence>> OperationalFencesAsync(TmsDbContext db, CancellationToken ct)
+    {
+        try
+        {
+            var sqlFences = (await db.SiteGeofences.AsNoTracking()
+                    .Where(fence => fence.Active)
+                    .OrderBy(fence => fence.Name)
+                    .ToListAsync(ct))
+                .Select(ToEmbeddedFence)
+                .Where(fence => fence is not null)
+                .Select(fence => fence!)
+                .ToList();
+
+            if (sqlFences.Count > 0) return sqlFences;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+        }
+
+        return Fences.Value;
+    }
+
     public static async Task<EmbeddedGeofenceSnapshot> BuildAsync(TmsDbContext db, DateOnly planningDate, IReadOnlyCollection<Load> loads, CancellationToken ct)
     {
         var now = DateTimeOffset.UtcNow;
-        var fences = Fences.Value;
+        var fences = await OperationalFencesAsync(db, ct);
         var vehicleIds = loads.Where(x => x.VehicleId is not null).Select(x => x.VehicleId!.Value).Distinct().ToList();
         List<Vehicle> vehicles = vehicleIds.Count == 0
             ? new List<Vehicle>()
@@ -267,6 +290,42 @@ public static class EmbeddedGeofenceEngine
             result.Add(new EmbeddedFence(StableId(name), name, Text(record, "category"), Int(record, "category_max_wait_time"), Int(record, "max_wait_time"), Int(record, "pending_entry_minutes") ?? 0, Int(record, "pending_exit_minutes") ?? 0, Text(record, "site_no"), parsedPoints));
         }
         return result;
+    }
+
+    private static EmbeddedFence? ToEmbeddedFence(SiteGeofence row)
+    {
+        var points = ParsePoints(row.PolygonJson);
+        if (points.Count < 3) return null;
+        return new EmbeddedFence(
+            row.Id,
+            row.Name,
+            row.Category,
+            row.CategoryMaxWaitMinutes,
+            row.MaxWaitMinutes,
+            row.PendingEntryMinutes,
+            row.PendingExitMinutes,
+            row.SiteNumber,
+            points);
+    }
+
+    private static IReadOnlyList<GeoPoint> ParsePoints(string? polygonJson)
+    {
+        if (string.IsNullOrWhiteSpace(polygonJson)) return [];
+        try
+        {
+            using var document = JsonDocument.Parse(polygonJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Array) return [];
+            return document.RootElement
+                .EnumerateArray()
+                .Select(ReadPoint)
+                .Where(point => point is not null)
+                .Select(point => point!)
+                .ToList();
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
     }
 
     private static IEnumerable<DerivedVisit> DeriveVisits(Guid vehicleId, string registration, IReadOnlyList<VehicleTrackingEvent> events, IReadOnlyList<EmbeddedFence> fences)

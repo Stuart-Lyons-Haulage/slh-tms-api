@@ -46,7 +46,10 @@ public sealed class RunProgressController(
                     .ToList();
 
                 if (trackingRecords.Count > 0)
+                {
                     await telemetryStore.PersistAsync(trackingRecords, ct, markAsLiveReceipt: true);
+                    await GeofenceRunProgression.ProcessTelemetryAsync(db, trackingRecords, ct);
+                }
             }
             catch (OperationCanceledException exception) when (!ct.IsCancellationRequested)
             {

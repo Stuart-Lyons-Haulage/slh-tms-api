@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
@@ -70,6 +71,15 @@ public sealed class PlannerSourceMasterDataResolver
 
         var latitude = site?.Latitude;
         var longitude = site?.Longitude;
+        if ((latitude is null || longitude is null) && linkedGeofence is not null)
+        {
+            var centre = GeofenceCentre(linkedGeofence);
+            if (centre is not null)
+            {
+                longitude = centre.Value.Longitude;
+                latitude = centre.Value.Latitude;
+            }
+        }
         if ((latitude is null || longitude is null) && embeddedFence is not null)
         {
             longitude = (decimal)embeddedFence.Points.Average(point => point.Longitude);
@@ -238,6 +248,42 @@ public sealed class PlannerSourceMasterDataResolver
     }
 
     private static string DisplayName(Site site) => !string.IsNullOrWhiteSpace(site.DriverTextName) ? site.DriverTextName.Trim() : site.Name.Trim();
+
+    private static (decimal Longitude, decimal Latitude)? GeofenceCentre(SiteGeofence geofence)
+    {
+        if (string.IsNullOrWhiteSpace(geofence.PolygonJson)) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(geofence.PolygonJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Array) return null;
+            var points = new List<(decimal Longitude, decimal Latitude)>();
+            foreach (var point in document.RootElement.EnumerateArray())
+            {
+                if (point.ValueKind == JsonValueKind.Array && point.GetArrayLength() >= 2 &&
+                    point[0].TryGetDecimal(out var longitude) && point[1].TryGetDecimal(out var latitude))
+                {
+                    points.Add((longitude, latitude));
+                    continue;
+                }
+
+                if (point.ValueKind != JsonValueKind.Object) continue;
+                var objectLongitude = Decimal(point, "longitude") ?? Decimal(point, "lng") ?? Decimal(point, "lon") ?? Decimal(point, "x");
+                var objectLatitude = Decimal(point, "latitude") ?? Decimal(point, "lat") ?? Decimal(point, "y");
+                if (objectLongitude is not null && objectLatitude is not null)
+                    points.Add((objectLongitude.Value, objectLatitude.Value));
+            }
+            return points.Count == 0
+                ? null
+                : (points.Average(item => item.Longitude), points.Average(item => item.Latitude));
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static decimal? Decimal(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.TryGetDecimal(out var number) ? number : null;
 
     private static string Normalize(string? value) => new((value ?? string.Empty)
         .Where(char.IsLetterOrDigit)

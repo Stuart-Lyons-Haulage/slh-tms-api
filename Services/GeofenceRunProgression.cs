@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Controllers;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Tracking;
@@ -109,6 +110,15 @@ END;
         var geofences = await db.SiteGeofences.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
         if (geofences.Count == 0) return;
         var vehicles = await db.Vehicles.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
+        PlannerSourceMasterDataResolver? siteResolver = null;
+        try
+        {
+            siteResolver = await PlannerSourceMasterDataResolver.CreateAsync(db, ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+        }
 
         foreach (var record in records.OrderBy(x => x.EventTimeUtc))
         {
@@ -117,7 +127,7 @@ END;
             var openVisit = await db.GeofenceVisits.OrderByDescending(x => x.EnteredAtUtc)
                 .FirstOrDefaultAsync(x => x.VehicleIdentifier == record.VehicleIdentifier && x.ExitedAtUtc == null, ct);
             var inside = geofences.FirstOrDefault(g => Contains(g.PolygonJson, record.Longitude.Value, record.Latitude.Value));
-            var load = await ResolveLoadAsync(db, vehicle?.Id, openVisit?.LoadId, record.EventTimeUtc, inside?.Name, ct);
+            var load = await ResolveLoadAsync(db, vehicle?.Id, openVisit?.LoadId, record.EventTimeUtc, inside, siteResolver, ct);
 
             if (inside is not null)
             {
@@ -128,7 +138,7 @@ END;
                     .FirstOrDefaultAsync(x => x.VehicleIdentifier == record.VehicleIdentifier && x.ExitedAtUtc == null && x.GeofenceId == inside.Id, ct);
                 if (openVisit is null)
                 {
-                    var stop = MatchNextStop(load, inside.Name, await CompletedStopIds(db, load?.Id, ct));
+                    var stop = MatchNextStop(load, inside, await CompletedStopIds(db, load?.Id, ct), siteResolver);
                     openVisit = new GeofenceVisit
                     {
                         GeofenceId = inside.Id, LoadId = load?.Id, LoadStopId = stop?.Id, VehicleId = vehicle?.Id,
@@ -144,7 +154,7 @@ END;
                     if (openVisit.LoadId is null && load is not null)
                     {
                         openVisit.LoadId = load.Id;
-                        openVisit.LoadStopId ??= MatchNextStop(load, inside.Name, await CompletedStopIds(db, load.Id, ct))?.Id;
+                        openVisit.LoadStopId ??= MatchNextStop(load, inside, await CompletedStopIds(db, load.Id, ct), siteResolver)?.Id;
                     }
                     openVisit.LastInsideAtUtc = record.EventTimeUtc;
                     openVisit.DwellMinutes = Math.Max(0, (int)Math.Floor((record.EventTimeUtc - openVisit.EnteredAtUtc).TotalMinutes));
@@ -182,7 +192,7 @@ END;
                         confirmed ? "Confirmed site visit completed on geofence exit." : "Vehicle left before the minimum dwell confirmation.", ct);
                     if (confirmed && openVisit.LoadId is Guid visitLoadId)
                     {
-                        var visitLoad = load?.Id == visitLoadId ? load : await ResolveLoadAsync(db, vehicle?.Id, visitLoadId, record.EventTimeUtc, null, ct);
+                        var visitLoad = load?.Id == visitLoadId ? load : await ResolveLoadAsync(db, vehicle?.Id, visitLoadId, record.EventTimeUtc, null, siteResolver, ct);
                         db.DriverStatusLogs.Add(new DriverStatusLog
                         {
                             LoadId = visitLoadId, DriverId = visitLoad?.DriverId, Status = "GeofenceStopCompleted",
@@ -219,7 +229,8 @@ END;
         Guid? vehicleId,
         Guid? preferredLoadId,
         DateTimeOffset eventTimeUtc,
-        string? geofenceName,
+        SiteGeofence? geofence,
+        PlannerSourceMasterDataResolver? siteResolver,
         CancellationToken ct)
     {
         if (preferredLoadId is Guid preferred)
@@ -262,7 +273,7 @@ END;
 
         try
         {
-            var registered = (await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct))
+            var registered = (await PlanningResilience.ReadLoadsAsync(db, planningDate, ct))
                 .Where(x => x.VehicleId == vehicleId && x.Status != LoadStatus.Completed && x.Status != LoadStatus.Cancelled);
             foreach (var load in registered)
                 if (candidates.All(existing => existing.Id != load.Id)) candidates.Add(load);
@@ -295,7 +306,7 @@ END;
             {
                 var completed = completedByLoad.GetValueOrDefault(load.Id) ?? [];
                 var remaining = (load.Stops ?? []).Where(stop => !completed.Contains(stop.Id)).OrderBy(stop => stop.Sequence).ToList();
-                var siteMatch = !string.IsNullOrWhiteSpace(geofenceName) && remaining.Any(stop => NamesOverlap(stop.Name, geofenceName));
+                var siteMatch = geofence is not null && remaining.Any(stop => StopMatchesGeofence(stop, geofence, siteResolver));
                 var planned = remaining.Where(stop => stop.PlannedArrivalUtc != null).Select(stop => stop.PlannedArrivalUtc!.Value).FirstOrDefault();
                 var distance = planned == default ? double.MaxValue : Math.Abs((planned - eventTimeUtc).TotalMinutes);
                 return new { load, siteMatch, priority = LoadPriority(load.Status), distance };
@@ -315,11 +326,27 @@ END;
             .Select(x => x.LoadStopId!.Value).ToListAsync(ct)).ToHashSet();
     }
 
-    private static LoadStop? MatchNextStop(Load? load, string geofenceName, HashSet<Guid> completed)
+    private static LoadStop? MatchNextStop(Load? load, SiteGeofence geofence, HashSet<Guid> completed, PlannerSourceMasterDataResolver? siteResolver)
     {
         var remaining = load?.Stops.Where(x => !completed.Contains(x.Id)).OrderBy(x => x.Sequence).ToList() ?? [];
-        var matched = remaining.FirstOrDefault(x => NamesOverlap(x.Name, geofenceName));
+        var matched = remaining.FirstOrDefault(x => StopMatchesGeofence(x, geofence, siteResolver));
         return matched ?? (remaining.Count == 1 ? remaining[0] : null);
+    }
+
+    private static bool StopMatchesGeofence(LoadStop stop, SiteGeofence geofence, PlannerSourceMasterDataResolver? siteResolver)
+    {
+        if (siteResolver is not null && (geofence.SiteId is not null || !string.IsNullOrWhiteSpace(geofence.SiteNumber)))
+        {
+            var resolution = siteResolver.Resolve(stop.Name);
+            if (resolution.SiteMatched)
+            {
+                if (geofence.SiteId is Guid siteId) return resolution.SiteId == siteId;
+                if (!string.IsNullOrWhiteSpace(geofence.SiteNumber)) return Normalize(resolution.SiteNumber) == Normalize(geofence.SiteNumber);
+            }
+            return false;
+        }
+
+        return NamesOverlap(stop.Name, geofence.Name) || NamesOverlap(stop.Address, geofence.Name);
     }
 
     private static async Task CloseVisitAsync(TmsDbContext db, GeofenceVisit visit, DateTimeOffset at, string status, string reason, CancellationToken ct)
@@ -344,7 +371,7 @@ END;
         return new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }.Where(x => !string.IsNullOrWhiteSpace(x)).Any(x => Normalize(x) == key);
     }
 
-    private static bool NamesOverlap(string a, string b)
+    private static bool NamesOverlap(string? a, string? b)
     {
         var left = Normalize(a); var right = Normalize(b);
         return left == right || left.Contains(right, StringComparison.Ordinal) || right.Contains(left, StringComparison.Ordinal);

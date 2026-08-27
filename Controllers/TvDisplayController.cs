@@ -115,6 +115,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
 
         var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
         var geofenceSnapshot = await EmbeddedGeofenceEngine.BuildAsync(db, day, geofenceLoads, ct);
+        geofenceSnapshot = await EmbeddedGeofenceEvidenceMerge.MergeDurableProjectionAsync(db, geofenceSnapshot, loads, ct);
         var useLiveMapEtas = loads.Count <= MaxLiveEtaCalculationsPerRefresh;
 
         var rows = new List<TvRunDisplayRow>();

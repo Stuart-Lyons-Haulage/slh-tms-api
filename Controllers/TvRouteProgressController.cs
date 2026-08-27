@@ -210,6 +210,10 @@ public sealed class TvRouteProgressController(
             });
         }
 
+        var geofenceCoverage = await RunGeofenceConfigurationCoverage.CalculateAsync(db, loads, ct);
+        var geofenceHitRuns = snapshot.Visits.Where(x => x.LoadId is not null).Select(x => x.LoadId!.Value).Distinct().Count();
+        var geofenceHitStops = snapshot.Visits.Where(x => x.LoadStopId is not null).Select(x => x.LoadStopId!.Value).Distinct().Count();
+
         return Ok(new
         {
             planningDate = day,
@@ -220,9 +224,14 @@ public sealed class TvRouteProgressController(
                 : snapshot.LatestTrackingUtc,
             geofenceAvailable = snapshot.Fences.Count > 0,
             geofenceCount = snapshot.Fences.Count,
+            geofenceConfiguredRuns = geofenceCoverage.LinkedRuns,
+            geofenceLinkedStops = geofenceCoverage.LinkedStops,
+            geofenceTotalStops = geofenceCoverage.TotalStops,
+            geofenceHitRuns,
+            geofenceHitStops,
             geofenceVisitCount = snapshot.Visits.Count,
             geofenceConfirmedVisitCount = snapshot.ConfirmedVisits.Count,
-            geofenceLinkedRuns = snapshot.Visits.Where(x => x.LoadId is not null).Select(x => x.LoadId!.Value).Distinct().Count(),
+            geofenceLinkedRuns = geofenceCoverage.LinkedRuns,
             tachoAvailable = tachoEvidence.Available,
             tachoWarning = tachoEvidence.Warning,
             runs = rows
@@ -248,13 +257,14 @@ public sealed class TvRouteProgressController(
                 try
                 {
                     await telemetryStore.PersistAsync(records, ct, markAsLiveReceipt: true);
+                    await GeofenceRunProgression.ProcessTelemetryAsync(db, records, ct);
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     db.ChangeTracker.Clear();
                     logger.LogWarning(
                         exception,
-                        "Fresh RoadTech telemetry could not be persisted for TV/geofence history; the TV will continue from the direct provider snapshot.");
+                        "Fresh RoadTech telemetry could not be persisted or applied to SQL geofences for TV/geofence history; the TV will continue from the direct provider snapshot.");
                 }
 
                 var statuses = records

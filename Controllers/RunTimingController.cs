@@ -32,7 +32,7 @@ public sealed class RunTimingController(
         if (!pairedKeyAllowed && !TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
 
         var planningDate = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
-        var loads = (await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct))
+        var loads = (await PlanningResilience.ReadLoadsAsync(db, planningDate, ct))
             .Where(load => load.Status != LoadStatus.Cancelled)
             .OrderBy(load => load.Reference)
             .Take(500)
@@ -42,6 +42,7 @@ public sealed class RunTimingController(
         try
         {
             snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, GeofencePlanningMatch.PrepareLoads(loads), ct);
+            snapshot = await EmbeddedGeofenceEvidenceMerge.MergeDurableProjectionAsync(db, snapshot, loads, ct);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {

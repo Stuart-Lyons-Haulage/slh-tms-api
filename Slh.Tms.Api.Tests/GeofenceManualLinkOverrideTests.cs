@@ -112,6 +112,77 @@ public sealed class GeofenceManualLinkOverrideTests
     }
 
     [Fact]
+    public async Task Active_sql_geofence_geometry_is_authoritative_for_progression()
+    {
+        var embedded = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences.Where(x => x.Name == "Selsey Despatch"));
+        var options = new DbContextOptionsBuilder<TmsDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
+        await using var db = new TmsDbContext(options);
+        var vehicleId = Guid.NewGuid();
+        var loadId = Guid.NewGuid();
+        var stopId = Guid.NewGuid();
+        db.Vehicles.Add(new Vehicle { Id = vehicleId, Registration = "SLH225", Active = true });
+        db.SiteGeofences.Add(new SiteGeofence
+        {
+            Id = embedded.Id,
+            Name = embedded.Name,
+            NormalizedName = NormalizeName(embedded.Name),
+            PolygonJson = PolygonAround(-3m, 53m),
+            Active = true
+        });
+        db.VehicleTrackingEvents.Add(Tracking("sql-entry", new DateTimeOffset(2026, 8, 26, 6, 0, 0, TimeSpan.Zero), 53.0001, -3.0001));
+        await db.SaveChangesAsync();
+
+        var load = new Load
+        {
+            Id = loadId,
+            Reference = "RUN-SQL-GEOFENCE",
+            PlanningDate = new DateOnly(2026, 8, 26),
+            Status = LoadStatus.Planned,
+            VehicleId = vehicleId,
+            Stops =
+            [
+                new LoadStop { Id = stopId, LoadId = loadId, Sequence = 1, Name = "Selsey Despatch" }
+            ]
+        };
+
+        var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, load.PlanningDate, [load], CancellationToken.None);
+
+        var visit = Assert.Single(snapshot.Visits);
+        Assert.Equal(embedded.Id, visit.Fence.Id);
+        Assert.Equal(loadId, visit.LoadId);
+        Assert.Equal(stopId, visit.LoadStopId);
+    }
+
+    [Fact]
+    public async Task Linked_sql_geofence_centre_supplies_stop_coordinates_when_site_has_none()
+    {
+        var options = new DbContextOptionsBuilder<TmsDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
+        await using var db = new TmsDbContext(options);
+        var site = new Site { Id = Guid.NewGuid(), ExternalCode = "SITE-900", Name = "Custom Delivery Site", DriverTextName = "Custom Delivery Site", Active = true };
+        var geofence = new SiteGeofence
+        {
+            Name = "Custom Delivery Geofence",
+            NormalizedName = NormalizeName("Custom Delivery Geofence"),
+            SiteId = site.Id,
+            SiteNumber = site.ExternalCode,
+            PolygonJson = PolygonAround(-2m, 52m),
+            Active = true
+        };
+        db.Sites.Add(site);
+        db.SiteGeofences.Add(geofence);
+        await db.SaveChangesAsync();
+
+        var resolver = await PlannerSourceMasterDataResolver.CreateAsync(db, CancellationToken.None);
+        var stop = new LoadStop { LoadId = Guid.NewGuid(), Sequence = 1, Name = "Custom Delivery Site" };
+
+        var coordinates = OperationalStopCoordinates.Resolve(stop, resolver);
+
+        Assert.NotNull(coordinates);
+        Assert.InRange(coordinates.Value.Longitude, -2.01m, -1.99m);
+        Assert.InRange(coordinates.Value.Latitude, 51.99m, 52.01m);
+    }
+
+    [Fact]
     public async Task Location_only_override_suppresses_automatic_site_linking()
     {
         var fence = Assert.Single(EmbeddedGeofenceEngine.ApprovedFences.Where(x => x.Name == "Selsey Despatch"));
@@ -150,6 +221,9 @@ public sealed class GeofenceManualLinkOverrideTests
         RawPayload = "{}",
         MatchStatus = "Received"
     };
+
+    private static string PolygonAround(decimal longitude, decimal latitude) =>
+        $$"""[[{{longitude - 0.01m}},{{latitude - 0.01m}}],[{{longitude + 0.01m}},{{latitude - 0.01m}}],[{{longitude + 0.01m}},{{latitude + 0.01m}}],[{{longitude - 0.01m}},{{latitude + 0.01m}}]]""";
 
     private static string NormalizeName(string value) => string.Join(' ', value.Trim().ToUpperInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries));
 }
