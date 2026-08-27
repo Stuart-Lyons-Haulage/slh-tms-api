@@ -45,12 +45,37 @@ public static class PlannerPlanImportRules
         {
             var pallets = stop.Pallets ?? 0m;
             if (pallets <= 0) continue;
-            var type = stop.PalletType?.Trim();
-            if (string.Equals(type, "std", StringComparison.OrdinalIgnoreCase) || string.Equals(type, "standard", StringComparison.OrdinalIgnoreCase)) standard += pallets;
+            var type = EffectivePalletType(stop);
+            if (string.Equals(type, "standard", StringComparison.OrdinalIgnoreCase)) standard += pallets;
             else if (string.Equals(type, "euro", StringComparison.OrdinalIgnoreCase)) euro += pallets;
             else unknown += pallets;
         }
         return PalletCapacityCalculator.Calculate(standard, euro, unknown);
+    }
+
+    public static string? EffectivePalletType(PlannerPlanStopRequest stop)
+    {
+        var explicitType = Normalize(stop.PalletType);
+        if (explicitType is "STD" or "STANDARD") return "standard";
+        if (explicitType == "EURO") return "euro";
+        if (explicitType.Contains("TRAY", StringComparison.Ordinal) || explicitType.Contains("CRATE", StringComparison.Ordinal)) return null;
+
+        var collection = Normalize(stop.CollectionSite);
+        var delivery = Normalize(stop.DeliverySite);
+
+        // Stuart Lyons pallet rules: Morrisons and Waitrose are Standard pallets.
+        if (delivery.Contains("MORRISONS", StringComparison.Ordinal) || delivery.Contains("WAITROSE", StringComparison.Ordinal)) return "standard";
+
+        // Aldi loads from Barfoots or Natures Way Foods are Euro pallets.
+        if (delivery.Contains("ALDI", StringComparison.Ordinal) &&
+            (collection.Contains("BAR", StringComparison.Ordinal) || collection.Contains("BARFOOT", StringComparison.Ordinal) ||
+             collection.Contains("NWF", StringComparison.Ordinal) || collection.Contains("NATURESWAY", StringComparison.Ordinal))) return "euro";
+
+        // Langmeads to Aldi Atherstone is Euro; every other Langmeads pallet movement is Standard.
+        if (collection.Contains("LANGMEAD", StringComparison.Ordinal) || collection.StartsWith("LAN", StringComparison.Ordinal))
+            return delivery.Contains("ALDI", StringComparison.Ordinal) && delivery.Contains("ATHERSTONE", StringComparison.Ordinal) ? "euro" : "standard";
+
+        return null;
     }
 
     public static string StopName(PlannerPlanStopRequest stop)
@@ -82,4 +107,9 @@ public static class PlannerPlanImportRules
         var text = string.Join(" | ", parts);
         return text[..Math.Min(text.Length, 1000)];
     }
+
+    private static string Normalize(string? value) => new((value ?? string.Empty)
+        .Where(char.IsLetterOrDigit)
+        .Select(char.ToUpperInvariant)
+        .ToArray());
 }
