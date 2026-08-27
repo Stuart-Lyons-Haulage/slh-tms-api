@@ -72,6 +72,7 @@ public sealed class RunTimingController(
         foreach (var load in loads)
         {
             var orderedStops = (load.Stops ?? []).OrderBy(stop => stop.Sequence).ToList();
+            var finalDestination = RunFinalDestination.Select(orderedStops);
             var visits = snapshot.Visits
                 .Where(visit => visit.LoadId == load.Id)
                 .OrderBy(visit => visit.EnteredAtUtc)
@@ -91,6 +92,11 @@ public sealed class RunTimingController(
                 .Where(visit => visit.ExitedAtUtc is not null && visit.LoadStopId is not null && completedStopIds.Contains(visit.LoadStopId.Value))
                 .OrderByDescending(visit => visit.ExitedAtUtc)
                 .FirstOrDefault();
+            var finalDestinationVisit = finalDestination is null
+                ? null
+                : visits.Where(visit => visit.LoadStopId == finalDestination.Id)
+                    .OrderByDescending(visit => visit.EnteredAtUtc)
+                    .FirstOrDefault();
 
             // Lake Lane is the authoritative route origin before any customer departure.
             // Once a customer stop has completed, that departure proves progression.
@@ -104,8 +110,10 @@ public sealed class RunTimingController(
 
             DateTimeOffset? nextEtaUtc = null;
             string etaSource = "Unavailable";
-            DateTimeOffset? finalEtaUtc = null;
-            string finalEtaSource = "Unavailable";
+            // If the customer destination has already been entered, preserve that actual
+            // arrival even when later operational/depot stops remain on the run.
+            DateTimeOffset? finalEtaUtc = finalDestinationVisit?.EnteredAtUtc;
+            string finalEtaSource = finalEtaUtc is null ? "Unavailable" : "Geofence";
             string? etaUnavailableStopName = null;
             string? etaUnavailableReason = null;
             var etaLegs = new List<RunTimingLeg>();
@@ -117,7 +125,8 @@ public sealed class RunTimingController(
                 (decimal Longitude, decimal Latitude)? routeOrigin = null;
                 DateTimeOffset? routeAnchorUtc = null;
                 var routeStops = remainingStops;
-                var finalContainsEstimate = false;
+                var finalDestinationReached = finalEtaUtc is not null;
+                var destinationContainsEstimate = false;
 
                 if (currentVisit is not null)
                 {
@@ -137,7 +146,17 @@ public sealed class RunTimingController(
                         preRouteDwellMinutes = (int)Math.Ceiling(remainingDwell);
                         routeAnchorUtc = now + TimeSpan.FromMinutes(remainingDwell);
                         routeAnchorSource = "Current geofence + remaining dwell";
-                        finalContainsEstimate = remainingDwell > 0;
+
+                        if (!finalDestinationReached && finalDestination is not null && activeStop.Id == finalDestination.Id)
+                        {
+                            finalEtaUtc = currentVisit.EnteredAtUtc;
+                            finalEtaSource = "Geofence";
+                            finalDestinationReached = true;
+                        }
+                        else if (!finalDestinationReached && finalDestination is not null && activeStop.Sequence < finalDestination.Sequence && remainingDwell > 0)
+                        {
+                            destinationContainsEstimate = true;
+                        }
                     }
                     else
                     {
@@ -196,7 +215,7 @@ public sealed class RunTimingController(
                         {
                             var route = await maps.TravelTimeEstimate(cursor, destination.Value, ct);
                             cursorTime += route.TravelTime;
-                            finalContainsEstimate |= route.IsApproximate;
+                            if (!finalDestinationReached) destinationContainsEstimate |= route.IsApproximate;
 
                             if (index == 0 && currentVisit is null)
                             {
@@ -204,7 +223,12 @@ public sealed class RunTimingController(
                                 etaSource = route.IsApproximate ? "GeofenceEstimated" : "Geofence";
                             }
 
-                            finalEtaUtc = cursorTime;
+                            if (!finalDestinationReached && finalDestination is not null && stop.Id == finalDestination.Id)
+                            {
+                                finalEtaUtc = cursorTime;
+                                finalEtaSource = destinationContainsEstimate ? "GeofenceEstimated" : "Geofence";
+                                finalDestinationReached = true;
+                            }
                             cursor = destination.Value;
 
                             var dwellMinutes = 0;
@@ -224,7 +248,7 @@ public sealed class RunTimingController(
                             if (dwellMinutes > 0)
                             {
                                 cursorTime += TimeSpan.FromMinutes(dwellMinutes);
-                                finalContainsEstimate = true;
+                                if (!finalDestinationReached) destinationContainsEstimate = true;
                             }
                         }
                         catch (Exception exception) when (exception is HttpRequestException or InvalidOperationException or Azure.Identity.AuthenticationFailedException)
@@ -237,14 +261,13 @@ public sealed class RunTimingController(
                         }
                     }
 
-                    if (routeFailed)
+                    // A failure after the customer destination must not erase the ETA/actual
+                    // arrival already calculated for that destination. Only fail closed when
+                    // the route could not reach the customer destination itself.
+                    if (routeFailed && !finalDestinationReached)
                     {
                         finalEtaUtc = null;
                         finalEtaSource = "Unavailable";
-                    }
-                    else if (finalEtaUtc is not null)
-                    {
-                        finalEtaSource = finalContainsEstimate ? "GeofenceEstimated" : "Geofence";
                     }
                 }
                 else if (routeStops.Count > 0 && etaUnavailableReason is null)
@@ -267,6 +290,8 @@ public sealed class RunTimingController(
                 etaSource,
                 finalEtaUtc,
                 finalEtaSource,
+                finalDestination?.Id,
+                finalDestination?.Name,
                 timingDeparture?.ExitedAtUtc,
                 currentVisit?.EnteredAtUtc,
                 currentVisit?.Fence.Name,
@@ -363,6 +388,8 @@ public sealed record RunTimingRecord(
     string EtaSource,
     DateTimeOffset? FinalEtaUtc,
     string FinalEtaSource,
+    Guid? FinalDestinationStopId,
+    string? FinalDestinationName,
     DateTimeOffset? PreviousGeofenceDepartureUtc,
     DateTimeOffset? DwellStartedAtUtc,
     string? CurrentGeofenceName,

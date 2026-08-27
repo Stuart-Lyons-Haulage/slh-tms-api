@@ -16,7 +16,7 @@ public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<Opera
     [HttpGet("readiness-snapshot")]
     public async Task<IActionResult> Readiness([FromQuery] DateOnly? date, CancellationToken ct)
     {
-        var day = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
+        var day = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
         var (loads, source) = await ReadLoads(day, ct);
         var vehicles = await ReadVehicles(ct);
         var drivers = await ReadDrivers(ct);
@@ -61,7 +61,7 @@ public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<Opera
     [HttpGet("attention-snapshot")]
     public async Task<IActionResult> Attention([FromQuery] DateOnly? date, CancellationToken ct)
     {
-        var day = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
+        var day = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
         var (loads, source) = await ReadLoads(day, ct);
         var vehicles = await ReadVehicles(ct);
         var drivers = await ReadDrivers(ct);
@@ -125,14 +125,16 @@ public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<Opera
     {
         try
         {
-            var loads = await db.Loads.AsNoTracking().Include(x => x.Stops)
+            var loads = (await PlanningResilience.ReadLoadsAsync(db, day, ct))
                 .Where(x => x.PlanningDate == day && x.Status != LoadStatus.Cancelled)
-                .OrderBy(x => x.Reference).Take(1000).ToListAsync(ct);
-            return (loads, "TMS planning tables");
+                .OrderBy(x => x.Reference)
+                .Take(2000)
+                .ToList();
+            return (loads, "TMS planning sources (merged)");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogInformation(ex, "Dedicated Loads table unavailable for {PlanningDate}; using audited planning register.", day);
+            logger.LogInformation(ex, "Merged planning source unavailable for {PlanningDate}; using audited planning register.", day);
             db.ChangeTracker.Clear();
             var loads = await PlanningRegisterStore.ReadLoadsAsync(db, day, ct);
             return (loads.Where(x => x.Status != LoadStatus.Cancelled).ToList(), "TMS planning register");
@@ -203,4 +205,16 @@ public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<Opera
     private static bool IsVor(Vehicle vehicle) => vehicle.FleetioVor == true
         || (vehicle.FleetioStatus?.Contains("VOR", StringComparison.OrdinalIgnoreCase) ?? false)
         || (vehicle.FleetioStatus?.Contains("out of service", StringComparison.OrdinalIgnoreCase) ?? false);
+
+    private static DateOnly UkOperatingDate(DateTimeOffset value)
+    {
+        try
+        {
+            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return DateOnly.FromDateTime(value.UtcDateTime);
+        }
+    }
 }
