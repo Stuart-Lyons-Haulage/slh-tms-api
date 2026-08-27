@@ -8,6 +8,7 @@ namespace Slh.Tms.Api.Services;
 public static class PlanningRegisterStore
 {
     private const string LoadType = "planningload";
+    private const int RecentLoadRegisterWindow = 10000;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
 
     public static async Task<List<TransportOrder>> ReadOrdersAsync(TmsDbContext db, DateOnly? from, DateOnly? to, CancellationToken ct)
@@ -29,10 +30,25 @@ public static class PlanningRegisterStore
 
     public static async Task<List<Load>> ReadLoadsAsync(TmsDbContext db, DateOnly? date, CancellationToken ct)
     {
-        var rows = await db.StagedImports.AsNoTracking().Where(x => x.EntityType == LoadType && x.Status == StagingStatus.Promoted)
-            .OrderBy(x => x.ReceivedAtUtc).Take(2000).ToListAsync(ct);
-        var loads = rows.Select(ParseLoad).Where(x => x is not null && (date is null || x.PlanningDate == date)).Cast<Load>()
-            .OrderBy(x => x.PlanningDate).ThenBy(x => x.Reference).Take(500).ToList();
+        // Planning loads live in an audited JSON register, so PlanningDate cannot be safely
+        // filtered in SQL across all supported database providers. Read the most recently
+        // created/reviewed promoted rows first, then apply the planning-date filter after
+        // deserialisation. The previous ascending Take(2000) selected the oldest register
+        // rows before filtering, which could leave today's wallboard with only a live SQL
+        // survivor even though the current imported plan contained many runs.
+        var rows = await db.StagedImports.AsNoTracking()
+            .Where(x => x.EntityType == LoadType && x.Status == StagingStatus.Promoted)
+            .OrderByDescending(x => x.ReviewedAtUtc ?? x.ReceivedAtUtc)
+            .ThenByDescending(x => x.ReceivedAtUtc)
+            .Take(RecentLoadRegisterWindow)
+            .ToListAsync(ct);
+        var loads = rows.Select(ParseLoad)
+            .Where(x => x is not null && (date is null || x.PlanningDate == date))
+            .Cast<Load>()
+            .OrderBy(x => x.PlanningDate)
+            .ThenBy(x => x.Reference)
+            .Take(2000)
+            .ToList();
         return loads;
     }
 
