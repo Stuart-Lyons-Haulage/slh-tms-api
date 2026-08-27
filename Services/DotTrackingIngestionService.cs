@@ -7,6 +7,8 @@ namespace Slh.Tms.Api.Services;
 public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactory, DotTrackingOptions options, ILogger<DotTrackingIngestionService> logger) : BackgroundService
 {
     private const int MaximumHistoryRecoveryMinutes = 10;
+    private static readonly TimeSpan MaximumFutureSkew = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan MaximumHistoricalClockCorrection = TimeSpan.FromHours(48);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -25,9 +27,10 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
                 var operatingDays = RecoveryDays(now);
                 var projectionDays = new HashSet<DateOnly> { operatingDays[0] };
 
-                var records = (await client.GetLatestVehicleEventsAsync(stoppingToken))
-                    .Select(DotTelemetryRecord.FromProvider)
-                    .ToList();
+                var records = NormaliseCurrentEventTimes(
+                    (await client.GetLatestVehicleEventsAsync(stoppingToken))
+                        .Select(DotTelemetryRecord.FromProvider),
+                    DateTimeOffset.UtcNow);
                 await store.PersistAsync(records, stoppingToken, markAsLiveReceipt: true);
                 await TryRepairProviderVehicleMappingsAsync(db, records.Select(record => record.VehicleIdentifier), "current", stoppingToken);
 
@@ -50,9 +53,12 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
                     {
                         foreach (var recoveryDay in operatingDays)
                         {
-                            var recovered = (await client.GetHistoricalVehicleEventsAsync(recoveryDay, stoppingToken))
-                                .Select(DotTelemetryRecord.FromProvider)
-                                .ToList();
+                            var recovered = NormaliseHistoricalEventTimes(
+                                (await client.GetHistoricalVehicleEventsAsync(recoveryDay, stoppingToken))
+                                    .Select(DotTelemetryRecord.FromProvider),
+                                records,
+                                recoveryDay,
+                                DateTimeOffset.UtcNow);
                             await store.PersistAsync(recovered, stoppingToken, markAsLiveReceipt: false);
 
                             // Historical Falcon pages can use provider vehicle keys that differ
@@ -106,6 +112,64 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
             catch (Exception exception) when (!stoppingToken.IsCancellationRequested) { logger.LogWarning(exception, "DOT tracking ingestion failed; retrying in {Minutes} minute(s).", pollInterval.TotalMinutes); }
             await Task.Delay(pollInterval, stoppingToken);
         }
+    }
+
+    internal static IReadOnlyList<DotTelemetryRecord> NormaliseCurrentEventTimes(
+        IEnumerable<DotTelemetryRecord> source,
+        DateTimeOffset receivedAtUtc)
+    {
+        var ceiling = receivedAtUtc.Add(MaximumFutureSkew);
+        return source
+            .Select(record => record.EventTimeUtc > ceiling
+                ? record with { EventTimeUtc = receivedAtUtc }
+                : record)
+            .ToList();
+    }
+
+    internal static IReadOnlyList<DotTelemetryRecord> NormaliseHistoricalEventTimes(
+        IEnumerable<DotTelemetryRecord> source,
+        IReadOnlyCollection<DotTelemetryRecord> currentRecords,
+        DateOnly recoveryDay,
+        DateTimeOffset nowUtc)
+    {
+        var historical = source.ToList();
+        if (historical.Count == 0) return historical;
+
+        // Only today's historical page can be calibrated against GetCurrentTelemetry.
+        // If Falcon history is systematically future-dated, the current fleet snapshot is
+        // the authoritative clock anchor for the same vehicle. Shift that vehicle's entire
+        // historical trail by the measured skew so ENTER/EXIT ordering is preserved rather
+        // than collapsing every bad point onto receipt time.
+        if (RecoveryDays(nowUtc)[0] != recoveryDay) return historical;
+
+        var currentByVehicle = currentRecords
+            .GroupBy(record => ExecutionIdentityResolver.NormaliseVehicle(record.VehicleIdentifier), StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Key.Length > 0)
+            .ToDictionary(group => group.Key, group => group.Max(record => record.EventTimeUtc), StringComparer.OrdinalIgnoreCase);
+        var futureCeiling = nowUtc.Add(MaximumFutureSkew);
+        var result = new List<DotTelemetryRecord>(historical.Count);
+
+        foreach (var group in historical.GroupBy(record => ExecutionIdentityResolver.NormaliseVehicle(record.VehicleIdentifier), StringComparer.OrdinalIgnoreCase))
+        {
+            var rows = group.ToList();
+            if (group.Key.Length == 0 || !currentByVehicle.TryGetValue(group.Key, out var currentTimeUtc))
+            {
+                result.AddRange(rows);
+                continue;
+            }
+
+            var newestHistoricalUtc = rows.Max(record => record.EventTimeUtc);
+            var skew = newestHistoricalUtc - currentTimeUtc;
+            if (newestHistoricalUtc <= futureCeiling || skew <= MaximumFutureSkew || skew > MaximumHistoricalClockCorrection)
+            {
+                result.AddRange(rows);
+                continue;
+            }
+
+            result.AddRange(rows.Select(record => record with { EventTimeUtc = record.EventTimeUtc - skew }));
+        }
+
+        return result;
     }
 
     private async Task TryRepairProviderVehicleMappingsAsync(
