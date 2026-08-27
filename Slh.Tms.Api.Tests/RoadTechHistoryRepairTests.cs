@@ -39,6 +39,47 @@ public sealed class RoadTechHistoryRepairTests
     }
 
     [Fact]
+    public async Task Current_snapshot_repairs_matching_future_event_and_live_status()
+    {
+        await using var db = CreateDb();
+        var correctedTime = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var poisonedTime = DateTimeOffset.UtcNow.AddHours(30);
+        db.VehicleTrackingEvents.Add(new VehicleTrackingEvent
+        {
+            ProviderName = "RoadTech Falcon",
+            ProviderEventId = "live-poisoned",
+            VehicleIdentifier = "AB12CDE",
+            EventTimeUtc = poisonedTime,
+            Latitude = 51.0m,
+            Longitude = -1.0m,
+            RawPayload = "poisoned",
+            MatchStatus = "Received"
+        });
+        db.VehicleLiveStatuses.Add(new VehicleLiveStatus
+        {
+            VehicleIdentifier = "AB12CDE",
+            LastEventTimeUtc = poisonedTime,
+            LastReceivedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2),
+            Latitude = 51.0m,
+            Longitude = -1.0m
+        });
+        await db.SaveChangesAsync();
+
+        var store = new DotTrackingTelemetryStore(db, NullLogger<DotTrackingTelemetryStore>.Instance);
+        var current = Record("live-poisoned", "AB12 CDE", correctedTime, 50.7581m, -0.7794m, "current");
+
+        await store.PersistAsync([current], CancellationToken.None, markAsLiveReceipt: true);
+
+        var stored = await db.VehicleTrackingEvents.SingleAsync();
+        var live = await db.VehicleLiveStatuses.SingleAsync();
+        Assert.Equal(correctedTime, stored.EventTimeUtc);
+        Assert.Equal(correctedTime, live.LastEventTimeUtc);
+        Assert.Equal(50.7581m, stored.Latitude);
+        Assert.Equal(50.7581m, live.Latitude);
+        Assert.Equal("current", stored.RawPayload);
+    }
+
+    [Fact]
     public async Task Historical_replay_does_not_refresh_live_status()
     {
         await using var db = CreateDb();
