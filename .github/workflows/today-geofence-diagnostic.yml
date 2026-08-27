@@ -32,28 +32,33 @@ jobs:
           jq -e . /tmp/progress.json >/dev/null
 
       - name: Production has merged wallboard runs
+        if: always()
         shell: bash
         run: test "$(jq 'length' /tmp/loads.json)" -gt 1
 
       - name: RoadTech historical tracking is stored
+        if: always()
         shell: bash
         run: |
           test "$(jq -r '.storedTrackingEvents24h // 0' /tmp/health.json)" -gt 0
           test "$(jq -r '.latestStoredTrackingEventUtc // empty' /tmp/health.json)" != ""
 
       - name: Durable geofence visits exist
+        if: always()
         shell: bash
         run: |
           test "$(jq -r '.vehiclesWithGeofenceEvidence24h // 0' /tmp/health.json)" -gt 0
           test "$(jq -r '.latestGeofenceEventUtc // empty' /tmp/health.json)" != ""
 
       - name: Run progress sees geofence linked runs
+        if: always()
         shell: bash
         run: |
           test "$(jq -r '.geofenceLinkedRuns // 0' /tmp/progress.json)" -gt 0
           test "$(jq -r '.geofenceLinkedStops // 0' /tmp/progress.json)" -gt 0
 
       - name: Run progress has actual geofence hits
+        if: always()
         shell: bash
         run: |
           test "$(jq -r '.geofenceHitRuns // 0' /tmp/progress.json)" -gt 0
@@ -61,31 +66,37 @@ jobs:
           test "$(jq -r '.geofenceVisitCount // 0' /tmp/progress.json)" -gt 0
 
       - name: Run 2 exists in production progress
+        if: always()
         shell: bash
         run: |
           jq -e '[.records[]? | select(((.loadReference // .reference // "") | test("(^|[[:space:]])run[[:space:]]*0*2$|^0*2$"; "i")))] | length > 0' /tmp/progress.json >/dev/null
 
       - name: Run 2 has a planned vehicle
+        if: always()
         shell: bash
         run: |
           jq -e '[.records[]? | select(((.loadReference // .reference // "") | test("(^|[[:space:]])run[[:space:]]*0*2$|^0*2$"; "i"))) | select((.vehicleRegistration // "") != "")] | length > 0' /tmp/progress.json >/dev/null
 
       - name: Run 2 has durable stop visit history
+        if: always()
         shell: bash
         run: |
           jq -e '[.records[]? | select(((.loadReference // .reference // "") | test("(^|[[:space:]])run[[:space:]]*0*2$|^0*2$"; "i"))) | (.stopDwell // [])[]? | select(.siteArrivalUtc != null or .siteDepartureUtc != null or .state == "OnSite" or .state == "Departed")] | length > 0' /tmp/progress.json >/dev/null
 
       - name: Run 2 has completed geofence stops
+        if: always()
         shell: bash
         run: |
           jq -e '[.records[]? | select(((.loadReference // .reference // "") | test("(^|[[:space:]])run[[:space:]]*0*2$|^0*2$"; "i"))) | (.completedStops // 0)] | max > 0' /tmp/progress.json >/dev/null
 
       - name: Run 2 reflects at least five completed stops
+        if: always()
         shell: bash
         run: |
           jq -e '[.records[]? | select(((.loadReference // .reference // "") | test("(^|[[:space:]])run[[:space:]]*0*2$|^0*2$"; "i"))) | (.completedStops // 0)] | max >= 5' /tmp/progress.json >/dev/null
 
       - name: Run 2 has no linkage exception
+        if: always()
         shell: bash
         run: |
           jq -e '[.records[]? | select(((.loadReference // .reference // "") | test("(^|[[:space:]])run[[:space:]]*0*2$|^0*2$"; "i"))) | select(.linkageException != null)] | length == 0' /tmp/progress.json >/dev/null
