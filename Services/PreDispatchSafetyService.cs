@@ -43,9 +43,34 @@ public sealed class PreDispatchSafetyService
         if (load.DriverId is Guid driverId)
         {
             var driver = await db.Drivers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == driverId, ct);
+            if (driver is not null) await MasterDetailStore.EnrichDriversAsync(db, [driver], ct);
             checks.Add(Check("DriverActive", driver?.Active == true, "Critical", driver?.Active == true
                 ? "Allocated driver is active."
                 : "Allocated driver is missing or inactive."));
+
+            if (driver is not null)
+            {
+                var licenceExpired = driver.LicenceExpiry is DateOnly expiry && expiry < load.PlanningDate;
+                checks.Add(Check("DrivingLicenceExpiry", !licenceExpired, "Critical",
+                    licenceExpired
+                        ? $"Driving licence expired {driver.LicenceExpiry:dd/MM/yyyy}; this driver cannot be dispatched."
+                        : driver.LicenceExpiry is DateOnly validUntil
+                            ? $"Driving licence is recorded through {validUntil:dd/MM/yyyy}."
+                            : "Driving licence expiry is not recorded; verify the Driver Master."));
+
+                var invalidStatus = IsInvalidLicenceStatus(driver.LicenceStatus);
+                checks.Add(Check("DrivingLicenceStatus", !invalidStatus, "Critical",
+                    invalidStatus
+                        ? $"Driving licence status is '{driver.LicenceStatus}'; this driver cannot be dispatched."
+                        : string.IsNullOrWhiteSpace(driver.LicenceStatus)
+                            ? "Driving licence status is not recorded; verify the Driver Master."
+                            : $"Driving licence status is {driver.LicenceStatus}."));
+
+                var hasTachoIdentity = !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId) || !string.IsNullOrWhiteSpace(driver.TachoCardNumber);
+                checks.Add(Check("TachoIdentity", hasTachoIdentity, "Critical", hasTachoIdentity
+                    ? "Canonical TachoMaster member/card identity is present."
+                    : "No canonical TachoMaster member/card identity is linked to this driver."));
+            }
         }
 
         if (load.VehicleId is Guid vehicleId)
@@ -86,9 +111,9 @@ public sealed class PreDispatchSafetyService
         if (load.PalletSpacesUsed is decimal used && load.TotalPalletSpaces is decimal capacity && capacity >= 0)
         {
             checks.Add(Check("CapacityWithinLimit", capacity == 0 ? used == 0 : used <= capacity, "Critical",
-                capacity == 0 ? (used == 0 ? "No pallet capacity is required." : "Pallets are planned but run capacity is zero.")
-                : used <= capacity ? $"Planned pallets {used:0.##}/{capacity:0.##} are within capacity."
-                : $"Planned pallets {used:0.##} exceed capacity {capacity:0.##}."));
+                capacity == 0 ? (used == 0 ? "No pallet capacity is required." : "Load units are planned but run capacity is zero.")
+                : used <= capacity ? $"Planned load {used:0.##}/{capacity:0.##} is within capacity."
+                : $"Planned load {used:0.##} exceeds capacity {capacity:0.##}."));
         }
         else
         {
@@ -142,6 +167,13 @@ public sealed class PreDispatchSafetyService
                 checks.Add(Check($"{resource.Kind}Conflict", true, "Information", $"Other same-day use of the allocated {resource.Kind.ToLowerInvariant()} does not overlap this run's timed window."));
             }
         }
+    }
+
+    private static bool IsInvalidLicenceStatus(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        return new[] { "expired", "invalid", "suspended", "revoked", "disqualified" }
+            .Any(marker => value.Contains(marker, StringComparison.OrdinalIgnoreCase));
     }
 
     private static IEnumerable<(string Kind, Guid Id)> Resources(Load load)
