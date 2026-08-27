@@ -94,30 +94,44 @@ jobs:
             "Cors__AllowedOrigins__0=https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io"
             "Deployment__Revision=$DEPLOY_SHA"
           )
-          az containerapp update \
+          target_revision="$(az containerapp update \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --image "$AZURE_CONTAINER_REGISTRY.azurecr.io/slh-tms-api:$DEPLOY_SHA" \
-            --set-env-vars "${env_vars[@]}"
+            --set-env-vars "${env_vars[@]}" \
+            --query properties.latestRevisionName \
+            --output tsv)"
+          test -n "$target_revision"
+          echo "TARGET_REVISION=$target_revision" >> "$GITHUB_ENV"
+          echo "Created target revision $target_revision for $DEPLOY_SHA"
 
-      - name: Route traffic to latest ready revision
+      - name: Route traffic to deployed ready revision
         run: |
           set -euo pipefail
-          for attempt in {1..60}; do
-            state="$(timeout 20s az containerapp show --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.provisioningState --output tsv 2>/dev/null || true)"
-            if test "$state" = "Succeeded"; then break; fi
+          target_ready=false
+          for attempt in {1..72}; do
+            health_state="$(timeout 20s az containerapp revision list \
+              --name "$AZURE_CONTAINER_APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --query "[?name=='$TARGET_REVISION'].properties.healthState | [0]" \
+              --output tsv 2>/dev/null || true)"
+            running_state="$(timeout 20s az containerapp revision list \
+              --name "$AZURE_CONTAINER_APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --query "[?name=='$TARGET_REVISION'].properties.runningState | [0]" \
+              --output tsv 2>/dev/null || true)"
+            if test "$health_state" = "Healthy"; then
+              target_ready=true
+              break
+            fi
+            echo "Target revision $TARGET_REVISION is health=${health_state:-unknown}, running=${running_state:-unknown}; waiting ($attempt/72)..."
             sleep 10
           done
-          latest_ready="$(az containerapp show \
-            --name "$AZURE_CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --query properties.latestReadyRevisionName \
-            --output tsv)"
-          test -n "$latest_ready"
+          test "$target_ready" = "true"
           az containerapp ingress traffic set \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --revision-weight "$latest_ready=100"
+            --revision-weight "$TARGET_REVISION=100"
 
       - name: Smoke test core API and SQL
         run: |
