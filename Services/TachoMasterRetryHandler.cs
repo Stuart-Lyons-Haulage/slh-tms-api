@@ -9,7 +9,6 @@ public sealed class TachoMasterRetryHandler(ILogger<TachoMasterRetryHandler> log
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         var template = await BufferedRequest.CreateAsync(request, cancellationToken);
-        HttpResponseMessage? lastResponse = null;
 
         for (var attempt = 1; attempt <= MaxAttempts; attempt++)
         {
@@ -17,9 +16,10 @@ public sealed class TachoMasterRetryHandler(ILogger<TachoMasterRetryHandler> log
                 await Task.Delay(TimeSpan.FromMilliseconds(250 * Math.Pow(2, attempt - 2)), cancellationToken);
 
             using var retryRequest = template.Create();
+            HttpResponseMessage response;
             try
             {
-                lastResponse = await base.SendAsync(retryRequest, cancellationToken);
+                response = await base.SendAsync(retryRequest, cancellationToken);
             }
             catch (HttpRequestException exception) when (attempt < MaxAttempts)
             {
@@ -29,14 +29,23 @@ public sealed class TachoMasterRetryHandler(ILogger<TachoMasterRetryHandler> log
                 continue;
             }
 
-            if (!ShouldRetry(request.RequestUri?.AbsolutePath, lastResponse.StatusCode) || attempt == MaxAttempts)
-                return lastResponse;
+            if (!ShouldRetry(request.RequestUri?.AbsolutePath, response.StatusCode))
+                return response;
+
+            if (attempt == MaxAttempts)
+            {
+                var statusCode = response.StatusCode;
+                response.Dispose();
+                throw new HttpRequestException(
+                    $"TachoMaster upstream {request.RequestUri?.AbsolutePath ?? "request"} returned HTTP {(int)statusCode} ({statusCode}) after {MaxAttempts} attempts.",
+                    null,
+                    statusCode);
+            }
 
             logger.LogWarning(
                 "TachoMaster upstream returned HTTP {StatusCode} for {Method} {Path}; retrying attempt {NextAttempt}/{MaxAttempts}.",
-                (int)lastResponse.StatusCode, request.Method, request.RequestUri?.AbsolutePath, attempt + 1, MaxAttempts);
-            lastResponse.Dispose();
-            lastResponse = null;
+                (int)response.StatusCode, request.Method, request.RequestUri?.AbsolutePath, attempt + 1, MaxAttempts);
+            response.Dispose();
         }
 
         throw new HttpRequestException("TachoMaster request failed after retries.");
