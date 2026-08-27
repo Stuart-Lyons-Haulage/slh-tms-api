@@ -43,29 +43,13 @@ public sealed class PreDispatchSafetyService
         if (load.DriverId is Guid driverId)
         {
             var driver = await db.Drivers.AsNoTracking().SingleOrDefaultAsync(item => item.Id == driverId, ct);
-            if (driver is not null) await MasterDetailStore.EnrichDriversAsync(db, [driver], ct);
             checks.Add(Check("DriverActive", driver?.Active == true, "Critical", driver?.Active == true
                 ? "Allocated driver is active."
                 : "Allocated driver is missing or inactive."));
 
-            if (driver is not null)
-            {
-                var licenceExpired = driver.LicenceExpiry is DateOnly expiry && expiry < load.PlanningDate;
-                checks.Add(Check("DrivingLicenceExpiry", !licenceExpired, "Critical",
-                    licenceExpired
-                        ? $"Driving licence expired {driver.LicenceExpiry:dd/MM/yyyy}; this driver cannot be dispatched."
-                        : driver.LicenceExpiry is DateOnly validUntil
-                            ? $"Driving licence is recorded through {validUntil:dd/MM/yyyy}."
-                            : "Driving licence expiry is not recorded; verify the Driver Master."));
-
-                var invalidStatus = IsInvalidLicenceStatus(driver.LicenceStatus);
-                checks.Add(Check("DrivingLicenceStatus", !invalidStatus, "Critical",
-                    invalidStatus
-                        ? $"Driving licence status is '{driver.LicenceStatus}'; this driver cannot be dispatched."
-                        : string.IsNullOrWhiteSpace(driver.LicenceStatus)
-                            ? "Driving licence status is not recorded; verify the Driver Master."
-                            : $"Driving licence status is {driver.LicenceStatus}."));
-            }
+            // Driving-licence validation is intentionally paused. SLH currently uses Driver Hire
+            // for licence checks and will only re-enable an automated dispatch gate once an
+            // authoritative Driver Hire integration is available.
         }
 
         if (load.VehicleId is Guid vehicleId)
@@ -162,13 +146,6 @@ public sealed class PreDispatchSafetyService
                 checks.Add(Check($"{resource.Kind}Conflict", true, "Information", $"Other same-day use of the allocated {resource.Kind.ToLowerInvariant()} does not overlap this run's timed window."));
             }
         }
-    }
-
-    private static bool IsInvalidLicenceStatus(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return false;
-        return new[] { "expired", "invalid", "suspended", "revoked", "disqualified" }
-            .Any(marker => value.Contains(marker, StringComparison.OrdinalIgnoreCase));
     }
 
     private static IEnumerable<(string Kind, Guid Id)> Resources(Load load)
