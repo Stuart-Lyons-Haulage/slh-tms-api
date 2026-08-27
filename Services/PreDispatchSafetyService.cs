@@ -65,11 +65,6 @@ public sealed class PreDispatchSafetyService
                         : string.IsNullOrWhiteSpace(driver.LicenceStatus)
                             ? "Driving licence status is not recorded; verify the Driver Master."
                             : $"Driving licence status is {driver.LicenceStatus}."));
-
-                var hasTachoIdentity = !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId) || !string.IsNullOrWhiteSpace(driver.TachoCardNumber);
-                checks.Add(Check("TachoIdentity", hasTachoIdentity, "Critical", hasTachoIdentity
-                    ? "Canonical TachoMaster member/card identity is present."
-                    : "No canonical TachoMaster member/card identity is linked to this driver."));
             }
         }
 
@@ -111,7 +106,7 @@ public sealed class PreDispatchSafetyService
         if (load.PalletSpacesUsed is decimal used && load.TotalPalletSpaces is decimal capacity && capacity >= 0)
         {
             checks.Add(Check("CapacityWithinLimit", capacity == 0 ? used == 0 : used <= capacity, "Critical",
-                capacity == 0 ? (used == 0 ? "No pallet capacity is required." : "Load units are planned but run capacity is zero.")
+                capacity == 0 ? (used == 0 ? "No load capacity is required." : "Load units are planned but run capacity is zero.")
                 : used <= capacity ? $"Planned load {used:0.##}/{capacity:0.##} is within capacity."
                 : $"Planned load {used:0.##} exceeds capacity {capacity:0.##}."));
         }
