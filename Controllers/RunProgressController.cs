@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Tracking;
@@ -18,6 +19,7 @@ public sealed class RunProgressController(
     IConfiguration configuration) : ControllerBase
 {
     private static readonly TimeSpan LiveRefreshBudget = TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan LiveTrackingThreshold = TimeSpan.FromMinutes(5);
 
     [HttpGet, AllowAnonymous]
     public async Task<IActionResult> Get([FromQuery] DateOnly? date, CancellationToken ct)
@@ -77,6 +79,11 @@ public sealed class RunProgressController(
             var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
             var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, geofenceLoads, ct);
 
+            // A temporary RoadTech/history gap must never erase an ENTER/EXIT that was
+            // already proved on an earlier refresh. Merge the durable SQL projection
+            // before calculating wallboard status and stop completion.
+            snapshot = await EmbeddedGeofenceEvidenceMerge.MergeDurableProjectionAsync(db, snapshot, loads, ct);
+
             // The same refresh that reads fresh RoadTech GPS now also publishes the
             // reconstructed ENTER/EXIT state immediately. This keeps every consumer
             // (Operations wallboard, TV wallboard and geofence health) on the same
@@ -99,21 +106,30 @@ public sealed class RunProgressController(
                 }.Where(value => !string.IsNullOrWhiteSpace(value)));
             }
 
+            // Movement/ignition/card evidence is deliberately included on run-progress
+            // itself. The wallboard must not depend on the separate TV route-progress
+            // request to know that a truck is moving or parked.
+            var liveByLoad = await ResolveLiveByLoadAsync(db, loads, ct);
             var tachoEvidence = await RunTachoEvidenceResolver.ResolveAsync(db, tachoMaster, loads, planningDate, logger, ct);
-            var records = loads.Select(load => BuildRecord(load, snapshot, now, tachoEvidence.ByLoadId.GetValueOrDefault(load.Id))).ToList();
+            var records = loads.Select(load => BuildRecord(
+                load,
+                snapshot,
+                now,
+                tachoEvidence.ByLoadId.GetValueOrDefault(load.Id),
+                liveByLoad.GetValueOrDefault(load.Id))).ToList();
 
             return Ok(new
             {
                 planningDate,
                 calculatedAtUtc = now,
                 count = records.Count,
-                source = "RoadTechCurrent+PlanningRegister+EmbeddedSLHGeofences",
+                source = "RoadTechCurrent+StoredLive+DurableGeofenceProjection+PlanningRegister",
                 geofenceAvailable = snapshot.Fences.Count > 0,
                 geofenceCount = snapshot.Fences.Count,
                 geofenceVisitCount = snapshot.Visits.Count,
                 geofenceLinkedRuns = snapshot.Visits.Where(x => x.LoadId != null).Select(x => x.LoadId!.Value).Distinct().Count(),
                 trackingEventCount = snapshot.TrackingEventCount,
-                latestTrackingUtc = snapshot.LatestTrackingUtc,
+                latestTrackingUtc = LatestTracking(snapshot.LatestTrackingUtc, liveByLoad.Values),
                 tachoAvailable = tachoEvidence.Available,
                 tachoWarning = tachoEvidence.Warning,
                 warning = string.Join(" ", new[] { refreshWarning, tachoEvidence.Warning }.Where(value => !string.IsNullOrWhiteSpace(value))),
@@ -128,6 +144,7 @@ public sealed class RunProgressController(
             List<Load> loads;
             try { loads = await PlanningRegisterStore.ReadLoadsAsync(db, planningDate, ct); }
             catch { loads = []; db.ChangeTracker.Clear(); }
+            var liveByLoad = await ResolveLiveByLoadAsync(db, loads, ct);
             var tachoEvidence = await RunTachoEvidenceResolver.ResolveAsync(db, tachoMaster, loads, planningDate, logger, ct);
 
             var records = loads.OrderBy(x => x.Reference).Select(load =>
@@ -135,16 +152,31 @@ public sealed class RunProgressController(
                 var stops = (load.Stops ?? []).OrderBy(x => x.Sequence).ToList();
                 var next = stops.FirstOrDefault();
                 var tacho = tachoEvidence.ByLoadId.GetValueOrDefault(load.Id);
+                var live = liveByLoad.GetValueOrDefault(load.Id);
+                var trackingObservedAtUtc = live?.LastReceivedAtUtc;
+                var trackingAge = trackingObservedAtUtc is null ? (TimeSpan?)null : now - trackingObservedAtUtc.Value;
+                var trackingFresh = trackingAge is not null && trackingAge.Value >= TimeSpan.Zero && trackingAge.Value <= LiveTrackingThreshold;
+                var trackingMoving = trackingFresh && live is not null && (live.IsMoving == true || (live.SpeedKph ?? 0) > 2);
                 return new
                 {
                     loadId = load.Id,
                     loadReference = load.Reference,
                     loadStatus = load.Status.ToString(),
-                    runState = InferredRunState(load, stops, now),
+                    runState = trackingMoving ? "InProgress" : InferredRunState(load, stops, now),
                     totalStops = stops.Count,
                     completedStops = 0,
                     progressPercent = 0m,
                     nextStop = next is null ? null : new { next.Id, next.Sequence, next.Name, next.Address, next.PlannedArrivalUtc },
+                    phase = trackingMoving ? "Heading to" : "Next job",
+                    focusStop = next?.Name,
+                    geofenceOnSite = false,
+                    trackingFresh,
+                    trackingMoving,
+                    ignitionOn = trackingFresh ? live?.IgnitionOn : null,
+                    driverCardPresent = trackingFresh ? !string.IsNullOrWhiteSpace(live?.CurrentDriverCardNumber) : (bool?)null,
+                    trackingObservedAtUtc,
+                    trackingAgeSeconds = trackingAge is null ? (int?)null : (int)Math.Max(0, Math.Floor(trackingAge.Value.TotalSeconds)),
+                    speedKph = trackingFresh ? live?.SpeedKph : null,
                     stopDwell = Array.Empty<object>(),
                     linkageException = (object?)null,
                     currentVisit = (object?)null,
@@ -166,18 +198,19 @@ public sealed class RunProgressController(
                 planningDate,
                 calculatedAtUtc = now,
                 count = records.Count,
-                source = "PlanningRegisterSafeFallback",
+                source = "PlanningRegister+StoredLiveSafeFallback",
                 geofenceAvailable = geofenceCount > 0,
                 geofenceCount,
                 geofenceVisitCount = 0,
                 geofenceLinkedRuns = 0,
+                latestTrackingUtc = LatestTracking(null, liveByLoad.Values),
                 tachoAvailable = tachoEvidence.Available,
                 tachoWarning = tachoEvidence.Warning,
                 warning = string.Join(" ", new[]
                 {
                     geofenceCount > 0
-                    ? "Approved SLH geofences are loaded, but live progression could not be calculated from tracking on this refresh."
-                    : "Live run progression could not be calculated and the approved geofence payload was unavailable on this refresh.",
+                    ? "Approved SLH geofences are loaded, but live progression could not be calculated from tracking on this refresh. Stored live movement remains active."
+                    : "Live run progression could not be calculated and the approved geofence payload was unavailable on this refresh. Stored live movement remains active.",
                     tachoEvidence.Warning
                 }.Where(value => !string.IsNullOrWhiteSpace(value))),
                 records
@@ -185,7 +218,12 @@ public sealed class RunProgressController(
         }
     }
 
-    private static object BuildRecord(Load load, EmbeddedGeofenceSnapshot snapshot, DateTimeOffset now, RunTachoEvidence? tacho)
+    private static object BuildRecord(
+        Load load,
+        EmbeddedGeofenceSnapshot snapshot,
+        DateTimeOffset now,
+        RunTachoEvidence? tacho,
+        VehicleLiveStatus? live)
     {
         var orderedStops = (load.Stops ?? []).OrderBy(x => x.Sequence).ToList();
         var visits = snapshot.Visits.Where(x => x.LoadId == load.Id).OrderBy(x => x.EnteredAtUtc).ToList();
@@ -205,6 +243,11 @@ public sealed class RunProgressController(
             .OrderByDescending(x => x.ExitedAtUtc)
             .FirstOrDefault();
 
+        var trackingObservedAtUtc = live?.LastReceivedAtUtc;
+        var trackingAge = trackingObservedAtUtc is null ? (TimeSpan?)null : now - trackingObservedAtUtc.Value;
+        var trackingFresh = trackingAge is not null && trackingAge.Value >= TimeSpan.Zero && trackingAge.Value <= LiveTrackingThreshold;
+        var trackingMoving = trackingFresh && live is not null && (live.IsMoving == true || (live.SpeedKph ?? 0) > 2);
+
         var totalStops = orderedStops.Count;
         var completedStops = completedStopIds.Count;
         var progressPercent = totalStops == 0 ? 0m : Math.Round((decimal)completedStops / totalStops * 100m, 1);
@@ -214,9 +257,17 @@ public sealed class RunProgressController(
             dwell = Math.Max(activeVisit.DwellMinutes, Math.Max(0, (int)Math.Floor((now - activeVisit.EnteredAtUtc).TotalMinutes)));
         var delayed = activeVisit is not null && waitLimit is int limit && dwell.GetValueOrDefault() > limit;
         var activeStatus = activeVisit is null ? null : delayed ? "SiteDelay" : activeVisit.ConfirmedAtUtc is not null ? "OnSiteConfirmed" : "Arrived";
-        var runState = RunProgressionFrontier.FinalStopCompleted(orderedStops, completedStopIds)
+        var complete = RunProgressionFrontier.FinalStopCompleted(orderedStops, completedStopIds);
+        var runState = complete
             ? "Completed"
-            : activeStatus ?? (progressionFrontierSequence > 0 ? "BetweenStops" : InferredRunState(load, orderedStops, now));
+            : activeStatus ?? (progressionFrontierSequence > 0 || trackingMoving ? "BetweenStops" : InferredRunState(load, orderedStops, now));
+        var phase = complete
+            ? "Complete"
+            : activeVisit is not null
+                ? "On site"
+                : progressionFrontierSequence > 0 || trackingMoving
+                    ? "Heading to"
+                    : "Next job";
 
         return new
         {
@@ -230,6 +281,16 @@ public sealed class RunProgressController(
             evidenceGaps = evidenceGaps.Select(stop => new { stop.Id, stop.Sequence, stop.Name }).ToList(),
             progressPercent,
             nextStop = nextStop is null ? null : new { nextStop.Id, nextStop.Sequence, nextStop.Name, nextStop.Address, nextStop.PlannedArrivalUtc },
+            phase,
+            focusStop = activeVisit?.Fence.Name ?? nextStop?.Name,
+            geofenceOnSite = activeVisit is not null,
+            trackingFresh,
+            trackingMoving,
+            ignitionOn = trackingFresh ? live?.IgnitionOn : null,
+            driverCardPresent = trackingFresh ? !string.IsNullOrWhiteSpace(live?.CurrentDriverCardNumber) : (bool?)null,
+            trackingObservedAtUtc,
+            trackingAgeSeconds = trackingAge is null ? (int?)null : (int)Math.Max(0, Math.Floor(trackingAge.Value.TotalSeconds)),
+            speedKph = trackingFresh ? live?.SpeedKph : null,
             currentVisit = activeVisit is null ? null : new
             {
                 activeVisit.Id,
@@ -287,6 +348,57 @@ public sealed class RunProgressController(
             tacho,
             calculatedAtUtc = now
         };
+    }
+
+    private static async Task<Dictionary<Guid, VehicleLiveStatus?>> ResolveLiveByLoadAsync(
+        TmsDbContext db,
+        IReadOnlyCollection<Load> loads,
+        CancellationToken ct)
+    {
+        try
+        {
+            var vehicleIds = loads.Where(load => load.VehicleId is not null).Select(load => load.VehicleId!.Value).Distinct().ToList();
+            if (vehicleIds.Count == 0) return [];
+
+            var vehicles = await db.Vehicles.AsNoTracking()
+                .Where(vehicle => vehicleIds.Contains(vehicle.Id))
+                .ToListAsync(ct);
+            var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles, ct);
+            var liveStatuses = await db.VehicleLiveStatuses.AsNoTracking().ToListAsync(ct);
+
+            var result = new Dictionary<Guid, VehicleLiveStatus?>();
+            foreach (var load in loads)
+            {
+                VehicleLiveStatus? live = null;
+                if (load.VehicleId is Guid vehicleId && aliasesByVehicle.TryGetValue(vehicleId, out var aliases))
+                    live = ExecutionIdentityResolver.MatchLive(aliases, liveStatuses);
+                result[load.Id] = live;
+            }
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            db.ChangeTracker.Clear();
+            return [];
+        }
+    }
+
+    private static DateTimeOffset? LatestTracking(
+        DateTimeOffset? snapshotLatest,
+        IEnumerable<VehicleLiveStatus?> liveStatuses)
+    {
+        var liveLatest = liveStatuses
+            .Where(status => status is not null)
+            .Select(status => (DateTimeOffset?)status!.LastReceivedAtUtc)
+            .OrderByDescending(value => value)
+            .FirstOrDefault();
+        if (snapshotLatest is null) return liveLatest;
+        if (liveLatest is null) return snapshotLatest;
+        return snapshotLatest > liveLatest ? snapshotLatest : liveLatest;
     }
 
     internal static string InferredRunState(Load load, IReadOnlyList<LoadStop> orderedStops, DateTimeOffset now)
