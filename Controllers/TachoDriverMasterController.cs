@@ -7,14 +7,20 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/v1/driver-master")]
 [Authorize]
-public sealed class TachoDriverMasterController(TachoDriverMasterSyncService sync) : ControllerBase
+public sealed class TachoDriverMasterController(
+    TachoDriverMasterSyncService sync,
+    DriverMasterClassificationService classification) : ControllerBase
 {
     [HttpPost("tachomaster/sync")]
     [Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> Sync(CancellationToken ct)
     {
-        var result = await sync.SyncAsync(User.Identity?.Name ?? "TMS user", ct);
-        return result.Success ? Ok(result) : StatusCode(StatusCodes.Status502BadGateway, result);
+        var actor = User.Identity?.Name ?? "TMS user";
+        var result = await sync.SyncAsync(actor, ct);
+        if (!result.Success) return StatusCode(StatusCodes.Status502BadGateway, result);
+
+        await classification.ApplyAsync(actor, ct);
+        return Ok(result);
     }
 
     [HttpGet("tachomaster/quality")]
