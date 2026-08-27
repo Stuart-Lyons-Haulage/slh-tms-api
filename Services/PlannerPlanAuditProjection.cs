@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -193,7 +194,9 @@ internal static class PlannerPlanAuditProjection
     private static DateOnly DateFromAuditKey(string key)
     {
         var parts = key.Split(':');
-        return parts.Length >= 3 && DateOnly.TryParseExact(parts[1], "yyyyMMdd", out var date) ? date : default;
+        return parts.Length >= 3 && DateOnly.TryParseExact(parts[1], "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date)
+            ? date
+            : default;
     }
 
     private static Guid StableGuid(Guid seed, string discriminator)
