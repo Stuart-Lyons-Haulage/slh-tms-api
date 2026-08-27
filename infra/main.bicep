@@ -6,6 +6,7 @@ param sqlAdminLogin string
 param entraTenantId string
 param entraAudience string
 param entraAllowedDomain string = 'lyonshaulage.com'
+param entraLegacyAllowedDomain string = 'stuartlyonshaulage.co.uk'
 
 resource plan 'Microsoft.Web/serverfarms@2023-12-01' = { name: '${appName}-plan' location: location sku: { name: 'B1' tier: 'Basic' } properties: { reserved: true } }
 resource app 'Microsoft.Web/sites@2023-12-01' = {
@@ -25,6 +26,7 @@ resource app 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'Entra__TenantId', value: entraTenantId }
         { name: 'Entra__Audience', value: entraAudience }
         { name: 'Entra__AllowedDomains__0', value: entraAllowedDomain }
+        { name: 'Entra__AllowedDomains__1', value: entraLegacyAllowedDomain }
       ]
     }
   }
