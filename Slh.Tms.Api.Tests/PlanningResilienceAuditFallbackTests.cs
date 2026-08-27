@@ -81,6 +81,54 @@ public sealed class PlanningResilienceAuditFallbackTests
     }
 
     [Fact]
+    public async Task Source_line_import_recovers_all_runs_and_preserves_collection_lines()
+    {
+        var options = new DbContextOptionsBuilder<TmsDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using var db = new TmsDbContext(options);
+        var day = new DateOnly(2026, 8, 27);
+        var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+
+        for (var number = 1; number <= 34; number++)
+        {
+            var sourceRows = number == 3
+                ? new[]
+                {
+                    new PlannerPlanStopRequest(1, "NWF-Runcton", "Merston", 8, "PO-003-A", "Standard", "06:00", "07:00", "17:00", 1),
+                    new PlannerPlanStopRequest(2, "NWF-Selsey", "Merston", 6, "PO-003-B", "Standard", "07:00", "08:00", "17:00", 2)
+                }
+                : new[]
+                {
+                    new PlannerPlanStopRequest(1, $"Collection {number}", $"Delivery {number}", 10, $"PO-{number:000}", "Standard", "06:00", "07:00", "17:00", number)
+                };
+            var run = new PlannerPlanRunRequest(
+                $"RUN-{number:000}", $"Run {number}", number <= 20 ? "AM" : "PM", day,
+                null, null, null, null, true, "Imported", null, sourceRows);
+
+            db.StagedImports.Add(new StagedImport
+            {
+                EntityType = "plannerplansourcerun",
+                IdempotencyKey = $"planimport-source:{day:yyyyMMdd}:{run.RunRef}",
+                PayloadJson = JsonSerializer.Serialize(run, json),
+                Status = StagingStatus.Promoted,
+                Source = "Planner source-line import",
+                ReviewedAtUtc = new DateTimeOffset(2026, 8, 27, 4, 0, 0, TimeSpan.Zero).AddMinutes(number)
+            });
+        }
+        await db.SaveChangesAsync();
+
+        var loads = await PlanningResilience.ReadLoadsAsync(db, day, CancellationToken.None);
+
+        Assert.Equal(34, loads.Count);
+        Assert.Equal(34, loads.Select(load => load.Reference).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        var runThree = loads.Single(load => load.Reference == PlannerPlanImportRules.TmsReference(day, "RUN-003"));
+        Assert.Equal(3, runThree.Stops.Count);
+        Assert.Equal(new[] { "Collect · NWF-Runcton", "Collect · NWF-Selsey", "Deliver · Merston" },
+            runThree.Stops.OrderBy(stop => stop.Sequence).Select(stop => stop.Name));
+    }
+
+    [Fact]
     public async Task Audit_projection_uses_stable_ids_across_refreshes()
     {
         var options = new DbContextOptionsBuilder<TmsDbContext>()
