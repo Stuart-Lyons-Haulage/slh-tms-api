@@ -8,10 +8,10 @@ using Slh.Tms.Api.Services;
 namespace Slh.Tms.Api.Controllers;
 
 /// <summary>
-/// Shared production-safe planning readers. Production can contain current runs in both
-/// the planning register and the legacy/live Loads table, so reads merge both sources.
-/// Live-table rows normally win when the same load id exists in both stores. A cancelled
-/// live tombstone must not override an active planning-register row created by a reset/re-import.
+/// Shared production-safe planning readers. Production can contain current runs in the
+/// planning register, the legacy/live Loads table, and the durable planner-plan import audit.
+/// Real planning/live rows always win. The import audit is a final read-only recovery source
+/// so a reset cannot make the wallboards collapse to only the runs that still have live rows.
 /// </summary>
 internal static class PlanningResilience
 {
@@ -46,6 +46,29 @@ internal static class PlanningResilience
             db.ChangeTracker.Clear();
         }
 
+        // Planner imports are also durably audited as one promoted plannerplanrun row per
+        // imported run. If a planning-day reset removes the operational Load row, that audit
+        // still represents an imported run and must remain visible to Operations and TV.
+        // Never replace a real active live/register row with the audit projection.
+        try
+        {
+            var audited = await PlannerPlanAuditProjection.ReadLoadsAsync(db, date, ct);
+            var activeReferences = merged.Values
+                .Where(load => load.Status != LoadStatus.Cancelled)
+                .Select(load => load.Reference)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var load in audited)
+            {
+                if (activeReferences.Contains(load.Reference)) continue;
+                merged[load.Id] = load;
+                activeReferences.Add(load.Reference);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+        }
+
         return merged.Values
             .OrderBy(x => x.PlanningDate)
             .ThenBy(x => x.Reference)
@@ -70,9 +93,19 @@ internal static class PlanningResilience
 
         try
         {
-            return await db.Loads.AsNoTracking().Include(x => x.Stops).SingleOrDefaultAsync(x => x.Id == id, ct);
+            var live = await db.Loads.AsNoTracking().Include(x => x.Stops).SingleOrDefaultAsync(x => x.Id == id, ct);
+            if (live is not null) return live;
         }
         catch (Exception ex) when (SchemaUnavailable(ex))
+        {
+            db.ChangeTracker.Clear();
+        }
+
+        try
+        {
+            return (await PlannerPlanAuditProjection.ReadLoadsAsync(db, null, ct)).SingleOrDefault(load => load.Id == id);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             db.ChangeTracker.Clear();
             return null;
