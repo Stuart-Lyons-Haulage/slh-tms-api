@@ -54,7 +54,28 @@ public sealed class TvRouteProgressController(
         // can advance the shared geofence engine. A persistence fault must not freeze the
         // visible TV marker because liveStatuses above already contains the provider data.
         var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
-        var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, day, geofenceLoads, ct);
+        EmbeddedGeofenceSnapshot snapshot;
+        try
+        {
+            snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, day, geofenceLoads, ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            logger.LogWarning(
+                exception,
+                "Live route geofence reconstruction failed for {PlanningDate}; retaining durable projected ENTER/EXIT evidence.",
+                day);
+            snapshot = new EmbeddedGeofenceSnapshot(
+                EmbeddedGeofenceEngine.ApprovedFences,
+                [],
+                [],
+                [],
+                0,
+                liveStatuses.Count > 0 ? liveStatuses.Max(status => status.LastReceivedAtUtc) : null);
+        }
+        snapshot = await EmbeddedGeofenceEvidenceMerge.MergeDurableProjectionAsync(db, snapshot, loads, ct);
+
         var vehicleIds = loads.Where(x => x.VehicleId is not null).Select(x => x.VehicleId!.Value).Distinct().ToList();
         var vehicles = vehicleIds.Count == 0
             ? new List<Vehicle>()
