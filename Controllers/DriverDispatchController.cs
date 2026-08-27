@@ -11,6 +11,7 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class DriverDispatchController(
     TmsDbContext db,
     SageHrClient sageHr,
+    TachoMasterClient tachoMaster,
     ILogger<DriverDispatchController> logger) : ControllerBase
 {
     private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
@@ -49,8 +50,13 @@ public sealed class DriverDispatchController(
             }
         }
 
-        var dispatchStates = await DriverDispatchStateStore.ReadAsync(db, loads.Select(load => load.Id), ct);
-        var leave = await LeaveByEmployeeNumber(planningDate, ct);
+        var tachoWorkEvidenceTask = ReadTachoWorkEvidenceAsync(planningDate, ct);
+        var leaveTask = LeaveByEmployeeNumber(planningDate, ct);
+        var dispatchStatesTask = DriverDispatchStateStore.ReadAsync(db, loads.Select(load => load.Id), ct);
+        await Task.WhenAll(tachoWorkEvidenceTask, leaveTask, dispatchStatesTask);
+        var tachoWorkEvidence = tachoWorkEvidenceTask.Result;
+        var leave = leaveTask.Result;
+        var dispatchStates = dispatchStatesTask.Result;
         var southboundRuns = loads.Where(IsSouthbound).Where(load => load.DriverId is null).ToList();
 
         var rows = new List<DriverDispatchDriver>();
@@ -62,7 +68,7 @@ public sealed class DriverDispatchController(
                 .ThenByDescending(load => load.CreatedAtUtc)
                 .FirstOrDefault();
             var previousVehicle = previous?.VehicleId is Guid previousVehicleId && vehicleById.TryGetValue(previousVehicleId, out var foundVehicle) ? foundVehicle : null;
-            var consecutive = ConsecutiveDays(history, driver.Id, planningDate);
+            var consecutive = ConsecutiveWorkedDays(history, driver, planningDate, tachoWorkEvidence);
             var dayNumber = consecutive + 1;
             var employeeKey = Normalise(driver.EmployeeNumber);
             leave.TryGetValue(employeeKey, out var absence);
@@ -134,6 +140,7 @@ public sealed class DriverDispatchController(
             planningDate,
             generatedAtUtc = DateTimeOffset.UtcNow,
             leaveSource = sageHr.IsConfigured ? "Sage HR" : "Unavailable",
+            dayNumberSource = tachoWorkEvidence.Count > 0 ? "TachoMaster duty with TMS executed-run fallback" : "TMS executed-run fallback",
             drivers = rows.OrderBy(row => TypeOrder(row.DriverType)).ThenBy(row => row.DisplayName),
             vehicles,
             trailers,
@@ -229,12 +236,102 @@ public sealed class DriverDispatchController(
         return result;
     }
 
-    private static int ConsecutiveDays(IEnumerable<Load> history, Guid driverId, DateOnly planningDate)
+    private async Task<Dictionary<DateOnly, HashSet<string>>> ReadTachoWorkEvidenceAsync(DateOnly planningDate, CancellationToken ct)
     {
-        var dates = history.Where(load => load.DriverId == driverId).Select(load => load.PlanningDate).ToHashSet();
+        var result = new Dictionary<DateOnly, HashSet<string>>();
+        if (!tachoMaster.IsConfigured) return result;
+
+        // Limit concurrent history calls so the workbench stays responsive without hammering the upstream service.
+        using var gate = new SemaphoreSlim(3, 3);
+        var days = Enumerable.Range(1, 7).Select(offset => planningDate.AddDays(-offset)).ToArray();
+        var tasks = days.Select(async day =>
+        {
+            await gate.WaitAsync(ct);
+            try
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(TimeSpan.FromSeconds(12));
+                var duties = await tachoMaster.GetDriverDutyStatusesAsync(day, timeout.Token);
+                var identities = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var duty in duties)
+                {
+                    AddIdentity(identities, "M", duty.MemberCode > 0 ? duty.MemberCode.ToString(System.Globalization.CultureInfo.InvariantCulture) : null);
+                    AddIdentity(identities, "C", duty.CardNumber);
+                    AddIdentity(identities, "E", duty.EmployeeNumber);
+                    AddIdentity(identities, "N", duty.DriverName);
+                }
+                return (Day: day, Success: true, Identities: identities);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning("TachoMaster history timed out for Driver Dispatch day-number evidence on {Date}; executed TMS run history will be used for that date.", day);
+                return (Day: day, Success: false, Identities: new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogWarning(exception, "TachoMaster history was unavailable for Driver Dispatch day-number evidence on {Date}; executed TMS run history will be used for that date.", day);
+                return (Day: day, Success: false, Identities: new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+            }
+            finally
+            {
+                gate.Release();
+            }
+        });
+
+        foreach (var item in await Task.WhenAll(tasks))
+            if (item.Success) result[item.Day] = item.Identities;
+        return result;
+    }
+
+    private static int ConsecutiveWorkedDays(
+        IEnumerable<Load> history,
+        Driver driver,
+        DateOnly planningDate,
+        IReadOnlyDictionary<DateOnly, HashSet<string>> tachoWorkEvidence)
+    {
+        var executedTmsDates = history
+            .Where(load => load.DriverId == driver.Id && load.Status is LoadStatus.Dispatched or LoadStatus.InProgress or LoadStatus.Completed)
+            .Select(load => load.PlanningDate)
+            .ToHashSet();
+
         var count = 0;
-        for (var day = planningDate.AddDays(-1); dates.Contains(day); day = day.AddDays(-1)) count++;
+        for (var day = planningDate.AddDays(-1); ; day = day.AddDays(-1))
+        {
+            var worked = tachoWorkEvidence.TryGetValue(day, out var identities)
+                ? DriverPresentInTacho(driver, identities)
+                : executedTmsDates.Contains(day);
+            if (!worked) break;
+            count++;
+            if (count >= 7) break;
+        }
         return count;
+    }
+
+    private static bool DriverPresentInTacho(Driver driver, HashSet<string> identities)
+    {
+        if (StableIdentityMatch(identities, "M", driver.TachoMasterDriverId)) return true;
+        if (StableIdentityMatch(identities, "C", driver.TachoCardNumber)) return true;
+        if (StableIdentityMatch(identities, "E", driver.EmployeeNumber)) return true;
+
+        var hasStableIdentity = !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId)
+            || !string.IsNullOrWhiteSpace(driver.TachoCardNumber)
+            || !string.IsNullOrWhiteSpace(driver.EmployeeNumber);
+        if (hasStableIdentity) return false;
+
+        return StableIdentityMatch(identities, "N", driver.TachoName)
+            || StableIdentityMatch(identities, "N", driver.DisplayName);
+    }
+
+    private static bool StableIdentityMatch(HashSet<string> identities, string prefix, string? value)
+    {
+        var normalized = Normalise(value);
+        return normalized.Length > 0 && identities.Contains($"{prefix}:{normalized}");
+    }
+
+    private static void AddIdentity(HashSet<string> identities, string prefix, string? value)
+    {
+        var normalized = Normalise(value);
+        if (normalized.Length > 0) identities.Add($"{prefix}:{normalized}");
     }
 
     private static DateTimeOffset? FirstPlanned(Load load) => load.Stops.OrderBy(stop => stop.Sequence).Select(stop => stop.PlannedArrivalUtc).FirstOrDefault(value => value is not null);
