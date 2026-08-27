@@ -13,6 +13,10 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize]
 public sealed class SiteAliasController(TmsDbContext db) : ControllerBase
 {
+    private const string SiteMasterDetailType = "masterdetail:site";
+    private const string AliasEditorSource = "SLH Site CRM alias editor";
+    private const string ReviewNote = "Full workbook detail retained in the audited register for legacy production columns.";
+
     [HttpPut("{id:guid}/aliases")]
     [Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> UpdateAliases(Guid id, SiteAliasUpdateRequest request, CancellationToken ct)
@@ -24,21 +28,15 @@ public sealed class SiteAliasController(TmsDbContext db) : ControllerBase
         var before = site.Aliases;
         site.Aliases = CleanAliases(request.Aliases);
 
-        await MasterDetailStore.SaveAsync(
-            db,
-            "site",
-            site.ExternalCode,
-            JsonSerializer.Serialize(site),
-            "SLH Site CRM alias editor",
-            User.Identity?.Name ?? User.FindFirst("preferred_username")?.Value,
-            ct);
+        var actor = User.Identity?.Name ?? User.FindFirst("preferred_username")?.Value;
+        await PersistSiteDetailAsync(site, actor, ct);
 
         db.MasterDataAudits.Add(new MasterDataAudit
         {
             EntityType = "Site",
             EntityId = site.Id,
             Action = "AliasesUpdated",
-            ChangedBy = User.Identity?.Name ?? User.FindFirst("preferred_username")?.Value ?? "unknown",
+            ChangedBy = actor ?? "unknown",
             ChangesJson = JsonSerializer.Serialize(new { before, after = site.Aliases })
         });
         await db.SaveChangesAsync(ct);
@@ -51,6 +49,62 @@ public sealed class SiteAliasController(TmsDbContext db) : ControllerBase
             site.Aliases
         });
     }
+
+    private async Task PersistSiteDetailAsync(Site site, string? actor, CancellationToken ct)
+    {
+        var payload = JsonSerializer.Serialize(site);
+        var idempotencyKey = $"{SiteMasterDetailType}:{NormaliseKey(site.ExternalCode)}";
+        var reviewedAt = DateTimeOffset.UtcNow;
+
+        // Site aliases live in the audited master-detail register rather than the base Site
+        // table. Update that row directly so repeated Site CRM saves cannot fail because an
+        // immediately preceding Site edit has advanced the staged row-version.
+        var updated = await db.StagedImports
+            .Where(item => item.IdempotencyKey == idempotencyKey)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(item => item.PayloadJson, payload)
+                .SetProperty(item => item.Status, StagingStatus.Promoted)
+                .SetProperty(item => item.Source, AliasEditorSource)
+                .SetProperty(item => item.ReviewedAtUtc, reviewedAt)
+                .SetProperty(item => item.ReviewedBy, actor)
+                .SetProperty(item => item.ReviewNote, ReviewNote), ct);
+
+        if (updated > 0) return;
+
+        db.StagedImports.Add(new StagedImport
+        {
+            EntityType = SiteMasterDetailType,
+            IdempotencyKey = idempotencyKey,
+            PayloadJson = payload,
+            Status = StagingStatus.Promoted,
+            Source = AliasEditorSource,
+            ReviewedAtUtc = reviewedAt,
+            ReviewedBy = actor,
+            ReviewNote = ReviewNote
+        });
+
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException)
+        {
+            // A concurrent first save may have inserted the same unique idempotency key.
+            // Clear the failed insert and apply the authoritative alias payload to that row.
+            db.ChangeTracker.Clear();
+            await db.StagedImports
+                .Where(item => item.IdempotencyKey == idempotencyKey)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.PayloadJson, payload)
+                    .SetProperty(item => item.Status, StagingStatus.Promoted)
+                    .SetProperty(item => item.Source, AliasEditorSource)
+                    .SetProperty(item => item.ReviewedAtUtc, reviewedAt)
+                    .SetProperty(item => item.ReviewedBy, actor)
+                    .SetProperty(item => item.ReviewNote, ReviewNote), ct);
+        }
+    }
+
+    private static string NormaliseKey(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 
     private static string? CleanAliases(string? value)
     {
