@@ -92,16 +92,16 @@ public sealed class PlanningResilienceAuditFallbackTests
 
         for (var number = 1; number <= 34; number++)
         {
-            var sourceRows = number == 3
-                ? new[]
-                {
+            List<PlannerPlanStopRequest> sourceRows = number == 3
+                ?
+                [
                     new PlannerPlanStopRequest(1, "NWF-Runcton", "Merston", 8, "PO-003-A", "Standard", "06:00", "07:00", "17:00", 1),
                     new PlannerPlanStopRequest(2, "NWF-Selsey", "Merston", 6, "PO-003-B", "Standard", "07:00", "08:00", "17:00", 2)
-                }
-                : new[]
-                {
+                ]
+                :
+                [
                     new PlannerPlanStopRequest(1, $"Collection {number}", $"Delivery {number}", 10, $"PO-{number:000}", "Standard", "06:00", "07:00", "17:00", number)
-                };
+                ];
             var run = new PlannerPlanRunRequest(
                 $"RUN-{number:000}", $"Run {number}", number <= 20 ? "AM" : "PM", day,
                 null, null, null, null, true, "Imported", null, sourceRows);
