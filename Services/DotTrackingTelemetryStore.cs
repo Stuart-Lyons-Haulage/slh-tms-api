@@ -9,12 +9,14 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
 {
     private static readonly ConcurrentDictionary<string, byte> NormalisedProviderIdentifiers = new(StringComparer.OrdinalIgnoreCase);
     private static readonly TimeSpan MaximumLiveFutureSkew = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan MaximumStoredFutureRepairWindow = TimeSpan.FromHours(48);
 
     public async Task PersistAsync(IEnumerable<DotTelemetryRecord> records, CancellationToken ct, bool markAsLiveReceipt = true)
     {
         var batch = records.ToList();
         var receivedAt = DateTimeOffset.UtcNow;
         var futureCeiling = receivedAt.Add(MaximumLiveFutureSkew);
+        var currentAnchors = new Dictionary<string, DateTimeOffset>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var record in batch)
         {
@@ -63,6 +65,10 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
                     receivedAt);
                 eventTimeUtc = receivedAt;
             }
+            if (markAsLiveReceipt)
+                currentAnchors[canonicalIdentifier] = currentAnchors.TryGetValue(canonicalIdentifier, out var existingAnchor) && existingAnchor > eventTimeUtc
+                    ? existingAnchor
+                    : eventTimeUtc;
 
             var hasGps = record.Latitude is not null && record.Longitude is not null;
             if (hasGps)
@@ -167,9 +173,54 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
             }
         }
 
+        if (markAsLiveReceipt && currentAnchors.Count > 0)
+            await RepairFutureStoredEventsAsync(currentAnchors, receivedAt, futureCeiling, ct);
+
         if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync(ct);
         if (batch.Count > 0)
             logger.LogDebug("Stored {RecordCount} RoadTech telemetry record(s) for table-free geofence progression.", batch.Count);
+    }
+
+    private async Task RepairFutureStoredEventsAsync(
+        IReadOnlyDictionary<string, DateTimeOffset> currentAnchors,
+        DateTimeOffset receivedAt,
+        DateTimeOffset futureCeiling,
+        CancellationToken ct)
+    {
+        var identifiers = currentAnchors.Keys.ToList();
+        var repairCeiling = receivedAt.Add(MaximumStoredFutureRepairWindow);
+        var futureRows = await db.VehicleTrackingEvents
+            .Where(item =>
+                item.ProviderName == "RoadTech Falcon" &&
+                identifiers.Contains(item.VehicleIdentifier) &&
+                item.EventTimeUtc > futureCeiling &&
+                item.EventTimeUtc <= repairCeiling)
+            .ToListAsync(ct);
+
+        var repaired = 0;
+        foreach (var group in futureRows.GroupBy(row => row.VehicleIdentifier, StringComparer.OrdinalIgnoreCase))
+        {
+            if (!currentAnchors.TryGetValue(group.Key, out var currentAnchor)) continue;
+            var newestFuture = group.Max(row => row.EventTimeUtc);
+            var skew = newestFuture - currentAnchor;
+            if (skew <= MaximumLiveFutureSkew || skew > MaximumStoredFutureRepairWindow) continue;
+
+            foreach (var row in group)
+            {
+                row.EventTimeUtc -= skew;
+                row.MatchStatus = string.IsNullOrWhiteSpace(row.MatchStatus)
+                    ? "ClockRepaired"
+                    : row.MatchStatus.Contains("ClockRepaired", StringComparison.OrdinalIgnoreCase)
+                        ? row.MatchStatus
+                        : $"{row.MatchStatus};ClockRepaired";
+                repaired++;
+            }
+        }
+
+        if (repaired > 0)
+            logger.LogWarning(
+                "Repaired {RecordCount} stored RoadTech tracking event time(s) that were ahead of the current Falcon snapshot.",
+                repaired);
     }
 
     private async Task<VehicleLiveStatus?> ResolveLiveStatusAsync(

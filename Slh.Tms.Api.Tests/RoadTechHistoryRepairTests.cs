@@ -80,6 +80,50 @@ public sealed class RoadTechHistoryRepairTests
     }
 
     [Fact]
+    public async Task Current_snapshot_repairs_future_stored_trail_for_same_vehicle()
+    {
+        await using var db = CreateDb();
+        var currentTime = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var futureOne = currentTime.AddHours(29).AddMinutes(-30);
+        var futureTwo = currentTime.AddHours(29);
+        db.VehicleTrackingEvents.AddRange(
+            new VehicleTrackingEvent
+            {
+                ProviderName = "RoadTech Falcon",
+                ProviderEventId = "future-1",
+                VehicleIdentifier = "AB12CDE",
+                EventTimeUtc = futureOne,
+                Latitude = 51.0m,
+                Longitude = -1.0m,
+                RawPayload = "future-1",
+                MatchStatus = "Received"
+            },
+            new VehicleTrackingEvent
+            {
+                ProviderName = "RoadTech Falcon",
+                ProviderEventId = "future-2",
+                VehicleIdentifier = "AB12CDE",
+                EventTimeUtc = futureTwo,
+                Latitude = 51.1m,
+                Longitude = -1.1m,
+                RawPayload = "future-2",
+                MatchStatus = "Received"
+            });
+        await db.SaveChangesAsync();
+
+        var store = new DotTrackingTelemetryStore(db, NullLogger<DotTrackingTelemetryStore>.Instance);
+        var current = Record("current", "AB12 CDE", currentTime, 50.7581m, -0.7794m, "current");
+
+        await store.PersistAsync([current], CancellationToken.None, markAsLiveReceipt: true);
+
+        var rows = await db.VehicleTrackingEvents.OrderBy(row => row.EventTimeUtc).ToListAsync();
+        Assert.Equal(currentTime.AddMinutes(-30), rows[0].EventTimeUtc);
+        Assert.Equal(currentTime, rows[1].EventTimeUtc);
+        Assert.Contains("ClockRepaired", rows[0].MatchStatus);
+        Assert.Contains("ClockRepaired", rows[1].MatchStatus);
+    }
+
+    [Fact]
     public async Task Historical_replay_does_not_refresh_live_status()
     {
         await using var db = CreateDb();
