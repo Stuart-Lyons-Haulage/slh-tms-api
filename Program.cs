@@ -13,6 +13,7 @@ using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Models.Integrations;
 using Slh.Tms.Api.Models.Assistant;
+using Slh.Tms.Api.Models.Runtime;
 using Slh.Tms.Api.Services;
 
 [assembly: InternalsVisibleTo("Slh.Tms.Api.Tests")]
@@ -22,11 +23,17 @@ var tenantId = builder.Configuration["Entra:TenantId"] ?? throw new InvalidOpera
 var audience = builder.Configuration["Entra:Audience"] ?? throw new InvalidOperationException("Entra:Audience is required");
 var allowedTmsDomains = builder.Configuration.GetSection("Entra:AllowedDomains").Get<string[]>() ?? ["lyonshaulage.com"];
 var deploymentRevision = builder.Configuration["Deployment:Revision"] ?? "local";
+var runtimeOptions = builder.Configuration.GetSection("TmsRuntime").Get<TmsRuntimeOptions>() ?? new();
+var workerOptions = builder.Configuration.GetSection("Workers").Get<TmsWorkerOptions>() ?? new();
+var graphEmailOptions = builder.Configuration.GetSection("Integrations:MicrosoftGraphEmail").Get<MicrosoftGraphEmailOptions>() ?? new();
 
 builder.Services.AddControllers().AddJsonOptions(options =>
 {
     options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
 });
+builder.Services.AddSingleton(runtimeOptions);
+builder.Services.AddSingleton(workerOptions);
+builder.Services.AddSingleton(graphEmailOptions);
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
@@ -109,8 +116,8 @@ builder.Services.AddHttpClient<DotTrackingClient>();
 builder.Services.AddHttpClient<TachoMasterClient>();
 builder.Services.AddHttpClient<AzureMapsRouteClient>();
 builder.Services.AddHttpClient<FleetioClient>();
-builder.Services.AddHostedService<DotTrackingIngestionService>();
-builder.Services.AddHostedService<IntegrationBackgroundSyncService>();
+if (workerOptions.DotTrackingIngestion) builder.Services.AddHostedService<DotTrackingIngestionService>();
+if (workerOptions.IntegrationBackgroundSync) builder.Services.AddHostedService<IntegrationBackgroundSyncService>();
 
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
 
@@ -164,6 +171,8 @@ static bool ReadBool(IConfiguration configuration, bool fallback, params string[
     bool.TryParse(ReadSetting(configuration, fallback.ToString(), keys), out var value) ? value : fallback;
 
 var app = builder.Build();
+
+TmsRuntimeStartupChecks.Verify(runtimeOptions, app.Logger);
 
 if (!app.Environment.IsEnvironment("Testing"))
 {
