@@ -49,8 +49,19 @@ public sealed class DriverPlanningController(TmsDbContext db, IConfiguration con
             foreach (var registerLoad in registerLoads)
             {
                 var index = loads.FindIndex(load => load.Id == registerLoad.Id);
-                if (index >= 0) loads[index] = registerLoad;
-                else loads.Add(registerLoad);
+                if (index < 0)
+                {
+                    loads.Add(registerLoad);
+                    continue;
+                }
+
+                // Live SQL is the authoritative execution copy because RoadTech/geofence
+                // progression advances its status to InProgress/Completed. Do not let an
+                // older Planning Register snapshot downgrade that live status. The only
+                // exception is the existing resilience rule for a cancelled SQL tombstone.
+                var liveLoad = loads[index];
+                if (PlanningResilience.KeepRegisteredOverLiveTombstone(registerLoad, liveLoad))
+                    loads[index] = registerLoad;
             }
         }
         catch (Exception) when (!ct.IsCancellationRequested)
