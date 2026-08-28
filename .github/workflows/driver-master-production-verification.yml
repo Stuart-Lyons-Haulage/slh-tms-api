@@ -33,17 +33,19 @@ jobs:
                test "$(echo "$body" | jq -r '.activeWithoutMember // -1')" = "0" && \
                test "$(echo "$body" | jq -r '.activeDrivers // 0')" -gt 0 && \
                test "$(echo "$body" | jq -r '.activeWithMember // 0')" = "$(echo "$body" | jq -r '.activeDrivers // -1')" && \
+               test "$(echo "$body" | jq -r '.sourceWorkers // 0')" = "$(echo "$body" | jq -r '.activeDrivers // -1')" && \
+               test "$(echo "$body" | jq -r '.populationAligned // false')" = "true" && \
                test "$(echo "$body" | jq -r '.latestCanonicalSyncUtc // empty')" != ""; then
-              echo "Canonical Driver Master is healthy."
+              echo "Canonical Driver Master is healthy and exactly matches the live TachoMaster worker population."
               exit 0
             fi
             sleep 10
           done
-          echo "Canonical Driver Master did not become healthy within 10 minutes of deployment."
+          echo "Canonical Driver Master did not become healthy and population-aligned within 10 minutes of deployment."
           exit 1
 
       - name: Summarise live Driver Master quality
         run: |
           set -euo pipefail
           body="$(curl --fail --silent --show-error --max-time 20 -H 'Cache-Control: no-cache' "https://$API_FQDN/api/v1/health/driver-master")"
-          echo "$body" | jq '{status, activeDrivers, activeWithMember, activeWithCard, duplicateMemberGroups, duplicateCardGroups, activeWithoutMember, activeWithoutCard, latestCanonicalSyncUtc}'
+          echo "$body" | jq '{status, activeDrivers, sourceWorkers, populationAligned, activeWithMember, activeWithCard, duplicateMemberGroups, duplicateCardGroups, activeWithoutMember, activeWithoutCard, latestCanonicalSyncUtc}'
