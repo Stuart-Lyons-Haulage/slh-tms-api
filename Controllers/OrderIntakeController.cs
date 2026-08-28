@@ -14,8 +14,9 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/v1/order-intake")]
 [Authorize]
-public sealed class OrderIntakeController(TmsDbContext db, StagingService stagingService, ILogger<OrderIntakeController> logger) : ControllerBase
+public sealed class OrderIntakeController(TmsDbContext db, StagingService stagingService, CustomerCommunicationExtractionService communicationExtractor, ILogger<OrderIntakeController> logger) : ControllerBase
 {
+    private static readonly JsonSerializerOptions StoredCommunicationJson = new(JsonSerializerDefaults.Web);
     private readonly EmailOrderIntakeService emailParser = new();
     private readonly SpecialistMailboxOrderParser specialistParser = new();
     private readonly SainsburyHaulierPlanParser sainsburyParser = new();
@@ -52,6 +53,8 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     {
         if (string.IsNullOrWhiteSpace(request.MessageId))
             return BadRequest(new ErrorResponse("missing_message_id", "Mailbox message ID is required so repeated flow runs remain idempotent.", HttpContext.TraceIdentifier));
+
+        await EnsureCommunicationEvidence(request, ct);
 
         var parsed = await ParseEmail(request, ct);
         if (parsed.IgnoredReason is not null)
@@ -125,6 +128,28 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             request.MessageId, staged, existing, superseded, parsed.Warnings.Count);
 
         return Accepted(new { ignored = false, staged, existing, superseded, warnings = parsed.Warnings, outlookCategory = "TMS Imported", records });
+    }
+
+    private async Task EnsureCommunicationEvidence(MailboxEmailIntakeRequest request, CancellationToken ct)
+    {
+        var key = $"communication:{request.MessageId}";
+        if (await db.StagedImports.AsNoTracking().AnyAsync(item => item.IdempotencyKey == key, ct)) return;
+        var extraction = communicationExtractor.Extract(request);
+        var payload = JsonSerializer.Serialize(new
+        {
+            source = new
+            {
+                request.MessageId, request.InternetMessageId, request.Mailbox, request.SenderAddress, request.SenderName,
+                request.Subject, request.ReceivedAtUtc, request.BodyText, request.BodyHtml, request.WebLink, request.ConversationId,
+                request.ToRecipients, request.CcRecipients, request.BodyFormat, request.Importance, request.CorrelationId,
+                attachments = (request.Attachments ?? []).Select(x => new { x.Name, x.ContentType, x.IsInline, x.ContentId, x.Size })
+            },
+            extraction
+        }, StoredCommunicationJson);
+        var item = new StagedImport { EntityType = "communication", IdempotencyKey = key, PayloadJson = payload, Source = request.Mailbox ?? "Mailbox communication" };
+        db.StagedImports.Add(item);
+        db.StagedImportEvents.Add(StagingAudit.Create(item, "Received"));
+        await db.SaveChangesAsync(ct);
     }
 
     private async Task<EmailIntakeParseResult> ParseEmail(MailboxEmailIntakeRequest request, CancellationToken ct) =>
