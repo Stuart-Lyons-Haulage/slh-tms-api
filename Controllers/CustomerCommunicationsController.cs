@@ -7,225 +7,89 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
 
-[ApiController]
-[Route("api/v1/customer-communications")]
-[Authorize]
-public sealed class CustomerCommunicationsController(TmsDbContext db) : ControllerBase
+[ApiController, Route("api/v1/customer-communications"), Authorize]
+public sealed class CustomerCommunicationsController(TmsDbContext db, StagingService staging, CustomerCommunicationExtractionService extractor) : ControllerBase
 {
     private const string SentMarker = "[CUSTOMER-ACK:SENT:";
+    private static readonly JsonSerializerOptions StoredPayloadJson = new(JsonSerializerDefaults.Web);
 
     [HttpGet("pending"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> Pending([FromQuery] int take = 50, CancellationToken ct = default)
     {
-        take = Math.Clamp(take, 1, 200);
-        var staged = await db.StagedImports
-            .AsNoTracking()
-            .Where(item => item.EntityType == "order" &&
-                           item.Source.StartsWith("Info mailbox") &&
-                           (item.Status == StagingStatus.PendingReview || item.Status == StagingStatus.Promoted))
-            .OrderByDescending(item => item.ReceivedAtUtc)
-            .Take(2000)
-            .ToListAsync(ct);
-
-        var parsed = staged
-            .Select(TryParse)
-            .Where(item => item is not null)
-            .Cast<CommunicationSource>()
-            .Where(item => !string.IsNullOrWhiteSpace(item.SourceMessageId) &&
-                           !string.IsNullOrWhiteSpace(item.SourceSender) &&
-                           !item.SourceSender.EndsWith("@lyonshaulage.com", StringComparison.OrdinalIgnoreCase))
-            .ToList();
-
-        var pending = new List<object>();
-        foreach (var group in parsed.GroupBy(item => item.SourceMessageId!, StringComparer.Ordinal))
+        var staged = await db.StagedImports.AsNoTracking().Where(x => x.EntityType == "order" && x.Source!.StartsWith("Info mailbox") && (x.Status == StagingStatus.PendingReview || x.Status == StagingStatus.Promoted)).OrderByDescending(x => x.ReceivedAtUtc).Take(2000).ToListAsync(ct);
+        var communications = new List<object>();
+        foreach (var group in staged.Select(TryParse).Where(x => x is not null).Cast<CommunicationSource>().Where(x => !string.IsNullOrWhiteSpace(x.SourceMessageId) && !x.SourceSender!.EndsWith("@lyonshaulage.com", StringComparison.OrdinalIgnoreCase)).GroupBy(x => x.SourceMessageId!, StringComparer.Ordinal))
         {
-            if (group.Any(item => item.ReviewNote?.Contains(SentMarker, StringComparison.Ordinal) == true))
-                continue;
-
-            var promoted = group.Where(item => item.Status == StagingStatus.Promoted).ToList();
-            if (promoted.Count == 0)
-                continue;
-
-            var accepted = promoted.Where(item => item.PlannerReady != false &&
-                                                   !string.Equals(item.IntakeStatus, "PreOrder", StringComparison.OrdinalIgnoreCase))
-                                   .ToList();
-            if (accepted.Count == 0)
-                continue;
-
-            var awaitingInstruction = group.Count(item => item.Status == StagingStatus.PendingReview &&
-                                                           (item.PlannerReady == false ||
-                                                            string.Equals(item.IntakeStatus, "PreOrder", StringComparison.OrdinalIgnoreCase)));
-            var first = accepted[0];
-            var key = CommunicationKey(group.Key);
-            var trackerSummary = accepted.Any(item => string.Equals(item.CustomerCode, "NWF", StringComparison.OrdinalIgnoreCase)) || accepted.Count > 1;
-            pending.Add(new
-            {
-                communicationKey = key,
-                kind = trackerSummary ? "OrderSummaryAccepted" : "OrderAccepted",
-                sourceMessageId = first.SourceMessageId,
-                sourceInternetMessageId = first.SourceInternetMessageId,
-                sourceSubject = first.SourceSubject,
-                replyTo = first.SourceSender,
-                acceptedCount = accepted.Count,
-                awaitingInstructionCount = awaitingInstruction,
-                references = accepted.Select(item => item.Reference).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct().ToList(),
-                bodyHtml = BuildAcceptedHtml(accepted, awaitingInstruction, trackerSummary),
-                idempotencyKey = $"customer-ack:{key}"
-            });
-
-            if (pending.Count >= take)
-                break;
+            if (group.Any(x => x.ReviewNote?.Contains(SentMarker, StringComparison.Ordinal) == true)) continue;
+            var accepted = group.Where(x => x.Status == StagingStatus.Promoted && x.PlannerReady != false && !string.Equals(x.IntakeStatus, "PreOrder", StringComparison.OrdinalIgnoreCase)).ToList();
+            if (accepted.Count == 0) continue;
+            var first = accepted[0]; var key = CommunicationKey(group.Key); var summary = accepted.Count > 1 || accepted.Any(x => x.CustomerCode == "NWF");
+            var awaitingInstruction = group.Count(x => x.Status == StagingStatus.PendingReview && (x.PlannerReady == false || string.Equals(x.IntakeStatus, "PreOrder", StringComparison.OrdinalIgnoreCase)));
+            communications.Add(new { communicationKey = key, kind = summary ? "OrderSummaryAccepted" : "OrderAccepted", sourceMessageId = first.SourceMessageId, sourceInternetMessageId = first.SourceInternetMessageId, sourceSubject = first.SourceSubject, replyTo = first.SourceSender, acceptedCount = accepted.Count, awaitingInstructionCount = awaitingInstruction, references = accepted.Select(x => x.Reference).Where(x => x is not null).Distinct().ToList(), bodyHtml = BuildAcceptedHtml(accepted, awaitingInstruction, summary), idempotencyKey = $"customer-ack:{key}" });
+            if (communications.Count >= Math.Clamp(take, 1, 200)) break;
         }
-
-        return Ok(new { count = pending.Count, communications = pending });
+        return Ok(new { count = communications.Count, communications });
     }
 
     [HttpPost("{communicationKey}/sent"), Authorize(Policy = "TmsWrite")]
-    public async Task<IActionResult> MarkSent(string communicationKey, [FromBody] CommunicationSentRequest request, CancellationToken ct)
+    public async Task<IActionResult> MarkSent(string communicationKey, CommunicationSentRequest request, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(communicationKey)) return BadRequest(new { code = "communication_key_required" });
-        var staged = await db.StagedImports
-            .Where(item => item.EntityType == "order" && item.Source.StartsWith("Info mailbox"))
-            .OrderByDescending(item => item.ReceivedAtUtc)
-            .Take(2000)
-            .ToListAsync(ct);
-
-        var matching = staged
-            .Select(item => new { Item = item, Parsed = TryParse(item) })
-            .Where(pair => pair.Parsed is not null && CommunicationKey(pair.Parsed.SourceMessageId!) == communicationKey)
-            .ToList();
+        var staged = await db.StagedImports.Where(x => x.EntityType == "order" && x.Source!.StartsWith("Info mailbox")).OrderByDescending(x => x.ReceivedAtUtc).Take(2000).ToListAsync(ct);
+        var matching = staged.Select(x => new { Item = x, Parsed = TryParse(x) }).Where(x => x.Parsed is not null && CommunicationKey(x.Parsed.SourceMessageId!) == communicationKey).ToList();
         if (matching.Count == 0) return NotFound();
-
-        if (matching.Any(pair => pair.Item.ReviewNote?.Contains(SentMarker, StringComparison.Ordinal) == true))
-            return Ok(new { communicationKey, alreadySent = true });
-
-        var timestamp = DateTimeOffset.UtcNow;
-        var marker = $"{SentMarker}{communicationKey}:{timestamp:O}]";
-        foreach (var pair in matching)
-        {
-            var detail = string.IsNullOrWhiteSpace(request.ProviderMessageId)
-                ? marker
-                : $"{marker} ProviderMessageId={request.ProviderMessageId}";
-            pair.Item.ReviewNote = string.Join(" | ", new[] { pair.Item.ReviewNote, detail }.Where(value => !string.IsNullOrWhiteSpace(value)));
-        }
-        await db.SaveChangesAsync(ct);
-        return Ok(new { communicationKey, sentAtUtc = timestamp, marked = matching.Count });
+        if (matching.Any(x => x.Item.ReviewNote?.Contains(SentMarker, StringComparison.Ordinal) == true)) return Ok(new { communicationKey, alreadySent = true });
+        var marker = $"{SentMarker}{communicationKey}:{DateTimeOffset.UtcNow:O}]";
+        foreach (var item in matching) item.Item.ReviewNote = string.Join(" | ", new[] { item.Item.ReviewNote, marker, request.ProviderMessageId }.Where(x => !string.IsNullOrWhiteSpace(x)));
+        await db.SaveChangesAsync(ct); return Ok(new { communicationKey, marked = matching.Count });
     }
 
-    private static CommunicationSource? TryParse(StagedImport item)
+    [HttpGet]
+    public async Task<IActionResult> Ledger([FromQuery] StagingStatus? status, [FromQuery] string? purpose, [FromQuery] int take = 100, CancellationToken ct = default)
     {
-        try
-        {
-            using var document = JsonDocument.Parse(item.PayloadJson);
-            var payload = document.RootElement;
-            return new CommunicationSource(
-                item.Status,
-                item.ReviewNote,
-                Text(payload, "sourceMessageId"),
-                Text(payload, "sourceInternetMessageId"),
-                Text(payload, "sourceSender"),
-                Text(payload, "sourceSubject"),
-                Text(payload, "poNumber") ?? Text(payload, "customerPo") ?? Text(payload, "productPo"),
-                Text(payload, "customerCode"),
-                Text(payload, "collectionDate"),
-                Text(payload, "deliveryDate"),
-                Text(payload, "sellerName"),
-                Text(payload, "stallNumber"),
-                Int(payload, "pallets"),
-                Bool(payload, "plannerReady"),
-                Text(payload, "intakeStatus"));
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
+        var query = db.StagedImports.AsNoTracking().Where(x => x.EntityType == "communication");
+        if (status is not null) query = query.Where(x => x.Status == status);
+        var rows = await query.OrderByDescending(x => x.ReceivedAtUtc).Take(Math.Clamp(take, 1, 500)).ToListAsync(ct);
+        var result = rows.Select(x => new { x.Id, x.Status, x.IdempotencyKey, x.Source, x.ReceivedAtUtc, x.ReviewedAtUtc, x.ReviewedBy, x.ReviewNote, payload = Parse(x.PayloadJson) });
+        if (!string.IsNullOrWhiteSpace(purpose)) result = result.Where(x => x.payload.GetProperty("extraction").GetProperty("purpose").GetString()!.Equals(purpose, StringComparison.OrdinalIgnoreCase));
+        return Ok(result);
     }
 
-    private static string BuildAcceptedHtml(IReadOnlyList<CommunicationSource> accepted, int awaitingInstruction, bool summary)
+    [HttpPost("ingest"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> Ingest(MailboxEmailIntakeRequest request, CancellationToken ct)
     {
-        var encoder = HtmlEncoder.Default;
-        var html = new StringBuilder();
-        html.Append("<p>Thank you for your transport instruction.</p>");
-        html.Append(summary
-            ? $"<p>We have reviewed the latest instruction and <strong>{accepted.Count}</strong> movement(s) have been accepted and passed to the Stuart Lyons Haulage Planning Team.</p>"
-            : "<p>Your order has been received, reviewed and passed to the Stuart Lyons Haulage Planning Team for the requested collection/delivery.</p>");
-        html.Append("<table style=\"border-collapse:collapse;border:1px solid #d1d5db\"><thead><tr>");
-        foreach (var heading in new[] { "Reference", "Collection", "Collection date", "Delivery", "Delivery date", "Pallets" })
-            html.Append($"<th style=\"padding:6px;border:1px solid #d1d5db;text-align:left\">{heading}</th>");
-        html.Append("</tr></thead><tbody>");
-        foreach (var order in accepted)
-        {
-            html.Append("<tr>");
-            foreach (var value in new[] { order.Reference, order.CollectionSite, order.CollectionDate, order.DeliverySite, order.DeliveryDate, order.Pallets?.ToString() })
-                html.Append($"<td style=\"padding:6px;border:1px solid #d1d5db\">{encoder.Encode(value ?? "—")}</td>");
-            html.Append("</tr>");
-        }
-        html.Append("</tbody></table>");
-        if (awaitingInstruction > 0)
-            html.Append($"<p><strong>{awaitingInstruction}</strong> pre-order item(s) remain recorded as awaiting further instruction and have not yet been committed to Planning.</p>");
-        html.Append("<p>If any of the above information changes, please reply to this email quoting the relevant reference. Amendments and cancellations will be reviewed against the existing order.</p>");
-        html.Append("<p>Kind regards,<br/>Stuart Lyons Haulage<br/>Transport Planning</p>");
-        return html.ToString();
+        if (string.IsNullOrWhiteSpace(request.MessageId)) return BadRequest(new { error = "message_id_required" });
+        var key = $"communication:{request.MessageId}"; var existing = await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(x => x.IdempotencyKey == key, ct);
+        if (existing is not null) return Ok(new { existing = true, existing.Id, existing.Status });
+        var extraction = extractor.Extract(request);
+        var payload = JsonSerializer.Serialize(new { source = new { request.MessageId, request.InternetMessageId, request.Mailbox, request.SenderAddress, request.SenderName, request.Subject, request.ReceivedAtUtc, request.BodyText, request.BodyHtml, request.WebLink, request.ConversationId, request.ToRecipients, request.CcRecipients, request.BodyFormat, request.Importance, request.CorrelationId, attachments = (request.Attachments ?? []).Select(x => new { x.Name, x.ContentType, x.IsInline, x.ContentId, x.Size }) }, extraction }, StoredPayloadJson);
+        var item = new StagedImport { EntityType = "communication", IdempotencyKey = key, PayloadJson = payload, Source = request.Mailbox ?? "Mailbox communication" };
+        db.StagedImports.Add(item); db.StagedImportEvents.Add(StagingAudit.Create(item, "Received")); await db.SaveChangesAsync(ct);
+        return Accepted(new { id = item.Id, item.Status, item.ReceivedAtUtc, purpose = extraction.Purpose });
     }
 
-    private static string CommunicationKey(string sourceMessageId)
+    [HttpPost("{id:guid}/approve"), Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> Approve(Guid id, ReviewNote request, CancellationToken ct) => await Review(id, true, request.Note, ct);
+    [HttpPost("{id:guid}/reject"), Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> Reject(Guid id, ReviewNote request, CancellationToken ct) => await Review(id, false, request.Note, ct);
+    private async Task<IActionResult> Review(Guid id, bool approve, string? note, CancellationToken ct)
     {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(sourceMessageId));
-        return Convert.ToHexString(bytes)[..24].ToLowerInvariant();
+        if (!await db.StagedImports.AsNoTracking().AnyAsync(x => x.Id == id && x.EntityType == "communication", ct)) return NotFound();
+        try { return Ok(await staging.ReviewAndPromote(id, approve, note, User, ct)); } catch (InvalidOperationException ex) { return Conflict(new { error = "communication_review_conflict", message = ex.Message }); }
     }
 
-    private static string? Text(JsonElement payload, string name)
-    {
-        if (!TryGet(payload, name, out var value)) return null;
-        return value.ValueKind switch
-        {
-            JsonValueKind.String => string.IsNullOrWhiteSpace(value.GetString()) ? null : value.GetString()!.Trim(),
-            JsonValueKind.Number => value.GetRawText(),
-            _ => null
-        };
-    }
-
-    private static int? Int(JsonElement payload, string name) => int.TryParse(Text(payload, name), out var value) ? value : null;
-    private static bool? Bool(JsonElement payload, string name)
-    {
-        if (!TryGet(payload, name, out var value)) return null;
-        return value.ValueKind switch { JsonValueKind.True => true, JsonValueKind.False => false, _ => null };
-    }
-
-    private static bool TryGet(JsonElement payload, string name, out JsonElement value)
-    {
-        if (payload.TryGetProperty(name, out value)) return true;
-        foreach (var property in payload.EnumerateObject())
-        {
-            if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
-            {
-                value = property.Value;
-                return true;
-            }
-        }
-        value = default;
-        return false;
-    }
-
-    private sealed record CommunicationSource(
-        StagingStatus Status,
-        string? ReviewNote,
-        string? SourceMessageId,
-        string? SourceInternetMessageId,
-        string? SourceSender,
-        string? SourceSubject,
-        string? Reference,
-        string? CustomerCode,
-        string? CollectionDate,
-        string? DeliveryDate,
-        string? CollectionSite,
-        string? DeliverySite,
-        int? Pallets,
-        bool? PlannerReady,
-        string? IntakeStatus);
+    private static JsonElement Parse(string value) { using var document = JsonDocument.Parse(value); return document.RootElement.Clone(); }
+    private static CommunicationSource? TryParse(StagedImport item) { try { using var document = JsonDocument.Parse(item.PayloadJson); var p = document.RootElement; return new(item.Status, item.ReviewNote, Text(p, "sourceMessageId"), Text(p, "sourceInternetMessageId"), Text(p, "sourceSender"), Text(p, "sourceSubject"), Text(p, "poNumber") ?? Text(p, "customerPo") ?? Text(p, "productPo"), Text(p, "customerCode"), Text(p, "collectionDate"), Text(p, "deliveryDate"), Text(p, "sellerName"), Text(p, "stallNumber"), Int(p, "pallets"), Bool(p, "plannerReady"), Text(p, "intakeStatus")); } catch (JsonException) { return null; } }
+    private static string BuildAcceptedHtml(IReadOnlyList<CommunicationSource> orders, int awaitingInstruction, bool summary) { var e = HtmlEncoder.Default; var html = new StringBuilder($"<p>{(summary ? "We have reviewed the latest instruction and accepted the following movements." : "Your order has been received, reviewed and passed to Planning.")}</p><table><tr><th>Reference</th><th>Collection</th><th>Delivery</th><th>Pallets</th></tr>"); foreach (var x in orders) html.Append($"<tr><td>{e.Encode(x.Reference ?? "—")}</td><td>{e.Encode(x.CollectionSite ?? "—")}</td><td>{e.Encode(x.DeliverySite ?? "—")}</td><td>{x.Pallets}</td></tr>"); html.Append("</table>"); if (awaitingInstruction > 0) html.Append($"<p><strong>{awaitingInstruction}</strong> pre-order item(s) remain awaiting instruction and have not been committed to Planning.</p>"); return html.Append("<p>Amendments and cancellations will be reviewed against the existing order.</p>").ToString(); }
+    private static string CommunicationKey(string sourceMessageId) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sourceMessageId)))[..24].ToLowerInvariant();
+    private static string? Text(JsonElement p, string n) { if (!p.TryGetProperty(n, out var v)) { foreach (var property in p.EnumerateObject()) if (property.Name.Equals(n, StringComparison.OrdinalIgnoreCase)) { v = property.Value; break; } } return v.ValueKind == JsonValueKind.String ? v.GetString()?.Trim() : v.ValueKind == JsonValueKind.Number ? v.GetRawText() : null; }
+    private static int? Int(JsonElement p, string n) => int.TryParse(Text(p, n), out var x) ? x : null;
+    private static bool? Bool(JsonElement p, string n) { if (!p.TryGetProperty(n, out var v)) { foreach (var property in p.EnumerateObject()) if (property.Name.Equals(n, StringComparison.OrdinalIgnoreCase)) { v = property.Value; break; } } return v.ValueKind == JsonValueKind.True ? true : v.ValueKind == JsonValueKind.False ? false : null; }
+    private sealed record CommunicationSource(StagingStatus Status, string? ReviewNote, string? SourceMessageId, string? SourceInternetMessageId, string? SourceSender, string? SourceSubject, string? Reference, string? CustomerCode, string? CollectionDate, string? DeliveryDate, string? CollectionSite, string? DeliverySite, int? Pallets, bool? PlannerReady, string? IntakeStatus);
 }
 
 public sealed record CommunicationSentRequest(string? ProviderMessageId);
+public sealed record ReviewNote(string? Note);
