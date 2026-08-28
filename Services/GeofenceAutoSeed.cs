@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
 
 namespace Slh.Tms.Api.Services;
 
@@ -8,6 +9,7 @@ public static class GeofenceAutoSeed
 {
     private static readonly SemaphoreSlim Gate = new(1, 1);
     private const int SupplementalFenceCount = 0;
+    private const string LocationOnly = "LOCATION_ONLY";
     private static readonly string[] SupplementalFenceNames =
     [
     ];
@@ -32,6 +34,17 @@ public static class GeofenceAutoSeed
         {
             active = await db.SiteGeofences.AsNoTracking().CountAsync(x => x.Active, ct);
             if (await IsCompleteAsync(db, active, ct)) return new GeofenceAutoSeedResult(false, active, 0, 0);
+
+            // A SiteId chosen from the Site Master geofence dropdown is an explicit operator
+            // decision and must survive any later provider/embedded catalogue refresh. The
+            // Falcon import routine updates existing rows and can otherwise replace SiteId /
+            // SiteNumber with its automatic name match. Preserve the exact linked row ids,
+            // including LOCATION_ONLY overrides, and restore only those identity fields after
+            // the geometry/catalogue refresh. Geometry and operational settings remain fresh.
+            var explicitlyLinkedRows = await db.SiteGeofences.AsNoTracking()
+                .Where(x => x.Active && (x.SiteId != null || x.SiteNumber == LocationOnly))
+                .ToListAsync(ct);
+            var preservedLinks = CaptureExplicitLinks(explicitlyLinkedRows);
 
             using var document = JsonDocument.Parse(GeofenceSeedPayload.Json);
             var inserted = 0;
@@ -66,6 +79,16 @@ public static class GeofenceAutoSeed
                 matched += result.SiteMatched;
             }
 
+            if (preservedLinks.Count > 0)
+            {
+                var preservedIds = preservedLinks.Keys.ToList();
+                var refreshedRows = await db.SiteGeofences
+                    .Where(x => preservedIds.Contains(x.Id))
+                    .ToListAsync(ct);
+                if (RestoreExplicitLinks(refreshedRows, preservedLinks) > 0)
+                    await db.SaveChangesAsync(ct);
+            }
+
             await GeofenceSiteAliasRepair.EnsureAsync(db, ct);
             active = await db.SiteGeofences.AsNoTracking().CountAsync(x => x.Active, ct);
             return new GeofenceAutoSeedResult(true, active, inserted + updated, matched);
@@ -74,6 +97,38 @@ public static class GeofenceAutoSeed
         {
             Gate.Release();
         }
+    }
+
+    internal static IReadOnlyDictionary<Guid, GeofencePreservedLink> CaptureExplicitLinks(IEnumerable<SiteGeofence> fences)
+        => fences
+            .Where(fence => fence.Active && (fence.SiteId is not null || string.Equals(fence.SiteNumber?.Trim(), LocationOnly, StringComparison.OrdinalIgnoreCase)))
+            .GroupBy(fence => fence.Id)
+            .ToDictionary(
+                group => group.Key,
+                group =>
+                {
+                    var fence = group.OrderByDescending(item => item.UpdatedAtUtc).First();
+                    return new GeofencePreservedLink(fence.SiteId, fence.SiteNumber);
+                });
+
+    internal static int RestoreExplicitLinks(
+        IEnumerable<SiteGeofence> fences,
+        IReadOnlyDictionary<Guid, GeofencePreservedLink> preservedLinks)
+    {
+        var restored = 0;
+        var now = DateTimeOffset.UtcNow;
+        foreach (var fence in fences)
+        {
+            if (!preservedLinks.TryGetValue(fence.Id, out var preserved)) continue;
+            if (fence.SiteId == preserved.SiteId && string.Equals(fence.SiteNumber, preserved.SiteNumber, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            fence.SiteId = preserved.SiteId;
+            fence.SiteNumber = preserved.SiteNumber;
+            fence.UpdatedAtUtc = now;
+            restored++;
+        }
+        return restored;
     }
 
     private static async Task<bool> IsCompleteAsync(TmsDbContext db, int active, CancellationToken ct)
@@ -98,5 +153,7 @@ public static class GeofenceAutoSeed
     private static int? NullableInt(JsonElement element, string property) =>
         element.TryGetProperty(property, out var value) && value.TryGetInt32(out var number) ? number : null;
 }
+
+internal sealed record GeofencePreservedLink(Guid? SiteId, string? SiteNumber);
 
 public sealed record GeofenceAutoSeedResult(bool Seeded, int Active, int Imported, int SiteMatched);
