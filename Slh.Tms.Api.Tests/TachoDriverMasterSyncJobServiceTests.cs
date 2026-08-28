@@ -55,7 +55,7 @@ public sealed class TachoDriverMasterSyncJobServiceTests
     }
 
     [Fact]
-    public async Task Expired_worker_lease_is_recovered_for_a_replacement_sync()
+    public async Task Expired_worker_lease_is_recovered_even_when_the_same_instance_returns_to_polling()
     {
         var now = DateTimeOffset.UtcNow;
         await using var db = CreateDb();
@@ -67,7 +67,7 @@ public sealed class TachoDriverMasterSyncJobServiceTests
         await db.SaveChangesAsync();
 
         var service = new TachoDriverMasterSyncJobService(db);
-        var recoveredCount = await RecoverAsync(service, "worker:replacement");
+        var recoveredCount = await RecoverAsync(service, "worker:dead");
 
         var recovered = await db.StagedImports.SingleAsync(row => row.Id == running.Id);
         Assert.Equal(1, recoveredCount);
