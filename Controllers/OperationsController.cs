@@ -22,9 +22,7 @@ public sealed class OperationsController(
     [HttpGet("delivery-etas"), AllowAnonymous]
     public async Task<IActionResult> DeliveryEtas([FromQuery] DateOnly? date, CancellationToken ct)
     {
-        var displayKey = Request.Headers["X-TV-Display-Key"].FirstOrDefault();
-        var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct);
-        if (!pairedKeyAllowed && !TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
+        if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
  
         var planningDate = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
         // A planning-day reset leaves cancelled rows in the legacy/live Loads table while
@@ -68,10 +66,6 @@ public sealed class OperationsController(
         try
         {
             geofence = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, GeofencePlanningMatch.PrepareLoads(loads), ct);
-            // The in-memory RoadTech reconstruction can briefly be incomplete while a refresh is
-            // catching up. Merge the durable projection before calculating ETAs so already-proved
-            // stops cannot disappear and send the route backwards through completed work.
-            geofence = await EmbeddedGeofenceEvidenceMerge.MergeDurableProjectionAsync(db, geofence, loads, ct);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -96,7 +90,6 @@ public sealed class OperationsController(
             var tacho = vehicle is null ? null : ExecutionIdentityResolver.MatchLiveDriverIdentityForVehicle(aliases, driver, tachoStatuses);
             var visits = geofence?.Visits.Where(visit => visit.LoadId == load.Id).OrderBy(visit => visit.EnteredAtUtc).ToList() ?? [];
             var completedStopIds = geofence is null ? new HashSet<Guid>() : GeofencePlanningMatch.CompletedStopIds(load, visits);
-            var finalDestination = RunFinalDestination.Select(load.Stops);
  
             var current = live is null ? ((decimal Longitude, decimal Latitude)?)null : (live.Longitude, live.Latitude);
             var currentEta = now;
@@ -138,8 +131,6 @@ public sealed class OperationsController(
                 }
                 var windowStart = order?.DeliveryWindowStartUtc;
                 var windowEnd = order?.DeliveryWindowEndUtc;
-                if (windowEnd is null && finalDestination is not null && stop.Id == finalDestination.Id)
-                    windowEnd = finalDestination.PlannedArrivalUtc;
                 var tachoAssessment = source == "Live"
                     ? TachoAssessment(tacho, cumulativeDrivingMinutes, breakDelayMinutes)
                     : source == "Estimated"
@@ -266,8 +257,7 @@ public sealed class OperationsController(
     {
         if (eta is null || end is null) return "Pending";
         if (eta > end) return "Late";
-        // Final-customer risk is deadline based. A live ETA at or before the
-        // latest accepted delivery time remains on track, even with a small buffer.
+        if (end - eta <= TimeSpan.FromMinutes(30)) return "AtRisk";
         return "OnTrack";
     }
  

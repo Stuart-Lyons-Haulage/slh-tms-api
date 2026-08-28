@@ -24,9 +24,7 @@ public sealed class RunProgressController(
     [HttpGet, AllowAnonymous]
     public async Task<IActionResult> Get([FromQuery] DateOnly? date, CancellationToken ct)
     {
-        var displayKey = Request.Headers["X-TV-Display-Key"].FirstOrDefault();
-        var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct);
-        if (!pairedKeyAllowed && !TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
+        if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
 
         var planningDate = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
         var now = DateTimeOffset.UtcNow;

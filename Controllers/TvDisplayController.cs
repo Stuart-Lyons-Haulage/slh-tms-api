@@ -168,7 +168,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
                 : stops.FirstOrDefault(stop => !completedStopIds.Contains(stop.Id))
                     ?? PickNextStop(stops, now, load.Status);
             var firstStop = stops.FirstOrDefault();
-            var finalStop = RunFinalDestination.Select(stops);
+            var finalStop = stops.LastOrDefault();
             var routeComplete = stops.Count > 0 && completedStopIds.Count >= stops.Count;
             var etaTarget = routeComplete ? null : finalStop;
             var eta = etaTarget?.PlannedArrivalUtc;
