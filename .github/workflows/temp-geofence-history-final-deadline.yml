@@ -130,11 +130,13 @@ jobs:
           legacy.write_text(text)
           PY
       - name: Restore
-        run: dotnet restore Slh.Tms.Api.sln
+        run: |
+          dotnet restore Slh.Tms.Api.csproj
+          dotnet restore Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj
       - name: Build
-        run: dotnet build Slh.Tms.Api.sln --configuration Release --no-restore
+        run: dotnet build Slh.Tms.Api.csproj --configuration Release --no-restore
       - name: Test
-        run: dotnet test Slh.Tms.Api.sln --configuration Release --no-build
+        run: dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --no-restore
       - name: Commit repaired source and remove temporary workflow
         shell: bash
         run: |
