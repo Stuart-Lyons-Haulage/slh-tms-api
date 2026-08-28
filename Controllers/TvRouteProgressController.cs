@@ -44,18 +44,41 @@ public sealed class TvRouteProgressController(
             .OrderBy(load => load.Reference)
             .ToList();
 
-        // TV reads must remain bounded. Current RoadTech ingestion and the shared geofence
-        // engine run continuously in the background; a display refresh must consume that durable
-        // projection rather than replaying the whole operating day synchronously.
-        var liveStatuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
-        var snapshot = new EmbeddedGeofenceSnapshot(
-            EmbeddedGeofenceEngine.ApprovedFences,
-            [],
-            [],
-            [],
-            0,
-            liveStatuses.Count > 0 ? liveStatuses.Max(status => status.LastReceivedAtUtc) : null);
-        snapshot = await EmbeddedGeofenceEvidenceMerge.MergeDurableProjectionAsync(db, snapshot, loads, ct);
+        // Use the same RoadTech + historical reconstruction + durable SQL evidence as
+        // the signed-in Operations wallboard. This keeps TV dots, History and Progress
+        // non-regressive and prevents a durable-projection lag from hiding real site hits.
+        var (liveStatuses, liveTrackingSource) = await LoadLiveStatusesAsync(now, ct);
+        EmbeddedGeofenceSnapshot snapshot;
+        try
+        {
+            snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, day, GeofencePlanningMatch.PrepareLoads(loads), ct);
+            snapshot = await EmbeddedGeofenceEvidenceMerge.MergeDurableProjectionAsync(db, snapshot, loads, ct);
+
+            // Backfill reconstructed history into the durable projection so legacy TV clients,
+            // timelines and subsequent reads all see the same ENTER/EXIT evidence.
+            try
+            {
+                await EmbeddedGeofenceSqlProjection.PersistAsync(db, snapshot, ct);
+            }
+            catch (Exception projectionException) when (projectionException is not OperationCanceledException)
+            {
+                db.ChangeTracker.Clear();
+                logger.LogWarning(projectionException, "TV geofence history reconstruction could not be persisted; reconstructed evidence remains visible for this refresh.");
+            }
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            logger.LogWarning(exception, "TV geofence history reconstruction failed; falling back to the latest durable projection.");
+            snapshot = new EmbeddedGeofenceSnapshot(
+                EmbeddedGeofenceEngine.ApprovedFences,
+                [],
+                [],
+                [],
+                0,
+                liveStatuses.Count > 0 ? liveStatuses.Max(status => status.LastReceivedAtUtc) : null);
+            snapshot = await EmbeddedGeofenceEvidenceMerge.MergeDurableProjectionAsync(db, snapshot, loads, ct);
+        }
 
         var vehicleIds = loads.Where(x => x.VehicleId is not null).Select(x => x.VehicleId!.Value).Distinct().ToList();
         var vehicles = vehicleIds.Count == 0
@@ -199,7 +222,7 @@ public sealed class TvRouteProgressController(
         {
             planningDate = day,
             calculatedAtUtc = now,
-            trackingSource = "SQL live status + durable geofence projection",
+            trackingSource = $"{liveTrackingSource} + reconstructed/durable geofence projection",
             latestTrackingUtc = liveStatuses.Count > 0
                 ? liveStatuses.Max(status => status.LastReceivedAtUtc)
                 : snapshot.LatestTrackingUtc,

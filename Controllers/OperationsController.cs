@@ -92,6 +92,7 @@ public sealed class OperationsController(
             var tacho = vehicle is null ? null : ExecutionIdentityResolver.MatchLiveDriverIdentityForVehicle(aliases, driver, tachoStatuses);
             var visits = geofence?.Visits.Where(visit => visit.LoadId == load.Id).OrderBy(visit => visit.EnteredAtUtc).ToList() ?? [];
             var completedStopIds = geofence is null ? new HashSet<Guid>() : GeofencePlanningMatch.CompletedStopIds(load, visits);
+            var finalDestination = RunFinalDestination.Select(load.Stops);
  
             var current = live is null ? ((decimal Longitude, decimal Latitude)?)null : (live.Longitude, live.Latitude);
             var currentEta = now;
@@ -133,6 +134,8 @@ public sealed class OperationsController(
                 }
                 var windowStart = order?.DeliveryWindowStartUtc;
                 var windowEnd = order?.DeliveryWindowEndUtc;
+                if (windowEnd is null && finalDestination is not null && stop.Id == finalDestination.Id)
+                    windowEnd = finalDestination.PlannedArrivalUtc;
                 var tachoAssessment = source == "Live"
                     ? TachoAssessment(tacho, cumulativeDrivingMinutes, breakDelayMinutes)
                     : source == "Estimated"
@@ -259,7 +262,8 @@ public sealed class OperationsController(
     {
         if (eta is null || end is null) return "Pending";
         if (eta > end) return "Late";
-        if (end - eta <= TimeSpan.FromMinutes(30)) return "AtRisk";
+        // Final-customer risk is deadline based. A live ETA at or before the
+        // latest accepted delivery time remains on track, even with a small buffer.
         return "OnTrack";
     }
  
