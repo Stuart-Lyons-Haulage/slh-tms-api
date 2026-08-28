@@ -27,6 +27,7 @@ public sealed class TvDisplayRunLabelsController(TmsDbContext db, IConfiguration
             .Where(load => load.Status != LoadStatus.Cancelled)
             .ToList();
         await LoadCommercialStore.EnrichAsync(db, loads, ct);
+        foreach (var load in loads) OvernightRunContinuity.Apply(load);
 
         return Ok(new
         {
@@ -74,7 +75,14 @@ internal static partial class RunDisplayLabel
         var plannerRun = NoteValue(load.PlannerNotes, "Planner run");
         var runType = NoteValue(load.PlannerNotes, "Run type");
         var source = string.IsNullOrWhiteSpace(plannerRun) ? StripInternalReference(load.Reference) : plannerRun.Trim();
-        var period = ExplicitPeriod(source) ?? ExplicitPeriod(runType) ?? PeriodFromFirstStop(load);
+        var plannedPeriod = PeriodFromFirstStop(load);
+
+        // Sequence is operational truth. A stale imported "AM" must not override a run whose
+        // first actual planned movement is the previous evening at 17:00.
+        if (plannedPeriod is not null && NumericRunRegex().IsMatch(source))
+            source = PeriodRegex().Replace(source, string.Empty).Trim();
+
+        var period = plannedPeriod ?? ExplicitPeriod(source) ?? ExplicitPeriod(runType);
         return Format(source, period);
     }
 
@@ -85,7 +93,7 @@ internal static partial class RunDisplayLabel
         if (numeric.Success)
         {
             var number = int.TryParse(numeric.Groups[1].Value, out var parsed) ? parsed.ToString() : numeric.Groups[1].Value;
-            var resolvedPeriod = ExplicitPeriod(numeric.Groups[2].Value) ?? period;
+            var resolvedPeriod = period ?? ExplicitPeriod(numeric.Groups[2].Value);
             return $"Run {number}{(resolvedPeriod is null ? string.Empty : $" {resolvedPeriod}")}";
         }
 
@@ -97,7 +105,7 @@ internal static partial class RunDisplayLabel
         if (existing is not null)
         {
             clean = PeriodRegex().Replace(clean, string.Empty).Trim();
-            return $"Run {clean} {existing}";
+            return $"Run {clean} {period ?? existing}";
         }
 
         return $"Run {clean}{(period is null ? string.Empty : $" {period}")}";
@@ -133,7 +141,10 @@ internal static partial class RunDisplayLabel
 
     private static string? PeriodFromFirstStop(Load load)
     {
-        var first = load.Stops.Where(stop => stop.PlannedArrivalUtc is not null).OrderBy(stop => stop.PlannedArrivalUtc).FirstOrDefault()?.PlannedArrivalUtc;
+        var first = load.Stops
+            .Where(stop => stop.PlannedArrivalUtc is not null)
+            .OrderBy(stop => stop.Sequence)
+            .FirstOrDefault()?.PlannedArrivalUtc;
         if (first is null) return null;
         var local = TimeZoneInfo.ConvertTime(first.Value, UkZone);
         return local.TimeOfDay >= TimeSpan.FromHours(12) ? "PM" : "AM";
