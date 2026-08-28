@@ -12,7 +12,6 @@ public sealed class TachoDriverMasterController(
     TachoDriverMasterSyncService sync) : ControllerBase
 {
     [HttpPost("tachomaster/sync")]
-    [Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> Sync(CancellationToken ct)
     {
         var actor = User.Identity?.Name ?? "TMS user";
