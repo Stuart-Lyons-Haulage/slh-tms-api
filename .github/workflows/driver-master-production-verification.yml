@@ -23,9 +23,17 @@ jobs:
       - name: Wait for canonical TachoMaster driver cleanse
         run: |
           set -euo pipefail
+          deployed_at="${{ github.event.workflow_run.updated_at }}"
+          deployed_epoch="$(date -u -d "$deployed_at" +%s)"
+          echo "Requiring canonical Driver Master promotion at/after deployment completion: $deployed_at"
           for attempt in {1..60}; do
             body="$(curl --fail --silent --show-error --max-time 20 -H 'Cache-Control: no-cache' "https://$API_FQDN/api/v1/health/driver-master" || true)"
             echo "Driver Master health attempt $attempt: $body"
+            canonical_at="$(echo "$body" | jq -r '.latestCanonicalSyncUtc // empty' 2>/dev/null || true)"
+            canonical_epoch=0
+            if test -n "$canonical_at"; then
+              canonical_epoch="$(date -u -d "$canonical_at" +%s 2>/dev/null || echo 0)"
+            fi
             if test -n "$body" && \
                test "$(echo "$body" | jq -r '.status // empty')" = "healthy" && \
                test "$(echo "$body" | jq -r '.duplicateMemberGroups // -1')" = "0" && \
@@ -35,13 +43,13 @@ jobs:
                test "$(echo "$body" | jq -r '.activeWithMember // 0')" = "$(echo "$body" | jq -r '.activeDrivers // -1')" && \
                test "$(echo "$body" | jq -r '.sourceWorkers // 0')" = "$(echo "$body" | jq -r '.activeDrivers // -1')" && \
                test "$(echo "$body" | jq -r '.populationAligned // false')" = "true" && \
-               test "$(echo "$body" | jq -r '.latestCanonicalSyncUtc // empty')" != ""; then
-              echo "Canonical Driver Master is healthy and exactly matches the live TachoMaster worker population."
+               test "$canonical_epoch" -ge "$deployed_epoch"; then
+              echo "Canonical Driver Master is healthy, exactly matches the live TachoMaster worker population, and was promoted after this deployment."
               exit 0
             fi
             sleep 10
           done
-          echo "Canonical Driver Master did not become healthy and population-aligned within 10 minutes of deployment."
+          echo "Canonical Driver Master did not produce a fresh healthy population-aligned promotion within 10 minutes of deployment."
           exit 1
 
       - name: Summarise live Driver Master quality

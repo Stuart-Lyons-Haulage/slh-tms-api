@@ -1,3 +1,5 @@
+using System.Reflection;
+using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
 using Xunit;
 
@@ -34,5 +36,67 @@ public sealed class TachoDriverMasterIdentityTests
     {
         Assert.True(TachoDriverIdentityRules.MemberMatches("1955729", "1955729"));
         Assert.False(TachoDriverIdentityRules.CardsMatch(null, null));
+    }
+
+    [Fact]
+    public void Duplicate_live_card_is_not_a_safe_identity_key()
+    {
+        var card = "CARD-DUPLICATE-0001";
+        var workers = new[]
+        {
+            new TachoLiveWorker(1, "Driver One", card, "SLH-1", "Employed", null, null, null, null, null, null, null, null, null, null, null, "{}"),
+            new TachoLiveWorker(2, "Driver Two", card, "SLH-2", "Employed", null, null, null, null, null, null, null, null, null, null, null, "{}")
+        };
+
+        var cardKey = TachoDriverIdentityRules.NormaliseIdentifier(card);
+        var liveCardCounts = workers
+            .Where(worker => !string.IsNullOrWhiteSpace(worker.CardNumber))
+            .GroupBy(worker => TachoDriverIdentityRules.NormaliseIdentifier(worker.CardNumber), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
+
+        Assert.Equal(2, liveCardCounts[cardKey]);
+        Assert.False(cardKey.Length > 0 && liveCardCounts.GetValueOrDefault(cardKey) == 1);
+    }
+
+    [Fact]
+    public void Missing_profile_metrics_preserve_last_known_tacho_hours()
+    {
+        var driver = new Driver
+        {
+            EmployeeNumber = "SLH-42",
+            DisplayName = "Test Driver",
+            TachoDriveAvailableTodayMinutes = 360,
+            TachoDriveAvailableWeekMinutes = 1440,
+            TachoWorkAvailableWeekMinutes = 2100
+        };
+        var worker = new TachoLiveWorker(
+            42,
+            "Test Driver",
+            "CARD42000000",
+            "SLH-42",
+            "Employed",
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            "{}");
+
+        var applyWorker = typeof(TachoDriverMasterSyncService).GetMethod(
+            "ApplyWorker",
+            BindingFlags.Static | BindingFlags.NonPublic);
+
+        Assert.NotNull(applyWorker);
+        applyWorker!.Invoke(null, [driver, worker, null, DateTimeOffset.UtcNow]);
+
+        Assert.Equal(360, driver.TachoDriveAvailableTodayMinutes);
+        Assert.Equal(1440, driver.TachoDriveAvailableWeekMinutes);
+        Assert.Equal(2100, driver.TachoWorkAvailableWeekMinutes);
     }
 }

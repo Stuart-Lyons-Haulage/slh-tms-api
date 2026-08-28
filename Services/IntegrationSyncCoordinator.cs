@@ -31,6 +31,7 @@ public sealed class IntegrationSyncCoordinator(
             await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
 
             var byMemberCode = profiles.GroupBy(profile => profile.MemberCode).ToDictionary(group => group.Key, group => group.First());
+            var byCard = UniqueLookup(profiles.Where(profile => !string.IsNullOrWhiteSpace(profile.CardNumber)), profile => Normalise(profile.CardNumber));
             var byEmployee = UniqueLookup(profiles.Where(profile => !string.IsNullOrWhiteSpace(profile.EmployeeNumber)), profile => Normalise(profile.EmployeeNumber));
             var byName = UniqueLookup(profiles, profile => NormalisePersonName(profile.DriverName));
             var matched = 0;
@@ -46,7 +47,7 @@ public sealed class IntegrationSyncCoordinator(
                 byMemberCode.TryGetValue(memberCode, out profile);
 
             if (profile is null && !string.IsNullOrWhiteSpace(driver.TachoCardNumber))
-                profile = profiles.SingleOrDefault(candidate => CardsMatch(driver.TachoCardNumber, candidate.CardNumber));
+                byCard.TryGetValue(Normalise(driver.TachoCardNumber), out profile);
 
             if (profile is null && !string.IsNullOrWhiteSpace(driver.EmployeeNumber))
                 byEmployee.TryGetValue(Normalise(driver.EmployeeNumber), out profile);
@@ -60,11 +61,11 @@ public sealed class IntegrationSyncCoordinator(
             if (profile is null) continue;
 
             driver.TachoMasterDriverId = profile.MemberCode.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            driver.TachoCardNumber = profile.CardNumber;
+            driver.TachoCardNumber = profile.CardNumber ?? driver.TachoCardNumber;
             driver.TachoName = string.IsNullOrWhiteSpace(driver.TachoName) ? profile.DriverName : driver.TachoName;
-            driver.TachoDriveAvailableTodayMinutes = profile.DriveAvailableTodayMinutes;
-            driver.TachoDriveAvailableWeekMinutes = profile.DriveAvailableWeekMinutes;
-            driver.TachoWorkAvailableWeekMinutes = profile.WorkAvailableWeekMinutes;
+            driver.TachoDriveAvailableTodayMinutes = profile.DriveAvailableTodayMinutes ?? driver.TachoDriveAvailableTodayMinutes;
+            driver.TachoDriveAvailableWeekMinutes = profile.DriveAvailableWeekMinutes ?? driver.TachoDriveAvailableWeekMinutes;
+            driver.TachoWorkAvailableWeekMinutes = profile.WorkAvailableWeekMinutes ?? driver.TachoWorkAvailableWeekMinutes;
             driver.LastTachoSyncUtc = DateTimeOffset.UtcNow;
             await MasterDetailStore.SaveAsync(db, "driver", driver.EmployeeNumber, JsonSerializer.Serialize(driver), "TachoMaster driver directory", actor, ct);
             matched++;

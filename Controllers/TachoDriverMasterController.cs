@@ -8,7 +8,7 @@ namespace Slh.Tms.Api.Controllers;
 [Route("api/v1/driver-master")]
 [Authorize]
 public sealed class TachoDriverMasterController(
-    TachoCanonicalDriverMasterOrchestrator orchestrator,
+    TachoDriverMasterSyncJobService jobs,
     TachoDriverMasterSyncService sync) : ControllerBase
 {
     [HttpPost("tachomaster/sync")]
@@ -16,12 +16,15 @@ public sealed class TachoDriverMasterController(
     public async Task<IActionResult> Sync(CancellationToken ct)
     {
         var actor = User.Identity?.Name ?? "TMS user";
-        var result = await orchestrator.RunAsync(actor, ct);
+        var job = await jobs.EnqueueAsync(actor, ct);
+        return AcceptedAtAction(nameof(SyncStatus), new { jobId = job.JobId }, job);
+    }
 
-        // Preserve the existing Master Data endpoint response contract so the portal does not
-        // need to change. Manual and scheduled syncs now execute the same canonical orchestration.
-        if (!result.Success) return StatusCode(StatusCodes.Status502BadGateway, result.Canonical);
-        return Ok(result.Canonical);
+    [HttpGet("tachomaster/sync/{jobId:guid}")]
+    public async Task<IActionResult> SyncStatus(Guid jobId, CancellationToken ct)
+    {
+        var job = await jobs.GetAsync(jobId, ct);
+        return job is null ? NotFound() : Ok(job);
     }
 
     [HttpGet("tachomaster/quality")]
