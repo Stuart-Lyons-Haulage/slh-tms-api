@@ -2,7 +2,7 @@
 
 This directory is the source-controlled definition for `SLH-TMS | Info Mailbox | Order Intake | PROD`.
 
-The flow is deliberately stopped in source. Import it into the existing SLH managed solution, bind the two existing connection references, run the acceptance matrix, and enable it only after every test produces `PendingReview` staging records and no live orders.
+The flow is configured as `Started` and accepts all inbound messages in the shared mailbox. Import it into the existing SLH managed solution, bind the two existing connection references, and verify the acceptance matrix before relying on it operationally.
 
 ## Existing components used
 
@@ -25,7 +25,7 @@ No Microsoft List, SharePoint store, Power Automate Approval, secret, bearer tok
 5. Set `SLH_InfoMailboxUPN` to `info@lyonshaulage.com`.
 6. Confirm secure inputs/outputs remain enabled on attachment retrieval and TMS submission.
 7. Confirm database script `031_Order_Import_Audit_History.sql` has applied successfully.
-8. Save with the flow stopped. Run the tests in the production runbook, then enable it.
+8. Save with the flow started. Run the tests in the production runbook and confirm the source email remains unchanged.
 
 Power Automate may rewrite connector-internal token names on first save. Use designer dynamic content for Message Id, Internet Message Id, Conversation Id, From, From Name, To, CC, Subject, Received Time, Body, Body Preview, Importance and Web Link if the imported tenant connector exposes a different internal token. Do not change the semantic request field names.
 
