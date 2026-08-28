@@ -1,3 +1,5 @@
+using System.Reflection;
+using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
 using Xunit;
 
@@ -34,5 +36,47 @@ public sealed class TachoDriverMasterIdentityTests
     {
         Assert.True(TachoDriverIdentityRules.MemberMatches("1955729", "1955729"));
         Assert.False(TachoDriverIdentityRules.CardsMatch(null, null));
+    }
+
+    [Fact]
+    public void Missing_profile_metrics_preserve_last_known_tacho_hours()
+    {
+        var driver = new Driver
+        {
+            EmployeeNumber = "SLH-42",
+            DisplayName = "Test Driver",
+            TachoDriveAvailableTodayMinutes = 360,
+            TachoDriveAvailableWeekMinutes = 1440,
+            TachoWorkAvailableWeekMinutes = 2100
+        };
+        var worker = new TachoLiveWorker(
+            42,
+            "Test Driver",
+            "CARD42000000",
+            "SLH-42",
+            "Employed",
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            "{}");
+
+        var applyWorker = typeof(TachoDriverMasterSyncService).GetMethod(
+            "ApplyWorker",
+            BindingFlags.Static | BindingFlags.NonPublic);
+
+        Assert.NotNull(applyWorker);
+        applyWorker!.Invoke(null, [driver, worker, null, DateTimeOffset.UtcNow]);
+
+        Assert.Equal(360, driver.TachoDriveAvailableTodayMinutes);
+        Assert.Equal(1440, driver.TachoDriveAvailableWeekMinutes);
+        Assert.Equal(2100, driver.TachoWorkAvailableWeekMinutes);
     }
 }
