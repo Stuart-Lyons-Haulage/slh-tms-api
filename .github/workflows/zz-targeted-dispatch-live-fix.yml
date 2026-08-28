@@ -1,0 +1,196 @@
+name: One-shot Dispatch and legacy live patch
+on:
+  push:
+    branches:
+      - fix/dispatch-and-legacy-live
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.event.head_commit.message != 'Apply Dispatch allocation and legacy live fixes'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply targeted source edits
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          dispatch = Path('Controllers/DriverDispatchController.cs')
+          text = dispatch.read_text()
+          old_date = 'var planningDate = date ?? DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime).AddDays(1);'
+          new_date = 'var planningDate = date ?? DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);'
+          if old_date not in text:
+              raise SystemExit('Dispatch default-date marker not found')
+          text = text.replace(old_date, new_date, 1)
+
+          old_candidates = '''        var roster = await DriverDispatchAgencyRosterStore.ReadForDateAsync(db, planningDate, ct);\n        var driverCandidates = await db.Drivers.AsNoTracking().Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToListAsync(ct);\n        var vehicles = await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(ct);'''
+          new_candidates = '''        var roster = await DriverDispatchAgencyRosterStore.ReadForDateAsync(db, planningDate, ct);\n        var relevantDriverIds = loads.Concat(history)\n            .Where(load => load.DriverId is not null)\n            .Select(load => load.DriverId!.Value)\n            .ToHashSet();\n        var identityDrivers = await db.Drivers.AsNoTracking()\n            .Where(driver => driver.Active || relevantDriverIds.Contains(driver.Id))\n            .OrderBy(driver => driver.DisplayName)\n            .ToListAsync(ct);\n        await MasterDetailStore.EnrichDriversAsync(db, identityDrivers, ct);\n        RepairAllocatedDriverAliases(loads, identityDrivers);\n        RepairAllocatedDriverAliases(history, identityDrivers);\n        var driverCandidates = identityDrivers.Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToList();\n        var vehicles = await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(ct);'''
+          if old_candidates not in text:
+              raise SystemExit('Dispatch driver-candidate marker not found')
+          text = text.replace(old_candidates, new_candidates, 1)
+
+          helper_marker = '    private static DateTimeOffset? FirstPlanned(Load load) => load.Stops.OrderBy(stop => stop.Sequence).Select(stop => stop.PlannedArrivalUtc).FirstOrDefault(value => value is not null);'
+          helper = '''    private static void RepairAllocatedDriverAliases(IEnumerable<Load> loads, IReadOnlyCollection<Driver> drivers)\n    {\n        var byId = drivers.ToDictionary(driver => driver.Id);\n        var active = drivers.Where(driver => driver.Active).ToList();\n        foreach (var load in loads)\n        {\n            if (load.DriverId is not Guid storedId || !byId.TryGetValue(storedId, out var stored) || stored.Active) continue;\n            var matches = active.Where(candidate => StableDriverIdentityMatch(stored, candidate)).Take(2).ToList();\n            if (matches.Count == 1) load.DriverId = matches[0].Id;\n        }\n    }\n\n    private static bool StableDriverIdentityMatch(Driver left, Driver right)\n    {\n        var leftEmployee = Normalise(left.EmployeeNumber);\n        var rightEmployee = Normalise(right.EmployeeNumber);\n        if (leftEmployee.Length > 0 && leftEmployee == rightEmployee) return true;\n\n        var leftMember = Normalise(left.TachoMasterDriverId);\n        var rightMember = Normalise(right.TachoMasterDriverId);\n        if (leftMember.Length > 0 && leftMember == rightMember) return true;\n\n        var leftCard = Normalise(left.TachoCardNumber);\n        var rightCard = Normalise(right.TachoCardNumber);\n        if (leftCard.Length > 0 && leftCard == rightCard) return true;\n\n        var leftName = Normalise(left.TachoName ?? left.DisplayName);\n        var rightName = Normalise(right.TachoName ?? right.DisplayName);\n        return leftName.Length > 0 && leftName == rightName;\n    }\n\n'''
+          if helper_marker not in text:
+              raise SystemExit('Dispatch helper insertion marker not found')
+          text = text.replace(helper_marker, helper + helper_marker, 1)
+          dispatch.write_text(text)
+
+          tv = Path('Controllers/TvDisplayController.cs')
+          tv_text = tv.read_text()
+          start = tv_text.index('    [HttpGet("live-runs"), AllowAnonymous]')
+          end = tv_text.index('    internal static bool ShouldHideCompletedRun', start)
+          replacement = r'''    [HttpGet("live-runs"), AllowAnonymous]
+    public async Task<IActionResult> LiveRuns([FromHeader(Name = "X-TV-Display-Key")] string? displayKey, [FromQuery] DateOnly? date, CancellationToken ct)
+    {
+        var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct);
+        var legacyKeyAllowed = TvWallboardAccess.IsAllowed(HttpContext, configuration);
+        if (!pairedKeyAllowed && !legacyKeyAllowed)
+            return Unauthorized(new { message = "This TV display is not paired. Open the TV display page in the signed-in TMS to get a new pairing code." });
+
+        var day = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
+        var now = DateTimeOffset.UtcNow;
+        var loads = (await PlanningResilience.ReadLoadsAsync(db, day, ct))
+            .Where(load => load.Status != LoadStatus.Cancelled)
+            .ToList();
+        var carried = (await PlanningResilience.ReadLoadsAsync(db, day.AddDays(-1), ct))
+            .Where(load => load.Status != LoadStatus.Cancelled && load.Status != LoadStatus.Completed)
+            .ToList();
+        foreach (var carry in carried)
+        {
+            var key = PlanningResilience.LogicalRunKey(carry);
+            if (loads.All(current => !string.Equals(PlanningResilience.LogicalRunKey(current), key, StringComparison.OrdinalIgnoreCase)))
+                loads.Add(carry);
+        }
+        loads = PlanningResilience.CollapseLogicalDuplicates(loads);
+        await RunOperationalStore.EnrichAsync(db, loads, ct);
+
+        var driverIds = loads.Where(x => x.DriverId is not null).Select(x => x.DriverId!.Value).Distinct().ToList();
+        var vehicleIds = loads.Where(x => x.VehicleId is not null).Select(x => x.VehicleId!.Value).Distinct().ToList();
+        var trailerIds = loads.Where(x => x.TrailerId is not null).Select(x => x.TrailerId!.Value).Distinct().ToList();
+
+        var drivers = await SafeDictionary(db.Drivers.AsNoTracking().Where(x => driverIds.Contains(x.Id)), x => x.Id, ct);
+        var vehicles = await SafeDictionary(db.Vehicles.AsNoTracking().Where(x => vehicleIds.Contains(x.Id)), x => x.Id, ct);
+        var trailers = await SafeDictionary(db.Trailers.AsNoTracking().Where(x => trailerIds.Contains(x.Id)), x => x.Id, ct);
+        var liveStatuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
+
+        loads = loads.Where(load => load.PlanningDate == day ||
+            (load.VehicleId is Guid vehicleId && vehicles.TryGetValue(vehicleId, out var vehicle) && MatchLive(vehicle, liveStatuses) is { } live && now - live.LastEventTimeUtc <= TimeSpan.FromMinutes(30)) ||
+            load.Status is LoadStatus.Dispatched or LoadStatus.InProgress)
+            .OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).ToList();
+
+        var loadIds = loads.Select(load => load.Id).ToList();
+        var durableVisits = loadIds.Count == 0
+            ? []
+            : await SafeList(db.GeofenceVisits.AsNoTracking().Where(visit => visit.LoadId != null && loadIds.Contains(visit.LoadId.Value)), ct);
+        var fenceIds = durableVisits.Select(visit => visit.GeofenceId).Distinct().ToList();
+        var fences = fenceIds.Count == 0
+            ? new Dictionary<Guid, SiteGeofence>()
+            : await SafeDictionary(db.SiteGeofences.AsNoTracking().Where(fence => fenceIds.Contains(fence.Id)), fence => fence.Id, ct);
+
+        var rows = new List<TvRunDisplayRow>();
+        foreach (var load in loads)
+        {
+            drivers.TryGetValue(load.DriverId ?? Guid.Empty, out var driver);
+            vehicles.TryGetValue(load.VehicleId ?? Guid.Empty, out var vehicle);
+            trailers.TryGetValue(load.TrailerId ?? Guid.Empty, out var trailer);
+            var live = vehicle is null ? null : MatchLive(vehicle, liveStatuses);
+            var stops = load.Stops.OrderBy(x => x.Sequence).ToList();
+            var visits = durableVisits.Where(visit => visit.LoadId == load.Id).OrderBy(visit => visit.EnteredAtUtc).ToList();
+            var completedStopIds = visits
+                .Where(visit => visit.ExitedAtUtc is not null && visit.LoadStopId is not null)
+                .Select(visit => visit.LoadStopId!.Value)
+                .ToHashSet();
+            if (ShouldHideCompletedRun(load, completedStopIds)) continue;
+
+            var currentVisit = visits.Where(visit => visit.ExitedAtUtc is null)
+                .OrderByDescending(visit => visit.EnteredAtUtc)
+                .FirstOrDefault();
+            var lastDeparted = visits.Where(visit => visit.ExitedAtUtc is not null)
+                .OrderByDescending(visit => visit.ExitedAtUtc)
+                .FirstOrDefault();
+            fences.TryGetValue(currentVisit?.GeofenceId ?? Guid.Empty, out var currentFence);
+
+            var nextStop = currentVisit?.LoadStopId is Guid currentStopId
+                ? stops.FirstOrDefault(stop => stop.Id == currentStopId)
+                : stops.FirstOrDefault(stop => !completedStopIds.Contains(stop.Id)) ?? PickNextStop(stops, now, load.Status);
+            var firstStop = stops.FirstOrDefault();
+            var finalStop = stops.LastOrDefault();
+            var routeComplete = stops.Count > 0 && completedStopIds.Count >= stops.Count;
+            var etaTarget = routeComplete ? null : finalStop;
+            var eta = etaTarget?.PlannedArrivalUtc;
+            var etaSource = eta is null ? "Unavailable" : "Planned";
+
+            var trackingAgeMinutes = live is null ? (double?)null : Math.Max(0, (now - live.LastEventTimeUtc).TotalMinutes);
+            var state = State(load, driver, vehicle, live, trackingAgeMinutes, eta, finalStop?.PlannedArrivalUtc);
+            int? liveDwellSeconds = null;
+            int? liveDwellMinutes = null;
+            if (currentVisit is not null)
+            {
+                liveDwellSeconds = Math.Max(0, (int)Math.Floor((now - currentVisit.EnteredAtUtc).TotalSeconds));
+                liveDwellMinutes = Math.Max(currentVisit.DwellMinutes, liveDwellSeconds.Value / 60);
+                var delayed = currentFence?.MaxWaitMinutes is int waitLimit && liveDwellMinutes > waitLimit ||
+                    currentFence?.CategoryMaxWaitMinutes is int categoryWaitLimit && liveDwellMinutes > categoryWaitLimit;
+                state = delayed
+                    ? ("SITE DELAY", $"{currentFence?.Name ?? "Site"} · time on site {liveDwellMinutes} min", 98)
+                    : ("ON SITE", $"{currentFence?.Name ?? "Site"} · time on site {liveDwellMinutes} min", 88);
+            }
+
+            rows.Add(new TvRunDisplayRow(
+                load.Id,
+                load.Reference,
+                load.Status.ToString(),
+                driver?.DisplayName ?? "Driver TBC",
+                vehicle?.Registration ?? "Vehicle TBC",
+                trailer?.TrailerNumber,
+                firstStop?.PlannedArrivalUtc,
+                finalStop?.PlannedArrivalUtc,
+                nextStop?.Name,
+                finalStop?.Name,
+                etaTarget?.Name,
+                eta,
+                etaSource,
+                live is null ? "No live tracking" : TrackingText(live, trackingAgeMinutes ?? 0),
+                live?.LastEventTimeUtc,
+                live?.SpeedKph,
+                state.Label,
+                state.Detail,
+                state.Priority,
+                currentVisit?.EnteredAtUtc,
+                currentVisit?.ExitedAtUtc ?? lastDeparted?.ExitedAtUtc,
+                liveDwellMinutes,
+                liveDwellSeconds,
+                lastDeparted?.DwellMinutes,
+                lastDeparted is null ? null : lastDeparted.DwellMinutes * 60,
+                currentVisit is not null ? "OnSite" : lastDeparted is not null ? "Departed" : "EnRoute",
+                null));
+        }
+
+        return Ok(new
+        {
+            planningDate = day,
+            generatedAtUtc = now,
+            refreshSeconds = 20,
+            runCount = rows.Count,
+            runs = rows.OrderByDescending(row => row.Priority).ThenBy(row => row.FirstPlannedUtc ?? DateTimeOffset.MaxValue).ToList()
+        });
+    }
+
+'''
+          tv_text = tv_text[:start] + replacement + tv_text[end:]
+          tv.write_text(tv_text)
+
+          Path('.github/workflows/zz-targeted-dispatch-live-fix.yml').unlink()
+          PY
+      - name: Commit targeted fixes
+        shell: bash
+        run: |
+          git config user.name "danwilliams201302-max"
+          git config user.email "daniel@lyonshaulage.com"
+          git add Controllers/DriverDispatchController.cs Controllers/TvDisplayController.cs .github/workflows/zz-targeted-dispatch-live-fix.yml
+          git commit -m "Apply Dispatch allocation and legacy live fixes"
+          git push origin HEAD:fix/dispatch-and-legacy-live
