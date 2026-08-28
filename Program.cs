@@ -106,6 +106,7 @@ builder.Services.AddScoped<IntegrationSyncCoordinator>();
 builder.Services.AddScoped<TachoDriverMasterSyncService>();
 builder.Services.AddScoped<DriverMasterClassificationService>();
 builder.Services.AddScoped<TachoCanonicalDriverMasterOrchestrator>();
+builder.Services.AddScoped<TachoDriverMasterSyncJobService>();
 builder.Services.AddTransient<TachoMasterRetryHandler>();
 builder.Services.AddHttpClient<DriverSmsDispatchService>();
 builder.Services.AddHttpClient<SageHrClient>();
@@ -116,6 +117,7 @@ builder.Services.AddHttpClient<FleetioClient>();
 builder.Services.AddHostedService<DotTrackingIngestionService>();
 builder.Services.AddHostedService<IntegrationBackgroundSyncService>();
 builder.Services.AddHostedService<TachoCanonicalDriverMasterDailyBackgroundService>();
+builder.Services.AddHostedService<TachoDriverMasterSyncJobWorker>();
 builder.Services.AddHostedService<DriverMasterClassificationBackgroundService>();
 
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();

@@ -39,6 +39,26 @@ public sealed class TachoDriverMasterIdentityTests
     }
 
     [Fact]
+    public void Duplicate_live_card_is_not_a_safe_identity_key()
+    {
+        var card = "CARD-DUPLICATE-0001";
+        var workers = new[]
+        {
+            new TachoLiveWorker(1, "Driver One", card, "SLH-1", "Employed", null, null, null, null, null, null, null, null, null, null, null, "{}"),
+            new TachoLiveWorker(2, "Driver Two", card, "SLH-2", "Employed", null, null, null, null, null, null, null, null, null, null, null, "{}")
+        };
+
+        var cardKey = TachoDriverIdentityRules.NormaliseIdentifier(card);
+        var liveCardCounts = workers
+            .Where(worker => !string.IsNullOrWhiteSpace(worker.CardNumber))
+            .GroupBy(worker => TachoDriverIdentityRules.NormaliseIdentifier(worker.CardNumber), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
+
+        Assert.Equal(2, liveCardCounts[cardKey]);
+        Assert.False(cardKey.Length > 0 && liveCardCounts.GetValueOrDefault(cardKey) == 1);
+    }
+
+    [Fact]
     public void Missing_profile_metrics_preserve_last_known_tacho_hours()
     {
         var driver = new Driver
