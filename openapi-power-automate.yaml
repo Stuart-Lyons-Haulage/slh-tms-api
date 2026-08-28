@@ -166,6 +166,52 @@ paths:
       responses:
         '200': { description: Communication marked sent idempotently }
         '404': { description: Communication source not found }
+  /customer-communications:
+    get:
+      operationId: ListCustomerCommunications
+      summary: List retained ETA, load-plan and exception communication evidence
+      parameters:
+        - { name: status, in: query, type: string, required: false, enum: [PendingReview, Promoted, Rejected, Archived] }
+        - { name: purpose, in: query, type: string, required: false, enum: [EtaUpdate, LoadPlan, Exception, Other] }
+        - { name: take, in: query, type: integer, required: false, default: 100, maximum: 500 }
+      responses: { '200': { description: Communication evidence records } }
+    post:
+      operationId: IngestCustomerCommunication
+      summary: Retain and extract a mailbox communication without creating a live order
+      parameters:
+        - { name: body, in: body, required: true, schema: { $ref: '#/definitions/MailboxEmailIntakeRequest' } }
+      responses:
+        '202': { description: Communication staged for TMS review }
+        '200': { description: Existing idempotent communication returned }
+  /customer-communications/{id}/approve:
+    post:
+      operationId: ApproveCustomerCommunication
+      summary: Approve communication evidence for the operational record
+      parameters:
+        - { name: id, in: path, required: true, type: string, format: uuid }
+        - { name: body, in: body, required: true, schema: { $ref: '#/definitions/ReviewRequest' } }
+      responses: { '200': { description: Communication review recorded } }
+  /customer-communications/{id}/reject:
+    post:
+      operationId: RejectCustomerCommunication
+      summary: Reject communication evidence
+      parameters:
+        - { name: id, in: path, required: true, type: string, format: uuid }
+        - { name: body, in: body, required: true, schema: { $ref: '#/definitions/ReviewRequest' } }
+      responses: { '200': { description: Communication review recorded } }
+  /operations/customer-eta-evidence:
+    get:
+      operationId: GetCustomerEtaEvidence
+      summary: Get the evidence-backed customer ETA dataset
+      parameters: [{ name: date, in: query, type: string, format: date, required: false }]
+      responses: { '200': { description: ETA evidence dataset } }
+  /operations/customer-eta-evidence/export.csv:
+    get:
+      operationId: ExportCustomerEtaEvidenceCsv
+      summary: Export evidence-backed customer ETA CSV
+      produces: [text/csv]
+      parameters: [{ name: date, in: query, type: string, format: date, required: false }]
+      responses: { '200': { description: Customer ETA evidence CSV } }
   /planning-day/{date}/reset-preview:
     get:
       operationId: PreviewPlanningDayReset
@@ -197,9 +243,6 @@ definitions:
       status: { type: string, example: PendingReview }
       receivedAtUtc: { type: string, format: date-time }
       reviewUrl: { type: string }
-  ReviewRequest:
-    type: object
-    properties: { note: { type: string } }
   StagedPayloadAmendment:
     type: object
     required: [payload]
@@ -275,6 +318,9 @@ definitions:
     type: object
     properties:
       providerMessageId: { type: string, description: Outlook reply/result message ID returned after a successful send }
+  ReviewRequest:
+    type: object
+    properties: { note: { type: string } }
   Customer:
     type: object
     properties: { id: { type: string, format: uuid }, code: { type: string }, name: { type: string }, active: { type: boolean } }
