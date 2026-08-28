@@ -56,4 +56,4 @@ jobs:
         run: |
           set -euo pipefail
           body="$(curl --fail --silent --show-error --max-time 20 -H 'Cache-Control: no-cache' "https://$API_FQDN/api/v1/health/driver-master")"
-          echo "$body" | jq '{status, activeDrivers, sourceWorkers, populationAligned, activeWithMember, activeWithCard, duplicateMemberGroups, duplicateCardGroups, duplicateMembers, duplicateCards, activeWithoutMember, activeWithoutCard, latestCanonicalSyncUtc}'
+          echo "$body" | jq '{status, activeDrivers, sourceWorkers, populationAligned, activeWithMember, activeWithCard, duplicateMemberGroups, duplicateCardGroups, activeWithoutMember, activeWithoutCard, latestCanonicalSyncUtc}'
