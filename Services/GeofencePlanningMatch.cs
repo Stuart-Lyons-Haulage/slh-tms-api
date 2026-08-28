@@ -8,7 +8,10 @@ namespace Slh.Tms.Api.Services;
 /// </summary>
 public static class GeofencePlanningMatch
 {
-    private const int CredibleCompletedVisitMinutes = 2;
+    // Falcon history can be sample-sparse at short collection stops. A linked entry and exit
+    // one minute apart is enough to prove the vehicle visited and left that planned stop;
+    // zero-duration/drive-by samples remain unconfirmed unless the visit was explicitly confirmed.
+    private const int CredibleCompletedVisitMinutes = 1;
 
     private static readonly HashSet<string> NoiseTokens = new(StringComparer.OrdinalIgnoreCase)
     {
