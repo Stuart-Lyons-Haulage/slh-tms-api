@@ -53,8 +53,6 @@ public sealed class DriverMasterHealthController(TmsDbContext db, TachoDriverMas
             quality.ActiveWithCard,
             quality.DuplicateMemberGroups,
             quality.DuplicateCardGroups,
-            quality.DuplicateMembers,
-            quality.DuplicateCards,
             quality.ActiveWithoutMember,
             quality.ActiveWithoutCard,
             quality.LatestCanonicalSyncUtc
