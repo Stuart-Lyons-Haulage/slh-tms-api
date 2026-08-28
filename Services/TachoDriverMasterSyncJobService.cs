@@ -21,11 +21,15 @@ internal sealed record TachoDriverMasterSyncJobEnvelope(
     DateTimeOffset? StartedAtUtc = null,
     DateTimeOffset? CompletedAtUtc = null,
     string? Message = null,
-    TachoCanonicalOrchestrationResult? Result = null);
+    TachoCanonicalOrchestrationResult? Result = null,
+    string? WorkerInstanceId = null,
+    DateTimeOffset? HeartbeatUtc = null);
 
 public sealed class TachoDriverMasterSyncJobService(TmsDbContext db)
 {
     internal const string EntityType = "tachodrivermastersyncjob";
+    internal static readonly TimeSpan LeaseStaleAfter = TimeSpan.FromMinutes(2);
+    internal static readonly TimeSpan LegacyRunningGrace = TimeSpan.FromMinutes(5);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public async Task<TachoDriverMasterSyncJobStatus> EnqueueAsync(string actor, CancellationToken ct)
@@ -64,7 +68,7 @@ public sealed class TachoDriverMasterSyncJobService(TmsDbContext db)
         return row is null ? null : ToStatus(row);
     }
 
-    internal async Task<TachoDriverMasterSyncJobClaim?> TryClaimNextAsync(CancellationToken ct)
+    internal async Task<TachoDriverMasterSyncJobClaim?> TryClaimNextAsync(string workerInstanceId, CancellationToken ct)
     {
         var row = await db.StagedImports
             .Where(item => item.EntityType == EntityType && item.Status == StagingStatus.PendingReview)
@@ -74,7 +78,13 @@ public sealed class TachoDriverMasterSyncJobService(TmsDbContext db)
 
         var envelope = ReadEnvelope(row);
         var started = DateTimeOffset.UtcNow;
-        envelope = envelope with { StartedAtUtc = started, Message = "Canonical TachoMaster Driver Master sync is running." };
+        envelope = envelope with
+        {
+            StartedAtUtc = started,
+            Message = "Canonical TachoMaster Driver Master sync is running.",
+            WorkerInstanceId = workerInstanceId,
+            HeartbeatUtc = started
+        };
         row.Status = StagingStatus.Approved;
         row.ReviewedAtUtc = started;
         row.ReviewedBy = envelope.Actor;
@@ -83,7 +93,11 @@ public sealed class TachoDriverMasterSyncJobService(TmsDbContext db)
         try
         {
             await db.SaveChangesAsync(ct);
-            return new TachoDriverMasterSyncJobClaim(row.Id, envelope.Actor);
+            var claim = new TachoDriverMasterSyncJobClaim(row.Id, envelope.Actor);
+            // Heartbeats use separate DbContexts and advance RowVersion. Do not retain a stale
+            // tracked copy in the orchestration scope or completion will conflict with our own lease.
+            db.ChangeTracker.Clear();
+            return claim;
         }
         catch (DbUpdateConcurrencyException)
         {
@@ -92,52 +106,140 @@ public sealed class TachoDriverMasterSyncJobService(TmsDbContext db)
         }
     }
 
-    internal async Task CompleteAsync(Guid jobId, TachoCanonicalOrchestrationResult result, CancellationToken ct)
+    internal async Task<bool> HeartbeatAsync(Guid jobId, string workerInstanceId, CancellationToken ct)
     {
-        var row = await db.StagedImports.SingleAsync(item => item.Id == jobId && item.EntityType == EntityType, ct);
-        var envelope = ReadEnvelope(row) with
+        var row = await db.StagedImports
+            .SingleOrDefaultAsync(item => item.Id == jobId && item.EntityType == EntityType, ct);
+        if (row is null || row.Status != StagingStatus.Approved) return false;
+
+        var envelope = ReadEnvelope(row);
+        if (!string.Equals(envelope.WorkerInstanceId, workerInstanceId, StringComparison.Ordinal)) return false;
+
+        row.PayloadJson = JsonSerializer.Serialize(envelope with { HeartbeatUtc = DateTimeOffset.UtcNow }, JsonOptions);
+        try
+        {
+            await db.SaveChangesAsync(ct);
+            return true;
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            db.ChangeTracker.Clear();
+            return false;
+        }
+    }
+
+    internal async Task<bool> CompleteAsync(
+        Guid jobId,
+        string workerInstanceId,
+        TachoCanonicalOrchestrationResult result,
+        CancellationToken ct)
+    {
+        var row = await db.StagedImports
+            .SingleOrDefaultAsync(item => item.Id == jobId && item.EntityType == EntityType, ct);
+        if (row is null || row.Status != StagingStatus.Approved) return false;
+
+        var current = ReadEnvelope(row);
+        if (!string.Equals(current.WorkerInstanceId, workerInstanceId, StringComparison.Ordinal)) return false;
+
+        var envelope = current with
         {
             CompletedAtUtc = DateTimeOffset.UtcNow,
             Message = result.Message,
-            Result = result
+            Result = result,
+            HeartbeatUtc = DateTimeOffset.UtcNow
         };
         row.Status = result.Success ? StagingStatus.Promoted : StagingStatus.Failed;
         row.ReviewedAtUtc = envelope.CompletedAtUtc;
         row.ReviewNote = result.Message;
         row.PayloadJson = JsonSerializer.Serialize(envelope, JsonOptions);
-        await db.SaveChangesAsync(ct);
+        try
+        {
+            await db.SaveChangesAsync(ct);
+            return true;
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            db.ChangeTracker.Clear();
+            return false;
+        }
     }
 
-    internal async Task FailAsync(Guid jobId, Exception exception, CancellationToken ct)
+    internal async Task<bool> FailAsync(Guid jobId, string workerInstanceId, Exception exception, CancellationToken ct)
     {
-        var row = await db.StagedImports.SingleOrDefaultAsync(item => item.Id == jobId && item.EntityType == EntityType, ct);
-        if (row is null) return;
+        var row = await db.StagedImports
+            .SingleOrDefaultAsync(item => item.Id == jobId && item.EntityType == EntityType, ct);
+        if (row is null || row.Status != StagingStatus.Approved) return false;
+
+        var current = ReadEnvelope(row);
+        if (!string.Equals(current.WorkerInstanceId, workerInstanceId, StringComparison.Ordinal)) return false;
+
         var message = $"Canonical TachoMaster Driver Master sync failed: {exception.GetBaseException().Message}";
-        var envelope = ReadEnvelope(row) with { CompletedAtUtc = DateTimeOffset.UtcNow, Message = message };
+        var envelope = current with
+        {
+            CompletedAtUtc = DateTimeOffset.UtcNow,
+            Message = message,
+            HeartbeatUtc = DateTimeOffset.UtcNow
+        };
         row.Status = StagingStatus.Failed;
         row.ReviewedAtUtc = envelope.CompletedAtUtc;
         row.ReviewNote = message;
         row.PayloadJson = JsonSerializer.Serialize(envelope, JsonOptions);
-        await db.SaveChangesAsync(ct);
+        try
+        {
+            await db.SaveChangesAsync(ct);
+            return true;
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            db.ChangeTracker.Clear();
+            return false;
+        }
     }
 
-    internal async Task RecoverInterruptedAsync(CancellationToken ct)
+    internal async Task<int> RecoverInterruptedAsync(string currentInstanceId, CancellationToken ct)
     {
-        var cutoff = DateTimeOffset.UtcNow.AddMinutes(-30);
+        var now = DateTimeOffset.UtcNow;
+        var leaseCutoff = now - LeaseStaleAfter;
+        var legacyCutoff = now - LegacyRunningGrace;
         var rows = await db.StagedImports
-            .Where(item => item.EntityType == EntityType && item.Status == StagingStatus.Approved &&
-                           (item.ReviewedAtUtc ?? item.ReceivedAtUtc) < cutoff)
+            .Where(item => item.EntityType == EntityType && item.Status == StagingStatus.Approved)
+            .OrderBy(item => item.ReceivedAtUtc)
             .ToListAsync(ct);
+        var recovered = 0;
+
         foreach (var row in rows)
         {
-            var message = "A previous canonical sync worker stopped before completion. Queue a new Force Sync if required.";
-            var envelope = ReadEnvelope(row) with { CompletedAtUtc = DateTimeOffset.UtcNow, Message = message };
+            var envelope = ReadEnvelope(row);
+            if (string.Equals(envelope.WorkerInstanceId, currentInstanceId, StringComparison.Ordinal)) continue;
+
+            var hasLease = !string.IsNullOrWhiteSpace(envelope.WorkerInstanceId) && envelope.HeartbeatUtc is not null;
+            var staleLease = hasLease && envelope.HeartbeatUtc < leaseCutoff;
+            var legacyRunning = !hasLease && (row.ReviewedAtUtc ?? row.ReceivedAtUtc) < legacyCutoff;
+            if (!staleLease && !legacyRunning) continue;
+
+            var reason = staleLease
+                ? $"Worker lease {envelope.WorkerInstanceId} expired after its last heartbeat."
+                : "Legacy running job has no worker lease and outlived the deployment recovery grace period.";
+            var message = $"A previous canonical sync worker stopped before completion. {reason} A replacement sync will be queued automatically.";
+            var failed = envelope with { CompletedAtUtc = now, Message = message };
             row.Status = StagingStatus.Failed;
-            row.ReviewedAtUtc = envelope.CompletedAtUtc;
+            row.ReviewedAtUtc = now;
             row.ReviewNote = message;
-            row.PayloadJson = JsonSerializer.Serialize(envelope, JsonOptions);
+            row.PayloadJson = JsonSerializer.Serialize(failed, JsonOptions);
+
+            try
+            {
+                await db.SaveChangesAsync(ct);
+                recovered++;
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                // Another replica recovered or refreshed this row first. Reload on the next pass.
+                db.ChangeTracker.Clear();
+            }
         }
-        if (rows.Count > 0) await db.SaveChangesAsync(ct);
+
+        return recovered;
     }
 
     private static TachoDriverMasterSyncJobStatus ToStatus(StagedImport row, TachoDriverMasterSyncJobEnvelope? envelope = null)
@@ -181,22 +283,20 @@ public sealed class TachoDriverMasterSyncJobWorker(
     IHostEnvironment environment,
     ILogger<TachoDriverMasterSyncJobWorker> logger) : BackgroundService
 {
+    private static readonly TimeSpan RecoveryPollInterval = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(20);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (environment.IsEnvironment("Testing")) return;
 
+        var workerInstanceId = $"{Environment.MachineName}:{Guid.NewGuid():N}";
+        var nextRecoveryCheck = DateTimeOffset.MinValue;
+
         try
         {
-            await using var startupScope = scopeFactory.CreateAsyncScope();
-            var jobs = startupScope.ServiceProvider.GetRequiredService<TachoDriverMasterSyncJobService>();
-            await jobs.RecoverInterruptedAsync(stoppingToken);
-            var quality = await startupScope.ServiceProvider.GetRequiredService<TachoDriverMasterSyncService>().QualityAsync(stoppingToken);
-            if (quality.LatestCanonicalSyncUtc is null ||
-                quality.LatestCanonicalSyncUtc < DateTimeOffset.UtcNow.AddMinutes(-15) ||
-                quality.DuplicateMemberGroups > 0 || quality.DuplicateCardGroups > 0 || quality.ActiveWithoutMember > 0)
-            {
-                await jobs.EnqueueAsync("system:tachomaster-canonical-driver-master-startup", stoppingToken);
-            }
+            await EnsureCanonicalWorkAsync(workerInstanceId, includeStaleSync: true, stoppingToken);
+            nextRecoveryCheck = DateTimeOffset.UtcNow + RecoveryPollInterval;
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
         catch (Exception ex)
@@ -209,23 +309,42 @@ public sealed class TachoDriverMasterSyncJobWorker(
             var processed = false;
             try
             {
+                if (DateTimeOffset.UtcNow >= nextRecoveryCheck)
+                {
+                    await EnsureCanonicalWorkAsync(workerInstanceId, includeStaleSync: false, stoppingToken);
+                    nextRecoveryCheck = DateTimeOffset.UtcNow + RecoveryPollInterval;
+                }
+
                 await using var scope = scopeFactory.CreateAsyncScope();
                 var jobs = scope.ServiceProvider.GetRequiredService<TachoDriverMasterSyncJobService>();
-                var claim = await jobs.TryClaimNextAsync(stoppingToken);
+                var claim = await jobs.TryClaimNextAsync(workerInstanceId, stoppingToken);
                 if (claim is not null)
                 {
                     processed = true;
+                    using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                    var heartbeatTask = MaintainLeaseAsync(claim.JobId, workerInstanceId, jobCts, stoppingToken);
                     try
                     {
                         var orchestrator = scope.ServiceProvider.GetRequiredService<TachoCanonicalDriverMasterOrchestrator>();
-                        var result = await orchestrator.RunAsync(claim.Actor, stoppingToken);
-                        await jobs.CompleteAsync(claim.JobId, result, stoppingToken);
+                        var result = await orchestrator.RunAsync(claim.Actor, jobCts.Token);
+                        if (!await jobs.CompleteAsync(claim.JobId, workerInstanceId, result, stoppingToken))
+                            logger.LogWarning("Canonical Driver Master sync {JobId} finished after its worker lease was lost; completion was not written over the replacement worker.", claim.JobId);
                     }
                     catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+                    catch (OperationCanceledException)
+                    {
+                        logger.LogWarning("Canonical Driver Master sync {JobId} stopped because its worker lease was lost.", claim.JobId);
+                    }
                     catch (Exception ex)
                     {
                         logger.LogError(ex, "Queued canonical Driver Master sync {JobId} failed unexpectedly.", claim.JobId);
-                        await jobs.FailAsync(claim.JobId, ex, stoppingToken);
+                        await jobs.FailAsync(claim.JobId, workerInstanceId, ex, stoppingToken);
+                    }
+                    finally
+                    {
+                        jobCts.Cancel();
+                        try { await heartbeatTask; }
+                        catch (OperationCanceledException) { }
                     }
                 }
             }
@@ -239,6 +358,57 @@ public sealed class TachoDriverMasterSyncJobWorker(
             {
                 try { await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken); }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+            }
+        }
+    }
+
+    private async Task EnsureCanonicalWorkAsync(string workerInstanceId, bool includeStaleSync, CancellationToken ct)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var jobs = scope.ServiceProvider.GetRequiredService<TachoDriverMasterSyncJobService>();
+        var recovered = await jobs.RecoverInterruptedAsync(workerInstanceId, ct);
+        var quality = await scope.ServiceProvider.GetRequiredService<TachoDriverMasterSyncService>().QualityAsync(ct);
+        var identityUnhealthy = quality.DuplicateMemberGroups > 0 || quality.DuplicateCardGroups > 0 || quality.ActiveWithoutMember > 0;
+        var stale = quality.LatestCanonicalSyncUtc is null || quality.LatestCanonicalSyncUtc < DateTimeOffset.UtcNow.AddMinutes(-15);
+        if (recovered > 0 || identityUnhealthy || (includeStaleSync && stale))
+        {
+            var actor = recovered > 0
+                ? "system:tachomaster-canonical-driver-master-recovery"
+                : "system:tachomaster-canonical-driver-master-startup";
+            await jobs.EnqueueAsync(actor, ct);
+        }
+    }
+
+    private async Task MaintainLeaseAsync(
+        Guid jobId,
+        string workerInstanceId,
+        CancellationTokenSource jobCts,
+        CancellationToken stoppingToken)
+    {
+        while (!jobCts.IsCancellationRequested && !stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(HeartbeatInterval, jobCts.Token);
+                if (jobCts.IsCancellationRequested) return;
+
+                await using var scope = scopeFactory.CreateAsyncScope();
+                var jobs = scope.ServiceProvider.GetRequiredService<TachoDriverMasterSyncJobService>();
+                if (await jobs.HeartbeatAsync(jobId, workerInstanceId, jobCts.Token)) continue;
+
+                logger.LogWarning("Canonical Driver Master sync {JobId} lost worker lease {WorkerInstanceId}; cancelling local work.", jobId, workerInstanceId);
+                jobCts.Cancel();
+                return;
+            }
+            catch (OperationCanceledException) when (jobCts.IsCancellationRequested || stoppingToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Could not refresh canonical Driver Master worker lease {WorkerInstanceId}; cancelling local work to avoid concurrent cleanses.", workerInstanceId);
+                jobCts.Cancel();
+                return;
             }
         }
     }
