@@ -95,6 +95,10 @@ public sealed class DriverDispatchController(
             var operationallyRelevant = roster.ContainsKey(driver.Id) || currentDayDriverIds.Contains(driver.Id) ||
                                         previousWeekDriverIds.Contains(driver.Id) || regularRecentDriverIds.Contains(driver.Id);
 
+            // A current TMS allocation is operational truth for Dispatch visibility.
+            // Sage HR still supplies leave/availability, but a roster mismatch must never hide
+            // a driver who is already allocated to today's plan.
+            if (currentDayDriverIds.Contains(driver.Id)) return true;
             if (persistedAgency) return operationallyRelevant;
             if (sage.Available) return sageDriver;
             return persistedCasual || PersistedEmployee(driver) || operationallyRelevant;
@@ -110,6 +114,7 @@ public sealed class DriverDispatchController(
             var sageDriver = sage.Available && sage.ActiveDriverEmployeeNumbers.Contains(employeeKey);
             var operationallyRelevant = roster.ContainsKey(driver.Id) || currentDayDriverIds.Contains(driver.Id) ||
                                         previousWeekDriverIds.Contains(driver.Id) || regularRecentDriverIds.Contains(driver.Id);
+            if (currentDayDriverIds.Contains(driver.Id)) return true;
             if (IsAgency(driver)) return operationallyRelevant;
             if (sage.Available) return sageDriver;
 
@@ -159,7 +164,11 @@ public sealed class DriverDispatchController(
             string? suggestedVehicleRegistration = null;
             int? assistantScore = null;
             string? suggestion = null;
-            var previousFinal = previous?.Stops.OrderBy(stop => stop.Sequence).LastOrDefault();
+            var previousStops = previous?.Stops.OrderBy(stop => stop.Sequence).ToList() ?? [];
+            var previousFinal = previousStops.LastOrDefault();
+            var previousRoute = previousStops.Count == 0
+                ? null
+                : string.Join(" → ", previousStops.Select(stop => CleanStopName(stop.Name)));
             if (absence is not null)
             {
                 suggestion = $"Unavailable · Sage HR {absence.PolicyName ?? "leave"}{(absence.IsPartOfDay ? " (part day)" : string.Empty)}.";
@@ -215,6 +224,7 @@ public sealed class DriverDispatchController(
                 previousVehicle?.Registration,
                 previousFinal?.Name,
                 previousFinal?.Latitude,
+                previousRoute,
                 allocated.FirstOrDefault()?.Id,
                 allocated.Count,
                 suggestedRunId,
@@ -524,6 +534,14 @@ public sealed class DriverDispatchController(
     }
 
     private static DateTimeOffset? FirstPlanned(Load load) => load.Stops.OrderBy(stop => stop.Sequence).Select(stop => stop.PlannedArrivalUtc).FirstOrDefault(value => value is not null);
+    private static string CleanStopName(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "Stop";
+        var clean = value.Trim();
+        foreach (var prefix in new[] { "Collect · ", "Deliver · ", "Collect - ", "Deliver - " })
+            if (clean.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return clean[prefix.Length..].Trim();
+        return clean;
+    }
     private static string CanonicalType(Driver driver) => IsAgency(driver) ? "Agency" : driver.DriverType?.Contains("casual", StringComparison.OrdinalIgnoreCase) == true || driver.DriverType?.Contains("zero", StringComparison.OrdinalIgnoreCase) == true ? "Casual" : "Employed";
     private static bool IsAgency(Driver driver) => new[] { driver.DriverType, driver.DriverGroup, driver.AgencyName }.Any(value => value?.Contains("agency", StringComparison.OrdinalIgnoreCase) == true) || string.Equals(driver.Coding?.Trim(), "4", StringComparison.OrdinalIgnoreCase);
     private static bool PersistedAgency(Driver driver) => new[] { driver.DriverType, driver.DriverGroup }.Any(value => value?.Contains("agency", StringComparison.OrdinalIgnoreCase) == true);
@@ -587,6 +605,7 @@ public sealed record DriverDispatchDriver(
     string? PreviousVehicleRegistration,
     string? PreviousFinalStop,
     decimal? PreviousFinalLatitude,
+    string? PreviousRoute,
     Guid? AssignedLoadId,
     int AssignedRunCount,
     Guid? SuggestedRunId,
