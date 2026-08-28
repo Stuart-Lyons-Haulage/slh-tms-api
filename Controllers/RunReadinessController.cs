@@ -15,24 +15,11 @@ public sealed class RunReadinessController(TmsDbContext db) : ControllerBase
     public async Task<IActionResult> Readiness([FromQuery] DateOnly? date, CancellationToken ct)
     {
         var day = date ?? DateOnly.FromDateTime(DateTime.UtcNow);
-        var merged = new Dictionary<Guid, Load>();
-
-        try
-        {
-            foreach (var load in await db.Loads.AsNoTracking().Include(x => x.Stops)
-                .Where(x => x.PlanningDate == day && x.Status != LoadStatus.Cancelled)
-                .OrderBy(x => x.Reference).Take(1000).ToListAsync(ct))
-                merged[load.Id] = load;
-        }
-        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex))
-        {
-            db.ChangeTracker.Clear();
-        }
-
-        foreach (var load in await PlanningRegisterStore.ReadLoadsAsync(db, day, ct))
-            if (load.Status != LoadStatus.Cancelled && !merged.ContainsKey(load.Id)) merged[load.Id] = load;
-
-        var loads = merged.Values.ToList();
+        var loads = (await PlanningResilience.ReadLoadsAsync(db, day, ct))
+            .Where(load => load.Status != LoadStatus.Cancelled)
+            .OrderBy(load => load.Reference)
+            .Take(1000)
+            .ToList();
         await RunOperationalStore.EnrichAsync(db, loads, ct);
 
         Dictionary<Guid, Vehicle> vehicles;
@@ -62,7 +49,7 @@ public sealed class RunReadinessController(TmsDbContext db) : ControllerBase
         {
             planningDate = day,
             generatedAtUtc = DateTimeOffset.UtcNow,
-            source = "Operational Runs",
+            source = "Reconciled Operational Runs",
             ready,
             runs = loads.Count,
             assignedDrivers,
