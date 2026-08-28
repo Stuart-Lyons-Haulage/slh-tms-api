@@ -1,7 +1,7 @@
 {
   "properties": {
     "displayName": "SLH-TMS | Info Mailbox | Order Intake | PROD",
-    "state": "Stopped",
+    "state": "Started",
     "connectionReferences": {
       "shared_office365": {
         "runtimeSource": "embedded",
