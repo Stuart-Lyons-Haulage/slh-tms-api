@@ -9,7 +9,9 @@ namespace Slh.Tms.Api.Controllers;
 /// <summary>
 /// Canonical run-membership feed shared by the signed-in operations wallboard and the office TV.
 /// It deliberately reads through PlanningResilience so SQL Loads, Planning Register and audit
-/// recovery copies cannot appear as separate real-world runs.
+/// recovery copies cannot appear as separate real-world runs. Planner operating dates can also
+/// contain an evening carry-in from the previous calendar day; those times are normalised here
+/// before the wallboard sorts or labels the journey.
 /// </summary>
 [ApiController]
 [Route("api/v1/tv-display/planned-runs")]
@@ -34,6 +36,7 @@ public sealed class TvPlannedRunsController(TmsDbContext db, IConfiguration conf
             .ToList();
 
         await RunOperationalStore.EnrichAsync(db, loads, ct);
+        foreach (var load in loads) OvernightRunContinuity.Apply(load);
         return Ok(loads);
     }
 
