@@ -1,0 +1,388 @@
+name: Temporary Driver Master Tacho recovery patch
+
+on:
+  push:
+    branches: [fix/driver-master-tacho-sync-recovery-20260828]
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: ${{ github.event.head_commit.message == 'Add temporary Driver Master recovery patch workflow' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/driver-master-tacho-sync-recovery-20260828
+      - name: Apply Driver Master Tacho recovery
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f'Expected patch target not found in {path}: {old[:120]!r}')
+              p.write_text(text.replace(old, new, 1))
+
+          # 1/2: Identity enrichment must never throw on an ambiguous card and must retain
+          # last-known compliance hours when the metrics endpoint is temporarily unavailable.
+          replace_once(
+              'Services/IntegrationSyncCoordinator.cs',
+              '''            var byMemberCode = profiles.GroupBy(profile => profile.MemberCode).ToDictionary(group => group.Key, group => group.First());\n            var byEmployee = UniqueLookup(profiles.Where(profile => !string.IsNullOrWhiteSpace(profile.EmployeeNumber)), profile => Normalise(profile.EmployeeNumber));''',
+              '''            var byMemberCode = profiles.GroupBy(profile => profile.MemberCode).ToDictionary(group => group.Key, group => group.First());\n            var byCard = UniqueLookup(profiles.Where(profile => !string.IsNullOrWhiteSpace(profile.CardNumber)), profile => Normalise(profile.CardNumber));\n            var byEmployee = UniqueLookup(profiles.Where(profile => !string.IsNullOrWhiteSpace(profile.EmployeeNumber)), profile => Normalise(profile.EmployeeNumber));''')
+          replace_once(
+              'Services/IntegrationSyncCoordinator.cs',
+              '''            if (profile is null && !string.IsNullOrWhiteSpace(driver.TachoCardNumber))\n                profile = profiles.SingleOrDefault(candidate => CardsMatch(driver.TachoCardNumber, candidate.CardNumber));''',
+              '''            if (profile is null && !string.IsNullOrWhiteSpace(driver.TachoCardNumber))\n                byCard.TryGetValue(Normalise(driver.TachoCardNumber), out profile);''')
+          replace_once(
+              'Services/IntegrationSyncCoordinator.cs',
+              '''            driver.TachoCardNumber = profile.CardNumber;\n            driver.TachoName = string.IsNullOrWhiteSpace(driver.TachoName) ? profile.DriverName : driver.TachoName;\n            driver.TachoDriveAvailableTodayMinutes = profile.DriveAvailableTodayMinutes;\n            driver.TachoDriveAvailableWeekMinutes = profile.DriveAvailableWeekMinutes;\n            driver.TachoWorkAvailableWeekMinutes = profile.WorkAvailableWeekMinutes;''',
+              '''            driver.TachoCardNumber = profile.CardNumber ?? driver.TachoCardNumber;\n            driver.TachoName = string.IsNullOrWhiteSpace(driver.TachoName) ? profile.DriverName : driver.TachoName;\n            driver.TachoDriveAvailableTodayMinutes = profile.DriveAvailableTodayMinutes ?? driver.TachoDriveAvailableTodayMinutes;\n            driver.TachoDriveAvailableWeekMinutes = profile.DriveAvailableWeekMinutes ?? driver.TachoDriveAvailableWeekMinutes;\n            driver.TachoWorkAvailableWeekMinutes = profile.WorkAvailableWeekMinutes ?? driver.TachoWorkAvailableWeekMinutes;''')
+
+          # 1/2/4/5: canonical matching, durable quality diagnostics and strict promotion gate.
+          replace_once(
+              'Services/TachoDriverMasterSyncService.cs',
+              '''public sealed record TachoDriverMasterQuality(\n    int ActiveDrivers,\n    int ActiveWithMember,\n    int ActiveWithCard,\n    int DuplicateMemberGroups,\n    int DuplicateCardGroups,\n    int ActiveWithoutMember,\n    int ActiveWithoutCard,\n    DateTimeOffset? LatestCanonicalSyncUtc);''',
+              '''public sealed record TachoDriverMasterDuplicateDriver(\n    Guid DriverId,\n    string EmployeeNumber,\n    string DisplayName);\n\npublic sealed record TachoDriverMasterIdentityDuplicate(\n    string IdentityValue,\n    IReadOnlyList<TachoDriverMasterDuplicateDriver> Drivers);\n\npublic sealed record TachoDriverMasterQuality(\n    int ActiveDrivers,\n    int ActiveWithMember,\n    int ActiveWithCard,\n    int DuplicateMemberGroups,\n    int DuplicateCardGroups,\n    int ActiveWithoutMember,\n    int ActiveWithoutCard,\n    DateTimeOffset? LatestCanonicalSyncUtc)\n{\n    public IReadOnlyList<TachoDriverMasterIdentityDuplicate> DuplicateMembers { get; init; } = [];\n    public IReadOnlyList<TachoDriverMasterIdentityDuplicate> DuplicateCards { get; init; } = [];\n}''')
+          replace_once(
+              'Services/TachoDriverMasterSyncService.cs',
+              '''        var liveNameCounts = workers\n            .GroupBy(worker => TachoDriverIdentityRules.NormalisePerson(worker.DisplayName), StringComparer.OrdinalIgnoreCase)\n            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);\n        var claimedDriverIds = new HashSet<Guid>();''',
+              '''        var liveNameCounts = workers\n            .GroupBy(worker => TachoDriverIdentityRules.NormalisePerson(worker.DisplayName), StringComparer.OrdinalIgnoreCase)\n            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);\n        var liveCardCounts = workers\n            .Where(worker => !string.IsNullOrWhiteSpace(worker.CardNumber))\n            .GroupBy(worker => TachoDriverIdentityRules.NormaliseIdentifier(worker.CardNumber), StringComparer.OrdinalIgnoreCase)\n            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);\n        var claimedDriverIds = new HashSet<Guid>();''')
+          replace_once(
+              'Services/TachoDriverMasterSyncService.cs',
+              '''            var member = worker.MemberCode.ToString(CultureInfo.InvariantCulture);\n            var strong = drivers.Where(driver =>\n                    TachoDriverIdentityRules.MemberMatches(driver.TachoMasterDriverId, member) ||\n                    TachoDriverIdentityRules.CardsMatch(driver.TachoCardNumber, worker.CardNumber))\n                .ToList();\n\n            Driver? canonical = null;\n            if (strong.Count > 0)\n            {\n                canonical = SelectCanonical(strong, worker, loadUse);\n                if (strong.Any(driver => TachoDriverIdentityRules.MemberMatches(driver.TachoMasterDriverId, member))) matchedByMember++;\n                else matchedByCard++;\n            }''',
+              '''            var member = worker.MemberCode.ToString(CultureInfo.InvariantCulture);\n            var memberMatches = drivers\n                .Where(driver => TachoDriverIdentityRules.MemberMatches(driver.TachoMasterDriverId, member))\n                .ToList();\n            var cardKey = TachoDriverIdentityRules.NormaliseIdentifier(worker.CardNumber);\n            var cardIsUnique = cardKey.Length > 0 && liveCardCounts.GetValueOrDefault(cardKey) == 1;\n            var strong = memberMatches.Count > 0\n                ? memberMatches\n                : cardIsUnique\n                    ? drivers.Where(driver => TachoDriverIdentityRules.CardsMatch(driver.TachoCardNumber, worker.CardNumber)).ToList()\n                    : [];\n\n            Driver? canonical = null;\n            if (strong.Count > 0)\n            {\n                canonical = SelectCanonical(strong, worker, loadUse);\n                if (memberMatches.Count > 0) matchedByMember++;\n                else matchedByCard++;\n            }''')
+          replace_once(
+              'Services/TachoDriverMasterSyncService.cs',
+              '''        driver.TachoDriveAvailableTodayMinutes = profile?.DriveAvailableTodayMinutes;\n        driver.TachoDriveAvailableWeekMinutes = profile?.DriveAvailableWeekMinutes;\n        driver.TachoWorkAvailableWeekMinutes = profile?.WorkAvailableWeekMinutes;''',
+              '''        driver.TachoDriveAvailableTodayMinutes = profile?.DriveAvailableTodayMinutes ?? driver.TachoDriveAvailableTodayMinutes;\n        driver.TachoDriveAvailableWeekMinutes = profile?.DriveAvailableWeekMinutes ?? driver.TachoDriveAvailableWeekMinutes;\n        driver.TachoWorkAvailableWeekMinutes = profile?.WorkAvailableWeekMinutes ?? driver.TachoWorkAvailableWeekMinutes;''')
+
+          old_audit = '''        db.StagedImports.Add(new StagedImport\n        {\n            EntityType = "tachodrivermastersync",\n            IdempotencyKey = $"tachodrivermastersync:{now:yyyyMMddHHmmss}:{Guid.NewGuid():N}",\n            PayloadJson = JsonSerializer.Serialize(new\n            {\n                sourceWorkers = workers.Count,\n                created,\n                updated,\n                duplicateRecordsRetired = retired,\n                driversArchivedNotInTachoMaster = archived,\n                sameNameDifferentIdentityGroups = CountDuplicateNames(workers),\n                workersWithoutCard = workers.Count(worker => string.IsNullOrWhiteSpace(worker.CardNumber))\n            }, JsonOptions),\n            Source = "TachoMaster live Worker List canonical Driver Master sync",\n            Status = StagingStatus.Promoted,\n            ReceivedAtUtc = now,\n            ReviewedAtUtc = now,\n            ReviewedBy = actor,\n            ReviewNote = "TachoMaster Member Code and Driver Card are authoritative identity. Sage HR remains an enrichment source for employed staff."\n        });\n\n        await db.SaveChangesAsync(ct);\n        await transaction.CommitAsync(ct);\n        var activeAfter = await db.Drivers.CountAsync(driver => driver.Active, ct);\n        var message = $"TachoMaster canonical Driver Master: {workers.Count} live worker(s), {activeAfter} active canonical TMS driver(s), {created} created, {retired} duplicate record(s) retired and {archived} stale/non-live TMS driver(s) archived. Member Code and card are authoritative; Sage HR remains employed-staff enrichment.";\n        return new(true, workers.Count, activeAfter, created, updated, retired, archived, matchedByMember, matchedByCard, matchedByName,\n            CountDuplicateNames(workers), workers.Count(worker => string.IsNullOrWhiteSpace(worker.CardNumber)), message, DateTimeOffset.UtcNow);'''
+          new_audit = '''        var activeAfter = drivers.Where(driver => driver.Active).ToList();\n        var duplicateMemberGroupsAfter = DuplicateIdentityGroupCount(activeAfter, driver => driver.TachoMasterDriverId);\n        var duplicateCardGroupsAfter = DuplicateIdentityGroupCount(activeAfter, driver => driver.TachoCardNumber);\n        var activeWithoutMemberAfter = activeAfter.Count(driver => string.IsNullOrWhiteSpace(driver.TachoMasterDriverId));\n        var canonicalHealthy = activeAfter.Count == workers.Count &&\n                               duplicateMemberGroupsAfter == 0 &&\n                               duplicateCardGroupsAfter == 0 &&\n                               activeWithoutMemberAfter == 0;\n\n        var auditPayload = JsonSerializer.Serialize(new\n        {\n            sourceWorkers = workers.Count,\n            canonicalActiveDrivers = activeAfter.Count,\n            created,\n            updated,\n            duplicateRecordsRetired = retired,\n            driversArchivedNotInTachoMaster = archived,\n            sameNameDifferentIdentityGroups = CountDuplicateNames(workers),\n            workersWithoutCard = workers.Count(worker => string.IsNullOrWhiteSpace(worker.CardNumber)),\n            duplicateMemberGroups = duplicateMemberGroupsAfter,\n            duplicateCardGroups = duplicateCardGroupsAfter,\n            activeWithoutMember = activeWithoutMemberAfter,\n            populationAligned = activeAfter.Count == workers.Count\n        }, JsonOptions);\n\n        if (!canonicalHealthy)\n        {\n            await transaction.RollbackAsync(ct);\n            db.ChangeTracker.Clear();\n            var failureMessage = $"TachoMaster canonical Driver Master was not promoted because the resulting population failed the strict identity gate: source={workers.Count}, active={activeAfter.Count}, duplicate members={duplicateMemberGroupsAfter}, duplicate cards={duplicateCardGroupsAfter}, active without member={activeWithoutMemberAfter}. No partial cleanse was committed.";\n            db.StagedImports.Add(new StagedImport\n            {\n                EntityType = "tachodrivermastersync",\n                IdempotencyKey = $"tachodrivermastersync:{now:yyyyMMddHHmmss}:{Guid.NewGuid():N}",\n                PayloadJson = auditPayload,\n                Source = "TachoMaster live Worker List canonical Driver Master sync",\n                Status = StagingStatus.Rejected,\n                ReceivedAtUtc = now,\n                ReviewedAtUtc = DateTimeOffset.UtcNow,\n                ReviewedBy = actor,\n                ReviewNote = failureMessage\n            });\n            await db.SaveChangesAsync(ct);\n            return new(false, workers.Count, activeAfter.Count, created, updated, retired, archived, matchedByMember, matchedByCard, matchedByName,\n                CountDuplicateNames(workers), workers.Count(worker => string.IsNullOrWhiteSpace(worker.CardNumber)), failureMessage, DateTimeOffset.UtcNow);\n        }\n\n        db.StagedImports.Add(new StagedImport\n        {\n            EntityType = "tachodrivermastersync",\n            IdempotencyKey = $"tachodrivermastersync:{now:yyyyMMddHHmmss}:{Guid.NewGuid():N}",\n            PayloadJson = auditPayload,\n            Source = "TachoMaster live Worker List canonical Driver Master sync",\n            Status = StagingStatus.Promoted,\n            ReceivedAtUtc = now,\n            ReviewedAtUtc = DateTimeOffset.UtcNow,\n            ReviewedBy = actor,\n            ReviewNote = "TachoMaster Member Code is authoritative. Card identity is used only when unique in the live source; Sage HR remains an enrichment source for employed staff."\n        });\n\n        await db.SaveChangesAsync(ct);\n        await transaction.CommitAsync(ct);\n        var message = $"TachoMaster canonical Driver Master: {workers.Count} live worker(s), {activeAfter.Count} active canonical TMS driver(s), {created} created, {retired} duplicate record(s) retired and {archived} stale/non-live TMS driver(s) archived. Strict source parity and duplicate-identity checks passed.";\n        return new(true, workers.Count, activeAfter.Count, created, updated, retired, archived, matchedByMember, matchedByCard, matchedByName,\n            CountDuplicateNames(workers), workers.Count(worker => string.IsNullOrWhiteSpace(worker.CardNumber)), message, DateTimeOffset.UtcNow);'''
+          replace_once('Services/TachoDriverMasterSyncService.cs', old_audit, new_audit)
+
+          old_quality = '''        var memberGroups = drivers.Where(driver => !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId))\n            .GroupBy(driver => TachoDriverIdentityRules.NormaliseIdentifier(driver.TachoMasterDriverId), StringComparer.OrdinalIgnoreCase)\n            .Count(group => group.Count() > 1);\n        var cardGroups = drivers.Where(driver => !string.IsNullOrWhiteSpace(driver.TachoCardNumber))\n            .GroupBy(driver => TachoDriverIdentityRules.NormaliseIdentifier(driver.TachoCardNumber), StringComparer.OrdinalIgnoreCase)\n            .Count(group => group.Count() > 1);'''
+          new_quality = '''        var duplicateMembers = DuplicateIdentities(drivers, driver => driver.TachoMasterDriverId);\n        var duplicateCards = DuplicateIdentities(drivers, driver => driver.TachoCardNumber);\n        var memberGroups = duplicateMembers.Count;\n        var cardGroups = duplicateCards.Count;'''
+          replace_once('Services/TachoDriverMasterSyncService.cs', old_quality, new_quality)
+          replace_once(
+              'Services/TachoDriverMasterSyncService.cs',
+              '''            drivers.Count(driver => string.IsNullOrWhiteSpace(driver.TachoCardNumber)),\n            latest == default ? null : latest);''',
+              '''            drivers.Count(driver => string.IsNullOrWhiteSpace(driver.TachoCardNumber)),\n            latest == default ? null : latest)\n        {\n            DuplicateMembers = duplicateMembers,\n            DuplicateCards = duplicateCards\n        };''')
+          replace_once(
+              'Services/TachoDriverMasterSyncService.cs',
+              '''    private static int CountDuplicateNames(IReadOnlyCollection<TachoLiveWorker> workers) => workers\n        .GroupBy(worker => TachoDriverIdentityRules.NormalisePerson(worker.DisplayName), StringComparer.OrdinalIgnoreCase)\n        .Count(group => group.Key.Length > 0 && group.Select(worker => worker.MemberCode).Distinct().Count() > 1);''',
+              '''    private static int CountDuplicateNames(IReadOnlyCollection<TachoLiveWorker> workers) => workers\n        .GroupBy(worker => TachoDriverIdentityRules.NormalisePerson(worker.DisplayName), StringComparer.OrdinalIgnoreCase)\n        .Count(group => group.Key.Length > 0 && group.Select(worker => worker.MemberCode).Distinct().Count() > 1);\n\n    private static int DuplicateIdentityGroupCount(IEnumerable<Driver> drivers, Func<Driver, string?> selector) =>\n        drivers\n            .Select(selector)\n            .Where(value => !string.IsNullOrWhiteSpace(value))\n            .GroupBy(TachoDriverIdentityRules.NormaliseIdentifier, StringComparer.OrdinalIgnoreCase)\n            .Count(group => group.Key.Length > 0 && group.Count() > 1);\n\n    private static IReadOnlyList<TachoDriverMasterIdentityDuplicate> DuplicateIdentities(\n        IEnumerable<Driver> drivers,\n        Func<Driver, string?> selector) =>\n        drivers\n            .Where(driver => !string.IsNullOrWhiteSpace(selector(driver)))\n            .GroupBy(driver => TachoDriverIdentityRules.NormaliseIdentifier(selector(driver)), StringComparer.OrdinalIgnoreCase)\n            .Where(group => group.Key.Length > 0 && group.Count() > 1)\n            .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase)\n            .Select(group => new TachoDriverMasterIdentityDuplicate(\n                group.Key,\n                group.OrderBy(driver => driver.DisplayName, StringComparer.OrdinalIgnoreCase)\n                    .Select(driver => new TachoDriverMasterDuplicateDriver(driver.Id, driver.EmployeeNumber, driver.DisplayName))\n                    .ToList()))\n            .ToList();''')
+
+          # 3: durable asynchronous Force Sync job. It uses the existing StagedImport table/rowversion,
+          # so no schema migration is required and browser cancellation cannot cancel the cleanse.
+          Path('Services/TachoDriverMasterSyncJobService.cs').write_text(r'''using System.Text.Json;
+          using Microsoft.EntityFrameworkCore;
+          using Slh.Tms.Api.Data;
+          using Slh.Tms.Api.Models;
+
+          namespace Slh.Tms.Api.Services;
+
+          public sealed record TachoDriverMasterSyncJobStatus(
+              Guid JobId,
+              string Status,
+              DateTimeOffset RequestedAtUtc,
+              DateTimeOffset? StartedAtUtc,
+              DateTimeOffset? CompletedAtUtc,
+              string? Message,
+              TachoCanonicalOrchestrationResult? Result);
+
+          internal sealed record TachoDriverMasterSyncJobClaim(Guid JobId, string Actor);
+
+          internal sealed record TachoDriverMasterSyncJobEnvelope(
+              string Actor,
+              DateTimeOffset RequestedAtUtc,
+              DateTimeOffset? StartedAtUtc = null,
+              DateTimeOffset? CompletedAtUtc = null,
+              string? Message = null,
+              TachoCanonicalOrchestrationResult? Result = null);
+
+          public sealed class TachoDriverMasterSyncJobService(TmsDbContext db)
+          {
+              internal const string EntityType = "tachodrivermastersyncjob";
+              private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+              public async Task<TachoDriverMasterSyncJobStatus> EnqueueAsync(string actor, CancellationToken ct)
+              {
+                  var existing = await db.StagedImports.AsNoTracking()
+                      .Where(row => row.EntityType == EntityType &&
+                                    (row.Status == StagingStatus.PendingReview || row.Status == StagingStatus.Approved))
+                      .OrderBy(row => row.ReceivedAtUtc)
+                      .FirstOrDefaultAsync(ct);
+                  if (existing is not null) return ToStatus(existing);
+
+                  var now = DateTimeOffset.UtcNow;
+                  var envelope = new TachoDriverMasterSyncJobEnvelope(actor, now);
+                  var row = new StagedImport
+                  {
+                      EntityType = EntityType,
+                      IdempotencyKey = $"tachodrivermastersyncjob:{Guid.NewGuid():N}",
+                      PayloadJson = JsonSerializer.Serialize(envelope, JsonOptions),
+                      Source = actor.StartsWith("system:", StringComparison.OrdinalIgnoreCase)
+                          ? "System canonical Driver Master queue"
+                          : "Manual canonical Driver Master queue",
+                      Status = StagingStatus.PendingReview,
+                      ReceivedAtUtc = now,
+                      ReviewedBy = actor,
+                      ReviewNote = "Queued. The canonical cleanse runs independently of the browser request."
+                  };
+                  db.StagedImports.Add(row);
+                  await db.SaveChangesAsync(ct);
+                  return ToStatus(row, envelope);
+              }
+
+              public async Task<TachoDriverMasterSyncJobStatus?> GetAsync(Guid jobId, CancellationToken ct)
+              {
+                  var row = await db.StagedImports.AsNoTracking()
+                      .SingleOrDefaultAsync(item => item.Id == jobId && item.EntityType == EntityType, ct);
+                  return row is null ? null : ToStatus(row);
+              }
+
+              internal async Task<TachoDriverMasterSyncJobClaim?> TryClaimNextAsync(CancellationToken ct)
+              {
+                  var row = await db.StagedImports
+                      .Where(item => item.EntityType == EntityType && item.Status == StagingStatus.PendingReview)
+                      .OrderBy(item => item.ReceivedAtUtc)
+                      .FirstOrDefaultAsync(ct);
+                  if (row is null) return null;
+
+                  var envelope = ReadEnvelope(row);
+                  var started = DateTimeOffset.UtcNow;
+                  envelope = envelope with { StartedAtUtc = started, Message = "Canonical TachoMaster Driver Master sync is running." };
+                  row.Status = StagingStatus.Approved;
+                  row.ReviewedAtUtc = started;
+                  row.ReviewedBy = envelope.Actor;
+                  row.ReviewNote = envelope.Message;
+                  row.PayloadJson = JsonSerializer.Serialize(envelope, JsonOptions);
+                  try
+                  {
+                      await db.SaveChangesAsync(ct);
+                      return new TachoDriverMasterSyncJobClaim(row.Id, envelope.Actor);
+                  }
+                  catch (DbUpdateConcurrencyException)
+                  {
+                      db.ChangeTracker.Clear();
+                      return null;
+                  }
+              }
+
+              internal async Task CompleteAsync(Guid jobId, TachoCanonicalOrchestrationResult result, CancellationToken ct)
+              {
+                  var row = await db.StagedImports.SingleAsync(item => item.Id == jobId && item.EntityType == EntityType, ct);
+                  var envelope = ReadEnvelope(row) with
+                  {
+                      CompletedAtUtc = DateTimeOffset.UtcNow,
+                      Message = result.Message,
+                      Result = result
+                  };
+                  row.Status = result.Success ? StagingStatus.Promoted : StagingStatus.Failed;
+                  row.ReviewedAtUtc = envelope.CompletedAtUtc;
+                  row.ReviewNote = result.Message;
+                  row.PayloadJson = JsonSerializer.Serialize(envelope, JsonOptions);
+                  await db.SaveChangesAsync(ct);
+              }
+
+              internal async Task FailAsync(Guid jobId, Exception exception, CancellationToken ct)
+              {
+                  var row = await db.StagedImports.SingleOrDefaultAsync(item => item.Id == jobId && item.EntityType == EntityType, ct);
+                  if (row is null) return;
+                  var message = $"Canonical TachoMaster Driver Master sync failed: {exception.GetBaseException().Message}";
+                  var envelope = ReadEnvelope(row) with { CompletedAtUtc = DateTimeOffset.UtcNow, Message = message };
+                  row.Status = StagingStatus.Failed;
+                  row.ReviewedAtUtc = envelope.CompletedAtUtc;
+                  row.ReviewNote = message;
+                  row.PayloadJson = JsonSerializer.Serialize(envelope, JsonOptions);
+                  await db.SaveChangesAsync(ct);
+              }
+
+              internal async Task RecoverInterruptedAsync(CancellationToken ct)
+              {
+                  var cutoff = DateTimeOffset.UtcNow.AddMinutes(-30);
+                  var rows = await db.StagedImports
+                      .Where(item => item.EntityType == EntityType && item.Status == StagingStatus.Approved &&
+                                     (item.ReviewedAtUtc ?? item.ReceivedAtUtc) < cutoff)
+                      .ToListAsync(ct);
+                  foreach (var row in rows)
+                  {
+                      var message = "A previous canonical sync worker stopped before completion. Queue a new Force Sync if required.";
+                      var envelope = ReadEnvelope(row) with { CompletedAtUtc = DateTimeOffset.UtcNow, Message = message };
+                      row.Status = StagingStatus.Failed;
+                      row.ReviewedAtUtc = envelope.CompletedAtUtc;
+                      row.ReviewNote = message;
+                      row.PayloadJson = JsonSerializer.Serialize(envelope, JsonOptions);
+                  }
+                  if (rows.Count > 0) await db.SaveChangesAsync(ct);
+              }
+
+              private static TachoDriverMasterSyncJobStatus ToStatus(StagedImport row, TachoDriverMasterSyncJobEnvelope? envelope = null)
+              {
+                  envelope ??= ReadEnvelope(row);
+                  return new TachoDriverMasterSyncJobStatus(
+                      row.Id,
+                      StatusName(row.Status),
+                      envelope.RequestedAtUtc,
+                      envelope.StartedAtUtc,
+                      envelope.CompletedAtUtc,
+                      envelope.Message ?? row.ReviewNote,
+                      envelope.Result);
+              }
+
+              private static TachoDriverMasterSyncJobEnvelope ReadEnvelope(StagedImport row)
+              {
+                  try
+                  {
+                      return JsonSerializer.Deserialize<TachoDriverMasterSyncJobEnvelope>(row.PayloadJson, JsonOptions)
+                             ?? new TachoDriverMasterSyncJobEnvelope(row.ReviewedBy ?? "unknown", row.ReceivedAtUtc);
+                  }
+                  catch (JsonException)
+                  {
+                      return new TachoDriverMasterSyncJobEnvelope(row.ReviewedBy ?? "unknown", row.ReceivedAtUtc, Message: row.ReviewNote);
+                  }
+              }
+
+              private static string StatusName(StagingStatus status) => status switch
+              {
+                  StagingStatus.PendingReview => "queued",
+                  StagingStatus.Approved => "running",
+                  StagingStatus.Promoted => "succeeded",
+                  StagingStatus.Failed or StagingStatus.Rejected => "failed",
+                  _ => status.ToString().ToLowerInvariant()
+              };
+          }
+
+          public sealed class TachoDriverMasterSyncJobWorker(
+              IServiceScopeFactory scopeFactory,
+              IHostEnvironment environment,
+              ILogger<TachoDriverMasterSyncJobWorker> logger) : BackgroundService
+          {
+              protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+              {
+                  if (environment.IsEnvironment("Testing")) return;
+
+                  try
+                  {
+                      await using var startupScope = scopeFactory.CreateAsyncScope();
+                      var jobs = startupScope.ServiceProvider.GetRequiredService<TachoDriverMasterSyncJobService>();
+                      await jobs.RecoverInterruptedAsync(stoppingToken);
+                      var quality = await startupScope.ServiceProvider.GetRequiredService<TachoDriverMasterSyncService>().QualityAsync(stoppingToken);
+                      if (quality.LatestCanonicalSyncUtc is null ||
+                          quality.LatestCanonicalSyncUtc < DateTimeOffset.UtcNow.AddMinutes(-15) ||
+                          quality.DuplicateMemberGroups > 0 || quality.DuplicateCardGroups > 0 || quality.ActiveWithoutMember > 0)
+                      {
+                          await jobs.EnqueueAsync("system:tachomaster-canonical-driver-master-startup", stoppingToken);
+                      }
+                  }
+                  catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+                  catch (Exception ex)
+                  {
+                      logger.LogWarning(ex, "Could not initialise the Driver Master sync queue; the worker will continue polling.");
+                  }
+
+                  while (!stoppingToken.IsCancellationRequested)
+                  {
+                      var processed = false;
+                      try
+                      {
+                          await using var scope = scopeFactory.CreateAsyncScope();
+                          var jobs = scope.ServiceProvider.GetRequiredService<TachoDriverMasterSyncJobService>();
+                          var claim = await jobs.TryClaimNextAsync(stoppingToken);
+                          if (claim is not null)
+                          {
+                              processed = true;
+                              try
+                              {
+                                  var orchestrator = scope.ServiceProvider.GetRequiredService<TachoCanonicalDriverMasterOrchestrator>();
+                                  var result = await orchestrator.RunAsync(claim.Actor, stoppingToken);
+                                  await jobs.CompleteAsync(claim.JobId, result, stoppingToken);
+                              }
+                              catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+                              catch (Exception ex)
+                              {
+                                  logger.LogError(ex, "Queued canonical Driver Master sync {JobId} failed unexpectedly.", claim.JobId);
+                                  await jobs.FailAsync(claim.JobId, ex, stoppingToken);
+                              }
+                          }
+                      }
+                      catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+                      catch (Exception ex)
+                      {
+                          logger.LogWarning(ex, "Driver Master sync queue poll failed.");
+                      }
+
+                      if (!processed)
+                      {
+                          try { await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken); }
+                          catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+                      }
+                  }
+              }
+          }
+          '''.replace('          ', '', 1))
+
+          # Controller now returns 202 + job id immediately and exposes a polling endpoint.
+          replace_once(
+              'Controllers/TachoDriverMasterController.cs',
+              '''public sealed class TachoDriverMasterController(\n    TachoCanonicalDriverMasterOrchestrator orchestrator,\n    TachoDriverMasterSyncService sync) : ControllerBase''',
+              '''public sealed class TachoDriverMasterController(\n    TachoDriverMasterSyncJobService jobs,\n    TachoDriverMasterSyncService sync) : ControllerBase''')
+          replace_once(
+              'Controllers/TachoDriverMasterController.cs',
+              '''    public async Task<IActionResult> Sync(CancellationToken ct)\n    {\n        var actor = User.Identity?.Name ?? "TMS user";\n        var result = await orchestrator.RunAsync(actor, ct);\n\n        // Preserve the existing Master Data endpoint response contract so the portal does not\n        // need to change. Manual and scheduled syncs now execute the same canonical orchestration.\n        if (!result.Success) return StatusCode(StatusCodes.Status502BadGateway, result.Canonical);\n        return Ok(result.Canonical);\n    }''',
+              '''    public async Task<IActionResult> Sync(CancellationToken ct)\n    {\n        var actor = User.Identity?.Name ?? "TMS user";\n        var job = await jobs.EnqueueAsync(actor, ct);\n        return AcceptedAtAction(nameof(SyncStatus), new { jobId = job.JobId }, job);\n    }\n\n    [HttpGet("tachomaster/sync/{jobId:guid}")]\n    public async Task<IActionResult> SyncStatus(Guid jobId, CancellationToken ct)\n    {\n        var job = await jobs.GetAsync(jobId, ct);\n        return job is null ? NotFound() : Ok(job);\n    }''')
+
+          # DI registrations.
+          replace_once(
+              'Program.cs',
+              '''builder.Services.AddScoped<TachoCanonicalDriverMasterOrchestrator>();\nbuilder.Services.AddTransient<TachoMasterRetryHandler>();''',
+              '''builder.Services.AddScoped<TachoCanonicalDriverMasterOrchestrator>();\nbuilder.Services.AddScoped<TachoDriverMasterSyncJobService>();\nbuilder.Services.AddTransient<TachoMasterRetryHandler>();''')
+          replace_once(
+              'Program.cs',
+              '''builder.Services.AddHostedService<TachoCanonicalDriverMasterDailyBackgroundService>();\nbuilder.Services.AddHostedService<DriverMasterClassificationBackgroundService>();''',
+              '''builder.Services.AddHostedService<TachoCanonicalDriverMasterDailyBackgroundService>();\nbuilder.Services.AddHostedService<TachoDriverMasterSyncJobWorker>();\nbuilder.Services.AddHostedService<DriverMasterClassificationBackgroundService>();''')
+
+          # Exact duplicate diagnostics through the anonymous production health endpoint.
+          replace_once(
+              'Controllers/DriverMasterHealthController.cs',
+              '''            quality.DuplicateMemberGroups,\n            quality.DuplicateCardGroups,\n            quality.ActiveWithoutMember,''',
+              '''            quality.DuplicateMemberGroups,\n            quality.DuplicateCardGroups,\n            quality.DuplicateMembers,\n            quality.DuplicateCards,\n            quality.ActiveWithoutMember,''')
+
+          # 5: deployment verification only turns green for a canonical sync promoted after the
+          # deployment workflow completed, not for an old healthy-looking snapshot.
+          replace_once(
+              '.github/workflows/driver-master-production-verification.yml',
+              '''          set -euo pipefail\n          for attempt in {1..60}; do''',
+              '''          set -euo pipefail\n          deployed_at="${{ github.event.workflow_run.updated_at }}"\n          deployed_epoch="$(date -u -d "$deployed_at" +%s)"\n          echo "Requiring canonical Driver Master promotion at/after deployment completion: $deployed_at"\n          for attempt in {1..60}; do''')
+          replace_once(
+              '.github/workflows/driver-master-production-verification.yml',
+              '''               test "$(echo "$body" | jq -r '.populationAligned // false')" = "true" && \\\n               test "$(echo "$body" | jq -r '.latestCanonicalSyncUtc // empty')" != ""; then''',
+              '''               test "$(echo "$body" | jq -r '.populationAligned // false')" = "true" && \\\n               test "$(echo "$body" | jq -r '.latestCanonicalSyncUtc // empty')" != "" && \\\n               test "$(date -u -d "$(echo "$body" | jq -r '.latestCanonicalSyncUtc')" +%s)" -ge "$deployed_epoch"; then''')
+          replace_once(
+              '.github/workflows/driver-master-production-verification.yml',
+              '''          echo "$body" | jq '{status, activeDrivers, sourceWorkers, populationAligned, activeWithMember, activeWithCard, duplicateMemberGroups, duplicateCardGroups, activeWithoutMember, activeWithoutCard, latestCanonicalSyncUtc}' ''',
+              '''          echo "$body" | jq '{status, activeDrivers, sourceWorkers, populationAligned, activeWithMember, activeWithCard, duplicateMemberGroups, duplicateCardGroups, duplicateMembers, duplicateCards, activeWithoutMember, activeWithoutCard, latestCanonicalSyncUtc}' ''')
+
+          # Extra behavioural coverage for ambiguous-card semantics.
+          p = Path('Slh.Tms.Api.Tests/TachoDriverMasterIdentityTests.cs')
+          text = p.read_text()
+          marker = '''    [Fact]\n    public void Missing_profile_metrics_preserve_last_known_tacho_hours()'''
+          extra = '''    [Fact]\n    public void Duplicate_live_card_is_not_a_safe_identity_key()\n    {\n        var card = "CARD-DUPLICATE-0001";\n        var workers = new[]\n        {\n            new TachoLiveWorker(1, "Driver One", card, "SLH-1", "Employed", null, null, null, null, null, null, null, null, null, null, null, "{}"),\n            new TachoLiveWorker(2, "Driver Two", card, "SLH-2", "Employed", null, null, null, null, null, null, null, null, null, null, null, "{}")\n        };\n\n        var cardKey = TachoDriverIdentityRules.NormaliseIdentifier(card);\n        var liveCardCounts = workers\n            .Where(worker => !string.IsNullOrWhiteSpace(worker.CardNumber))\n            .GroupBy(worker => TachoDriverIdentityRules.NormaliseIdentifier(worker.CardNumber), StringComparer.OrdinalIgnoreCase)\n            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);\n\n        Assert.Equal(2, liveCardCounts[cardKey]);\n        Assert.False(cardKey.Length > 0 && liveCardCounts.GetValueOrDefault(cardKey) == 1);\n    }\n\n'''
+          if marker not in text:
+              raise SystemExit('Identity test insertion marker missing')
+          p.write_text(text.replace(marker, extra + marker, 1))
+
+          # Remove this one-shot workflow before committing the real patch.
+          Path('.github/workflows/temp-driver-master-tacho-recovery.yml').unlink()
+          PY
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Recover Driver Master Tacho sync and cleanse'
+          git push origin HEAD:fix/driver-master-tacho-sync-recovery-20260828
