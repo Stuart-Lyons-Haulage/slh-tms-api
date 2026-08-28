@@ -20,7 +20,7 @@ public sealed class DriverDispatchController(
     [HttpGet]
     public async Task<IActionResult> Get([FromQuery] DateOnly? date, CancellationToken ct)
     {
-        var planningDate = date ?? DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime).AddDays(1);
+        var planningDate = date ?? DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
         var weekStart = DriverDispatchAgencyRosterStore.WeekStart(planningDate);
         var weekEnd = weekStart.AddDays(6);
         var sageTask = ReadSageStateAsync(planningDate, ct);
@@ -55,7 +55,18 @@ public sealed class DriverDispatchController(
             .ToListAsync(ct);
 
         var roster = await DriverDispatchAgencyRosterStore.ReadForDateAsync(db, planningDate, ct);
-        var driverCandidates = await db.Drivers.AsNoTracking().Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToListAsync(ct);
+        var relevantDriverIds = loads.Concat(history)
+            .Where(load => load.DriverId is not null)
+            .Select(load => load.DriverId!.Value)
+            .ToHashSet();
+        var identityDrivers = await db.Drivers.AsNoTracking()
+            .Where(driver => driver.Active || relevantDriverIds.Contains(driver.Id))
+            .OrderBy(driver => driver.DisplayName)
+            .ToListAsync(ct);
+        await MasterDetailStore.EnrichDriversAsync(db, identityDrivers, ct);
+        RepairAllocatedDriverAliases(loads, identityDrivers);
+        RepairAllocatedDriverAliases(history, identityDrivers);
+        var driverCandidates = identityDrivers.Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToList();
         var vehicles = await db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active).OrderBy(vehicle => vehicle.Registration).ToListAsync(ct);
         var trailers = await db.Trailers.AsNoTracking().Where(trailer => trailer.Active).OrderBy(trailer => trailer.TrailerNumber).ToListAsync(ct);
         var vehicleById = vehicles.ToDictionary(vehicle => vehicle.Id);
@@ -479,6 +490,37 @@ public sealed class DriverDispatchController(
             if (count >= 7) break;
         }
         return count;
+    }
+
+    private static void RepairAllocatedDriverAliases(IEnumerable<Load> loads, IReadOnlyCollection<Driver> drivers)
+    {
+        var byId = drivers.ToDictionary(driver => driver.Id);
+        var active = drivers.Where(driver => driver.Active).ToList();
+        foreach (var load in loads)
+        {
+            if (load.DriverId is not Guid storedId || !byId.TryGetValue(storedId, out var stored) || stored.Active) continue;
+            var matches = active.Where(candidate => StableDriverIdentityMatch(stored, candidate)).Take(2).ToList();
+            if (matches.Count == 1) load.DriverId = matches[0].Id;
+        }
+    }
+
+    private static bool StableDriverIdentityMatch(Driver left, Driver right)
+    {
+        var leftEmployee = Normalise(left.EmployeeNumber);
+        var rightEmployee = Normalise(right.EmployeeNumber);
+        if (leftEmployee.Length > 0 && leftEmployee == rightEmployee) return true;
+
+        var leftMember = Normalise(left.TachoMasterDriverId);
+        var rightMember = Normalise(right.TachoMasterDriverId);
+        if (leftMember.Length > 0 && leftMember == rightMember) return true;
+
+        var leftCard = Normalise(left.TachoCardNumber);
+        var rightCard = Normalise(right.TachoCardNumber);
+        if (leftCard.Length > 0 && leftCard == rightCard) return true;
+
+        var leftName = Normalise(left.TachoName ?? left.DisplayName);
+        var rightName = Normalise(right.TachoName ?? right.DisplayName);
+        return leftName.Length > 0 && leftName == rightName;
     }
 
     private static DateTimeOffset? FirstPlanned(Load load) => load.Stops.OrderBy(stop => stop.Sequence).Select(stop => stop.PlannedArrivalUtc).FirstOrDefault(value => value is not null);

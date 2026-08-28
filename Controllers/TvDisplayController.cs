@@ -97,7 +97,15 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
         var carried = (await PlanningResilience.ReadLoadsAsync(db, day.AddDays(-1), ct))
             .Where(load => load.Status != LoadStatus.Cancelled && load.Status != LoadStatus.Completed)
             .ToList();
-        loads.AddRange(carried.Where(load => loads.All(current => current.Id != load.Id)));
+
+        foreach (var carry in carried)
+        {
+            var key = PlanningResilience.LogicalRunKey(carry);
+            if (loads.All(current => !string.Equals(PlanningResilience.LogicalRunKey(current), key, StringComparison.OrdinalIgnoreCase)))
+                loads.Add(carry);
+        }
+
+        loads = PlanningResilience.CollapseLogicalDuplicates(loads);
         await RunOperationalStore.EnrichAsync(db, loads, ct);
 
         var driverIds = loads.Where(x => x.DriverId is not null).Select(x => x.DriverId!.Value).Distinct().ToList();
@@ -108,15 +116,22 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
         var vehicles = await SafeDictionary(db.Vehicles.AsNoTracking().Where(x => vehicleIds.Contains(x.Id)), x => x.Id, ct);
         var trailers = await SafeDictionary(db.Trailers.AsNoTracking().Where(x => trailerIds.Contains(x.Id)), x => x.Id, ct);
         var liveStatuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
+
         loads = loads.Where(load => load.PlanningDate == day ||
             (load.VehicleId is Guid vehicleId && vehicles.TryGetValue(vehicleId, out var vehicle) && MatchLive(vehicle, liveStatuses) is { } live && now - live.LastEventTimeUtc <= TimeSpan.FromMinutes(30)) ||
             load.Status is LoadStatus.Dispatched or LoadStatus.InProgress)
-            .OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).ToList();
+            .OrderBy(load => load.PlanningDate)
+            .ThenBy(load => load.Reference)
+            .ToList();
 
-        var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
-        var geofenceSnapshot = await EmbeddedGeofenceEngine.BuildAsync(db, day, geofenceLoads, ct);
-        geofenceSnapshot = await EmbeddedGeofenceEvidenceMerge.MergeDurableProjectionAsync(db, geofenceSnapshot, loads, ct);
-        var useLiveMapEtas = loads.Count <= MaxLiveEtaCalculationsPerRefresh;
+        var loadIds = loads.Select(load => load.Id).ToList();
+        List<GeofenceVisit> durableVisits = loadIds.Count == 0
+            ? []
+            : await SafeList(db.GeofenceVisits.AsNoTracking().Where(visit => visit.LoadId != null && loadIds.Contains(visit.LoadId.Value)), ct);
+        var fenceIds = durableVisits.Select(visit => visit.GeofenceId).Distinct().ToList();
+        Dictionary<Guid, SiteGeofence> fences = fenceIds.Count == 0
+            ? []
+            : await SafeDictionary(db.SiteGeofences.AsNoTracking().Where(fence => fenceIds.Contains(fence.Id)), fence => fence.Id, ct);
 
         var rows = new List<TvRunDisplayRow>();
         foreach (var load in loads)
@@ -124,18 +139,30 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
             drivers.TryGetValue(load.DriverId ?? Guid.Empty, out var driver);
             vehicles.TryGetValue(load.VehicleId ?? Guid.Empty, out var vehicle);
             trailers.TryGetValue(load.TrailerId ?? Guid.Empty, out var trailer);
+
             var live = vehicle is null ? null : MatchLive(vehicle, liveStatuses);
             var stops = load.Stops.OrderBy(x => x.Sequence).ToList();
-            var visits = geofenceSnapshot.Visits.Where(visit => visit.LoadId == load.Id).OrderBy(visit => visit.EnteredAtUtc).ToList();
-            var completedStopIds = GeofencePlanningMatch.CompletedStopIds(load, visits);
-            if (ShouldHideCompletedRun(load, completedStopIds)) continue;
-            var currentVisit = geofenceSnapshot.ActiveVisits
+            var visits = durableVisits
                 .Where(visit => visit.LoadId == load.Id)
+                .OrderBy(visit => visit.EnteredAtUtc)
+                .ToList();
+            var completedStopIds = visits
+                .Where(visit => visit.ExitedAtUtc is not null && visit.LoadStopId is not null)
+                .Select(visit => visit.LoadStopId!.Value)
+                .ToHashSet();
+
+            if (ShouldHideCompletedRun(load, completedStopIds)) continue;
+
+            var currentVisit = visits
+                .Where(visit => visit.ExitedAtUtc is null)
                 .OrderByDescending(visit => visit.EnteredAtUtc)
                 .FirstOrDefault();
-            var stopDwell = RunStopDwellProjection.Build(load, visits, geofenceSnapshot.ActiveVisits, now);
-            var activeDwell = stopDwell.FirstOrDefault(stop => stop.State == "OnSite");
-            var finalDwell = stopDwell.LastOrDefault(stop => stop.State == "Departed");
+            var lastDeparted = visits
+                .Where(visit => visit.ExitedAtUtc is not null)
+                .OrderByDescending(visit => visit.ExitedAtUtc)
+                .FirstOrDefault();
+            fences.TryGetValue(currentVisit?.GeofenceId ?? Guid.Empty, out var currentFence);
+
             var nextStop = currentVisit?.LoadStopId is Guid currentStopId
                 ? stops.FirstOrDefault(stop => stop.Id == currentStopId)
                 : stops.FirstOrDefault(stop => !completedStopIds.Contains(stop.Id))
@@ -144,47 +171,26 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
             var finalStop = stops.LastOrDefault();
             var routeComplete = stops.Count > 0 && completedStopIds.Count >= stops.Count;
             var etaTarget = routeComplete ? null : finalStop;
-
-            DateTimeOffset? eta = etaTarget?.PlannedArrivalUtc;
+            var eta = etaTarget?.PlannedArrivalUtc;
             var etaSource = eta is null ? "Unavailable" : "Planned";
-            if (live is not null && etaTarget?.Latitude is not null && etaTarget.Longitude is not null && now - live.LastEventTimeUtc <= TimeSpan.FromMinutes(30))
-            {
-                if (useLiveMapEtas)
-                {
-                    try
-                    {
-                        using var mapEta = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                        mapEta.CancelAfter(MapEtaBudget);
-                        var travel = await maps.TravelTime((live.Longitude, live.Latitude), (etaTarget.Longitude.Value, etaTarget.Latitude.Value), mapEta.Token);
-                        eta = now + travel;
-                        etaSource = "Live";
-                    }
-                    catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-                    {
-                        etaSource = eta is null ? "Tracking" : "Planned";
-                    }
-                    catch (Exception exception) when (exception is not OperationCanceledException)
-                    {
-                        etaSource = eta is null ? "Unavailable" : "Planned";
-                    }
-                }
-                else
-                {
-                    etaSource = eta is null ? "Tracking" : "Planned";
-                }
-            }
 
             var trackingAgeMinutes = live is null ? (double?)null : Math.Max(0, (now - live.LastEventTimeUtc).TotalMinutes);
             var state = State(load, driver, vehicle, live, trackingAgeMinutes, eta, finalStop?.PlannedArrivalUtc);
-            if (activeDwell is not null)
+
+            int? liveDwellSeconds = null;
+            int? liveDwellMinutes = null;
+            if (currentVisit is not null)
             {
-                var minutes = activeDwell.LiveDwellMinutes ?? 0;
-                var delayed = currentVisit?.Fence.MaxWaitMinutes is int waitLimit && minutes > waitLimit ||
-                    currentVisit?.Fence.CategoryMaxWaitMinutes is int categoryWaitLimit && minutes > categoryWaitLimit;
+                liveDwellSeconds = Math.Max(0, (int)Math.Floor((now - currentVisit.EnteredAtUtc).TotalSeconds));
+                liveDwellMinutes = Math.Max(currentVisit.DwellMinutes, liveDwellSeconds.Value / 60);
+                var delayed =
+                    currentFence?.MaxWaitMinutes is int waitLimit && liveDwellMinutes.Value > waitLimit ||
+                    currentFence?.CategoryMaxWaitMinutes is int categoryWaitLimit && liveDwellMinutes.Value > categoryWaitLimit;
                 state = delayed
-                    ? ("SITE DELAY", $"{activeDwell.GeofenceName ?? "Site"} · time on site {minutes} min", 98)
-                    : ("ON SITE", $"{activeDwell.GeofenceName ?? "Site"} · time on site {minutes} min", 88);
+                    ? ("SITE DELAY", $"{currentFence?.Name ?? "Site"} · time on site {liveDwellMinutes} min", 98)
+                    : ("ON SITE", $"{currentFence?.Name ?? "Site"} · time on site {liveDwellMinutes} min", 88);
             }
+
             rows.Add(new TvRunDisplayRow(
                 load.Id,
                 load.Reference,
@@ -205,14 +211,14 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
                 state.Label,
                 state.Detail,
                 state.Priority,
-                activeDwell?.SiteArrivalUtc,
-                activeDwell?.SiteDepartureUtc ?? finalDwell?.SiteDepartureUtc,
-                activeDwell?.LiveDwellMinutes,
-                activeDwell?.LiveDwellSeconds,
-                finalDwell?.FinalDwellMinutes,
-                finalDwell?.FinalDwellSeconds,
-                activeDwell?.State ?? finalDwell?.State ?? "EnRoute",
-                RunStopDwellProjection.LinkExceptionFor(load, geofenceSnapshot)?.Message));
+                currentVisit?.EnteredAtUtc,
+                lastDeparted?.ExitedAtUtc,
+                liveDwellMinutes,
+                liveDwellSeconds,
+                lastDeparted?.DwellMinutes,
+                lastDeparted is null ? null : lastDeparted.DwellMinutes * 60,
+                currentVisit is not null ? "OnSite" : lastDeparted is not null ? "Departed" : "EnRoute",
+                null));
         }
 
         return Ok(new
@@ -221,7 +227,10 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
             generatedAtUtc = now,
             refreshSeconds = 20,
             runCount = rows.Count,
-            runs = rows.OrderByDescending(row => row.Priority).ThenBy(row => row.FirstPlannedUtc ?? DateTimeOffset.MaxValue).ToList()
+            runs = rows
+                .OrderByDescending(row => row.Priority)
+                .ThenBy(row => row.FirstPlannedUtc ?? DateTimeOffset.MaxValue)
+                .ToList()
         });
     }
 
