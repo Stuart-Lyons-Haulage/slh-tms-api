@@ -130,7 +130,7 @@ The existing Azure SQL automated backup, daily/monthly export and restore-drill 
 3. Deploy the matching TMS web change.
 4. Import/update `workflow.json` in the existing managed solution.
 5. Bind both existing connections and set the mailbox environment variable.
-6. Keep stopped during acceptance testing; enable only after planner sign-off.
+6. The source-controlled flow state is `Started`; after import, verify the tenant flow is enabled and accepting messages with no attachment-only filter.
 
 ## Acceptance matrix
 
