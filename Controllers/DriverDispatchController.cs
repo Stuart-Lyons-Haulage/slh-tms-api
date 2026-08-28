@@ -12,6 +12,7 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class DriverDispatchController(
     TmsDbContext db,
     SageHrClient sageHr,
+    TachoMasterClient tachoMaster,
     ILogger<DriverDispatchController> logger) : ControllerBase
 {
     private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
@@ -37,9 +38,8 @@ public sealed class DriverDispatchController(
             db.ChangeTracker.Clear();
         }
 
-        // The workbench must never rebuild seven resilient planning days or call seven live TachoMaster
-        // history endpoints just to render a planning sheet. One bounded SQL history query supplies the
-        // previous-run/day-number fallback; legal-hours compliance is rechecked at actual dispatch.
+        // One bounded SQL history query still supplies yesterday/previous-run context and the
+        // emergency fallback. Day number itself is calculated from TachoMaster duty history below.
         var historyStart = planningDate.AddDays(-7);
         var history = await db.Loads.AsNoTracking()
             .Include(load => load.Stops)
@@ -126,6 +126,9 @@ public sealed class DriverDispatchController(
                    operationallyRelevant;
         }).OrderBy(driver => driver.DisplayName).ToList();
 
+        // Start the bounded Tacho history read before the remaining planning enrichment so its
+        // network latency overlaps with the local database/assistant work below.
+        var tachoDayTask = ReadTachoDayNumbersAsync(selectedDrivers, planningDate, ct);
         var dispatchStates = await DriverDispatchStateStore.ReadAsync(db, loads.Select(load => load.Id), ct);
         var unavailableDriverIds = selectedDrivers
             .Where(driver => sage.Leave.ContainsKey(Normalise(driver.EmployeeNumber)))
@@ -141,6 +144,7 @@ public sealed class DriverDispatchController(
             trailers,
             unavailableDriverIds,
             ct);
+        var tachoDays = await tachoDayTask;
 
         var rows = new List<DriverDispatchDriver>();
         foreach (var driver in selectedDrivers)
@@ -151,8 +155,9 @@ public sealed class DriverDispatchController(
                 .ThenByDescending(load => load.CreatedAtUtc)
                 .FirstOrDefault();
             var previousVehicle = previous?.VehicleId is Guid previousVehicleId && vehicleById.TryGetValue(previousVehicleId, out var foundVehicle) ? foundVehicle : null;
-            var consecutive = ConsecutiveWorkedDays(history, driver, planningDate);
-            var dayNumber = consecutive + 1;
+            var dayNumber = tachoDays.DayNumbers.TryGetValue(driver.Id, out var tachoDayNumber)
+                ? tachoDayNumber
+                : ConsecutiveWorkedDays(history, driver, planningDate) + 1;
             var employeeKey = Normalise(driver.EmployeeNumber);
             sage.Leave.TryGetValue(employeeKey, out var absence);
             roster.TryGetValue(driver.Id, out var rosterEntry);
@@ -245,7 +250,9 @@ public sealed class DriverDispatchController(
             generatedAtUtc = DateTimeOffset.UtcNow,
             leaveSource = sage.Available ? "Sage HR" : "Unavailable",
             driverPopulationSource = sage.Available ? "Sage HR driver roles + relevant Agency" : "Canonical driver evidence + relevant Agency fallback",
-            dayNumberSource = "TMS executed-run history; live TachoMaster compliance is rechecked at dispatch",
+            dayNumberSource = tachoDays.Available
+                ? "TachoMaster duty history / weekly-rest cycle; TMS executed-run history only where no usable Tacho identity is available"
+                : "TachoMaster unavailable; TMS executed-run history fallback",
             assistantSource = "Explainable matching using live/last Falcon position, work-day continuity, Driver skills/coding, route direction and learned regular vehicle preference",
             drivers = rows.OrderBy(row => TypeOrder(row.DriverType)).ThenBy(row => row.DisplayName),
             vehicles,
@@ -443,6 +450,46 @@ public sealed class DriverDispatchController(
         return Ok(state);
     }
 
+    private async Task<TachoDayNumberState> ReadTachoDayNumbersAsync(IReadOnlyCollection<Driver> drivers, DateOnly planningDate, CancellationToken ct)
+    {
+        if (!tachoMaster.IsConfigured || drivers.Count == 0) return TachoDayNumberState.Unavailable;
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(20));
+
+            var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
+            var throughDate = planningDate <= today ? planningDate : today;
+            var fromDate = throughDate.AddDays(-8);
+            var duties = new List<TachoDriverDutyStatus>();
+            for (var dutyDate = fromDate; dutyDate <= throughDate; dutyDate = dutyDate.AddDays(1))
+                duties.AddRange(await tachoMaster.GetDriverDutyStatusesAsync(dutyDate, timeout.Token));
+
+            var dayNumbers = new Dictionary<Guid, int>();
+            foreach (var driver in drivers)
+            {
+                var matched = duties.Where(duty => DriverDayCycleCalculator.MatchesDriver(driver, duty)).ToList();
+                if (matched.Count == 0 && !DriverDayCycleCalculator.HasBoundTachoIdentity(driver)) continue;
+                dayNumbers[driver.Id] = DriverDayCycleCalculator.Calculate(planningDate, matched);
+            }
+
+            logger.LogInformation(
+                "Driver Dispatch calculated TachoMaster day-cycle values for {MatchedDrivers} of {DriverCount} planning driver(s) using {DutyCount} duty record(s) from {FromDate} to {ThroughDate}.",
+                dayNumbers.Count, drivers.Count, duties.Count, fromDate, throughDate);
+            return new TachoDayNumberState(true, dayNumbers);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning("TachoMaster exceeded the 20 second Driver Dispatch day-cycle budget; TMS run history will be used only as a fallback for this response.");
+            return TachoDayNumberState.Unavailable;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "TachoMaster duty history was unavailable for Driver Dispatch day-cycle calculation; TMS run history will be used only as a fallback for this response.");
+            return TachoDayNumberState.Unavailable;
+        }
+    }
+
     private async Task<SageDispatchState> ReadSageStateAsync(DateOnly date, CancellationToken ct)
     {
         if (!sageHr.IsConfigured) return SageDispatchState.Unavailable;
@@ -569,6 +616,10 @@ public sealed class DriverDispatchController(
     private sealed record SageDispatchState(bool Available, HashSet<string> ActiveDriverEmployeeNumbers, Dictionary<string, LeaveState> Leave)
     {
         public static SageDispatchState Unavailable { get; } = new(false, new HashSet<string>(StringComparer.OrdinalIgnoreCase), new Dictionary<string, LeaveState>(StringComparer.OrdinalIgnoreCase));
+    }
+    private sealed record TachoDayNumberState(bool Available, Dictionary<Guid, int> DayNumbers)
+    {
+        public static TachoDayNumberState Unavailable { get; } = new(false, new Dictionary<Guid, int>());
     }
 }
 
