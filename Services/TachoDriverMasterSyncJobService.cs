@@ -28,37 +28,84 @@ internal sealed record TachoDriverMasterSyncJobEnvelope(
 public sealed class TachoDriverMasterSyncJobService(TmsDbContext db)
 {
     internal const string EntityType = "tachodrivermastersyncjob";
+    internal const string QueueSlotKey = "tachodrivermastersyncjob:singleton";
     internal static readonly TimeSpan LeaseStaleAfter = TimeSpan.FromMinutes(2);
     internal static readonly TimeSpan LegacyRunningGrace = TimeSpan.FromMinutes(5);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public async Task<TachoDriverMasterSyncJobStatus> EnqueueAsync(string actor, CancellationToken ct)
     {
-        var existing = await db.StagedImports.AsNoTracking()
+        // There is deliberately one reusable queue slot. Without this, two API replicas can both
+        // observe an unhealthy Driver Master and insert different randomly keyed jobs, allowing two
+        // canonical cleanses to run concurrently. The unique IdempotencyKey plus RowVersion makes
+        // creation/requeue contention converge on one durable job row.
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var existing = await db.StagedImports.AsNoTracking()
+                .Where(row => row.EntityType == EntityType &&
+                              (row.Status == StagingStatus.PendingReview || row.Status == StagingStatus.Approved))
+                .OrderBy(row => row.ReceivedAtUtc)
+                .FirstOrDefaultAsync(ct);
+            if (existing is not null) return ToStatus(existing);
+
+            var now = DateTimeOffset.UtcNow;
+            var envelope = new TachoDriverMasterSyncJobEnvelope(actor, now, Message: "Queued. The canonical cleanse runs independently of the browser request.");
+            var source = actor.StartsWith("system:", StringComparison.OrdinalIgnoreCase)
+                ? "System canonical Driver Master queue"
+                : "Manual canonical Driver Master queue";
+
+            var slot = await db.StagedImports
+                .SingleOrDefaultAsync(row => row.EntityType == EntityType && row.IdempotencyKey == QueueSlotKey, ct);
+            if (slot is null)
+            {
+                slot = new StagedImport
+                {
+                    EntityType = EntityType,
+                    IdempotencyKey = QueueSlotKey,
+                    PayloadJson = JsonSerializer.Serialize(envelope, JsonOptions),
+                    Source = source,
+                    Status = StagingStatus.PendingReview,
+                    ReceivedAtUtc = now,
+                    ReviewedBy = actor,
+                    ReviewNote = envelope.Message
+                };
+                db.StagedImports.Add(slot);
+            }
+            else
+            {
+                slot.PayloadJson = JsonSerializer.Serialize(envelope, JsonOptions);
+                slot.Source = source;
+                slot.Status = StagingStatus.PendingReview;
+                slot.ReceivedAtUtc = now;
+                slot.ReviewedAtUtc = null;
+                slot.ReviewedBy = actor;
+                slot.ReviewNote = envelope.Message;
+            }
+
+            try
+            {
+                await db.SaveChangesAsync(ct);
+                return ToStatus(slot, envelope);
+            }
+            catch (DbUpdateConcurrencyException) when (attempt < 2)
+            {
+                db.ChangeTracker.Clear();
+            }
+            catch (DbUpdateException) when (attempt < 2)
+            {
+                // Most commonly another replica created QueueSlotKey between our read and insert.
+                db.ChangeTracker.Clear();
+            }
+        }
+
+        db.ChangeTracker.Clear();
+        var winner = await db.StagedImports.AsNoTracking()
             .Where(row => row.EntityType == EntityType &&
                           (row.Status == StagingStatus.PendingReview || row.Status == StagingStatus.Approved))
             .OrderBy(row => row.ReceivedAtUtc)
             .FirstOrDefaultAsync(ct);
-        if (existing is not null) return ToStatus(existing);
-
-        var now = DateTimeOffset.UtcNow;
-        var envelope = new TachoDriverMasterSyncJobEnvelope(actor, now, Message: "Queued. The canonical cleanse runs independently of the browser request.");
-        var row = new StagedImport
-        {
-            EntityType = EntityType,
-            IdempotencyKey = $"tachodrivermastersyncjob:{Guid.NewGuid():N}",
-            PayloadJson = JsonSerializer.Serialize(envelope, JsonOptions),
-            Source = actor.StartsWith("system:", StringComparison.OrdinalIgnoreCase)
-                ? "System canonical Driver Master queue"
-                : "Manual canonical Driver Master queue",
-            Status = StagingStatus.PendingReview,
-            ReceivedAtUtc = now,
-            ReviewedBy = actor,
-            ReviewNote = envelope.Message
-        };
-        db.StagedImports.Add(row);
-        await db.SaveChangesAsync(ct);
-        return ToStatus(row, envelope);
+        if (winner is not null) return ToStatus(winner);
+        throw new InvalidOperationException("Could not acquire the canonical Driver Master sync queue slot after concurrent retries.");
     }
 
     public async Task<TachoDriverMasterSyncJobStatus?> GetAsync(Guid jobId, CancellationToken ct)
@@ -236,6 +283,7 @@ public sealed class TachoDriverMasterSyncJobService(TmsDbContext db)
             {
                 // Another replica recovered or refreshed this row first. Reload on the next pass.
                 db.ChangeTracker.Clear();
+                break;
             }
         }
 
