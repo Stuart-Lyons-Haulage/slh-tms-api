@@ -41,12 +41,17 @@ public sealed class SiteAliasController(TmsDbContext db) : ControllerBase
         });
         await db.SaveChangesAsync(ct);
 
+        // Alias changes are operational Master Data. Apply any unique exact alias match to
+        // an unlinked Falcon geofence immediately rather than waiting for a re-import/restart.
+        var geofenceLinksRepaired = await GeofenceSiteAliasRepair.EnsureAsync(db, ct);
+
         return Ok(new
         {
             site.Id,
             site.ExternalCode,
             site.Name,
-            site.Aliases
+            site.Aliases,
+            geofenceLinksRepaired
         });
     }
 
