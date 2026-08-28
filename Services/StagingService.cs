@@ -8,7 +8,7 @@ using Slh.Tms.Api.Models;
 namespace Slh.Tms.Api.Services;
 public sealed class StagingService(TmsDbContext db)
 {
-    private static readonly HashSet<string> Types = new(StringComparer.OrdinalIgnoreCase) { "customer", "customercontact", "vehicle", "driver", "trailer", "site", "marketcontact", "fuelprice", "order" };
+    private static readonly HashSet<string> Types = new(StringComparer.OrdinalIgnoreCase) { "customer", "customercontact", "vehicle", "driver", "trailer", "site", "marketcontact", "fuelprice", "order", "communication" };
     public StagedImport Create(StageImportRequest r)
     {
         if (!Types.Contains(r.EntityType)) throw new ArgumentException("Unsupported entityType");
@@ -138,6 +138,7 @@ public sealed class StagingService(TmsDbContext db)
             case "marketcontact": await PromoteMarketContact(payload, ct); break;
             case "fuelprice": await PromoteFuelPrice(payload, ct); break;
             case "order": await PromoteOrder(item, payload, ct); break;
+            case "communication": break; // Approval records the decision only; it never creates a live order.
             default: throw new JsonException($"Unsupported registered entity type '{item.EntityType}'.");
         }
         await db.SaveChangesAsync(ct);

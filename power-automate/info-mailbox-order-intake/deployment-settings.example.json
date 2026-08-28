@@ -8,7 +8,7 @@
   },
   "flow": {
     "name": "SLH-TMS | Info Mailbox | Order Intake | PROD",
-    "initialState": "Stopped",
+    "initialState": "Started",
     "triggerConcurrency": 4
   }
 }

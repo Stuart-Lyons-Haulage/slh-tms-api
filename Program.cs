@@ -33,6 +33,7 @@ var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get
 builder.Services.AddCors(options => options.AddPolicy("Portal", policy => policy.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod()));
 builder.Services.AddDbContext<TmsDbContext>(o => o.UseSqlServer(builder.Configuration.GetConnectionString("TmsDb")));
 builder.Services.AddScoped<StagingService>();
+builder.Services.AddSingleton<CustomerCommunicationExtractionService>();
 builder.Services.AddScoped<OrderIntakeLedgerService>();
 builder.Services.AddScoped<IntakeMappingService>();
 builder.Services.AddScoped<OrderCompletenessService>();
