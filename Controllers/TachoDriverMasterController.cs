@@ -8,26 +8,20 @@ namespace Slh.Tms.Api.Controllers;
 [Route("api/v1/driver-master")]
 [Authorize]
 public sealed class TachoDriverMasterController(
-    TachoDriverMasterSyncService sync,
-    DriverMasterClassificationService classification) : ControllerBase
+    TachoCanonicalDriverMasterOrchestrator orchestrator,
+    TachoDriverMasterSyncService sync) : ControllerBase
 {
     [HttpPost("tachomaster/sync")]
     [Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> Sync(CancellationToken ct)
     {
         var actor = User.Identity?.Name ?? "TMS user";
+        var result = await orchestrator.RunAsync(actor, ct);
 
-        // Repair/normalise persisted Driver Master detail before the canonical pass. In
-        // particular this retires duplicate historical Tacho profile staging keys which would
-        // otherwise make the sync's identity dictionary fail before any drivers are consolidated.
-        await classification.ApplyAsync(actor, ct);
-
-        var result = await sync.SyncAsync(actor, ct);
-        if (!result.Success) return StatusCode(StatusCodes.Status502BadGateway, result);
-
-        // Reapply controlled Type/Group/Agency/email rules to the newly canonical population.
-        await classification.ApplyAsync(actor, ct);
-        return Ok(result);
+        // Preserve the existing Master Data endpoint response contract so the portal does not
+        // need to change. Manual and scheduled syncs now execute the same canonical orchestration.
+        if (!result.Success) return StatusCode(StatusCodes.Status502BadGateway, result.Canonical);
+        return Ok(result.Canonical);
     }
 
     [HttpGet("tachomaster/quality")]
