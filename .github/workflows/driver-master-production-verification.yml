@@ -1,0 +1,49 @@
+name: Driver Master Production Verification
+
+on:
+  workflow_run:
+    workflows: ["CD - Deploy TMS to Azure Container Apps"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: driver-master-production-verification
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      API_FQDN: slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+    steps:
+      - name: Wait for canonical TachoMaster driver cleanse
+        run: |
+          set -euo pipefail
+          for attempt in {1..60}; do
+            body="$(curl --fail --silent --show-error --max-time 20 -H 'Cache-Control: no-cache' "https://$API_FQDN/api/v1/health/driver-master" || true)"
+            echo "Driver Master health attempt $attempt: $body"
+            if test -n "$body" && \
+               test "$(echo "$body" | jq -r '.status // empty')" = "healthy" && \
+               test "$(echo "$body" | jq -r '.duplicateMemberGroups // -1')" = "0" && \
+               test "$(echo "$body" | jq -r '.duplicateCardGroups // -1')" = "0" && \
+               test "$(echo "$body" | jq -r '.activeWithoutMember // -1')" = "0" && \
+               test "$(echo "$body" | jq -r '.activeDrivers // 0')" -gt 0 && \
+               test "$(echo "$body" | jq -r '.activeWithMember // 0')" = "$(echo "$body" | jq -r '.activeDrivers // -1')" && \
+               test "$(echo "$body" | jq -r '.latestCanonicalSyncUtc // empty')" != ""; then
+              echo "Canonical Driver Master is healthy."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Canonical Driver Master did not become healthy within 10 minutes of deployment."
+          exit 1
+
+      - name: Summarise live Driver Master quality
+        run: |
+          set -euo pipefail
+          body="$(curl --fail --silent --show-error --max-time 20 -H 'Cache-Control: no-cache' "https://$API_FQDN/api/v1/health/driver-master")"
+          echo "$body" | jq '{status, activeDrivers, activeWithMember, activeWithCard, duplicateMemberGroups, duplicateCardGroups, activeWithoutMember, activeWithoutCard, latestCanonicalSyncUtc}'
