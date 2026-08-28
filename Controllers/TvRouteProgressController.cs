@@ -44,36 +44,17 @@ public sealed class TvRouteProgressController(
             .OrderBy(load => load.Reference)
             .ToList();
 
-        // Live Tracking in the TMS asks Falcon directly. The TV must use that same
-        // current source first rather than relying on a SQL live-status row that may
-        // have failed to persist. SQL remains a resilience fallback only.
-        var liveSnapshot = await LoadLiveStatusesAsync(now, ct);
-        var liveStatuses = liveSnapshot.Statuses;
-
-        // Persist is attempted before geofence reconstruction so current Falcon evidence
-        // can advance the shared geofence engine. A persistence fault must not freeze the
-        // visible TV marker because liveStatuses above already contains the provider data.
-        var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
-        EmbeddedGeofenceSnapshot snapshot;
-        try
-        {
-            snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, day, geofenceLoads, ct);
-        }
-        catch (Exception exception) when (exception is not OperationCanceledException)
-        {
-            db.ChangeTracker.Clear();
-            logger.LogWarning(
-                exception,
-                "Live route geofence reconstruction failed for {PlanningDate}; retaining durable projected ENTER/EXIT evidence.",
-                day);
-            snapshot = new EmbeddedGeofenceSnapshot(
-                EmbeddedGeofenceEngine.ApprovedFences,
-                [],
-                [],
-                [],
-                0,
-                liveStatuses.Count > 0 ? liveStatuses.Max(status => status.LastReceivedAtUtc) : null);
-        }
+        // TV reads must remain bounded. Current RoadTech ingestion and the shared geofence
+        // engine run continuously in the background; a display refresh must consume that durable
+        // projection rather than replaying the whole operating day synchronously.
+        var liveStatuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
+        var snapshot = new EmbeddedGeofenceSnapshot(
+            EmbeddedGeofenceEngine.ApprovedFences,
+            [],
+            [],
+            [],
+            0,
+            liveStatuses.Count > 0 ? liveStatuses.Max(status => status.LastReceivedAtUtc) : null);
         snapshot = await EmbeddedGeofenceEvidenceMerge.MergeDurableProjectionAsync(db, snapshot, loads, ct);
 
         var vehicleIds = loads.Where(x => x.VehicleId is not null).Select(x => x.VehicleId!.Value).Distinct().ToList();
@@ -218,7 +199,7 @@ public sealed class TvRouteProgressController(
         {
             planningDate = day,
             calculatedAtUtc = now,
-            trackingSource = liveSnapshot.Source,
+            trackingSource = "SQL live status + durable geofence projection",
             latestTrackingUtc = liveStatuses.Count > 0
                 ? liveStatuses.Max(status => status.LastReceivedAtUtc)
                 : snapshot.LatestTrackingUtc,
