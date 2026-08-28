@@ -118,7 +118,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
         var liveStatuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
 
         loads = loads.Where(load => load.PlanningDate == day ||
-            (load.VehicleId is Guid vehicleId && vehicles.TryGetValue(vehicleId, out var vehicle) && MatchLive(vehicle, liveStatuses) is { } live && now - live.LastEventTimeUtc <= TimeSpan.FromMinutes(30)) ||
+            (load.VehicleId is Guid vehicleId && vehicles.TryGetValue(vehicleId, out var vehicle) && MatchLive(vehicle, liveStatuses) is { } live && now - TrackingFreshnessUtc(live) <= TimeSpan.FromMinutes(30)) ||
             load.Status is LoadStatus.Dispatched or LoadStatus.InProgress)
             .OrderBy(load => load.PlanningDate)
             .ThenBy(load => load.Reference)
@@ -174,7 +174,8 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
             var eta = etaTarget?.PlannedArrivalUtc;
             var etaSource = eta is null ? "Unavailable" : "Planned";
 
-            var trackingAgeMinutes = live is null ? (double?)null : Math.Max(0, (now - live.LastEventTimeUtc).TotalMinutes);
+            var trackingFreshnessUtc = live is null ? (DateTimeOffset?)null : TrackingFreshnessUtc(live);
+            var trackingAgeMinutes = trackingFreshnessUtc is null ? (double?)null : Math.Max(0, (now - trackingFreshnessUtc.Value).TotalMinutes);
             var state = State(load, driver, vehicle, live, trackingAgeMinutes, eta, finalStop?.PlannedArrivalUtc);
 
             int? liveDwellSeconds = null;
@@ -206,7 +207,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
                 eta,
                 etaSource,
                 live is null ? "No live tracking" : TrackingText(live, trackingAgeMinutes ?? 0),
-                live?.LastEventTimeUtc,
+                trackingFreshnessUtc,
                 live?.SpeedKph,
                 state.Label,
                 state.Detail,
@@ -253,7 +254,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
         if (load.Status == LoadStatus.Completed) return ("COMPLETED", "Run completed", 0);
         if (driver is null || vehicle is null) return ("NEEDS ALLOCATION", "Driver or vehicle not allocated", 100);
         if (live is null) return (load.Status == LoadStatus.InProgress ? "IN PROGRESS" : "UPCOMING", "Waiting for live vehicle tracking", 60);
-        if (ageMinutes is > 30) return ("TRACKING STALE", $"Last tracking update {Math.Round(ageMinutes.Value)} min ago", 90);
+        if (ageMinutes is > 30) return ("TRACKING STALE", $"Last tracking receipt {Math.Round(ageMinutes.Value)} min ago", 90);
 
         var moving = live.IsMoving == true || (live.SpeedKph ?? 0) > 2;
         if (moving)
@@ -275,6 +276,8 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
         return $"Parked · {age}";
     }
 
+    private static DateTimeOffset TrackingFreshnessUtc(VehicleLiveStatus live) => live.LastReceivedAtUtc;
+
     private static VehicleLiveStatus? MatchLive(Vehicle vehicle, List<VehicleLiveStatus> statuses)
     {
         var aliases = new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }
@@ -283,7 +286,8 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         return statuses
             .Where(status => aliases.Contains(Normalise(status.VehicleIdentifier)))
-            .OrderByDescending(status => status.LastEventTimeUtc)
+            .OrderByDescending(status => status.LastReceivedAtUtc)
+            .ThenByDescending(status => status.LastEventTimeUtc)
             .FirstOrDefault();
     }
 

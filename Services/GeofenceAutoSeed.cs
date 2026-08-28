@@ -17,10 +17,12 @@ public static class GeofenceAutoSeed
         await GeofenceRuntimeRepair.EnsureAsync(db, ct);
         await GeofenceRunProgression.EnsureSchemaAsync(db, ct);
 
-        // Run this even when all 736 fences already exist. Historic imports interpreted
-        // DOT/Falcon site_no=1 as SLH Site 1, so a simple "seed complete" early return
-        // must not leave those contaminated links in production indefinitely.
+        // Run these even when all 736 fences already exist. Historic imports interpreted
+        // DOT/Falcon site_no=1 as SLH Site 1, and Site Master aliases may have been added
+        // after the original geofence import. Both repairs are idempotent and keep the
+        // existing polygon/visit history intact.
         await GeofenceProviderPlaceholderRepair.EnsureAsync(db, ct);
+        await GeofenceSiteAliasRepair.EnsureAsync(db, ct);
 
         var active = await db.SiteGeofences.AsNoTracking().CountAsync(x => x.Active, ct);
         if (await IsCompleteAsync(db, active, ct)) return new GeofenceAutoSeedResult(false, active, 0, 0);
@@ -64,6 +66,7 @@ public static class GeofenceAutoSeed
                 matched += result.SiteMatched;
             }
 
+            await GeofenceSiteAliasRepair.EnsureAsync(db, ct);
             active = await db.SiteGeofences.AsNoTracking().CountAsync(x => x.Active, ct);
             return new GeofenceAutoSeedResult(true, active, inserted + updated, matched);
         }

@@ -155,4 +155,75 @@ public static class GeofenceProviderPlaceholderRepair
     }
 }
 
+/// <summary>
+/// Repairs active Falcon geofences that have no canonical Site link by matching the
+/// geofence name against one unique Site Master code/name/driver-text/alias. This makes
+/// the Site Master alias field operational rather than display-only and repairs aliases
+/// that were saved before the geofence was imported or linked.
+/// </summary>
+public static class GeofenceSiteAliasRepair
+{
+    public static async Task<int> EnsureAsync(TmsDbContext db, CancellationToken ct)
+    {
+        List<SiteGeofence> unlinked;
+        try
+        {
+            unlinked = await db.SiteGeofences
+                .Where(fence => fence.Active && fence.SiteId == null)
+                .ToListAsync(ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            return 0;
+        }
+
+        if (unlinked.Count == 0) return 0;
+
+        List<Site> sites;
+        try
+        {
+            // GeofenceSiteResolver expands every unique Site Master alias into a synthetic
+            // driver-text candidate while retaining the canonical Site Id/code.
+            sites = await GeofenceSiteResolver.LoadActiveSitesAsync(db, ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            return 0;
+        }
+
+        var repaired = 0;
+        var now = DateTimeOffset.UtcNow;
+        foreach (var fence in unlinked)
+        {
+            var target = GeofenceProviderSiteLinkPolicy.ExactCanonicalSite(fence.Name, fence.SiteNumber, sites);
+            if (target is null) continue;
+
+            fence.SiteId = target.Id;
+            fence.SiteNumber = target.ExternalCode;
+            fence.UpdatedAtUtc = now;
+            repaired++;
+            db.MasterDataAudits.Add(new MasterDataAudit
+            {
+                EntityType = "Geofence",
+                EntityId = fence.Id,
+                Action = "LinkedFromSiteAlias",
+                ChangedBy = "GeofenceSiteAliasRepair",
+                ChangesJson = JsonSerializer.Serialize(new
+                {
+                    geofenceName = fence.Name,
+                    canonicalSiteId = target.Id,
+                    canonicalSiteCode = target.ExternalCode,
+                    canonicalSiteName = target.Name,
+                    reason = "Unique exact Site Master name/driver-text/alias match."
+                })
+            });
+        }
+
+        if (repaired > 0) await db.SaveChangesAsync(ct);
+        return repaired;
+    }
+}
+
 public sealed record GeofenceProviderPlaceholderRepairResult(int Found, int Relinked, int Cleared);
