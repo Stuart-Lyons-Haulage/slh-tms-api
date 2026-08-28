@@ -1,0 +1,27 @@
+name: Temporary Driver Master rollback safety patch
+
+on:
+  push:
+    branches:
+      - fix/driver-master-tacho-sync-recovery-20260828
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/driver-master-tacho-sync-recovery-20260828
+      - name: Apply rollback safety
+        run: python3 .github/fix-driver-master-rollback.py
+      - name: Commit rollback safety
+        run: |
+          rm .github/fix-driver-master-rollback.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Make rejected canonical sync audit rollback-safe'
+          git push origin HEAD:fix/driver-master-tacho-sync-recovery-20260828
