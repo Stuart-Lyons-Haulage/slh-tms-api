@@ -26,13 +26,16 @@ jobs:
           live="$(mktemp)"
           trap 'rm -f "$assignments" "$source" "$live"' EXIT
 
-          curl --silent --show-error --max-time 60 \
-            -H "X-TMS-TV-Key: $TV_WALLBOARD_ACCESS_KEY" \
+          headers=(-H "X-TMS-TV-Key: $TV_WALLBOARD_ACCESS_KEY" -H "X-TV-Display-Key: $TV_WALLBOARD_ACCESS_KEY")
+
+          curl --silent --show-error --max-time 60 "${headers[@]}" \
             "$API_BASE/api/v1/driver-assignments?from=$planning_date&to=$planning_date" > "$assignments"
 
-          curl --silent --show-error --max-time 60 \
-            -H "X-TMS-TV-Key: $TV_WALLBOARD_ACCESS_KEY" \
+          curl --silent --show-error --max-time 60 "${headers[@]}" \
             "$API_BASE/api/v1/operations/wallboard-source-health?date=$planning_date" > "$source"
+
+          curl --silent --show-error --max-time 120 "${headers[@]}" \
+            "$API_BASE/api/v1/tv-display/live-runs?date=$planning_date" > "$live"
 
           echo "planningDate=$planning_date"
           echo "driverAssignmentCount=$(jq 'length' "$assignments")"
@@ -42,3 +45,8 @@ jobs:
           jq -r 'group_by([(.driver.displayName//"Unallocated"),(.vehicle.registration//"")]) | map(select(length > 1)) | .[] | "PAIR\tdriver=\(.[0].driver.displayName//"Unallocated")\tvehicle=\(.[0].vehicle.registration//"")\tcount=\(length)\n" + (map("  id=\(.loadId) ref=\(.loadReference) status=\(.status) trailer=\(.trailerNumber//"-") stops=\(.stopCount)") | join("\n"))' "$assignments"
           echo "--- wallboard source health ---"
           jq . "$source"
+          echo "--- TV live runs ---"
+          echo "tvRunCount=$(jq '.runCount // ((.runs // []) | length)' "$live")"
+          jq -r '(.runs // [])[] | [(.loadId//.id//""),(.planningDate//""),(.reference//""),(.state//""),(.driver//"Unallocated"),(.vehicle//""),(.trailer//.trailerNumber//"")] | @tsv' "$live"
+          echo "--- TV probable duplicate signatures ---"
+          jq -r '(.runs // []) | group_by([(.driver//"Unallocated"),(.vehicle//"")]) | map(select(length > 1)) | .[] | "PAIR\tdriver=\(.[0].driver//"Unallocated")\tvehicle=\(.[0].vehicle//"")\tcount=\(length)\n" + (map("  ref=\(.reference) state=\(.state) planningDate=\(.planningDate//"-")") | join("\n"))' "$live"
