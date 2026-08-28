@@ -60,18 +60,35 @@ public sealed class PlanningRegionController(TmsDbContext db, ILogger<PlanningRe
             catch (JsonException) { }
         }
 
-        Dictionary<string, string> map;
+        Dictionary<string, PalletDestinationPresentation> presentation;
         try
         {
-            map = await SitePlanningProfileStore.ResolveRegionsAsync(db, destinations, ct);
+            presentation = await PalletDestinationPresentationStore.ResolveAsync(db, destinations, ct);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             db.ChangeTracker.Clear();
             degraded = true;
-            logger.LogWarning(ex, "Planning destination regions could not be resolved; assigning all destinations to Other.");
-            map = destinations.ToDictionary(destination => destination, _ => "Other", StringComparer.OrdinalIgnoreCase);
+            logger.LogWarning(ex, "Pallet Control Site Master presentation could not be resolved; using raw destination names.");
+            presentation = destinations.ToDictionary(
+                destination => destination,
+                destination => new PalletDestinationPresentation("Other", destination, null, false),
+                StringComparer.OrdinalIgnoreCase);
         }
+
+        var map = destinations.ToDictionary(
+            destination => destination,
+            destination => presentation.GetValueOrDefault(destination)?.Region ?? "Other",
+            StringComparer.OrdinalIgnoreCase);
+        var labels = destinations.ToDictionary(
+            destination => destination,
+            destination => presentation.GetValueOrDefault(destination)?.DisplayName ?? destination,
+            StringComparer.OrdinalIgnoreCase);
+        var siteCodes = destinations.ToDictionary(
+            destination => destination,
+            destination => presentation.GetValueOrDefault(destination)?.SiteCode,
+            StringComparer.OrdinalIgnoreCase);
+
         var rank = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {
             ["North"] = 0,
@@ -83,13 +100,20 @@ public sealed class PlanningRegionController(TmsDbContext db, ILogger<PlanningRe
             ["West / Wales"] = 6,
             ["Other"] = 7
         };
-        var ordered = destinations.OrderBy(x => rank.TryGetValue(map.GetValueOrDefault(x, "Other"), out var value) ? value : 99)
-            .ThenBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+        var ordered = destinations
+            .OrderBy(destination => rank.TryGetValue(map.GetValueOrDefault(destination, "Other"), out var value) ? value : 99)
+            .ThenBy(destination => labels.GetValueOrDefault(destination, destination), StringComparer.OrdinalIgnoreCase)
+            .ThenBy(destination => destination, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
         return Ok(new
         {
             date,
             destinations = ordered,
             destinationRegions = map,
+            destinationLabels = labels,
+            destinationSiteCodes = siteCodes,
+            unmatchedDestinations = presentation.Count(item => !item.Value.MasterMatched),
             temperatureConflicts = temperatureSync.Conflicts,
             temperatureUpdatedLoads = temperatureSync.UpdatedLoads,
             temperatureUpdatedOrders = temperatureSync.UpdatedOrders,
