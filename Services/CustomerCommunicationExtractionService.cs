@@ -16,7 +16,7 @@ public sealed class CustomerCommunicationExtractionService
     private static readonly Regex Acceptance = new(@"\b(?:accept|acceptance)\s*(?:until|up to)\s*(?<time>\d{1,2}:\d{2})", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex Url = new(@"https?://[^\s<>]+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    public CustomerCommunicationExtraction Extract(MailboxEmailIntakeRequest request)
+    public CustomerCommunication Extract(MailboxEmailIntakeRequest request)
     {
         var subject = request.Subject?.Trim() ?? string.Empty;
         var body = (request.BodyText ?? string.Empty).Trim();
