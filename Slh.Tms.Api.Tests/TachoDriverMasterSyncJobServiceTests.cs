@@ -75,6 +75,26 @@ public sealed class TachoDriverMasterSyncJobServiceTests
         Assert.Contains("lease", recovered.ReviewNote ?? string.Empty, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Completed_queue_slot_is_reused_instead_of_creating_another_job_row()
+    {
+        await using var db = CreateDb();
+        var service = new TachoDriverMasterSyncJobService(db);
+
+        var first = await service.EnqueueAsync("system:first", CancellationToken.None);
+        var slot = await db.StagedImports.SingleAsync(row => row.Id == first.JobId);
+        slot.Status = StagingStatus.Failed;
+        slot.ReviewedAtUtc = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        var second = await service.EnqueueAsync("system:second", CancellationToken.None);
+
+        Assert.Equal(first.JobId, second.JobId);
+        Assert.Equal("queued", second.Status);
+        Assert.Equal(1, await db.StagedImports.CountAsync(row => row.EntityType == "tachodrivermastersyncjob"));
+    }
+
     private static TmsDbContext CreateDb()
     {
         var options = new DbContextOptionsBuilder<TmsDbContext>()
