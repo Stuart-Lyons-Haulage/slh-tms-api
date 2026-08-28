@@ -271,6 +271,7 @@ public sealed class TachoDriverMasterSyncService(
         if (!canonicalHealthy)
         {
             await transaction.RollbackAsync(ct);
+            await transaction.DisposeAsync();
             db.ChangeTracker.Clear();
             var failureMessage = $"TachoMaster canonical Driver Master was not promoted because the resulting population failed the strict identity gate: source={workers.Count}, active={activeAfter.Count}, duplicate members={duplicateMemberGroupsAfter}, duplicate cards={duplicateCardGroupsAfter}, active without member={activeWithoutMemberAfter}. No partial cleanse was committed.";
             db.StagedImports.Add(new StagedImport
