@@ -11,6 +11,7 @@ public sealed class OvernightRunContinuityTests
     {
         var load = new Load
         {
+            Reference = "PLAN-20260828-2",
             PlanningDate = new DateOnly(2026, 8, 28),
             Stops =
             [
@@ -33,6 +34,7 @@ public sealed class OvernightRunContinuityTests
         var original = new DateTimeOffset(2026, 8, 28, 16, 0, 0, TimeSpan.Zero);
         var load = new Load
         {
+            Reference = "PLAN-20260828-8",
             PlanningDate = new DateOnly(2026, 8, 28),
             Stops =
             [
