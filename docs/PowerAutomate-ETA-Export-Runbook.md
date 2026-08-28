@@ -16,10 +16,7 @@ POST /api/v1/order-intake/email
 
 Pass the complete message envelope: message IDs, conversation ID, sender, recipients, subject, received time, body, web link, correlation ID and attachment objects containing name, content type, base64 content, inline flag, content ID and size.
 
-The API now performs two coordinated writes:
-
-1. It stages one or more transport orders as `PendingReview`.
-2. It stages one `communication` evidence record using `communication:{messageId}` as its idempotency key.
+The inbound API stages one or more transport orders as `PendingReview`. A separate Sent Items flow should call `POST /api/v1/customer-communications/ingest` for outbound ETA/load-plan/exception emails; that endpoint uses `communication:{messageId}` as its idempotency key.
 
 Retries are safe. The original email and attachments remain in Outlook. Attachment bytes are not copied into the communication evidence payload.
 
