@@ -245,6 +245,7 @@ public sealed class TachoDriverMasterSyncJobService(TmsDbContext db)
 
     internal async Task<int> RecoverInterruptedAsync(string currentInstanceId, CancellationToken ct)
     {
+        _ = currentInstanceId; // Lease freshness, not instance-name equality, is authoritative.
         var now = DateTimeOffset.UtcNow;
         var leaseCutoff = now - LeaseStaleAfter;
         var legacyCutoff = now - LegacyRunningGrace;
@@ -257,8 +258,6 @@ public sealed class TachoDriverMasterSyncJobService(TmsDbContext db)
         foreach (var row in rows)
         {
             var envelope = ReadEnvelope(row);
-            if (string.Equals(envelope.WorkerInstanceId, currentInstanceId, StringComparison.Ordinal)) continue;
-
             var hasLease = !string.IsNullOrWhiteSpace(envelope.WorkerInstanceId) && envelope.HeartbeatUtc is not null;
             var staleLease = hasLease && envelope.HeartbeatUtc < leaseCutoff;
             var legacyRunning = !hasLease && (row.ReviewedAtUtc ?? row.ReceivedAtUtc) < legacyCutoff;
@@ -382,6 +381,11 @@ public sealed class TachoDriverMasterSyncJobWorker(
                     catch (OperationCanceledException)
                     {
                         logger.LogWarning("Canonical Driver Master sync {JobId} stopped because its worker lease was lost.", claim.JobId);
+                        await jobs.FailAsync(
+                            claim.JobId,
+                            workerInstanceId,
+                            new InvalidOperationException("Canonical Driver Master worker lease was lost before completion."),
+                            stoppingToken);
                     }
                     catch (Exception ex)
                     {
