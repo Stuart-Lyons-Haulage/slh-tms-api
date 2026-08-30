@@ -164,6 +164,19 @@ public sealed class EmailOrderIntakeService
         return new EmailIntakeParseResult(orders, globalWarnings, null);
     }
 
+    private static List<ParsedEmailOrder> ParseBarfootsWaitroseWaveBody(
+        MailboxEmailIntakeRequest request,
+        string body,
+        DateTimeOffset receivedAt)
+        => [];
+
+    private static ParsedEmailOrder ApplyPrecedenceOverrides(
+        ParsedEmailOrder order,
+        MailboxEmailIntakeRequest request,
+        string body,
+        IReadOnlyCollection<string> masterSiteNames)
+        => order;
+
     private static IEnumerable<ParsedEmailOrder> ParseStructuredBodyOrders(
         MailboxEmailIntakeRequest request,
         DateOnly? sourceDate,
