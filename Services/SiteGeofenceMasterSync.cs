@@ -448,11 +448,11 @@ public static partial class SiteGeofenceMasterSync
     /// </summary>
     private static bool ShouldRegisterAlias(string geofenceName, Site site)
     {
-        var key = NormalizeName(geofenceName);
+        var key = NormalizeAliasKey(geofenceName);
         if (key.Length == 0) return false;
-        if (NormalizeName(site.Name) == key || NormalizeName(site.DriverTextName) == key) return false;
+        if (NormalizeAliasKey(site.Name) == key || NormalizeAliasKey(site.DriverTextName) == key) return false;
         foreach (var existing in SplitAliases(site.Aliases))
-            if (NormalizeName(existing) == key) return false;
+            if (NormalizeAliasKey(existing) == key) return false;
         return true;
     }
 
@@ -474,7 +474,7 @@ public static partial class SiteGeofenceMasterSync
             ? []
             : aliases.Split(new[] { ',', ';', '|', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-    private static string NormalizeName(string? value) =>
+    private static string NormalizeAliasKey(string? value) =>
         new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     [GeneratedRegex("^SITE0*([1-9][0-9]*)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
