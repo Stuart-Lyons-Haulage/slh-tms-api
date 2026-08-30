@@ -112,7 +112,15 @@ builder.Services.AddTransient<TachoMasterRetryHandler>();
 builder.Services.AddHttpClient<DriverSmsDispatchService>();
 builder.Services.AddHttpClient<SageHrClient>();
 builder.Services.AddHttpClient<DotTrackingClient>();
-builder.Services.AddHttpClient<TachoMasterClient>().AddHttpMessageHandler<TachoMasterRetryHandler>();
+builder.Services.AddHttpClient<TachoMasterClient>()
+    .AddHttpMessageHandler<TachoMasterRetryHandler>()
+    .ConfigureHttpClient((sp, _) =>
+    {
+        // DotTrackingClient is optional — if it is removed from DI, TachoMasterClient
+        // receives null rather than a hard startup failure (the constructor uses
+        // DotTrackingClient? = null as a default parameter).
+        _ = sp.GetService<DotTrackingClient>();
+    });
 builder.Services.AddHttpClient<AzureMapsRouteClient>();
 builder.Services.AddHttpClient<FleetioClient>();
 builder.Services.AddHostedService<DotTrackingIngestionService>();
