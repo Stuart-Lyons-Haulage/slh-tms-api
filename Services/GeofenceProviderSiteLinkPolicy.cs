@@ -197,8 +197,27 @@ public static class GeofenceSiteAliasRepair
         var now = DateTimeOffset.UtcNow;
         foreach (var fence in unlinked)
         {
+            // Phase 1: exact canonical match (code, name, driver-text, alias)
             var target = GeofenceProviderSiteLinkPolicy.ExactCanonicalSite(fence.Name, fence.SiteNumber, sites);
-            if (target is null) continue;
+            string matchReason;
+            if (target is not null)
+            {
+                matchReason = "Unique exact Site Master name/driver-text/alias match.";
+            }
+            else
+            {
+                // Phase 2: fuzzy token-similarity match — only accepts a result when exactly
+                // ONE site clears the threshold, preventing ambiguous auto-links.
+                var fuzzyResult = GeofenceFuzzyMatcher.BestUniqueMatch(fence.Name, sites);
+                if (fuzzyResult is null) continue;
+                target = fuzzyResult.Site;
+                matchReason = $"Fuzzy token similarity match (score {fuzzyResult.Score}/100). " +
+                              "Geofence name registered as site alias for future exact matching.";
+
+                // Register the geofence name as an alias on the site so future syncs
+                // match exactly and the alias is visible in the Geofence Integrity UI.
+                GeofenceFuzzyMatcher.RegisterAliasIfNew(fence.Name, target);
+            }
 
             fence.SiteId = target.Id;
             fence.SiteNumber = target.ExternalCode;
@@ -216,7 +235,7 @@ public static class GeofenceSiteAliasRepair
                     canonicalSiteId = target.Id,
                     canonicalSiteCode = target.ExternalCode,
                     canonicalSiteName = target.Name,
-                    reason = "Unique exact Site Master name/driver-text/alias match."
+                    reason = matchReason
                 })
             });
         }
@@ -227,3 +246,97 @@ public static class GeofenceSiteAliasRepair
 }
 
 public sealed record GeofenceProviderPlaceholderRepairResult(int Found, int Relinked, int Cleared);
+
+/// <summary>
+/// Shared fuzzy name-matching logic for geofence-to-site linking.
+/// Kept separate so it can be used by both SiteGeofenceMasterSync and
+/// GeofenceSiteAliasRepair without duplication.
+/// </summary>
+public static class GeofenceFuzzyMatcher
+{
+    // Mirrors SiteGeofenceMasterSync.FuzzyAutoLinkThreshold.
+    // Require 70% token overlap for an automatic link.
+    public const int AutoLinkThreshold = 70;
+
+    private static readonly HashSet<string> IgnoredTokens = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "SITE", "DEPOT", "WAREHOUSE", "DISTRIBUTION", "CENTRE", "CENTER", "STORE", "MARKET",
+        "ROAD", "STREET", "LANE", "UNIT", "SERVICE", "SERVICES", "LIMITED", "LTD", "THE", "AND"
+    };
+
+    public sealed record FuzzyMatch(Site Site, int Score);
+
+    /// <summary>
+    /// Returns the single site that best matches the geofence name above the auto-link
+    /// threshold, or null if no site qualifies or more than one site is tied at the top.
+    /// </summary>
+    public static FuzzyMatch? BestUniqueMatch(string geofenceName, IReadOnlyList<Site> sites)
+    {
+        var fenceTokens = Tokens(geofenceName);
+        if (fenceTokens.Count == 0) return null;
+
+        var scored = sites
+            .Select(site => new FuzzyMatch(site, ScoreAgainst(fenceTokens, site)))
+            .Where(x => x.Score >= AutoLinkThreshold)
+            .OrderByDescending(x => x.Score)
+            .ThenBy(x => x.Site.Name)
+            .ToList();
+
+        return scored.Count == 1 ? scored[0] : null;
+    }
+
+    /// <summary>
+    /// Appends the geofence name to the site alias list if it is not already represented
+    /// in the site's Name, DriverTextName or existing aliases.
+    /// </summary>
+    public static void RegisterAliasIfNew(string geofenceName, Site site)
+    {
+        var key = Normalize(geofenceName);
+        if (key.Length == 0) return;
+        if (Normalize(site.Name) == key || Normalize(site.DriverTextName) == key) return;
+        foreach (var alias in SplitAliases(site.Aliases))
+            if (Normalize(alias) == key) return;
+
+        var trimmed = geofenceName.Trim();
+        site.Aliases = string.IsNullOrWhiteSpace(site.Aliases)
+            ? trimmed
+            : string.Join(", ", SplitAliases(site.Aliases).Append(trimmed).Distinct(StringComparer.OrdinalIgnoreCase));
+    }
+
+    private static int ScoreAgainst(IReadOnlyCollection<string> fenceTokens, Site site)
+    {
+        var candidates = new[] { site.Name, site.DriverTextName }
+            .Concat(SplitAliases(site.Aliases))
+            .Select(Tokens)
+            .Where(t => t.Count > 0);
+
+        return candidates
+            .Select(siteTokens =>
+            {
+                var common = fenceTokens.Intersect(siteTokens, StringComparer.OrdinalIgnoreCase).Count();
+                if (common == 0) return 0;
+                return (int)Math.Round(100d * common / Math.Max(fenceTokens.Count, siteTokens.Count));
+            })
+            .DefaultIfEmpty(0)
+            .Max();
+    }
+
+    private static List<string> Tokens(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return [];
+        var spaced = new string(value.Select(c => char.IsLetterOrDigit(c) ? char.ToUpperInvariant(c) : ' ').ToArray());
+        return spaced.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(token => token.Length >= 2 && !IgnoredTokens.Contains(token) && !token.All(char.IsDigit))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static IEnumerable<string> SplitAliases(string? aliases) =>
+        string.IsNullOrWhiteSpace(aliases)
+            ? []
+            : aliases.Split(new[] { ',', ';', '|', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private static string Normalize(string? value) =>
+        new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+}
+
