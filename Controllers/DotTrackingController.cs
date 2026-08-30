@@ -796,12 +796,22 @@ public sealed class DotTrackingController(
     {
         try
         {
-            return await db.Drivers
+            // TachoMasterDriverId is intentionally [NotMapped]. It is retained in the
+            // promoted master-detail payload rather than dbo.Drivers, so projecting it
+            // directly from IQueryable cannot populate the value used for correlation.
+            // Materialise the mapped entity first, enrich it from the audited payload,
+            // then project the complete identity in memory.
+            var driverRows = await db.Drivers
                 .AsNoTracking()
                 .Where(driver =>
                     driver.Active ||
                     allocatedDriverIds.Contains(
                         driver.Id))
+                .ToListAsync(ct);
+
+            await MasterDetailStore.EnrichDriversAsync(db, driverRows, ct);
+
+            return driverRows
                 .Select(driver =>
                     new FleetDriverIdentity(
                         driver.Id,
@@ -810,9 +820,7 @@ public sealed class DotTrackingController(
                         driver.TachoName,
                         driver.TachoMasterDriverId,
                         driver.TachoCardNumber))
-                .ToDictionaryAsync(
-                    driver => driver.Id,
-                    ct);
+                .ToDictionary(driver => driver.Id);
         }
         catch (Exception exception)
             when (IsSchemaUnavailable(exception))
