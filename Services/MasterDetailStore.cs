@@ -51,8 +51,14 @@ public static class MasterDetailStore
                 driver.NorthEligible = Bool(payload, "northEligible");
                 driver.PreloadEligible = Bool(payload, "preloadEligible");
                 driver.Notes = Text(payload, "notes");
-                driver.TachoMasterDriverId = Text(payload, "tachoMasterDriverId") ?? Text(payload, "tachomasterDriverId");
-                driver.TachoCardNumber = Text(payload, "tachoCardNumber") ?? Text(payload, "cardNumber");
+                var tachoMasterDriverId = Text(payload, "tachoMasterDriverId") ?? Text(payload, "tachomasterDriverId");
+                if (!string.IsNullOrWhiteSpace(tachoMasterDriverId))
+                    driver.TachoMasterDriverId = tachoMasterDriverId;
+
+                var tachoCardNumber = Text(payload, "tachoCardNumber") ?? Text(payload, "cardNumber");
+                if (!string.IsNullOrWhiteSpace(tachoCardNumber))
+                    driver.TachoCardNumber = tachoCardNumber;
+
                 driver.TachoDriveAvailableTodayMinutes = Int(payload, "tachoDriveAvailableTodayMinutes");
                 driver.TachoDriveAvailableWeekMinutes = Int(payload, "tachoDriveAvailableWeekMinutes");
                 driver.TachoWorkAvailableWeekMinutes = Int(payload, "tachoWorkAvailableWeekMinutes");
