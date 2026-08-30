@@ -119,7 +119,7 @@ builder.Services.AddHttpClient<TachoMasterClient>()
         // DotTrackingClient is optional — if it is removed from DI, TachoMasterClient
         // receives null rather than a hard startup failure (the constructor uses
         // DotTrackingClient? = null as a default parameter).
-        _ = sp.GetService<DotTrackingClient>();
+        sp.GetService<DotTrackingClient>();
     });
 builder.Services.AddHttpClient<AzureMapsRouteClient>();
 builder.Services.AddHttpClient<FleetioClient>();
