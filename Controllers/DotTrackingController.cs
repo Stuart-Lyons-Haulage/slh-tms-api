@@ -796,11 +796,10 @@ public sealed class DotTrackingController(
     {
         try
         {
-            // TachoMasterDriverId is intentionally [NotMapped]. It is retained in the
-            // promoted master-detail payload rather than dbo.Drivers, so projecting it
-            // directly from IQueryable cannot populate the value used for correlation.
-            // Materialise the mapped entity first, enrich it from the audited payload,
-            // then project the complete identity in memory.
+            // Driver identity is persisted on dbo.Drivers. Keep the staged
+            // master-detail enrichment as a compatibility fallback for records written
+            // before the identity columns were introduced, then project the complete
+            // identity used by live TachoMaster correlation.
             var driverRows = await db.Drivers
                 .AsNoTracking()
                 .Where(driver =>
