@@ -40,7 +40,22 @@ public sealed class OperationsController(
         var vehicleIds = loads.Where(load => load.VehicleId != null).Select(load => load.VehicleId!.Value).Distinct().ToList();
         var driverIds = loads.Where(load => load.DriverId != null).Select(load => load.DriverId!.Value).Distinct().ToList();
         var vehicles = await SafeDictionary(db.Vehicles.AsNoTracking().Where(vehicle => vehicleIds.Contains(vehicle.Id)), vehicle => vehicle.Id, ct);
-        var drivers = await SafeDictionary(db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id)), driver => driver.Id, ct);
+        var drivers = await SafeDictionary(
+            db.Drivers
+                .AsNoTracking()
+                .Where(driver => driverIds.Contains(driver.Id))
+                .Select(driver => new Driver
+                {
+                    Id = driver.Id,
+                    EmployeeNumber = driver.EmployeeNumber,
+                    DisplayName = driver.DisplayName,
+                    TachoName = driver.TachoName,
+                    TachoMasterDriverId = driver.TachoMasterDriverId,
+                    TachoCardNumber = driver.TachoCardNumber,
+                    Active = driver.Active
+                }),
+            driver => driver.Id,
+            ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers.Values.ToList(), ct);
         var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles.Values.ToList(), ct);
         try
