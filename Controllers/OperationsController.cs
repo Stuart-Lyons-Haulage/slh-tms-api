@@ -66,6 +66,10 @@ public sealed class OperationsController(
         try
         {
             geofence = await EmbeddedGeofenceEngine.BuildAsync(db, planningDate, GeofencePlanningMatch.PrepareLoads(loads), ct);
+            // The in-memory RoadTech reconstruction can briefly be incomplete while a refresh is
+            // catching up. Merge the durable projection before calculating ETAs so already-proved
+            // stops cannot disappear and send the route backwards through completed work.
+            geofence = await EmbeddedGeofenceEvidenceMerge.MergeDurableProjectionAsync(db, geofence, loads, ct);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
