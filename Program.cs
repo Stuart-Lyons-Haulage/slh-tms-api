@@ -29,7 +29,10 @@ builder.Services.AddControllers().AddJsonOptions(options =>
 });
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
-var configuredOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>();
+var configuredOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()?
+    .Where(origin => !string.IsNullOrWhiteSpace(origin))
+    .Select(origin => origin.Trim())
+    .ToArray();
 var allowedOrigins = configuredOrigins is { Length: > 0 } ? configuredOrigins : [
     "https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io"
 ];
