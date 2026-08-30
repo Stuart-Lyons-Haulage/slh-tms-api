@@ -806,6 +806,16 @@ public sealed class DotTrackingController(
                     driver.Active ||
                     allocatedDriverIds.Contains(
                         driver.Id))
+                .Select(driver => new Driver
+                {
+                    Id = driver.Id,
+                    EmployeeNumber = driver.EmployeeNumber,
+                    DisplayName = driver.DisplayName,
+                    TachoName = driver.TachoName,
+                    TachoMasterDriverId = driver.TachoMasterDriverId,
+                    TachoCardNumber = driver.TachoCardNumber,
+                    Active = driver.Active
+                })
                 .ToListAsync(ct);
 
             await MasterDetailStore.EnrichDriversAsync(db, driverRows, ct);
