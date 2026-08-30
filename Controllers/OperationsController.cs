@@ -255,7 +255,6 @@ public sealed class OperationsController(
             : ("WithinDriveTime", "Current TachoMaster availability covers the calculated route without an additional driving break.");
     }
  
-    private static bool IsDeliveryStop(LoadStop stop) => stop.Name.StartsWith("Deliver", StringComparison.OrdinalIgnoreCase);
  
     private static string Risk(DateTimeOffset? eta, DateTimeOffset? start, DateTimeOffset? end)
     {
