@@ -73,18 +73,6 @@ public sealed class RunTimingController(
         {
             var orderedStops = (load.Stops ?? []).OrderBy(stop => stop.Sequence).ToList();
             var finalDestination = RunFinalDestination.Select(orderedStops);
-            // The final customer promise comes from the transport-order delivery window,
-            // not the planner arrival time for an intermediate/operational stop. Some
-            // imported runs do not retain the OrderId on the final display stop, so carry
-            // the latest explicit delivery window from the orders attached anywhere on
-            // the run onto the selected final customer destination.
-            var finalDeliveryWindowEndUtc = orderedStops
-                .Select(stop => stop.OrderId is Guid orderId && orders.TryGetValue(orderId, out var linkedOrder)
-                    ? linkedOrder.DeliveryWindowEndUtc
-                    : null)
-                .Where(value => value is not null)
-                .OrderByDescending(value => value)
-                .FirstOrDefault();
             var visits = snapshot.Visits
                 .Where(visit => visit.LoadId == load.Id)
                 .OrderBy(visit => visit.EnteredAtUtc)
