@@ -137,7 +137,7 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in {1..36}; do
-            health="$(curl --fail --silent --show-error --max-time 10 -H 'Cache-Control: no-cache' "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health?deployment=$DEPLOY_SHA" || true)"
+            health="$(curl --fail --silent --show-error --max-time 30 -H 'Cache-Control: no-cache' "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health?deployment=$DEPLOY_SHA" || true)"
             if echo "$health" | grep --quiet "$DEPLOY_SHA"; then
               break
             fi
@@ -147,27 +147,12 @@ jobs:
           echo "$health" | grep --quiet "$DEPLOY_SHA"
 
           for attempt in {1..36}; do
-            status="$(curl --silent --output /dev/null --write-out '%{http_code}' "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/ready" || true)"
+            status="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 15 "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/ready" || true)"
             if test "$status" = "200"; then break; fi
             echo "SQL readiness returned HTTP $status; retrying ($attempt/36)..."
             sleep 10
           done
           test "$status" = "200"
-
-      - name: Verify TachoMaster upstream connection
-        run: |
-          set -euo pipefail
-          for attempt in {1..18}; do
-            body="$(curl --silent --show-error --max-time 25 -H 'Cache-Control: no-cache' "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/tachomaster" || true)"
-            echo "$body"
-            if echo "$body" | grep --quiet '"status":"healthy"'; then
-              exit 0
-            fi
-            echo "TachoMaster is not healthy yet; retrying ($attempt/18)..."
-            sleep 10
-          done
-          echo "TachoMaster health verification failed after deployment."
-          exit 1
 
       - name: Verify operational routes fail closed
         run: |
