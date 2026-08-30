@@ -123,6 +123,8 @@ END;
         foreach (var record in records.OrderBy(x => x.EventTimeUtc))
         {
             if (record.Latitude is null || record.Longitude is null) continue;
+            try
+            {
             var vehicle = vehicles.FirstOrDefault(v => VehicleMatches(v, record.VehicleIdentifier));
             var openVisit = await db.GeofenceVisits.OrderByDescending(x => x.EnteredAtUtc)
                 .FirstOrDefaultAsync(x => x.VehicleIdentifier == record.VehicleIdentifier && x.ExitedAtUtc == null, ct);
@@ -221,6 +223,18 @@ END;
                 }
             }
             if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync(ct);
+            } // end per-record try
+            catch (OperationCanceledException) { throw; }
+            catch (Exception exception)
+            {
+                // A single bad telemetry record must not abort the whole batch.
+                // Clear tracked entities so the next record starts from a clean state.
+                db.ChangeTracker.Clear();
+                logger.LogWarning(exception,
+                    "Geofence telemetry processing failed for vehicle {VehicleIdentifier} at {EventTime}; " +
+                    "skipping this record and continuing with the remaining batch.",
+                    record.VehicleIdentifier, record.EventTimeUtc);
+            }
         }
     }
 
