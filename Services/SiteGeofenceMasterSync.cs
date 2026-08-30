@@ -33,6 +33,18 @@ public static partial class SiteGeofenceMasterSync
         "ROAD", "STREET", "LANE", "UNIT", "SERVICE", "SERVICES", "LIMITED", "LTD", "THE", "AND"
     };
 
+    // A fuzzy match is accepted for automatic linking only when the token-overlap similarity
+    // score reaches this threshold (0-100). 70 means at least 70% of the meaningful tokens
+    // in the shorter name appear in the longer name. This is deliberately conservative to
+    // avoid false positives; a human operator can always confirm lower-confidence suggestions
+    // via the Geofence Integrity screen.
+    private const int FuzzyAutoLinkThreshold = 70;
+
+    // When a geofence is linked to a site via fuzzy matching, the geofence name is written
+    // as an alias on the site so that future syncs match exactly and the alias appears in
+    // the Geofence Integrity UI for operator awareness.
+    private const int FuzzyAliasThreshold = 55;
+
     public static async Task<SiteGeofenceSyncResult> SyncAsync(TmsDbContext db, CancellationToken ct)
     {
         var sites = await db.Sites.Where(x => x.Active).OrderBy(x => x.Name).ThenBy(x => x.Id).ToListAsync(ct);
@@ -103,6 +115,17 @@ public static partial class SiteGeofenceMasterSync
                     canonicalized++;
                 }
                 fence.UpdatedAtUtc = DateTimeOffset.UtcNow;
+
+                // If this link was established via fuzzy matching (geofence name doesn't
+                // appear in the site's canonical Name, DriverTextName or existing aliases),
+                // register the geofence name as an alias on the site. This means:
+                //   (a) future syncs will match exactly without needing fuzzy logic, and
+                //   (b) the alias appears in the Geofence Integrity UI so operators can
+                //       review what was auto-merged and remove it if incorrect.
+                var dbSite = sitesById.GetValueOrDefault(site.Id);
+                if (dbSite is not null && ShouldRegisterAlias(fence.Name, dbSite))
+                    RegisterAlias(fence.Name, dbSite);
+
                 continue;
             }
 
@@ -221,14 +244,68 @@ public static partial class SiteGeofenceMasterSync
 
     private static List<Site> MatchingSites(string geofenceName, IReadOnlyList<Site> sites)
     {
+        // Phase 1 — exact token overlap (existing behaviour, score > 0 means ≥1 shared token)
         var scored = sites
             .Select(site => new { Site = site, Score = MatchScore(geofenceName, site) })
             .Where(x => x.Score > 0)
             .ToList();
-        if (scored.Count == 0) return [];
+        if (scored.Count > 0)
+        {
+            var bestScore = scored.Max(x => x.Score);
+            var best = scored.Where(x => x.Score == bestScore).Select(x => x.Site).ToList();
+            if (best.Count == 1) return best;
+            // Multiple sites share the same top token-overlap score — fall through to fuzzy
+            // ranking to break the tie.
+        }
 
-        var bestScore = scored.Max(x => x.Score);
-        return scored.Where(x => x.Score == bestScore).Select(x => x.Site).ToList();
+        // Phase 2 — fuzzy similarity score (same algorithm as GeofenceLinkDiagnostics).
+        // Only returns a result when exactly ONE site clears the auto-link threshold so
+        // we never automatically link an ambiguous geofence.
+        var fuzzy = sites
+            .Select(site => new { Site = site, Score = FuzzyScore(geofenceName, site) })
+            .Where(x => x.Score >= FuzzyAutoLinkThreshold)
+            .OrderByDescending(x => x.Score)
+            .ThenBy(x => x.Site.Name)
+            .ToList();
+        if (fuzzy.Count == 1) return [fuzzy[0].Site];
+
+        // If multiple sites are above threshold (ambiguous) return them all so the caller
+        // treats this as a non-unique match and leaves the geofence unlinked.
+        if (fuzzy.Count > 1) return fuzzy.Select(x => x.Site).ToList();
+
+        return [];
+    }
+
+    /// <summary>
+    /// Token-overlap similarity score (0–100). Meaningful tokens (≥2 chars, not in
+    /// IgnoredTokens, not purely numeric) are extracted from both names; the score is
+    /// the percentage of the smaller token set that appears in the larger set.
+    /// </summary>
+    private static int FuzzyScore(string geofenceName, Site site)
+    {
+        var fenceTokens = FuzzyTokens(geofenceName);
+        if (fenceTokens.Count == 0) return 0;
+        return SiteNames(site)
+            .Select(name => FuzzyTokens(name))
+            .Select(siteTokens =>
+            {
+                if (siteTokens.Count == 0) return 0;
+                var common = fenceTokens.Intersect(siteTokens, StringComparer.OrdinalIgnoreCase).Count();
+                if (common == 0) return 0;
+                return (int)Math.Round(100d * common / Math.Max(fenceTokens.Count, siteTokens.Count));
+            })
+            .DefaultIfEmpty(0)
+            .Max();
+    }
+
+    private static List<string> FuzzyTokens(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return [];
+        var spaced = new string(value.Select(c => char.IsLetterOrDigit(c) ? char.ToUpperInvariant(c) : ' ').ToArray());
+        return spaced.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(token => token.Length >= 2 && !IgnoredTokens.Contains(token) && !token.All(char.IsDigit))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private static int MatchScore(string geofenceName, Site site)
@@ -362,6 +439,43 @@ public static partial class SiteGeofenceMasterSync
             .Select(match => match.Value.ToUpperInvariant())
             .Where(token => token.Length >= 4 && !IgnoredTokens.Contains(token) && !token.All(char.IsDigit))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+
+    /// <summary>
+    /// Returns true when the geofence name is not already represented in the site's
+    /// Name, DriverTextName or alias list — i.e. when the fuzzy match introduced new
+    /// naming evidence that should be recorded.
+    /// </summary>
+    private static bool ShouldRegisterAlias(string geofenceName, Site site)
+    {
+        var key = NormalizeName(geofenceName);
+        if (key.Length == 0) return false;
+        if (NormalizeName(site.Name) == key || NormalizeName(site.DriverTextName) == key) return false;
+        foreach (var existing in SplitAliases(site.Aliases))
+            if (NormalizeName(existing) == key) return false;
+        return true;
+    }
+
+    /// <summary>
+    /// Appends the geofence name to the site's alias list, which is stored as a
+    /// comma-separated string on the Site entity.
+    /// </summary>
+    private static void RegisterAlias(string geofenceName, Site site)
+    {
+        var trimmed = geofenceName.Trim();
+        if (string.IsNullOrWhiteSpace(trimmed)) return;
+        site.Aliases = string.IsNullOrWhiteSpace(site.Aliases)
+            ? trimmed
+            : string.Join(", ", SplitAliases(site.Aliases).Append(trimmed).Distinct(StringComparer.OrdinalIgnoreCase));
+    }
+
+    private static IEnumerable<string> SplitAliases(string? aliases) =>
+        string.IsNullOrWhiteSpace(aliases)
+            ? []
+            : aliases.Split(new[] { ',', ';', '|', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private static string NormalizeName(string? value) =>
+        new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     [GeneratedRegex("^SITE0*([1-9][0-9]*)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SiteCodeRegex();
