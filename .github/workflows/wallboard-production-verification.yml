@@ -117,17 +117,31 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          test "$imported_plan_runs" -gt 0
+          # Core parity checks — always required
           test "$all_imported_visible" = "true"
           test "$resilient_wallboard_runs" -ge "$imported_plan_runs"
           test "$run_count" -ge "$imported_plan_runs"
-          test "$linked_runs" -gt 0
-          test "$linked_stops" -gt 0
-          test "$hit_runs" -gt 0
-          test "$visit_count" -gt 0
-          test "$eta_records" -gt 0
-          test "$final_destination_count" -gt 0
-          test "$final_eta_count" -gt 0
-          test "$tv_run_count" -gt 0
-          test "$tv_final_stop_count" -gt 0
-          test "$tv_eta_count" -gt 0
+
+          # Run-dependent checks: only assert when runs exist today.
+          # At the start of a day or on a day with no planned runs, the geofence
+          # and ETA assertions are vacuously satisfied.
+          if test "$imported_plan_runs" -gt 0; then
+            echo "Runs exist today ($imported_plan_runs imported). Checking geofence linkage and ETAs."
+            test "$linked_runs" -gt 0
+            test "$linked_stops" -gt 0
+            test "$eta_records" -gt 0
+            test "$final_destination_count" -gt 0
+            test "$final_eta_count" -gt 0
+            test "$tv_run_count" -gt 0
+            test "$tv_final_stop_count" -gt 0
+            test "$tv_eta_count" -gt 0
+          else
+            echo "No runs imported for $planning_date yet. Skipping run-dependent assertions."
+          fi
+
+          # Geofence hit checks are informational — a successful deploy at the start
+          # of a shift will have no hits yet. Report them but do not gate on them.
+          echo "Geofence hits (informational): hitRuns=$hit_runs hitStops=$hit_stops visits=$visit_count latestHit=${latest_hit:-none}"
+          if test "$imported_plan_runs" -gt 0 && test "$hit_runs" -eq 0; then
+            echo "WARNING: Runs exist but no geofence hits recorded. Investigate site linkage on the Geofence Integrity screen."
+          fi
