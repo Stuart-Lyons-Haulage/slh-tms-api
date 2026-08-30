@@ -81,5 +81,4 @@ public static class PlanningSchemaInitializer
             }
         }
     }
-    }
 }
