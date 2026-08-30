@@ -32,7 +32,13 @@ public static class MasterDetailStore
     public static async Task EnrichDriversAsync(TmsDbContext db, IReadOnlyCollection<Driver> drivers, CancellationToken ct)
     {
         if (drivers.Count == 0) return;
-        var byEmployee = drivers.ToDictionary(driver => NormaliseKey(driver.EmployeeNumber), StringComparer.OrdinalIgnoreCase);
+        var byEmployee = drivers
+            .Where(driver => !string.IsNullOrWhiteSpace(driver.EmployeeNumber))
+            .GroupBy(driver => NormaliseKey(driver.EmployeeNumber), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                group => group.Key,
+                group => group.OrderByDescending(driver => driver.Active).ThenBy(driver => driver.Id).First(),
+                StringComparer.OrdinalIgnoreCase);
         var rows = await db.StagedImports.AsNoTracking().Where(item => item.EntityType == DriverType && item.Status == StagingStatus.Promoted)
             .OrderByDescending(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc).Take(5000).ToListAsync(ct);
         var applied = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
