@@ -35,7 +35,12 @@ public sealed class SystemSyncController(
                  item.EntityType == "tachodriverprofile"))
             .MaxAsync(item => (DateTimeOffset?)(item.ReviewedAtUtc ?? item.ReceivedAtUtc), ct);
 
-        var fleetioUtc = await db.Vehicles.AsNoTracking().MaxAsync(item => (DateTimeOffset?)item.FleetioLastSyncedUtc, ct);
+        // FleetioLastSyncedUtc is runtime-only / NotMapped. Read the persisted
+        // synchronisation receipt instead of asking EF to translate a non-persisted
+        // property, which otherwise returns HTTP 500 from the feed-health endpoint.
+        var fleetioUtc = await db.StagedImports.AsNoTracking()
+            .Where(item => item.Status == StagingStatus.Promoted && item.EntityType == "fleetiosync")
+            .MaxAsync(item => (DateTimeOffset?)(item.ReviewedAtUtc ?? item.ReceivedAtUtc), ct);
         var sageUtc = await db.StagedImports.AsNoTracking()
             .Where(item => item.EntityType == "sagehrsync" && item.Status == StagingStatus.Promoted)
             .MaxAsync(item => (DateTimeOffset?)(item.ReviewedAtUtc ?? item.ReceivedAtUtc), ct);
