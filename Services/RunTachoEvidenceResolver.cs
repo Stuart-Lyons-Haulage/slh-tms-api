@@ -178,7 +178,20 @@ public static class RunTachoEvidenceResolver
         var ids = loads.Where(load => load.DriverId is not null).Select(load => load.DriverId!.Value).Distinct().ToList();
         if (ids.Count == 0) return new Dictionary<Guid, Driver>();
 
-        var drivers = await db.Drivers.AsNoTracking().Where(driver => ids.Contains(driver.Id)).ToListAsync(ct);
+        var drivers = await db.Drivers
+            .AsNoTracking()
+            .Where(driver => ids.Contains(driver.Id))
+            .Select(driver => new Driver
+            {
+                Id = driver.Id,
+                EmployeeNumber = driver.EmployeeNumber,
+                DisplayName = driver.DisplayName,
+                TachoName = driver.TachoName,
+                TachoMasterDriverId = driver.TachoMasterDriverId,
+                TachoCardNumber = driver.TachoCardNumber,
+                Active = driver.Active
+            })
+            .ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
         return drivers.ToDictionary(driver => driver.Id);
     }
