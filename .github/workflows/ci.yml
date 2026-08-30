@@ -44,3 +44,5 @@ jobs:
 
       - name: Run tests
         run: dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --no-restore
+
+# CI trigger after geofence normalization fix
