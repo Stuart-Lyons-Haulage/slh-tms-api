@@ -230,10 +230,7 @@ END;
                 // A single bad telemetry record must not abort the whole batch.
                 // Clear tracked entities so the next record starts from a clean state.
                 db.ChangeTracker.Clear();
-                logger.LogWarning(exception,
-                    "Geofence telemetry processing failed for vehicle {VehicleIdentifier} at {EventTime}; " +
-                    "skipping this record and continuing with the remaining batch.",
-                    record.VehicleIdentifier, record.EventTimeUtc);
+                Console.Error.WriteLine($"Geofence telemetry processing failed for vehicle {record.VehicleIdentifier} at {record.EventTimeUtc:u}: {exception.Message}");
             }
         }
     }
