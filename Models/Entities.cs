@@ -55,15 +55,15 @@ public sealed class Driver
     [NotMapped] public bool? NorthEligible { get; set; }
     [NotMapped] public bool? PreloadEligible { get; set; }
     [NotMapped, MaxLength(500)] public string? Notes { get; set; }
-    [NotMapped, MaxLength(80)] public string? TachoMasterDriverId { get; set; }
-    [NotMapped, MaxLength(80)] public string? TachoCardNumber { get; set; }
+    [MaxLength(80)] public string? TachoMasterDriverId { get; set; }
+    [MaxLength(80)] public string? TachoCardNumber { get; set; }
     [NotMapped] public int? TachoDriveAvailableTodayMinutes { get; set; }
     [NotMapped] public int? TachoDriveAvailableWeekMinutes { get; set; }
     [NotMapped] public int? TachoWorkAvailableWeekMinutes { get; set; }
     [NotMapped, MaxLength(80)] public string? DrivingLicenceNumber { get; set; }
     [NotMapped] public DateOnly? LicenceExpiry { get; set; }
     [NotMapped, MaxLength(40)] public string? LicenceStatus { get; set; }
-    [NotMapped] public DateTimeOffset? LastTachoSyncUtc { get; set; }
+    public DateTimeOffset? LastTachoSyncUtc { get; set; }
     public bool Active { get; set; } = true;
 }
 public sealed class Trailer
