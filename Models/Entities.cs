@@ -56,7 +56,7 @@ public sealed class Driver
     [NotMapped] public bool? PreloadEligible { get; set; }
     [NotMapped, MaxLength(500)] public string? Notes { get; set; }
     [MaxLength(80)] public string? TachoMasterDriverId { get; set; }
-    [MaxLength(80)] public string? TachoCardNumber { get; set; }
+    [NotMapped, MaxLength(80)] public string? TachoCardNumber { get; set; }
     [NotMapped] public int? TachoDriveAvailableTodayMinutes { get; set; }
     [NotMapped] public int? TachoDriveAvailableWeekMinutes { get; set; }
     [NotMapped] public int? TachoWorkAvailableWeekMinutes { get; set; }
