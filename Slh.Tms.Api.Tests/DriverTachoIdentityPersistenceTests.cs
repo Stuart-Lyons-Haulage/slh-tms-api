@@ -21,7 +21,6 @@ public sealed class DriverTachoIdentityPersistenceTests
                 EmployeeNumber = "SLH001",
                 DisplayName = "Test Driver",
                 TachoMasterDriverId = "298",
-                TachoCardNumber = "1234567890123456",
                 LastTachoSyncUtc = DateTimeOffset.UtcNow
             });
 
@@ -33,7 +32,6 @@ public sealed class DriverTachoIdentityPersistenceTests
             var driver = await readDb.Drivers.SingleAsync();
 
             Assert.Equal("298", driver.TachoMasterDriverId);
-            Assert.Equal("1234567890123456", driver.TachoCardNumber);
             Assert.NotNull(driver.LastTachoSyncUtc);
         }
     }
