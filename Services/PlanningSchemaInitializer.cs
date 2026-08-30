@@ -28,5 +28,58 @@ public static class PlanningSchemaInitializer
                 logger.LogError(ex, "TMS schema repair script {SchemaScript} failed; continuing with remaining scripts.", resourceName);
             }
         }
+
+        // Driver identity was introduced as a guarded repair, but a SQL Server batch
+        // can be partially applied if an older repair fails after its first ALTER.
+        // Re-issue each DDL statement independently so one missing column cannot
+        // prevent the remaining identity columns from being created.
+        await EnsureDriverIdentityColumnsAsync(db, logger, ct);
+    }
+
+    private static async Task EnsureDriverIdentityColumnsAsync(TmsDbContext db, ILogger logger, CancellationToken ct)
+    {
+        var statements = new[]
+        {
+            """
+            IF OBJECT_ID(N'dbo.Drivers', N'U') IS NOT NULL
+               AND COL_LENGTH(N'dbo.Drivers', N'TachoMasterDriverId') IS NULL
+                EXEC(N'ALTER TABLE dbo.Drivers ADD TachoMasterDriverId nvarchar(80) NULL');
+            """,
+            """
+            IF OBJECT_ID(N'dbo.Drivers', N'U') IS NOT NULL
+               AND COL_LENGTH(N'dbo.Drivers', N'TachoCardNumber') IS NULL
+                EXEC(N'ALTER TABLE dbo.Drivers ADD TachoCardNumber nvarchar(80) NULL');
+            """,
+            """
+            IF OBJECT_ID(N'dbo.Drivers', N'U') IS NOT NULL
+               AND COL_LENGTH(N'dbo.Drivers', N'LastTachoSyncUtc') IS NULL
+                EXEC(N'ALTER TABLE dbo.Drivers ADD LastTachoSyncUtc datetimeoffset(7) NULL');
+            """,
+            """
+            IF OBJECT_ID(N'dbo.Drivers', N'U') IS NOT NULL
+               AND COL_LENGTH(N'dbo.Drivers', N'TachoMasterDriverId') IS NOT NULL
+               AND NOT EXISTS
+               (
+                   SELECT 1
+                   FROM sys.indexes
+                   WHERE name = N'IX_Drivers_TachoMasterDriverId'
+                     AND object_id = OBJECT_ID(N'dbo.Drivers')
+               )
+                EXEC(N'CREATE INDEX IX_Drivers_TachoMasterDriverId ON dbo.Drivers(TachoMasterDriverId) WHERE TachoMasterDriverId IS NOT NULL');
+            """
+        };
+
+        foreach (var statement in statements)
+        {
+            try
+            {
+                await db.Database.ExecuteSqlRawAsync(statement, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Driver Tacho identity schema repair statement failed.");
+            }
+        }
+    }
     }
 }
