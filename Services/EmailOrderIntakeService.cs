@@ -158,6 +158,9 @@ public sealed class EmailOrderIntakeService
         if (orders.Count == 0)
             return new EmailIntakeParseResult([], globalWarnings, "No transport order could be identified from this email.");
 
+        orders = orders
+            .Select(order => ApplyPrecedenceOverrides(order, request, body, masterSiteNames ?? []))
+            .ToList();
         return new EmailIntakeParseResult(orders, globalWarnings, null);
     }
 
@@ -177,6 +180,9 @@ public sealed class EmailOrderIntakeService
 
         var doubleHWaitrose = ParseDoubleHWaitroseColumnTable(request, rawPo, body, sourceText, receivedAt);
         if (doubleHWaitrose.Count > 0) return doubleHWaitrose;
+
+        var barfootsWaitrose = ParseBarfootsWaitroseWaveBody(request, body, receivedAt);
+        if (barfootsWaitrose.Count > 0) return barfootsWaitrose;
 
         var waitrose = ParseWaitroseDepotTable(request, rawPo, body, sourceText, sourceDate, receivedAt);
         if (waitrose.Count > 0) return waitrose;
