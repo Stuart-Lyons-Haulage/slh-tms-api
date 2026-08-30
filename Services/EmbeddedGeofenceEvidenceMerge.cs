@@ -16,7 +16,8 @@ public static class EmbeddedGeofenceEvidenceMerge
         TmsDbContext db,
         EmbeddedGeofenceSnapshot snapshot,
         IReadOnlyCollection<Load> loads,
-        CancellationToken ct)
+        CancellationToken ct,
+        ILogger? logger = null)
     {
         var loadById = loads
             .Where(load => load.Status != LoadStatus.Cancelled)
@@ -126,9 +127,12 @@ public static class EmbeddedGeofenceEvidenceMerge
         {
             throw;
         }
-        catch
+        catch (Exception exception) when (exception is not OperationCanceledException)
         {
             db.ChangeTracker.Clear();
+            logger?.LogWarning(exception,
+                "Durable geofence evidence merge failed; returning the in-memory RoadTech snapshot as a safe fallback. " +
+                "Completed stops may be temporarily invisible until the next poll cycle resolves the exception.");
             return snapshot;
         }
     }
