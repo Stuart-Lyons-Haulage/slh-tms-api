@@ -86,6 +86,9 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<CustomerContact>().HasIndex(x => new { x.CustomerCode, x.Name }).IsUnique();
         b.Entity<Vehicle>().HasIndex(x => x.Registration).IsUnique();
         b.Entity<Driver>().HasIndex(x => x.EmployeeNumber).IsUnique();
+        b.Entity<Driver>().HasIndex(x => x.TachoMasterDriverId)
+            .HasDatabaseName("IX_Drivers_TachoMasterDriverId")
+            .HasFilter("[TachoMasterDriverId] IS NOT NULL");
         b.Entity<Trailer>().HasIndex(x => x.TrailerNumber).IsUnique();
         b.Entity<Site>().HasIndex(x => x.ExternalCode).IsUnique();
         if (Database.ProviderName == "Microsoft.EntityFrameworkCore.SqlServer")
