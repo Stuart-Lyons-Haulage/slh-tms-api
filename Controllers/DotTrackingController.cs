@@ -881,11 +881,13 @@ public sealed class DotTrackingController(
                 .AsNoTracking()
                 .Include(load => load.Stops)
                 .Where(load =>
-                    load.PlanningDate >= firstDate &&
-                    load.PlanningDate <= lastDate &&
                     load.VehicleId != null &&
                     load.Status != LoadStatus.Cancelled &&
-                    load.Status != LoadStatus.Completed)
+                    load.Status != LoadStatus.Completed &&
+                    (load.PlanningDate == lastDate ||
+                     (load.PlanningDate == firstDate &&
+                      (load.Status == LoadStatus.Dispatched ||
+                       load.Status == LoadStatus.InProgress))))
                 .ToListAsync(ct);
         }
         catch (Exception exception)
@@ -905,11 +907,13 @@ public sealed class DotTrackingController(
                     null,
                     ct))
                 .Where(load =>
-                    load.PlanningDate >= firstDate &&
-                    load.PlanningDate <= lastDate &&
                     load.VehicleId != null &&
                     load.Status != LoadStatus.Cancelled &&
-                    load.Status != LoadStatus.Completed)
+                    load.Status != LoadStatus.Completed &&
+                    (load.PlanningDate == lastDate ||
+                     (load.PlanningDate == firstDate &&
+                      (load.Status == LoadStatus.Dispatched ||
+                       load.Status == LoadStatus.InProgress))))
                 .ToList();
 
             foreach (var registerLoad in registerLoads)
@@ -1394,216 +1398,3 @@ public sealed class DotTrackingController(
                         driverCard.Length >= 8 &&
                         (string.Equals(
                             driverCard,
-                            tachoCard,
-                            StringComparison.OrdinalIgnoreCase) ||
-                         driverCard.EndsWith(
-                            tachoCard,
-                            StringComparison.OrdinalIgnoreCase) ||
-                         tachoCard.EndsWith(
-                            driverCard,
-                            StringComparison.OrdinalIgnoreCase));
-                });
-
-            if (cardMatch is not null)
-            {
-                return (
-                    cardMatch,
-                    "TachoCard");
-            }
-        }
-
-        // 4. Explicit mapping by employee number
-        if (
-            !string.IsNullOrWhiteSpace(
-                tacho.EmployeeNumber) &&
-            mappings.TryGetValue(
-                tacho.EmployeeNumber!
-                    .ToUpperInvariant(),
-                out var mappedEmpId))
-        {
-            var driver =
-                drivers.FirstOrDefault(
-                    driver =>
-                        driver.Id == mappedEmpId);
-
-            if (driver is not null)
-            {
-                return (driver, "Mapped");
-            }
-        }
-
-        // 5. Explicit mapping by driver name
-        var nameKey =
-            NormalisePersonName(
-                tacho.DriverName);
-
-        if (
-            nameKey.Length > 0 &&
-            mappings.TryGetValue(
-                nameKey,
-                out var mappedNameId))
-        {
-            var driver =
-                drivers.FirstOrDefault(
-                    driver =>
-                        driver.Id == mappedNameId);
-
-            if (driver is not null)
-            {
-                return (driver, "Mapped");
-            }
-        }
-
-        // 6. Employee-number match
-        if (
-            !string.IsNullOrWhiteSpace(
-                tacho.EmployeeNumber))
-        {
-            var employeeMatch =
-                drivers.FirstOrDefault(
-                    driver =>
-                        !string.IsNullOrWhiteSpace(
-                            driver.EmployeeNumber) &&
-                        string.Equals(
-                            driver.EmployeeNumber,
-                            tacho.EmployeeNumber,
-                            StringComparison.OrdinalIgnoreCase));
-
-            if (employeeMatch is not null)
-            {
-                return (
-                    employeeMatch,
-                    "EmployeeNumber");
-            }
-        }
-
-        // 7. Tacho name match
-        if (nameKey.Length > 0)
-        {
-            var tachoNameMatch =
-                drivers.FirstOrDefault(
-                    driver =>
-                        NormalisePersonName(
-                            driver.TachoName) ==
-                        nameKey);
-
-            if (tachoNameMatch is not null)
-            {
-                return (
-                    tachoNameMatch,
-                    "TachoName");
-            }
-        }
-
-        // 8. Display-name match
-        if (nameKey.Length > 0)
-        {
-            var displayMatch =
-                drivers.FirstOrDefault(
-                    driver =>
-                        NormalisePersonName(
-                            driver.DisplayName) ==
-                        nameKey);
-
-            if (displayMatch is not null)
-            {
-                return (
-                    displayMatch,
-                    "DisplayName");
-            }
-        }
-
-        return (null, "Unmatched");
-    }
-
-    private static bool SameDriverName(
-        FleetDriverIdentity? liveMatchedDriver,
-        string liveDriverName,
-        FleetDriverIdentity allocatedDriver)
-    {
-        if (liveMatchedDriver is not null)
-        {
-            return
-                liveMatchedDriver.Id ==
-                allocatedDriver.Id;
-        }
-
-        var liveName =
-            NormalisePersonName(
-                liveDriverName);
-
-        return
-            liveName ==
-                NormalisePersonName(
-                    allocatedDriver.TachoName) ||
-            liveName ==
-                NormalisePersonName(
-                    allocatedDriver.DisplayName);
-    }
-}
-
-public sealed record DotTelemetryResponse(
-    string Provider,
-    DateTimeOffset RetrievedAtUtc,
-    int RecordCount,
-    IReadOnlyList<DotTelemetryRecord> Records);
-
-public sealed record FleetStatusResponse(
-    string Provider,
-    DateTimeOffset RetrievedAtUtc,
-    int VehicleCount,
-    int ReadyCount,
-    int AttentionCount,
-    IReadOnlyList<FleetVehicleStatus> Vehicles);
-
-public sealed record FleetVehicleStatus(
-    Guid VehicleId,
-    string Registration,
-    string? FleetNumber,
-    string? TrackingIdentifier,
-    string Condition,
-    DateTimeOffset? LastEventTimeUtc,
-    bool? IgnitionOn,
-    bool? IsMoving,
-    decimal? SpeedKph,
-    decimal? Latitude,
-    decimal? Longitude,
-    int? AgeMinutes,
-    Guid? LoadId,
-    string? LoadReference,
-    string? LoadStatus,
-    Guid? DriverId,
-    string? DriverName,
-    string? TachoName,
-    string? DriverSource,
-    string? AllocatedDriverName,
-    bool DriverMismatch,
-    DateTimeOffset? PlannedDutyUtc,
-    TachoVehicleDriverStatus? Tacho,
-    string? FleetioId,
-    string? FleetioName,
-    string? FleetioStatus,
-    bool? FleetioVor,
-    DateTimeOffset? FleetioPmiDueUtc,
-    DateTimeOffset? FleetioMotDueUtc,
-    string? FleetioServiceStatus,
-    string? DriverMatchReason);
-
-public sealed record FleetVehicleMaster(
-    Guid Id,
-    string Registration,
-    string? FleetNumber,
-    string? Abbreviation,
-    string? FleetioStatus,
-    bool? FleetioVor,
-    DateTimeOffset? FleetioPmiDueUtc,
-    DateTimeOffset? FleetioMotDueUtc,
-    string? FleetioServiceStatus);
-
-public sealed record FleetDriverIdentity(
-    Guid Id,
-    string EmployeeNumber,
-    string DisplayName,
-    string? TachoName,
-    string? TachoMasterDriverId,
-    string? TachoCardNumber);
