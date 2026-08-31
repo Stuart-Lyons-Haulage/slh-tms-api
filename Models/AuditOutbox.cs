@@ -2,6 +2,11 @@ using System.ComponentModel.DataAnnotations;
 
 namespace Slh.Tms.Api.Models;
 
+public static class AuditOutboxEventTypes
+{
+    public const string MasterDataAudit = nameof(MasterDataAudit);
+}
+
 public sealed class AuditOutbox
 {
     public Guid OutboxId { get; set; } = Guid.NewGuid();
