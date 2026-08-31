@@ -21,6 +21,19 @@ public sealed class IntegrationSyncCoordinator(
 
     public async Task<IntegrationSyncResult> SyncTachoMasterAsync(string actor, CancellationToken ct)
     {
+        await TachoMasterSyncGate.WaitAsync(ct);
+        try
+        {
+            return await SyncTachoMasterCoreAsync(actor, ct);
+        }
+        finally
+        {
+            TachoMasterSyncGate.Release();
+        }
+    }
+
+    internal async Task<IntegrationSyncResult> SyncTachoMasterCoreAsync(string actor, CancellationToken ct)
+    {
         if (!tachoMaster.IsConfigured)
             return new("TachoMaster", false, DateTimeOffset.UtcNow, $"TachoMaster is not configured: {string.Join(", ", tachoMaster.MissingSettings)}.");
 
