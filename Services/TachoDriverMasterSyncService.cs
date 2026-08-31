@@ -64,6 +64,19 @@ public sealed class TachoDriverMasterSyncService(
 
     public async Task<TachoDriverMasterSyncResult> SyncAsync(string actor, CancellationToken ct)
     {
+        await TachoMasterSyncGate.WaitAsync(ct);
+        try
+        {
+            return await SyncCoreAsync(actor, ct);
+        }
+        finally
+        {
+            TachoMasterSyncGate.Release();
+        }
+    }
+
+    internal async Task<TachoDriverMasterSyncResult> SyncCoreAsync(string actor, CancellationToken ct)
+    {
         var now = DateTimeOffset.UtcNow;
         if (!options.IsConfigured)
             return new(false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
