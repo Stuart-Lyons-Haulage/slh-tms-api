@@ -67,7 +67,7 @@ public sealed class AssistantController(
         return Ok(advice with { Suggestions = EnableSafeFixes(suggestions) });
     }
 
-    [HttpPost("fix-safe-validations"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("fix-safe-validations"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> FixSafeValidations(CancellationToken ct)
     {
         try

@@ -49,7 +49,7 @@ public sealed class SitePlanningProfilesController(TmsDbContext db) : Controller
         }));
     }
 
-    [HttpPut("{siteId:guid}"), Authorize(Policy = "TmsApprove")]
+    [HttpPut("{siteId:guid}"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> Update(Guid siteId, SitePlanningProfileUpdate request, CancellationToken ct)
     {
         var site = await db.Sites.AsNoTracking().SingleOrDefaultAsync(x => x.Id == siteId, ct);

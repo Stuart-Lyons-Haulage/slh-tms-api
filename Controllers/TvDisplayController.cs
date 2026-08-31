@@ -29,7 +29,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
         });
     }
 
-    [HttpPost("key/rotate"), Authorize(Policy = "TmsWrite")]
+    [HttpPost("key/rotate"), Authorize(Policy = "TmsAdmin")]
     public async Task<IActionResult> Rotate(CancellationToken ct)
     {
         var access = await TvDisplayKeyStore.RotateAsync(db, User.Identity?.Name, ct);
@@ -54,7 +54,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
         });
     }
 
-    [HttpPost("pairing-code/refresh"), Authorize(Policy = "TmsWrite")]
+    [HttpPost("pairing-code/refresh"), Authorize(Policy = "TmsAdmin")]
     public async Task<IActionResult> RefreshPairingCode(CancellationToken ct)
     {
         var pairing = await TvDisplayPairingStore.RefreshAsync(db, User.Identity?.Name, ct);

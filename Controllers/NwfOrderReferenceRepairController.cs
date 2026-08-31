@@ -7,7 +7,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController]
 [Route("api/v1/staging/orders")]
-[Authorize(Policy = "TmsWrite")]
+[Authorize(Policy = "TmsAdmin")]
 public sealed class NwfOrderReferenceRepairController(TmsDbContext db) : ControllerBase
 {
     [HttpPost("repair-nwf-references")]

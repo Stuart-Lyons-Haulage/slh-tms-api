@@ -140,6 +140,7 @@ builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(o =>
 {
     o.Authority = $"https://login.microsoftonline.com/{tenantId}/v2.0";
+    o.MapInboundClaims = false;
     o.TokenValidationParameters = new TokenValidationParameters
     {
         ValidateIssuer = true,
@@ -150,7 +151,9 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJw
         },
         ValidateAudience = true,
         ValidAudience = audience,
-        ValidateLifetime = true
+        ValidateLifetime = true,
+        NameClaimType = "preferred_username",
+        RoleClaimType = "roles"
     };
     o.Events = new JwtBearerEvents
     {
@@ -169,15 +172,21 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJw
 
 builder.Services.AddAuthorization(options =>
 {
-    var tmsAccessPolicy = new AuthorizationPolicyBuilder()
+    AuthorizationPolicy BuildRolePolicy(IReadOnlyCollection<string> roles) => new AuthorizationPolicyBuilder()
         .RequireAuthenticatedUser()
         .RequireAssertion(context => TmsAccessPolicy.IsCompanyUser(context.User, allowedTmsDomains))
+        .RequireRole(roles)
         .Build();
+
+    var tmsAccessPolicy = BuildRolePolicy(TmsRoles.Access);
     options.DefaultPolicy = tmsAccessPolicy;
     options.FallbackPolicy = tmsAccessPolicy;
-    options.AddPolicy("TmsAccess", tmsAccessPolicy);
-    options.AddPolicy("TmsWrite", tmsAccessPolicy);
-    options.AddPolicy("TmsApprove", tmsAccessPolicy);
+    options.AddPolicy(TmsPolicies.Access, tmsAccessPolicy);
+    options.AddPolicy(TmsPolicies.Write, BuildRolePolicy(TmsRoles.Write));
+    options.AddPolicy(TmsPolicies.Dispatch, BuildRolePolicy(TmsRoles.Dispatch));
+    options.AddPolicy(TmsPolicies.Approve, BuildRolePolicy(TmsRoles.Approve));
+    options.AddPolicy(TmsPolicies.MasterData, BuildRolePolicy(TmsRoles.MasterData));
+    options.AddPolicy(TmsPolicies.Admin, BuildRolePolicy(TmsRoles.Admin));
 });
 
 static string ReadSetting(IConfiguration configuration, string fallback, params string[] keys) =>

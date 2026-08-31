@@ -15,13 +15,13 @@ namespace Slh.Tms.Api.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/v1/operational-recovery")]
-[Authorize(Policy = "TmsWrite")]
+[Authorize(Policy = "TmsAccess")]
 public sealed class OperationalRecoveryController(
     TmsDbContext db,
     TachoMasterClient tachoMaster,
     ILogger<OperationalRecoveryController> logger) : ControllerBase
 {
-    [HttpDelete("orders/{id:guid}")]
+    [HttpDelete("orders/{id:guid}"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> CancelOrder(Guid id, CancellationToken ct)
     {
         // Normal production order first. Only project stable columns so optional
@@ -136,7 +136,7 @@ public sealed class OperationalRecoveryController(
         });
     }
 
-    [HttpPost("tachomaster/refresh-drivers")]
+    [HttpPost("tachomaster/refresh-drivers"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> RefreshTachoDrivers(CancellationToken ct)
     {
         if (!tachoMaster.IsConfigured)

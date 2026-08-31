@@ -17,7 +17,7 @@ public sealed class CustomerCommunicationsController(TmsDbContext db, StagingSer
     private const string SentMarker = "[CUSTOMER-ACK:SENT:";
     private static readonly JsonSerializerOptions StoredPayloadJson = new(JsonSerializerDefaults.Web);
 
-    [HttpGet("pending"), Authorize(Policy = "TmsWrite")]
+    [HttpGet("pending"), Authorize(Policy = "TmsAccess")]
     public async Task<IActionResult> Pending([FromQuery] int take = 50, CancellationToken ct = default)
     {
         var staged = await db.StagedImports.AsNoTracking().Where(x => x.EntityType == "order" && x.Source!.StartsWith("Info mailbox") && (x.Status == StagingStatus.PendingReview || x.Status == StagingStatus.Promoted)).OrderByDescending(x => x.ReceivedAtUtc).Take(2000).ToListAsync(ct);
@@ -35,7 +35,7 @@ public sealed class CustomerCommunicationsController(TmsDbContext db, StagingSer
         return Ok(new { count = communications.Count, communications });
     }
 
-    [HttpPost("{communicationKey}/sent"), Authorize(Policy = "TmsWrite")]
+    [HttpPost("{communicationKey}/sent"), Authorize(Policy = "TmsDispatch")]
     public async Task<IActionResult> MarkSent(string communicationKey, CommunicationSentRequest request, CancellationToken ct)
     {
         var staged = await db.StagedImports.Where(x => x.EntityType == "order" && x.Source!.StartsWith("Info mailbox")).OrderByDescending(x => x.ReceivedAtUtc).Take(2000).ToListAsync(ct);

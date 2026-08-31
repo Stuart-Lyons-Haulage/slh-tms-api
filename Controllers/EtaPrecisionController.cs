@@ -11,7 +11,7 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize]
 public sealed class EtaPrecisionController(TmsDbContext db) : ControllerBase
 {
-    [HttpPost("eta-snapshots/capture"), Authorize(Policy = "TmsWrite")]
+    [HttpPost("eta-snapshots/capture"), Authorize(Policy = "TmsDispatch")]
     public async Task<IActionResult> Capture([FromBody] List<EtaSnapshotCaptureItem> items, CancellationToken ct)
     {
         if (items.Count > 2000) return BadRequest("A maximum of 2,000 ETA samples can be captured per request.");

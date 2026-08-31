@@ -155,7 +155,7 @@ public sealed class OperationsIntelligenceController(TmsDbContext db) : Controll
         catch { return Ok(null); }
     }
 
-    [HttpPost("plan-lock/{date}"), Authorize(Policy = "TmsWrite")]
+    [HttpPost("plan-lock/{date}"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> LockPlan(DateOnly date, CancellationToken ct)
     {
         await PlanLockStore.LockAsync(db, date, User.Identity?.Name, ct);

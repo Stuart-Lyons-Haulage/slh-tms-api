@@ -9,7 +9,7 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController, Route("api/v1/orders"), Authorize]
 public sealed class OrdersBulkMaintenanceController(TmsDbContext db, ILogger<OrdersBulkMaintenanceController> logger) : ControllerBase
 {
-    [HttpDelete("open"), Authorize(Policy = "TmsWrite")]
+    [HttpDelete("open"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> CancelAllOpen(CancellationToken ct)
     {
         var warnings = new List<string>();

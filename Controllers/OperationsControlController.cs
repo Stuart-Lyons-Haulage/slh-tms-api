@@ -269,7 +269,7 @@ public sealed class OperationsControlController(
         return Ok(mappings);
     }
 
-    [HttpPost("mappings"), Authorize(Policy = "TmsWrite")]
+    [HttpPost("mappings"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> CreateMapping([FromBody] CreateMappingRequest request, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.Provider) || string.IsNullOrWhiteSpace(request.ExternalKey) || string.IsNullOrWhiteSpace(request.TmsEntityType))
@@ -290,7 +290,7 @@ public sealed class OperationsControlController(
         return Ok(mapping);
     }
 
-    [HttpDelete("mappings/{id}"), Authorize(Policy = "TmsWrite")]
+    [HttpDelete("mappings/{id}"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> DeleteMapping(Guid id, CancellationToken ct)
     {
         var mapping = await db.IntegrationMappings.FindAsync([id], ct);
@@ -304,7 +304,7 @@ public sealed class OperationsControlController(
 
     // --- Driver status feedback (phase 1: dispatcher-captured) ---
 
-    [HttpPost("loads/{loadId}/driver-status"), Authorize(Policy = "TmsWrite")]
+    [HttpPost("loads/{loadId}/driver-status"), Authorize(Policy = "TmsDispatch")]
     public async Task<IActionResult> CaptureDriverStatus(Guid loadId, [FromBody] CaptureStatusRequest request, CancellationToken ct)
     {
         var validStatuses = new[] { "Dispatched", "Accepted", "ArrivedCollection", "Loaded", "ArrivedDelivery", "Delivered", "IssueReported" };

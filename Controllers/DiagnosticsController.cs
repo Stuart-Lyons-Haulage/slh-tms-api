@@ -45,7 +45,7 @@ public sealed class DiagnosticsController(TmsDbContext db) : ControllerBase
         return ready ? Ok(response) : StatusCode(StatusCodes.Status503ServiceUnavailable, response);
     }
 
-    [HttpGet("tables")]
+    [HttpGet("tables"), Authorize(Policy = "TmsAdmin")]
     public async Task<IActionResult> Tables(CancellationToken ct)
     {
         var checks = new Dictionary<string, Func<CancellationToken, Task<object>>>
@@ -74,7 +74,7 @@ public sealed class DiagnosticsController(TmsDbContext db) : ControllerBase
         return Ok(results);
     }
 
-    [HttpGet("master-data-suggestions")]
+    [HttpGet("master-data-suggestions"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> MasterDataSuggestions(CancellationToken ct)
     {
         var suggestions = new List<object>();

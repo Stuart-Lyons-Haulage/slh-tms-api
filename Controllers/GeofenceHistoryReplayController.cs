@@ -15,7 +15,7 @@ public sealed class GeofenceHistoryReplayController(
     ILogger<GeofenceHistoryReplayService> logger) : ControllerBase
 {
     [HttpPost("rebuild-today")]
-    [Authorize(Policy = "TmsWrite")]
+    [Authorize(Policy = "TmsAdmin")]
     public async Task<ActionResult<GeofenceHistoryReplayResult>> RebuildToday(CancellationToken ct)
     {
         var today = UkDate(DateTimeOffset.UtcNow);
@@ -23,7 +23,7 @@ public sealed class GeofenceHistoryReplayController(
     }
 
     [HttpPost("rebuild")]
-    [Authorize(Policy = "TmsWrite")]
+    [Authorize(Policy = "TmsAdmin")]
     public async Task<ActionResult<GeofenceHistoryReplayResult>> Rebuild([FromQuery] DateOnly date, CancellationToken ct) =>
         Ok(await Replay().ReplayAsync(date, ct));
 

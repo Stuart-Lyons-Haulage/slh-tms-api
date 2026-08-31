@@ -38,8 +38,7 @@ public sealed class GeofenceMasterDataHealthController(TmsDbContext db, IConfigu
         });
     }
 
-    [HttpPost("sync")]
-    [AllowAnonymous]
+    [HttpPost("sync"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> Sync(CancellationToken ct)
     {
         if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();

@@ -18,7 +18,7 @@ public sealed class SiteAliasController(TmsDbContext db) : ControllerBase
     private const string ReviewNote = "Full workbook detail retained in the audited register for legacy production columns.";
 
     [HttpPut("{id:guid}/aliases")]
-    [Authorize(Policy = "TmsApprove")]
+    [Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> UpdateAliases(Guid id, SiteAliasUpdateRequest request, CancellationToken ct)
     {
         var site = await db.Sites.FirstOrDefaultAsync(item => item.Id == id, ct);

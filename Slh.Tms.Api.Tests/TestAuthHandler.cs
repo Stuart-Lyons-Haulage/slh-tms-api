@@ -37,7 +37,7 @@ public class TestAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions
         }
         if (Request.Headers.TryGetValue("X-Test-Oid", out var oid)) claims.Add(new Claim("oid", oid.ToString()));
 
-        var identity = new ClaimsIdentity(claims, SchemeName);
+        var identity = new ClaimsIdentity(claims, SchemeName, ClaimTypes.Name, "roles");
         var principal = new ClaimsPrincipal(identity);
         var ticket = new AuthenticationTicket(principal, SchemeName);
         return Task.FromResult(AuthenticateResult.Success(ticket));

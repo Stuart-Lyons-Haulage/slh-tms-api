@@ -104,10 +104,13 @@ public class AuthenticationTests : IClassFixture<CustomWebFactory>
     }
 
     [Theory]
-    [InlineData("Tms.Access")]
-    [InlineData("Tms.Write")]
-    [InlineData("Tms.Approve")]
-    [InlineData("Tms.Admin")]
+    [InlineData("TMS.Viewer")]
+    [InlineData("TMS.Planner")]
+    [InlineData("TMS.Dispatcher")]
+    [InlineData("TMS.OperationsController")]
+    [InlineData("TMS.Approver")]
+    [InlineData("TMS.MasterDataAdmin")]
+    [InlineData("TMS.SystemAdmin")]
     public async Task Valid_TMS_app_role_request_succeeds(string role)
     {
         var client = _factory.CreateClient();

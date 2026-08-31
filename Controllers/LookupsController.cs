@@ -59,7 +59,7 @@ public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController
     }
 
     [HttpPut("vehicles/{id:guid}")]
-    [Authorize(Policy = "TmsWrite")]
+    [Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> UpdateVehicle(Guid id, [FromBody] LookupVehicleUpdateRequest request, CancellationToken ct)
     {
         var vehicle = await db.Vehicles.SingleOrDefaultAsync(item => item.Id == id, ct);
@@ -86,7 +86,7 @@ public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController
         return Ok(vehicle);
     }
 
-    [HttpPut("drivers/{id:guid}"), Authorize(Policy = "TmsWrite")]
+    [HttpPut("drivers/{id:guid}"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> UpdateDriver(Guid id, [FromBody] LookupDriverUpdateRequest request, CancellationToken ct)
     {
         var driver = await db.Drivers.SingleOrDefaultAsync(x => x.Id == id, ct);
@@ -101,7 +101,7 @@ public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController
         return Ok(driver);
     }
 
-    [HttpPut("customers/{id:guid}"), Authorize(Policy = "TmsWrite")]
+    [HttpPut("customers/{id:guid}"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> UpdateCustomer(Guid id, [FromBody] LookupCustomerUpdateRequest request, CancellationToken ct)
     {
         var customer = await db.Customers.SingleOrDefaultAsync(x => x.Id == id, ct);
@@ -114,7 +114,7 @@ public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController
         return Ok(customer);
     }
 
-    [HttpPut("customer-contacts/{id:guid}"), Authorize(Policy = "TmsWrite")]
+    [HttpPut("customer-contacts/{id:guid}"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> UpdateCustomerContact(Guid id, [FromBody] CustomerContactUpdateRequest request, CancellationToken ct)
     {
         var contact = await db.CustomerContacts.SingleOrDefaultAsync(x => x.Id == id, ct);
@@ -127,7 +127,7 @@ public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController
         return Ok(contact);
     }
 
-    [HttpPut("trailers/{id:guid}"), Authorize(Policy = "TmsWrite")]
+    [HttpPut("trailers/{id:guid}"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> UpdateTrailer(Guid id, [FromBody] LookupTrailerUpdateRequest request, CancellationToken ct)
     {
         var trailer = await db.Trailers.SingleOrDefaultAsync(x => x.Id == id, ct);
@@ -139,7 +139,7 @@ public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController
         await db.SaveChangesAsync(ct); return Ok(trailer);
     }
 
-    [HttpPut("sites/{id:guid}"), Authorize(Policy = "TmsWrite")]
+    [HttpPut("sites/{id:guid}"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> UpdateSite(Guid id, [FromBody] LookupSiteUpdateRequest request, CancellationToken ct)
     {
         var site = await db.Sites.SingleOrDefaultAsync(x => x.Id == id, ct);
