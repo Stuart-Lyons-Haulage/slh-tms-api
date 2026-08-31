@@ -26,6 +26,19 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
 {
     public async Task<TachoCanonicalOrchestrationResult> RunAsync(string actor, CancellationToken ct)
     {
+        await TachoMasterSyncGate.WaitAsync(ct);
+        try
+        {
+            return await RunCoreAsync(actor, ct);
+        }
+        finally
+        {
+            TachoMasterSyncGate.Release();
+        }
+    }
+
+    private async Task<TachoCanonicalOrchestrationResult> RunCoreAsync(string actor, CancellationToken ct)
+    {
         var started = DateTimeOffset.UtcNow;
         IntegrationSyncResult enrichment;
         TachoDriverMasterSyncResult canonicalResult;
@@ -37,11 +50,11 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
             // This pass is intentionally first. It adds Employee Number as the safe fallback
             // between card and name, then persists Member Code/Card so the canonical pass can
             // use strong identities for consolidation.
-            enrichment = await integration.SyncTachoMasterAsync($"{actor}:identity-enrichment", ct);
+            enrichment = await integration.SyncTachoMasterCoreAsync($"{actor}:identity-enrichment", ct);
             if (!enrichment.Success)
                 logger.LogWarning("TachoMaster identity-enrichment pass did not complete before canonical sync: {Message}", enrichment.Message);
 
-            canonicalResult = await canonical.SyncAsync(actor, ct);
+            canonicalResult = await canonical.SyncCoreAsync(actor, ct);
             if (canonicalResult.Success)
                 await classification.ApplyAsync(actor, ct);
         }
