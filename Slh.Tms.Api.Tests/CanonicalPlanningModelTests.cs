@@ -76,6 +76,14 @@ public sealed class CanonicalPlanningModelTests
         Assert.Equal(new[] { nameof(RunTrackingState.RunId) }, tracking.FindPrimaryKey()!.Properties.Select(property => property.Name));
     }
 
+    [Fact]
+    public void Canonical_planning_migration_is_discoverable_by_ef_core()
+    {
+        using var db = CreateContext();
+
+        Assert.Contains("20260831214900_CanonicalRelationalPlanning", db.Database.GetMigrations());
+    }
+
     private static TmsDbContext CreateContext()
     {
         var options = new DbContextOptionsBuilder<TmsDbContext>()
