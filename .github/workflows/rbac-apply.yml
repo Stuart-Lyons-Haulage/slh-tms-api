@@ -1,0 +1,273 @@
+name: Apply RBAC refactor
+
+on:
+  push:
+    branches:
+      - feature/entra-rbac
+    paths:
+      - .github/workflows/rbac-apply.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/entra-rbac
+          fetch-depth: 0
+      - name: Apply role policy refactor
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace(path, old, new, count=None):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              found = text.count(old)
+              expected = 1 if count is None else count
+              if found != expected:
+                  raise SystemExit(f'{path}: expected {expected} occurrence(s) of {old!r}, found {found}')
+              p.write_text(text.replace(old, new), encoding='utf-8')
+
+          program = Path('Program.cs')
+          text = program.read_text(encoding='utf-8')
+          old = '''builder.Services.AddAuthorization(options =>
+          {
+              var tmsAccessPolicy = new AuthorizationPolicyBuilder()
+                  .RequireAuthenticatedUser()
+                  .RequireAssertion(context => TmsAccessPolicy.IsCompanyUser(context.User, allowedTmsDomains))
+                  .Build();
+              options.DefaultPolicy = tmsAccessPolicy;
+              options.FallbackPolicy = tmsAccessPolicy;
+              options.AddPolicy("TmsAccess", tmsAccessPolicy);
+              options.AddPolicy("TmsWrite", tmsAccessPolicy);
+              options.AddPolicy("TmsApprove", tmsAccessPolicy);
+          });'''
+          new = '''builder.Services.AddAuthorization(options =>
+          {
+              AuthorizationPolicy BuildRolePolicy(IReadOnlyCollection<string> roles) => new AuthorizationPolicyBuilder()
+                  .RequireAuthenticatedUser()
+                  .RequireAssertion(context => TmsAccessPolicy.IsCompanyUser(context.User, allowedTmsDomains))
+                  .RequireRole(roles)
+                  .Build();
+
+              var tmsAccessPolicy = BuildRolePolicy(TmsRoles.Access);
+              options.DefaultPolicy = tmsAccessPolicy;
+              options.FallbackPolicy = tmsAccessPolicy;
+              options.AddPolicy(TmsPolicies.Access, tmsAccessPolicy);
+              options.AddPolicy(TmsPolicies.Write, BuildRolePolicy(TmsRoles.Write));
+              options.AddPolicy(TmsPolicies.Dispatch, BuildRolePolicy(TmsRoles.Dispatch));
+              options.AddPolicy(TmsPolicies.Approve, BuildRolePolicy(TmsRoles.Approve));
+              options.AddPolicy(TmsPolicies.MasterData, BuildRolePolicy(TmsRoles.MasterData));
+              options.AddPolicy(TmsPolicies.Admin, BuildRolePolicy(TmsRoles.Admin));
+          });'''
+          if text.count(old) != 1:
+              raise SystemExit('Program.cs flat authorisation block not found exactly once')
+          text = text.replace(old, new)
+          old_token = '''        ValidAudience = audience,
+                  ValidateLifetime = true'''
+          new_token = '''        ValidAudience = audience,
+                  ValidateLifetime = true,
+                  RoleClaimType = "roles"'''
+          if text.count(old_token) != 1:
+              raise SystemExit('Program.cs token validation block not found')
+          program.write_text(text.replace(old_token, new_token), encoding='utf-8')
+
+          replace('Slh.Tms.Api.Tests/TestAuthHandler.cs',
+                  'var identity = new ClaimsIdentity(claims, SchemeName);',
+                  'var identity = new ClaimsIdentity(claims, SchemeName, ClaimTypes.Name, "roles");')
+
+          replace('Slh.Tms.Api.Tests/CustomWebFactory.cs',
+                  'public HttpClient CreateClientWithUser(string userName, string scopes = "")\n    {\n        var c = CreateClient();\n        c.DefaultRequestHeaders.Add("X-Test-User", userName);\n        if (!string.IsNullOrEmpty(scopes)) c.DefaultRequestHeaders.Add("X-Test-Scopes", scopes);\n        return c;\n    }',
+                  'public HttpClient CreateClientWithUser(string userName, string scopes = "", string roles = "TMS.SystemAdmin")\n    {\n        var c = CreateClient();\n        c.DefaultRequestHeaders.Add("X-Test-User", userName);\n        if (!string.IsNullOrEmpty(scopes)) c.DefaultRequestHeaders.Add("X-Test-Scopes", scopes);\n        if (!string.IsNullOrWhiteSpace(roles)) c.DefaultRequestHeaders.Add("X-Test-Roles", roles);\n        return c;\n    }')
+
+          auth = Path('Slh.Tms.Api.Tests/AuthenticationTests.cs')
+          text = auth.read_text(encoding='utf-8')
+          old_roles = '''    [Theory]
+              [InlineData("Tms.Access")]
+              [InlineData("Tms.Write")]
+              [InlineData("Tms.Approve")]
+              [InlineData("Tms.Admin")]'''
+          new_roles = '''    [Theory]
+              [InlineData("TMS.Viewer")]
+              [InlineData("TMS.Planner")]
+              [InlineData("TMS.Dispatcher")]
+              [InlineData("TMS.OperationsController")]
+              [InlineData("TMS.Approver")]
+              [InlineData("TMS.MasterDataAdmin")]
+              [InlineData("TMS.SystemAdmin")]'''
+          if text.count(old_roles) != 1:
+              raise SystemExit('AuthenticationTests old role theory not found')
+          auth.write_text(text.replace(old_roles, new_roles), encoding='utf-8')
+
+          # Read-only endpoints that were accidentally elevated by the former flat policy.
+          replace('Controllers/DotTrackingController.cs', '[Authorize(Policy = "TmsWrite")]', '[Authorize(Policy = "TmsAccess")]', 1)
+          replace('Controllers/LiveVehicleDetailsController.cs', '[Authorize(Policy = "TmsWrite")]', '[Authorize(Policy = "TmsAccess")]', 1)
+
+          # Dispatch mutations.
+          replace('Controllers/DriverDispatchController.cs', 'Authorize(Policy = "TmsWrite")', 'Authorize(Policy = "TmsDispatch")', 3)
+          replace('Controllers/PlanningController.cs', '[HttpPost("loads/{id:guid}/dispatch/sms"), Authorize(Policy = "TmsWrite")]', '[HttpPost("loads/{id:guid}/dispatch/sms"), Authorize(Policy = "TmsDispatch")]', 1)
+          replace('Controllers/RunDriverMessageController.cs', '[HttpPost("{id:guid}/driver-message/sms"), Authorize(Policy = "TmsWrite")]', '[HttpPost("{id:guid}/driver-message/sms"), Authorize(Policy = "TmsDispatch")]', 1)
+          replace('Controllers/OperationsControlController.cs', '[HttpPost("loads/{loadId}/driver-status"), Authorize(Policy = "TmsWrite")]', '[HttpPost("loads/{loadId}/driver-status"), Authorize(Policy = "TmsDispatch")]', 1)
+          replace('Controllers/EtaPrecisionController.cs', '[HttpPost("eta-snapshots/capture"), Authorize(Policy = "TmsWrite")]', '[HttpPost("eta-snapshots/capture"), Authorize(Policy = "TmsDispatch")]', 1)
+          replace('Controllers/CustomerCommunicationsController.cs', '[HttpPost("{communicationKey}/sent"), Authorize(Policy = "TmsWrite")]', '[HttpPost("{communicationKey}/sent"), Authorize(Policy = "TmsDispatch")]', 1)
+
+          # Master-data mutations.
+          replace('Controllers/AssistantController.cs', '[HttpPost("fix-safe-validations"), Authorize(Policy = "TmsApprove")]', '[HttpPost("fix-safe-validations"), Authorize(Policy = "TmsMasterData")]', 1)
+          replace('Controllers/DriverVehiclePreferencesController.cs', '[HttpPost("refresh"), Authorize(Policy = "TmsWrite")]', '[HttpPost("refresh"), Authorize(Policy = "TmsMasterData")]', 1)
+          replace('Controllers/FleetioAssetSyncController.cs', '[Authorize(Policy = "TmsWrite")]', '[Authorize(Policy = "TmsMasterData")]', 1)
+          replace('Controllers/FleetioResilientSyncController.cs', '[Authorize(Policy = "TmsWrite")]', '[Authorize(Policy = "TmsMasterData")]', 1)
+          replace('Controllers/FuelController.cs', '[Authorize(Policy = "TmsWrite")]', '[Authorize(Policy = "TmsMasterData")]', 1)
+          replace('Controllers/GeofencesController.cs', 'Authorize(Policy = "TmsWrite")', 'Authorize(Policy = "TmsMasterData")', 3)
+          replace('Controllers/IntegrationsController.cs', 'Authorize(Policy = "TmsWrite")', 'Authorize(Policy = "TmsMasterData")', 3)
+          replace('Controllers/LookupsController.cs', 'Authorize(Policy = "TmsWrite")', 'Authorize(Policy = "TmsMasterData")', 6)
+          replace('Controllers/MasterDataCleanupController.cs', 'Authorize(Policy = "TmsApprove")', 'Authorize(Policy = "TmsMasterData")', 4)
+          replace('Controllers/MasterDataController.cs', 'Authorize(Policy = "TmsApprove")', 'Authorize(Policy = "TmsMasterData")', 2)
+          replace('Controllers/OperationalMasterDataController.cs', 'Authorize(Policy = "TmsApprove")', 'Authorize(Policy = "TmsMasterData")', 17)
+          replace('Controllers/SiteAliasController.cs', 'Authorize(Policy = "TmsApprove")', 'Authorize(Policy = "TmsMasterData")', 1)
+          replace('Controllers/SiteGeofenceSyncController.cs', 'Authorize(Policy = "TmsApprove")', 'Authorize(Policy = "TmsMasterData")', 2)
+          replace('Controllers/SitePlanningProfilesController.cs', 'Authorize(Policy = "TmsApprove")', 'Authorize(Policy = "TmsMasterData")', 1)
+          replace('Controllers/TachoDriverMasterController.cs', 'Authorize(Policy = "TmsApprove")', 'Authorize(Policy = "TmsMasterData")', 1)
+          replace('Controllers/TachoMasterIdentityController.cs', '[Authorize(Policy = "TmsWrite")]', '[Authorize(Policy = "TmsMasterData")]', 1)
+
+          # Integration mapping maintenance is master data; operational driver state is dispatch.
+          replace('Controllers/OperationsControlController.cs', '[HttpPost("mappings"), Authorize(Policy = "TmsWrite")]', '[HttpPost("mappings"), Authorize(Policy = "TmsMasterData")]', 1)
+          replace('Controllers/OperationsControlController.cs', '[HttpDelete("mappings/{id}"), Authorize(Policy = "TmsWrite")]', '[HttpDelete("mappings/{id}"), Authorize(Policy = "TmsMasterData")]', 1)
+
+          # Master document reads remain viewer-accessible; mutations require master-data administration.
+          replace('Controllers/MasterDocumentsController.cs', '[ApiController, Route("api/v1/master-documents"), Authorize(Policy = "TmsWrite")]', '[ApiController, Route("api/v1/master-documents"), Authorize(Policy = "TmsAccess")]', 1)
+          for old_attr, new_attr in [
+              ('[HttpPost("{entityType}/{entityId:guid}")]', '[HttpPost("{entityType}/{entityId:guid}"), Authorize(Policy = "TmsMasterData")]'),
+              ('[HttpPut("{documentId:guid}")]', '[HttpPut("{documentId:guid}"), Authorize(Policy = "TmsMasterData")]'),
+              ('[HttpPost("{documentId:guid}/archive")]', '[HttpPost("{documentId:guid}/archive"), Authorize(Policy = "TmsMasterData")]'),
+              ('[HttpPost("{documentId:guid}/restore")]', '[HttpPost("{documentId:guid}/restore"), Authorize(Policy = "TmsMasterData")]')]:
+              replace('Controllers/MasterDocumentsController.cs', old_attr, new_attr, 1)
+
+          # Operational recovery is split rather than giving the whole controller one broad write privilege.
+          replace('Controllers/OperationalRecoveryController.cs', '[Authorize(Policy = "TmsWrite")]', '[Authorize(Policy = "TmsAccess")]', 1)
+          replace('Controllers/OperationalRecoveryController.cs', '[HttpDelete("orders/{id:guid}")]', '[HttpDelete("orders/{id:guid}"), Authorize(Policy = "TmsWrite")]', 1)
+          replace('Controllers/OperationalRecoveryController.cs', '[HttpPost("tachomaster/refresh-drivers")]', '[HttpPost("tachomaster/refresh-drivers"), Authorize(Policy = "TmsMasterData")]', 1)
+
+          # System-administration / repair operations.
+          replace('Controllers/GeofenceHistoryReplayController.cs', 'Authorize(Policy = "TmsWrite")', 'Authorize(Policy = "TmsAdmin")', 2)
+          replace('Controllers/GeofenceRecoveryController.cs', 'Authorize(Policy = "TmsWrite")', 'Authorize(Policy = "TmsAdmin")', 1)
+          replace('Controllers/MasterDataRebuildController.cs', 'Authorize(Policy = "TmsApprove")', 'Authorize(Policy = "TmsAdmin")', 1)
+          replace('Controllers/NwfOrderReferenceRepairController.cs', '[Authorize(Policy = "TmsWrite")]', '[Authorize(Policy = "TmsAdmin")]', 1)
+          replace('Controllers/SystemSyncController.cs', '[HttpPost("force/{provider}"), Authorize(Policy = "TmsWrite")]', '[HttpPost("force/{provider}"), Authorize(Policy = "TmsAdmin")]', 1)
+          replace('Controllers/TvDisplayController.cs', '[HttpPost("key/rotate"), Authorize(Policy = "TmsWrite")]', '[HttpPost("key/rotate"), Authorize(Policy = "TmsAdmin")]', 1)
+          replace('Controllers/TvDisplayController.cs', '[HttpPost("pairing-code/refresh"), Authorize(Policy = "TmsWrite")]', '[HttpPost("pairing-code/refresh"), Authorize(Policy = "TmsAdmin")]', 1)
+
+          # Diagnostics are read-only but privileged: table diagnostics are system-admin; master suggestions are master-data admin.
+          replace('Controllers/DiagnosticsController.cs', '[HttpGet("tables")]', '[HttpGet("tables"), Authorize(Policy = "TmsAdmin")]', 1)
+          replace('Controllers/DiagnosticsController.cs', '[HttpGet("master-data-suggestions")]', '[HttpGet("master-data-suggestions"), Authorize(Policy = "TmsMasterData")]', 1)
+
+          # A mutation must never remain anonymous simply because its paired GET is a health endpoint.
+          replace('Controllers/GeofenceMasterDataHealthController.cs', '[HttpPost("sync")]\n    [AllowAnonymous]', '[HttpPost("sync"), Authorize(Policy = "TmsMasterData")]', 1)
+
+          # Locking the published plan is an approval boundary; bulk cancellation is likewise elevated.
+          replace('Controllers/OperationsIntelligenceController.cs', '[HttpPost("plan-lock/{date}"), Authorize(Policy = "TmsWrite")]', '[HttpPost("plan-lock/{date}"), Authorize(Policy = "TmsApprove")]', 1)
+          replace('Controllers/OrdersBulkMaintenanceController.cs', '[HttpDelete("open"), Authorize(Policy = "TmsWrite")]', '[HttpDelete("open"), Authorize(Policy = "TmsApprove")]', 1)
+
+          # Pending communications are a read operation, not a write privilege.
+          replace('Controllers/CustomerCommunicationsController.cs', '[HttpGet("pending"), Authorize(Policy = "TmsWrite")]', '[HttpGet("pending"), Authorize(Policy = "TmsAccess")]', 1)
+
+      - name: Add RBAC policy tests
+        shell: bash
+        run: |
+          cat > Slh.Tms.Api.Tests/RoleAuthorizationTests.cs <<'EOF'
+          using System.Net;
+          using System.Text;
+          using Xunit;
+
+          namespace Slh.Tms.Api.Tests;
+
+          public sealed class RoleAuthorizationTests : IClassFixture<CustomWebFactory>
+          {
+              private const string User = "planner@lyonshaulage.com";
+              private readonly CustomWebFactory _factory;
+
+              public RoleAuthorizationTests(CustomWebFactory factory) => _factory = factory;
+
+              private HttpClient Client(string role)
+              {
+                  var client = _factory.CreateClient();
+                  client.DefaultRequestHeaders.Add("X-Test-User", User);
+                  client.DefaultRequestHeaders.Add("X-Test-Roles", role);
+                  return client;
+              }
+
+              [Fact]
+              public async Task Viewer_can_read_but_cannot_write()
+              {
+                  var client = Client("TMS.Viewer");
+                  Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/v1/customers")).StatusCode);
+                  var body = new StringContent("{\"EntityType\":\"customer\",\"IdempotencyKey\":\"rbac-viewer\",\"Payload\":{\"Code\":\"RBAC\",\"Name\":\"RBAC\"}}", Encoding.UTF8, "application/json");
+                  Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsync("/api/v1/staging", body)).StatusCode);
+              }
+
+              [Fact]
+              public async Task Planner_can_write_but_cannot_dispatch()
+              {
+                  var client = Client("TMS.Planner");
+                  var body = new StringContent("{\"EntityType\":\"customer\",\"IdempotencyKey\":\"rbac-planner\",\"Payload\":{\"Code\":\"RBACP\",\"Name\":\"RBAC Planner\"}}", Encoding.UTF8, "application/json");
+                  Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync("/api/v1/staging", body)).StatusCode);
+                  Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsync($"/api/v1/loads/{Guid.NewGuid()}/dispatch/sms", null)).StatusCode);
+              }
+
+              [Fact]
+              public async Task Dispatcher_passes_dispatch_policy_but_not_approval()
+              {
+                  var client = Client("TMS.Dispatcher");
+                  var dispatch = await client.PostAsync($"/api/v1/loads/{Guid.NewGuid()}/dispatch/sms", null);
+                  Assert.NotEqual(HttpStatusCode.Forbidden, dispatch.StatusCode);
+                  var approve = await client.PostAsync($"/api/v1/staging/{Guid.NewGuid()}/approve", new StringContent("{\"note\":\"test\"}", Encoding.UTF8, "application/json"));
+                  Assert.Equal(HttpStatusCode.Forbidden, approve.StatusCode);
+              }
+
+              [Fact]
+              public async Task Approver_cannot_edit_master_data()
+              {
+                  var client = Client("TMS.Approver");
+                  var payload = new StringContent("{\"displayName\":\"Test\",\"employeeNumber\":\"T1\"}", Encoding.UTF8, "application/json");
+                  Assert.Equal(HttpStatusCode.Forbidden, (await client.PutAsync($"/api/v1/operational-master-data/drivers/{Guid.NewGuid()}", payload)).StatusCode);
+              }
+
+              [Fact]
+              public async Task MasterDataAdmin_passes_master_data_policy_but_not_admin()
+              {
+                  var client = Client("TMS.MasterDataAdmin");
+                  var payload = new StringContent("{\"displayName\":\"Test\",\"employeeNumber\":\"T1\"}", Encoding.UTF8, "application/json");
+                  var master = await client.PutAsync($"/api/v1/operational-master-data/drivers/{Guid.NewGuid()}", payload);
+                  Assert.NotEqual(HttpStatusCode.Forbidden, master.StatusCode);
+                  Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsync("/api/v1/system-sync/force/fleetio", null)).StatusCode);
+              }
+
+              [Fact]
+              public async Task SystemAdmin_passes_admin_policy()
+              {
+                  var client = Client("TMS.SystemAdmin");
+                  var response = await client.PostAsync("/api/v1/system-sync/force/not-a-provider", null);
+                  Assert.NotEqual(HttpStatusCode.Forbidden, response.StatusCode);
+              }
+
+              [Fact]
+              public async Task Company_user_without_app_role_is_forbidden()
+              {
+                  var client = _factory.CreateClient();
+                  client.DefaultRequestHeaders.Add("X-Test-User", User);
+                  Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/v1/customers")).StatusCode);
+              }
+          }
+          EOF
+
+      - name: Commit RBAC implementation
+        shell: bash
+        run: |
+          git config user.name "slh-tms-rbac-bot"
+          git config user.email "slh-tms-rbac-bot@users.noreply.github.com"
+          git add Program.cs Authorization Controllers Slh.Tms.Api.Tests
+          git commit -m "Implement Entra role-based TMS authorization"
+          git push origin HEAD:feature/entra-rbac
