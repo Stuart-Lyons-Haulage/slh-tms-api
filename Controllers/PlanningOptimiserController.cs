@@ -23,24 +23,14 @@ public sealed class PlanningOptimiserController(
         }
         catch (Exception exception) when (SchemaUnavailable(exception))
         {
-            logger.LogWarning(exception, "Planning optimiser schema was unavailable; applying the embedded schema repair before one retry.");
-            db.ChangeTracker.Clear();
-            await PlanningSchemaInitializer.Apply(db, logger, ct);
-            db.ChangeTracker.Clear();
-            try
+            // Required schema changes are now applied only during application startup.
+            // A live request must never mutate database schema or hide migration drift.
+            logger.LogError(exception, "Planning optimiser schema is unavailable after startup migration validation.");
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
             {
-                var proposal = await service.GenerateAsync(request, User.Identity?.Name, ct);
-                return CreatedAtAction(nameof(Get), new { id = proposal.Id }, proposal);
-            }
-            catch (Exception retryException) when (SchemaUnavailable(retryException))
-            {
-                logger.LogError(retryException, "Planning optimiser remained unavailable after schema repair.");
-                return StatusCode(StatusCodes.Status503ServiceUnavailable, new
-                {
-                    code = "PlanningOptimiserSchemaUnavailable",
-                    message = "Planning proposal generation is temporarily unavailable while the planning schema catches up. No live runs were created or changed."
-                });
-            }
+                code = "PlanningOptimiserSchemaUnavailable",
+                message = "Planning proposal generation is unavailable because the required database schema is not healthy. No live runs were created or changed."
+            });
         }
         catch (Exception exception) when (!ct.IsCancellationRequested)
         {
@@ -78,24 +68,12 @@ public sealed class PlanningOptimiserController(
         }
         catch (Exception exception) when (SchemaUnavailable(exception))
         {
-            logger.LogWarning(exception, "Planning optimiser apply schema was unavailable; applying the embedded schema repair before one retry.");
-            db.ChangeTracker.Clear();
-            await PlanningSchemaInitializer.Apply(db, logger, ct);
-            db.ChangeTracker.Clear();
-            try
+            logger.LogError(exception, "Planning optimiser apply schema is unavailable after startup migration validation.");
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
             {
-                var result = await new PlanningProposalApplicationService(db).ApplyAsync(id, request, User.Identity?.Name, ct);
-                return Ok(result);
-            }
-            catch (Exception retryException) when (SchemaUnavailable(retryException))
-            {
-                logger.LogError(retryException, "Planning optimiser apply remained unavailable after schema repair.");
-                return StatusCode(StatusCodes.Status503ServiceUnavailable, new
-                {
-                    code = "PlanningOptimiserSchemaUnavailable",
-                    message = "Applying the reviewed proposal is temporarily unavailable while the planning schema catches up. No additional live runs were created."
-                });
-            }
+                code = "PlanningOptimiserSchemaUnavailable",
+                message = "Applying the reviewed proposal is unavailable because the required database schema is not healthy. No additional live runs were created."
+            });
         }
         catch (Exception exception) when (!ct.IsCancellationRequested)
         {
