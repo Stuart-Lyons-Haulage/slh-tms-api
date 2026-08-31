@@ -134,6 +134,7 @@ builder.Services.AddHostedService<IntegrationBackgroundSyncService>();
 builder.Services.AddHostedService<TachoCanonicalDriverMasterDailyBackgroundService>();
 builder.Services.AddHostedService<TachoDriverMasterSyncJobWorker>();
 builder.Services.AddHostedService<DriverMasterClassificationBackgroundService>();
+builder.Services.AddHostedService<AuditOutboxBackgroundService>();
 
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
 
