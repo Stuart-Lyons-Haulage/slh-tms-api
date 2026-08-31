@@ -14,6 +14,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Remove="Slh.Tms.Api.Tests/**/*.cs" />
+    <Compile Remove="Slh.Tms.Jobs/**/*.cs" />
     <EmbeddedResource Include="Database/*.sql" />
   </ItemGroup>
 </Project>
