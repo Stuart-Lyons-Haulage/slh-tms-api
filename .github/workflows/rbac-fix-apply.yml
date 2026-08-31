@@ -1,0 +1,36 @@
+name: Correct RBAC apply workflow
+
+on:
+  push:
+    branches:
+      - feature/entra-rbac
+    paths:
+      - .github/workflows/rbac-fix-apply.yml
+
+permissions:
+  contents: write
+
+jobs:
+  correct:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/entra-rbac
+      - name: Correct verified master-data endpoint count
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('.github/workflows/rbac-apply.yml')
+          text = p.read_text(encoding='utf-8')
+          old = "replace('Controllers/OperationalMasterDataController.cs', 'Authorize(Policy = \"TmsApprove\")', 'Authorize(Policy = \"TmsMasterData\")', 17)"
+          new = "replace('Controllers/OperationalMasterDataController.cs', 'Authorize(Policy = \"TmsApprove\")', 'Authorize(Policy = \"TmsMasterData\")', 19)"
+          if text.count(old) != 1:
+              raise SystemExit('Expected guarded count line was not found exactly once')
+          p.write_text(text.replace(old, new), encoding='utf-8')
+          PY
+          git config user.name "slh-tms-rbac-bot"
+          git config user.email "slh-tms-rbac-bot@users.noreply.github.com"
+          git add .github/workflows/rbac-apply.yml
+          git commit -m "Correct RBAC master-data endpoint inventory"
+          git push origin HEAD:feature/entra-rbac
