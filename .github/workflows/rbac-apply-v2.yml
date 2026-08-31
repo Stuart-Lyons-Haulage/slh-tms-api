@@ -24,10 +24,8 @@ jobs:
           from pathlib import Path
           p = Path('tools/apply-rbac.py')
           text = p.read_text(encoding='utf-8')
-          old = '''anchor = ''' + "'''    options.Authority = issuer;\n    options.Audience = audience;'''" + '''
-          replacement = ''' + "'''    options.Authority = issuer;\n    options.Audience = audience;\n    options.MapInboundClaims = false;'''" + ''''''
-          new = '''anchor = ''' + "'''    o.Authority = $\"https://login.microsoftonline.com/{tenantId}/v2.0\";'''" + '''
-          replacement = ''' + "'''    o.Authority = $\"https://login.microsoftonline.com/{tenantId}/v2.0\";\n    o.MapInboundClaims = false;'''" + ''''''
+          old = "anchor = '''    options.Authority = issuer;\n    options.Audience = audience;'''\nreplacement = '''    options.Authority = issuer;\n    options.Audience = audience;\n    options.MapInboundClaims = false;'''"
+          new = "anchor = '''    o.Authority = $\"https://login.microsoftonline.com/{tenantId}/v2.0\";'''\nreplacement = '''    o.Authority = $\"https://login.microsoftonline.com/{tenantId}/v2.0\";\n    o.MapInboundClaims = false;'''"
           if text.count(old) != 1:
               raise SystemExit('Expected outdated JWT transform anchor not found exactly once')
           p.write_text(text.replace(old, new), encoding='utf-8')
