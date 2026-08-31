@@ -1,0 +1,60 @@
+{
+  "appRoles": [
+    {
+      "allowedMemberTypes": ["User"],
+      "description": "Read-only access to SLH TMS operational data.",
+      "displayName": "TMS Viewer",
+      "id": "888eadd4-2666-4939-a25f-4e631cb12b5c",
+      "isEnabled": true,
+      "value": "TMS.Viewer"
+    },
+    {
+      "allowedMemberTypes": ["User"],
+      "description": "Create and update operational orders, runs and planning data.",
+      "displayName": "TMS Planner",
+      "id": "51800200-91a2-44d3-8f2b-5ebc8098ab6b",
+      "isEnabled": true,
+      "value": "TMS.Planner"
+    },
+    {
+      "allowedMemberTypes": ["User"],
+      "description": "Dispatch runs, drivers and customer-facing operational messages in addition to planner access.",
+      "displayName": "TMS Dispatcher",
+      "id": "c8ff4b75-db76-4f15-8dc6-05cf59713784",
+      "isEnabled": true,
+      "value": "TMS.Dispatcher"
+    },
+    {
+      "allowedMemberTypes": ["User"],
+      "description": "Control live transport operations and perform dispatcher and planner actions.",
+      "displayName": "TMS Operations Controller",
+      "id": "910bfb0a-cd6e-4b45-96e3-aac17501b0cf",
+      "isEnabled": true,
+      "value": "TMS.OperationsController"
+    },
+    {
+      "allowedMemberTypes": ["User"],
+      "description": "Approve or reject reviewed operational changes and lock/reset controlled plans.",
+      "displayName": "TMS Approver",
+      "id": "36d00564-8296-4ae3-8440-a7dd6e8fbe83",
+      "isEnabled": true,
+      "value": "TMS.Approver"
+    },
+    {
+      "allowedMemberTypes": ["User"],
+      "description": "Administer TMS master data, integration identities and reference data.",
+      "displayName": "TMS Master Data Administrator",
+      "id": "20a02e12-3103-4f59-aeac-5f18bd0a1f25",
+      "isEnabled": true,
+      "value": "TMS.MasterDataAdmin"
+    },
+    {
+      "allowedMemberTypes": ["User"],
+      "description": "Full TMS system administration including repair, replay, diagnostics and privileged system operations.",
+      "displayName": "TMS System Administrator",
+      "id": "eca9f094-3e8c-4a34-83a6-297223a883fb",
+      "isEnabled": true,
+      "value": "TMS.SystemAdmin"
+    }
+  ]
+}
