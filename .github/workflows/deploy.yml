@@ -2,6 +2,11 @@ name: CD - Deploy TMS to Azure Container Apps
 
 on:
   workflow_dispatch:
+    inputs:
+      sha:
+        description: Full 40-character Git commit SHA to deploy. The SHA must have a successful CI - Build and Test run.
+        required: true
+        type: string
   workflow_run:
     workflows: ["CI - Build and Test"]
     types: [completed]
@@ -9,6 +14,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   id-token: write
 
 concurrency:
@@ -26,9 +32,54 @@ jobs:
       AZURE_CONTAINER_APP_NAME: slh-tms-api-prod
       AZURE_RESOURCE_GROUP: slh-tms-prod-rg
       AZURE_CONTAINER_APP_FQDN: slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
-      DEPLOY_SHA: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.workflow_run.head_sha }}
+      CANARY_MAX_5XX_RATE_PERCENT: "2"
+      DEPLOY_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.sha || github.event.workflow_run.head_sha }}
 
     steps:
+      - name: Validate deployment SHA has passed CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          deploy_sha="$(printf '%s' "$DEPLOY_SHA" | tr '[:upper:]' '[:lower:]')"
+          if ! [[ "$deploy_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Deployment SHA must be a full 40-character hexadecimal commit SHA."
+            exit 1
+          fi
+
+          curl --fail --silent --show-error \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/commits/$deploy_sha" \
+            >/dev/null
+
+          ci_runs="$(curl --fail --silent --show-error \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$deploy_sha&status=success&per_page=100")"
+
+          ci_run_id="$(jq -r --arg sha "$deploy_sha" '
+            [.workflow_runs[]
+              | select(.head_sha == $sha)
+              | select(.status == "completed")
+              | select(.conclusion == "success")]
+            | sort_by(.run_number)
+            | last
+            | .id // empty
+          ' <<<"$ci_runs")"
+
+          if test -z "$ci_run_id"; then
+            echo "::error::Commit $deploy_sha has no successful CI - Build and Test workflow run. Deployment is blocked."
+            exit 1
+          fi
+
+          echo "DEPLOY_SHA=$deploy_sha" >> "$GITHUB_ENV"
+          echo "CI_RUN_ID=$ci_run_id" >> "$GITHUB_ENV"
+          echo "Deploying tested SHA $deploy_sha (passing CI run $ci_run_id)."
+
       - name: Check out tested source
         uses: actions/checkout@v4
         with:
@@ -47,27 +98,84 @@ jobs:
           az acr build \
             --registry "$AZURE_CONTAINER_REGISTRY" \
             --image "slh-tms-api:$DEPLOY_SHA" \
-            --image slh-tms-api:latest \
             .
 
-      - name: Wait for Container App readiness
+      - name: Capture current production revision and enable staged revisions
         run: |
           set -euo pipefail
+
           for attempt in {1..60}; do
             state="$(timeout 20s az containerapp show \
               --name "$AZURE_CONTAINER_APP_NAME" \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --query properties.provisioningState \
               --output tsv 2>/dev/null || true)"
-            if test "$state" = "Succeeded"; then exit 0; fi
+            if test "$state" = "Succeeded"; then break; fi
             echo "Container App provisioning state is ${state:-unknown}; waiting ($attempt/60)..."
             sleep 10
           done
-          exit 1
+          test "$state" = "Succeeded"
 
-      - name: Deploy image with stable runtime configuration
+          revisions="$(az containerapp revision list \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --all \
+            --output json)"
+
+          previous_revision="$(jq -r '
+            ([.[] | select((.properties.trafficWeight // 0) > 0)]
+              | sort_by(.properties.trafficWeight // 0)
+              | last
+              | .name) // empty
+          ' <<<"$revisions")"
+
+          if test -z "$previous_revision"; then
+            previous_revision="$(jq -r '
+              ([.[] | select(.properties.active == true)]
+                | sort_by(.properties.createdTime)
+                | last
+                | .name) // empty
+            ' <<<"$revisions")"
+          fi
+
+          if test -z "$previous_revision"; then
+            echo "::error::Unable to identify the current production revision."
+            exit 1
+          fi
+
+          resource_id="$(az containerapp show \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query id \
+            --output tsv)"
+
+          az containerapp revision set-mode \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --mode multiple
+
+          az containerapp revision activate \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision "$previous_revision"
+
+          # Replace any latest-revision traffic rule with an explicit production revision.
+          # This guarantees that creating the candidate revision cannot receive user traffic.
+          az containerapp ingress traffic set \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision-weight "$previous_revision=100"
+
+          echo "PREVIOUS_REVISION=$previous_revision" >> "$GITHUB_ENV"
+          echo "CONTAINER_APP_RESOURCE_ID=$resource_id" >> "$GITHUB_ENV"
+          echo "Current production revision is $previous_revision at 100% traffic."
+
+      - name: Deploy candidate revision at 0% traffic
         run: |
           set -euo pipefail
+
+          short_sha="${DEPLOY_SHA:0:8}"
+          revision_suffix="r${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}-${short_sha}"
           env_vars=(
             "ConnectionStrings__TmsDb=secretref:tms-db-connection"
             "Tracking__Dot__Enabled=true"
@@ -94,68 +202,218 @@ jobs:
             "Cors__AllowedOrigins__0=https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io"
             "Deployment__Revision=$DEPLOY_SHA"
           )
+
           target_revision="$(az containerapp update \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --image "$AZURE_CONTAINER_REGISTRY.azurecr.io/slh-tms-api:$DEPLOY_SHA" \
+            --revision-suffix "$revision_suffix" \
             --set-env-vars "${env_vars[@]}" \
             --query properties.latestRevisionName \
             --output tsv)"
-          test -n "$target_revision"
-          echo "TARGET_REVISION=$target_revision" >> "$GITHUB_ENV"
-          echo "Created target revision $target_revision for $DEPLOY_SHA"
 
-      - name: Route traffic to deployed ready revision
-        run: |
-          set -euo pipefail
-          target_ready=false
-          for attempt in {1..72}; do
-            health_state="$(timeout 20s az containerapp revision list \
-              --name "$AZURE_CONTAINER_APP_NAME" \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --query "[?name=='$TARGET_REVISION'].properties.healthState | [0]" \
-              --output tsv 2>/dev/null || true)"
-            running_state="$(timeout 20s az containerapp revision list \
-              --name "$AZURE_CONTAINER_APP_NAME" \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --query "[?name=='$TARGET_REVISION'].properties.runningState | [0]" \
-              --output tsv 2>/dev/null || true)"
-            if test "$health_state" = "Healthy"; then
-              target_ready=true
-              break
-            fi
-            echo "Target revision $TARGET_REVISION is health=${health_state:-unknown}, running=${running_state:-unknown}; waiting ($attempt/72)..."
-            sleep 10
-          done
-          test "$target_ready" = "true"
+          if test -z "$target_revision" -o "$target_revision" = "$PREVIOUS_REVISION"; then
+            echo "::error::Azure did not create a distinct candidate revision."
+            exit 1
+          fi
+
+          echo "TARGET_REVISION=$target_revision" >> "$GITHUB_ENV"
+
+          # Keep the previous revision pinned at 100% and explicitly register the candidate at 0%.
           az containerapp ingress traffic set \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --revision-weight "$TARGET_REVISION=100"
+            --revision-weight "$PREVIOUS_REVISION=100" "$target_revision=0"
 
-      - name: Smoke test core API and SQL
+          echo "Created candidate revision $target_revision for $DEPLOY_SHA at 0% production traffic."
+
+      - name: Run startup migration on the 0%-traffic revision
         run: |
           set -euo pipefail
-          for attempt in {1..36}; do
-            health="$(curl --fail --silent --show-error --max-time 30 -H 'Cache-Control: no-cache' "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health?deployment=$DEPLOY_SHA" || true)"
-            if echo "$health" | grep --quiet "$DEPLOY_SHA"; then
+
+          # The API runs its schema migration/initialisation during process startup.
+          # Calling the revision-specific readiness endpoint starts the candidate (if scaled to zero)
+          # and keeps all migration work isolated from production traffic.
+          target_ready=false
+          for attempt in {1..72}; do
+            target_fqdn="$(timeout 20s az containerapp revision show \
+              --name "$AZURE_CONTAINER_APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --revision "$TARGET_REVISION" \
+              --query properties.fqdn \
+              --output tsv 2>/dev/null || true)"
+
+            health_state="$(timeout 20s az containerapp revision show \
+              --name "$AZURE_CONTAINER_APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --revision "$TARGET_REVISION" \
+              --query properties.healthState \
+              --output tsv 2>/dev/null || true)"
+
+            ready_status="000"
+            if test -n "$target_fqdn"; then
+              ready_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+                --max-time 20 \
+                -H 'Cache-Control: no-cache' \
+                "https://$target_fqdn/api/v1/health/ready" || true)"
+            fi
+
+            if test "$health_state" = "Healthy" -a "$ready_status" = "200"; then
+              target_ready=true
               break
             fi
-            echo "Core API has not reported deployment $DEPLOY_SHA yet; retrying ($attempt/36)..."
+
+            echo "Candidate migration/readiness gate: health=${health_state:-unknown}, HTTP=$ready_status; waiting ($attempt/72)..."
+            sleep 10
+          done
+
+          test "$target_ready" = "true"
+          test -n "$target_fqdn"
+          echo "TARGET_REVISION_FQDN=$target_fqdn" >> "$GITHUB_ENV"
+          echo "Candidate startup migration completed and revision is SQL-ready at $target_fqdn."
+
+      - name: Smoke test candidate revision directly
+        run: |
+          set -euo pipefail
+
+          traffic_weight="$(az containerapp revision show \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision "$TARGET_REVISION" \
+            --query properties.trafficWeight \
+            --output tsv)"
+          test "${traffic_weight:-0}" = "0"
+
+          health="$(curl --fail --silent --show-error --max-time 30 \
+            -H 'Cache-Control: no-cache' \
+            "https://$TARGET_REVISION_FQDN/api/v1/health?deployment=$DEPLOY_SHA")"
+          echo "$health" | grep --quiet "$DEPLOY_SHA"
+
+          ready_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 \
+            "https://$TARGET_REVISION_FQDN/api/v1/health/ready")"
+          test "$ready_status" = "200"
+
+          auth_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 \
+            "https://$TARGET_REVISION_FQDN/api/v1/customers")"
+          test "$auth_status" = "401" -o "$auth_status" = "403"
+
+      - name: Route 10% canary traffic and observe for two minutes
+        run: |
+          set -euo pipefail
+
+          az containerapp ingress traffic set \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision-weight "$PREVIOUS_REVISION=90" "$TARGET_REVISION=10"
+
+          echo "CANARY_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          echo "Candidate $TARGET_REVISION is receiving 10% production traffic for 120 seconds."
+          sleep 120
+
+      - name: Check canary revision health and error rate
+        run: |
+          set -euo pipefail
+
+          health_state="$(az containerapp revision show \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision "$TARGET_REVISION" \
+            --query properties.healthState \
+            --output tsv)"
+          test "$health_state" = "Healthy"
+
+          ready_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 \
+            "https://$TARGET_REVISION_FQDN/api/v1/health/ready")"
+          test "$ready_status" = "200"
+
+          canary_end="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          total_metrics="$(az monitor metrics list \
+            --resource "$CONTAINER_APP_RESOURCE_ID" \
+            --metric Requests \
+            --interval PT1M \
+            --aggregation Total \
+            --start-time "$CANARY_START" \
+            --end-time "$canary_end" \
+            --filter "revisionName eq '$TARGET_REVISION' and statusCodeCategory eq '*'" \
+            --output json)"
+
+          error_metrics="$(az monitor metrics list \
+            --resource "$CONTAINER_APP_RESOURCE_ID" \
+            --metric Requests \
+            --interval PT1M \
+            --aggregation Total \
+            --start-time "$CANARY_START" \
+            --end-time "$canary_end" \
+            --filter "revisionName eq '$TARGET_REVISION' and statusCodeCategory eq '5xx'" \
+            --output json)"
+
+          total_requests="$(jq '[.value[].timeseries[].data[] | (.total // 0)] | add // 0' <<<"$total_metrics")"
+          error_requests="$(jq '[.value[].timeseries[].data[] | (.total // 0)] | add // 0' <<<"$error_metrics")"
+
+          if awk -v total="$total_requests" 'BEGIN { exit !(total > 0) }'; then
+            error_rate="$(awk -v errors="$error_requests" -v total="$total_requests" 'BEGIN { printf "%.4f", (errors / total) * 100 }')"
+          else
+            error_rate="0.0000"
+            echo "No production requests were observed on the 10% candidate during this low-traffic window; revision health and direct readiness remain mandatory."
+          fi
+
+          echo "Canary requests=$total_requests, 5xx=$error_requests, 5xx rate=${error_rate}% (maximum ${CANARY_MAX_5XX_RATE_PERCENT}%)."
+          awk -v rate="$error_rate" -v maximum="$CANARY_MAX_5XX_RATE_PERCENT" 'BEGIN { exit !(rate <= maximum) }'
+
+      - name: Promote candidate to 100% traffic
+        run: |
+          set -euo pipefail
+          az containerapp ingress traffic set \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision-weight "$PREVIOUS_REVISION=0" "$TARGET_REVISION=100"
+
+      - name: Final production smoke test
+        run: |
+          set -euo pipefail
+
+          for attempt in {1..18}; do
+            health="$(curl --fail --silent --show-error --max-time 30 \
+              -H 'Cache-Control: no-cache' \
+              "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health?deployment=$DEPLOY_SHA" || true)"
+            if echo "$health" | grep --quiet "$DEPLOY_SHA"; then break; fi
+            echo "Production FQDN has not reported deployment $DEPLOY_SHA yet; retrying ($attempt/18)..."
             sleep 10
           done
           echo "$health" | grep --quiet "$DEPLOY_SHA"
 
-          for attempt in {1..36}; do
-            status="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 15 "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/ready" || true)"
-            if test "$status" = "200"; then break; fi
-            echo "SQL readiness returned HTTP $status; retrying ($attempt/36)..."
-            sleep 10
-          done
-          test "$status" = "200"
+          ready_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 \
+            "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/ready")"
+          test "$ready_status" = "200"
 
-      - name: Verify operational routes fail closed
+          auth_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --max-time 20 \
+            "https://$AZURE_CONTAINER_APP_FQDN/api/v1/customers")"
+          test "$auth_status" = "401" -o "$auth_status" = "403"
+
+      - name: Roll back traffic on deployment failure
+        if: ${{ failure() && env.PREVIOUS_REVISION != '' && env.TARGET_REVISION != '' }}
         run: |
           set -euo pipefail
-          status="$(curl --silent --output /dev/null --write-out '%{http_code}' "https://$AZURE_CONTAINER_APP_FQDN/api/v1/customers")"
-          test "$status" = "401" -o "$status" = "403"
+          echo "Deployment failed. Restoring $PREVIOUS_REVISION to 100% and setting $TARGET_REVISION to 0%."
+
+          az containerapp revision activate \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision "$PREVIOUS_REVISION" \
+            || true
+
+          az containerapp ingress traffic set \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision-weight "$PREVIOUS_REVISION=100" "$TARGET_REVISION=0"
+
+          az containerapp ingress traffic show \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --output table
