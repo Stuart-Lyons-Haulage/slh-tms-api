@@ -39,7 +39,7 @@ public sealed class EtaRecalculationJob(
                 ReadString(record, "source") ?? "Unavailable",
                 ReadString(record, "risk") ?? "Pending",
                 ReadString(record, "tachoStatus") ?? "Unavailable",
-                ReadInt(record, "breakDelayMinutes"),
+                ReadInt(record, "breakMinutesIncluded"),
                 ReadDate(record, "trackingUpdatedAtUtc")));
         }
 
