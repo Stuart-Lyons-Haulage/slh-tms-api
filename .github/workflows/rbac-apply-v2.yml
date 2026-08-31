@@ -1,0 +1,29 @@
+name: Apply RBAC source transformation
+
+on:
+  push:
+    branches:
+      - feature/entra-rbac
+    paths:
+      - .github/workflows/rbac-apply-v2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/entra-rbac
+          fetch-depth: 0
+      - name: Apply guarded RBAC changes
+        run: python tools/apply-rbac.py
+      - name: Commit application changes
+        run: |
+          git config user.name "slh-tms-rbac-bot"
+          git config user.email "slh-tms-rbac-bot@users.noreply.github.com"
+          git add Program.cs Authorization Controllers Slh.Tms.Api.Tests
+          git commit -m "Implement Entra role-based TMS authorization"
+          git push origin HEAD:feature/entra-rbac
