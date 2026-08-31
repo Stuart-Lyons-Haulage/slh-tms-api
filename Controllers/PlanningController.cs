@@ -37,7 +37,7 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         }
     }
 
-    [HttpGet("loads"), AllowAnonymous]
+    [HttpGet("loads"), Authorize(Policy = "TmsAccess")]
     public async Task<IActionResult> Loads([FromQuery] DateOnly? date, CancellationToken ct)
     {
         if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();

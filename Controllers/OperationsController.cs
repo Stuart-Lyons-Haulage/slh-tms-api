@@ -19,7 +19,7 @@ public sealed class OperationsController(
     ILogger<OperationsController> logger,
     IConfiguration configuration) : ControllerBase
 {
-    [HttpGet("delivery-etas"), AllowAnonymous]
+    [HttpGet("delivery-etas"), Authorize(Policy = "TmsAccess")]
     public async Task<IActionResult> DeliveryEtas([FromQuery] DateOnly? date, CancellationToken ct)
     {
         if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();

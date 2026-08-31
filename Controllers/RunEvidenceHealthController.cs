@@ -21,7 +21,7 @@ public sealed class RunEvidenceHealthController(
     ILogger<RunEvidenceHealthController> logger,
     IConfiguration configuration) : ControllerBase
 {
-    [HttpGet, AllowAnonymous]
+    [HttpGet, Authorize(Policy = "TmsAccess")]
     public async Task<IActionResult> Get([FromQuery] DateOnly? date, CancellationToken ct)
     {
         if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();

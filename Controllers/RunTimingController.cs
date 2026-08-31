@@ -22,7 +22,7 @@ public sealed class RunTimingController(
     IConfiguration configuration,
     ILogger<RunTimingController> logger) : ControllerBase
 {
-    [HttpGet, AllowAnonymous]
+    [HttpGet, Authorize(Policy = "TmsAccess")]
     public async Task<IActionResult> Get(
         [FromHeader(Name = "X-TV-Display-Key")] string? displayKey,
         [FromQuery] DateOnly? date,

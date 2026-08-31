@@ -12,7 +12,7 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize]
 public sealed class DriverPlanningController(TmsDbContext db, IConfiguration configuration) : ControllerBase
 {
-    [HttpGet("driver-assignments"), AllowAnonymous]
+    [HttpGet("driver-assignments"), Authorize(Policy = "TmsAccess")]
     public async Task<IActionResult> Assignments([FromQuery] DateOnly? from, [FromQuery] DateOnly? to, CancellationToken ct)
     {
         if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();

@@ -21,7 +21,7 @@ public sealed class RunProgressController(
     private static readonly TimeSpan LiveRefreshBudget = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan LiveTrackingThreshold = TimeSpan.FromMinutes(5);
 
-    [HttpGet, AllowAnonymous]
+    [HttpGet, Authorize(Policy = "TmsAccess")]
     public async Task<IActionResult> Get([FromQuery] DateOnly? date, CancellationToken ct)
     {
         if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
