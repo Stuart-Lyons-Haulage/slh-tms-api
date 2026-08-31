@@ -63,6 +63,7 @@ builder.Services.AddScoped<TachoDriverMasterSyncService>();
 builder.Services.AddScoped<DriverMasterClassificationService>();
 builder.Services.AddScoped<TachoCanonicalDriverMasterOrchestrator>();
 builder.Services.AddScoped<TachoMasterScheduledJob>();
+builder.Services.AddScoped<SageHrScheduledJob>();
 builder.Services.AddScoped<EtaRecalculationJob>();
 builder.Services.AddScoped<ScheduledJobRunner>();
 
@@ -83,11 +84,8 @@ var exitCode = jobKind switch
         var result = await services.GetRequiredService<IntegrationSyncCoordinator>().SyncFleetioAsync("system:aca-job:fleetio", ct);
         return new JobExecutionResult(result.Success, result.Message, result.Changed);
     }, shutdown.Token),
-    "sagehr" => await runner.RunAsync("SageHR", "job:sagehr", TimeSpan.FromMinutes(45), async ct =>
-    {
-        var result = await services.GetRequiredService<IntegrationSyncCoordinator>().SyncSageHrAsync("system:aca-job:sagehr", ct);
-        return new JobExecutionResult(result.Success, result.Message, result.Changed);
-    }, shutdown.Token),
+    "sagehr" => await runner.RunAsync("SageHR", "job:sagehr", TimeSpan.FromMinutes(45),
+        services.GetRequiredService<SageHrScheduledJob>().RunAsync, shutdown.Token),
     "eta" => await runner.RunAsync("ETARecalculation", "job:eta-recalculation", TimeSpan.FromMinutes(10),
         services.GetRequiredService<EtaRecalculationJob>().RunAsync, shutdown.Token),
     _ => throw new InvalidOperationException($"Unsupported TMS_JOB_KIND '{jobKind}'. Expected tachomaster, fleetio, sagehr or eta.")
