@@ -6,7 +6,7 @@ The API no longer owns the TachoMaster, Fleetio or Sage HR timers. `Slh.Tms.Jobs
 | --- | --- | --- |
 | `tachomaster` | `*/5 * * * *` | Five-minute Tacho identity refresh. At/after 04:30 Europe/London it runs the full canonical Driver Master once per local day. |
 | `fleetio` | `5 * * * *` | Hourly canonical fleet/trailer sync. |
-| `sagehr` | `30 5 * * *` | Daily Sage HR driver sync. Container Apps cron is UTC; adjust if a fixed UK wall-clock time is required across DST. |
+| `sagehr` | `30 4,5 * * *` | Fires at both possible UTC equivalents of 05:30 Europe/London. The job checks the durable `sagehrsync` ledger and executes only once per London date, preserving the 05:30 local schedule across BST/GMT. |
 | `eta` | `*/5 * * * *` | Recalculate delivery ETAs through the existing live ETA engine and persist precision snapshots. |
 
 Every execution first acquires a SQL row in `dbo.DistributedLease`. The row contains `LeaseId`, `AcquiredAt`, `ExpiresAt` and `InstanceId`. Acquisition uses a serializable transaction and `UPDLOCK/HOLDLOCK`; a crashed execution becomes eligible after `ExpiresAt`. Normal completion and failure release only the row owned by that instance.
@@ -14,6 +14,8 @@ Every execution first acquires a SQL row in `dbo.DistributedLease`. The row cont
 There are two lease layers by design. The outer `job:*` lease suppresses duplicate Container Apps Job executions. Integration service methods also use `integration:*` leases so a manual API sync cannot overlap the scheduled job after the process-local `SemaphoreSlim` gates are removed.
 
 The Tacho job keeps the historical 04:30 Europe/London canonical pass without a second in-process timer: the five-minute job checks the durable orchestration ledger and runs the canonical pass only when one successful pass has not yet completed for the current London date.
+
+Container Apps scheduled-job cron expressions are evaluated in UTC. The Sage job therefore uses two UTC trigger times plus the durable local-date guard instead of relying on a fixed UTC hour.
 
 Build the jobs image with:
 
