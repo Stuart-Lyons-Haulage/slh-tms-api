@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
@@ -62,6 +63,12 @@ public sealed class OrderReviewSiteMatchTests : IClassFixture<CustomWebFactory>
         var geofence = await verifyDb.SiteGeofences.SingleAsync(row => row.Id == geofenceId);
         Assert.Equal(siteId, geofence.SiteId);
         Assert.Equal("SITE-ALIAS", geofence.SiteNumber);
-        Assert.Contains(verifyDb.MasterDataAudits, row => row.EntityType == "Geofence" && row.EntityId == geofenceId && row.Action == "DeliveryImportSiteConfirmed");
+
+        var auditProcessor = new AuditOutboxProcessor(verifyDb, NullLogger<AuditOutboxProcessor>.Instance);
+        await auditProcessor.ProcessPendingAsync(CancellationToken.None);
+        Assert.True(await verifyDb.MasterDataAudits.AnyAsync(row =>
+            row.EntityType == "Geofence"
+            && row.EntityId == geofenceId
+            && row.Action == "DeliveryImportSiteConfirmed"));
     }
 }
