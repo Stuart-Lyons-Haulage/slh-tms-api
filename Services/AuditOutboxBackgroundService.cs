@@ -97,6 +97,8 @@ public sealed class AuditOutboxProcessor(
         if (item is null || item.ProcessedAt is not null || item.FailedAt is not null)
             return false;
 
+        Guid? auditId = null;
+
         try
         {
             if (!string.Equals(item.EventType, AuditOutboxEventTypes.MasterDataAudit, StringComparison.Ordinal))
@@ -104,6 +106,7 @@ public sealed class AuditOutboxProcessor(
 
             var audit = JsonSerializer.Deserialize<MasterDataAudit>(item.Payload)
                 ?? throw new InvalidOperationException("Audit outbox payload deserialised to null.");
+            auditId = audit.Id;
 
             var alreadyWritten = await db.MasterDataAudits
                 .AsNoTracking()
@@ -120,6 +123,20 @@ public sealed class AuditOutboxProcessor(
         {
             logger.LogWarning(ex, "Audit outbox event {OutboxId} failed to replay.", outboxId);
             db.ChangeTracker.Clear();
+
+            // Another API replica may have committed the same deterministic audit Id after
+            // this worker checked for it. Treat that as successful idempotent replay rather
+            // than consuming retries on a duplicate primary-key insert.
+            if (auditId.HasValue && await db.MasterDataAudits.AsNoTracking().AnyAsync(x => x.Id == auditId.Value, ct))
+            {
+                var concurrentlyProcessed = await db.AuditOutboxes.SingleOrDefaultAsync(x => x.OutboxId == outboxId, ct);
+                if (concurrentlyProcessed is not null && concurrentlyProcessed.ProcessedAt is null)
+                {
+                    concurrentlyProcessed.ProcessedAt = DateTimeOffset.UtcNow;
+                    await db.SaveAuditReplayChangesAsync(ct);
+                }
+                return true;
+            }
 
             var failed = await db.AuditOutboxes.SingleOrDefaultAsync(x => x.OutboxId == outboxId, ct);
             if (failed is null || failed.ProcessedAt is not null || failed.FailedAt is not null)
