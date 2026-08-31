@@ -46,6 +46,9 @@ jobs:
       - name: Build scheduled Jobs project (Release)
         run: dotnet build Slh.Tms.Jobs/Slh.Tms.Jobs.csproj --configuration Release --no-restore
 
+      - name: Validate Container Apps Jobs Bicep
+        run: az bicep build --file infra/container-app-jobs.bicep --stdout > /dev/null
+
       - name: Run tests
         run: dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --no-restore
 
