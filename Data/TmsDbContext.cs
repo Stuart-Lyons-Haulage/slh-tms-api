@@ -126,7 +126,6 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
 
         b.Entity<AuditOutbox>().ToTable("AuditOutbox");
         b.Entity<AuditOutbox>().HasKey(x => x.OutboxId);
-        b.Entity<AuditOutbox>().Property(x => x.Payload).HasColumnType("nvarchar(max)");
         b.Entity<AuditOutbox>()
             .HasIndex(x => new { x.ProcessedAt, x.FailedAt, x.CreatedAt })
             .HasDatabaseName("IX_AuditOutbox_Pending");
