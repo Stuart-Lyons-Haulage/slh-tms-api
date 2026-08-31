@@ -18,23 +18,12 @@ jobs:
         with:
           ref: feature/entra-rbac
           fetch-depth: 0
-      - name: Align guarded transform with current Program.cs
-        shell: python
-        run: |
-          from pathlib import Path
-          p = Path('tools/apply-rbac.py')
-          text = p.read_text(encoding='utf-8')
-          old = "anchor = '''    options.Authority = issuer;\n    options.Audience = audience;'''\nreplacement = '''    options.Authority = issuer;\n    options.Audience = audience;\n    options.MapInboundClaims = false;'''"
-          new = "anchor = '''    o.Authority = $\"https://login.microsoftonline.com/{tenantId}/v2.0\";'''\nreplacement = '''    o.Authority = $\"https://login.microsoftonline.com/{tenantId}/v2.0\";\n    o.MapInboundClaims = false;'''"
-          if text.count(old) != 1:
-              raise SystemExit('Expected outdated JWT transform anchor not found exactly once')
-          p.write_text(text.replace(old, new), encoding='utf-8')
-      - name: Apply guarded RBAC changes
-        run: python tools/apply-rbac.py
-      - name: Commit application changes
+      - name: Harden operational anonymous endpoints
+        run: python tools/harden-rbac-anonymous.py
+      - name: Commit endpoint authorisation changes
         run: |
           git config user.name "slh-tms-rbac-bot"
           git config user.email "slh-tms-rbac-bot@users.noreply.github.com"
-          git add Program.cs Authorization Controllers Slh.Tms.Api.Tests
-          git commit -m "Implement Entra role-based TMS authorization"
+          git add Controllers
+          git commit -m "Require TmsAccess for operational data feeds"
           git push origin HEAD:feature/entra-rbac
