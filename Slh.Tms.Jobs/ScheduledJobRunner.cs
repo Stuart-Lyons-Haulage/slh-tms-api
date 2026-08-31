@@ -16,19 +16,25 @@ public sealed class ScheduledJobRunner(DistributedLeaseManager leases, ILogger<S
     {
         var instanceId = $"{Environment.MachineName}:{Environment.ProcessId}";
         var started = DateTimeOffset.UtcNow;
-        await using var lease = await leases.TryAcquireAsync(leaseId, leaseDuration, ct);
-        if (lease is null)
-        {
-            logger.LogInformation("ScheduledJobSkippedLeaseHeld JobName={JobName} LeaseId={LeaseId} InstanceId={InstanceId}", jobName, leaseId, instanceId);
-            return 0;
-        }
 
-        logger.LogInformation("ScheduledJobStarted JobName={JobName} LeaseId={LeaseId} InstanceId={InstanceId} StartedAtUtc={StartedAtUtc}",
-            jobName, leaseId, instanceId, started);
         try
         {
+            await using var lease = await leases.TryAcquireAsync(leaseId, leaseDuration, ct);
+            if (lease is null)
+            {
+                logger.LogInformation(
+                    "ScheduledJobSkippedLeaseHeld JobName={JobName} LeaseId={LeaseId} InstanceId={InstanceId}",
+                    jobName, leaseId, instanceId);
+                return 0;
+            }
+
+            logger.LogInformation(
+                "ScheduledJobStarted JobName={JobName} LeaseId={LeaseId} InstanceId={InstanceId} StartedAtUtc={StartedAtUtc}",
+                jobName, leaseId, instanceId, started);
+
             var result = await action(ct);
             if (!result.Success) throw new InvalidOperationException(result.Message);
+
             logger.LogInformation(
                 "ScheduledJobCompleted JobName={JobName} LeaseId={LeaseId} InstanceId={InstanceId} StartedAtUtc={StartedAtUtc} CompletedAtUtc={CompletedAtUtc} Changed={Changed} Message={Message}",
                 jobName, leaseId, instanceId, started, DateTimeOffset.UtcNow, result.Changed, result.Message);
@@ -36,7 +42,9 @@ public sealed class ScheduledJobRunner(DistributedLeaseManager leases, ILogger<S
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            logger.LogWarning("ScheduledJobCancelled JobName={JobName} LeaseId={LeaseId} InstanceId={InstanceId}", jobName, leaseId, instanceId);
+            logger.LogWarning(
+                "ScheduledJobCancelled JobName={JobName} LeaseId={LeaseId} InstanceId={InstanceId} StartedAtUtc={StartedAtUtc} CancelledAtUtc={CancelledAtUtc}",
+                jobName, leaseId, instanceId, started, DateTimeOffset.UtcNow);
             return 2;
         }
         catch (Exception ex)
