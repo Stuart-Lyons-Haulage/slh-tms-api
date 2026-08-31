@@ -36,7 +36,9 @@ param tmsApiBaseUrl string = 'https://slh-tms-api-prod.gentlepond-08dba66b.uksou
 var jobs = [
   { name: 'slh-tms-job-tachomaster', kind: 'tachomaster', cron: '*/5 * * * *', timeout: 4200 }
   { name: 'slh-tms-job-fleetio', kind: 'fleetio', cron: '5 * * * *', timeout: 3300 }
-  { name: 'slh-tms-job-sagehr', kind: 'sagehr', cron: '30 5 * * *', timeout: 2700 }
+  // ACA Job cron is UTC. Trigger both possible UTC equivalents of 05:30 Europe/London;
+  // SageHrScheduledJob uses the durable sagehrsync ledger and executes only once per London date.
+  { name: 'slh-tms-job-sagehr', kind: 'sagehr', cron: '30 4,5 * * *', timeout: 2700 }
   { name: 'slh-tms-job-eta', kind: 'eta', cron: '*/5 * * * *', timeout: 600 }
 ]
 
