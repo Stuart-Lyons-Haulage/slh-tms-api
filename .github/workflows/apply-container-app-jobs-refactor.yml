@@ -6,6 +6,7 @@ on:
       - feature/container-app-integration-jobs
     paths:
       - scripts/apply-container-app-jobs-refactor.py
+      - scripts/fix-container-app-jobs-usings.py
       - .github/workflows/apply-container-app-jobs-refactor.yml
 
 permissions:
@@ -23,7 +24,9 @@ jobs:
         with:
           dotnet-version: '8.0.x'
       - name: Apply guarded refactor
-        run: python scripts/apply-container-app-jobs-refactor.py
+        run: |
+          python scripts/apply-container-app-jobs-refactor.py
+          python scripts/fix-container-app-jobs-usings.py
       - name: Restore and build API, jobs and tests
         run: |
           dotnet restore Slh.Tms.Api.csproj
@@ -37,7 +40,7 @@ jobs:
           git config user.name "slh-tms-jobs-bot"
           git config user.email "slh-tms-jobs-bot@users.noreply.github.com"
           git add -A
-          git reset .github/workflows/apply-container-app-jobs-refactor.yml scripts/apply-container-app-jobs-refactor.py
+          git reset .github/workflows/apply-container-app-jobs-refactor.yml scripts/apply-container-app-jobs-refactor.py scripts/fix-container-app-jobs-usings.py
           if git diff --cached --quiet; then
             echo "No source changes to commit."
             exit 0
