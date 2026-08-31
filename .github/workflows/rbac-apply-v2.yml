@@ -1,4 +1,4 @@
-name: Apply RBAC source transformation
+name: Validate Entra RBAC
 
 on:
   push:
@@ -8,22 +8,34 @@ on:
       - .github/workflows/rbac-apply-v2.yml
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  apply:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: feature/entra-rbac
-          fetch-depth: 0
-      - name: Harden operational anonymous endpoints
-        run: python tools/harden-rbac-anonymous.py
-      - name: Commit endpoint authorisation changes
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Restore
         run: |
-          git config user.name "slh-tms-rbac-bot"
-          git config user.email "slh-tms-rbac-bot@users.noreply.github.com"
-          git add Controllers
-          git commit -m "Require TmsAccess for operational data feeds"
-          git push origin HEAD:feature/entra-rbac
+          dotnet restore Slh.Tms.Api.csproj
+          dotnet restore Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj
+      - name: Build API
+        run: dotnet build Slh.Tms.Api.csproj --configuration Release --no-restore
+      - name: Run tests
+        run: dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --no-restore
+      - name: RBAC static assertions
+        shell: bash
+        run: |
+          grep -q 'RoleClaimType = "roles"' Program.cs
+          grep -q 'options.AddPolicy(TmsPolicies.Dispatch' Program.cs
+          grep -q 'options.AddPolicy(TmsPolicies.MasterData' Program.cs
+          grep -q 'options.AddPolicy(TmsPolicies.Admin' Program.cs
+          ! grep -q 'options.AddPolicy("TmsWrite", tmsAccessPolicy)' Program.cs
+          grep -R 'TmsDispatch' Controllers >/dev/null
+          grep -R 'TmsMasterData' Controllers >/dev/null
+          grep -R 'TmsAdmin' Controllers >/dev/null
