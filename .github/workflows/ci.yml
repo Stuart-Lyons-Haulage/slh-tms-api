@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: api-ci-${{ github.ref }}
@@ -20,118 +20,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.ref || github.ref }}
-
-      - name: One-shot E2E contract repair
-        if: ${{ github.event_name == 'pull_request' && github.head_ref == 'feature/e2e-regression-tests' }}
-        shell: python
-        run: |
-          from pathlib import Path
-
-          test = Path('Slh.Tms.Api.Tests/EndToEndWorkflowTests.cs')
-          text = test.read_text()
-          text = text.replace('using Microsoft.Extensions.DependencyInjection;\n', 'using Microsoft.Extensions.Configuration;\nusing Microsoft.Extensions.DependencyInjection;\n')
-          text = text.replace('            Assert.Equal(4m, run.PalletSpacesUsed);\n', '')
-          old = '''        var complete = await PutJson(client, $"/api/v1/loads/{loadId}/status", new { status = "Completed" });
-        Assert.Equal(HttpStatusCode.OK, complete.StatusCode);
-
-        using (var scope = factory.Services.CreateScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-            var persisted = await db.Loads.SingleAsync(x => x.Id == loadId);
-            Assert.Equal(monday, persisted.PlanningDate);
-            Assert.Equal(LoadStatus.Completed, persisted.Status);
-        }
-'''
-          new = '''        var completionAtUtc = new DateTimeOffset(2026, 9, 7, 1, 45, 0, TimeSpan.Zero);
-        using (var scope = factory.Services.CreateScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-            db.DriverStatusLogs.Add(new DriverStatusLog
-            {
-                LoadId = loadId,
-                DriverId = driverId,
-                Status = RunCompletionPersistenceGuard.CompletionEvidenceStatus,
-                Notes = "E2E final geofence departure evidence",
-                CapturedBy = "e2e",
-                CapturedAtUtc = completionAtUtc
-            });
-            await db.SaveChangesAsync();
-        }
-
-        var complete = await PutJson(client, $"/api/v1/loads/{loadId}/status", new { status = "Completed" });
-        Assert.Equal(HttpStatusCode.OK, complete.StatusCode);
-
-        using (var scope = factory.Services.CreateScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-            var persisted = await db.Loads.SingleAsync(x => x.Id == loadId);
-            var completion = await db.DriverStatusLogs.SingleAsync(x => x.LoadId == loadId && x.Status == RunCompletionPersistenceGuard.CompletionEvidenceStatus);
-            var london = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
-            Assert.Equal(monday, persisted.PlanningDate);
-            Assert.Equal(LoadStatus.Completed, persisted.Status);
-            Assert.Equal(monday, DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(completion.CapturedAtUtc, london).DateTime));
-        }
-'''
-          if old in text:
-              text = text.replace(old, new)
-          old = '''        await using var unavailableFactory = factory.WithWebHostBuilder(builder =>
-        {
-            builder.ConfigureTestServices(services =>
-'''
-          new = '''        await using var unavailableFactory = factory.WithWebHostBuilder(builder =>
-        {
-            builder.ConfigureAppConfiguration(configuration =>
-            {
-                configuration.AddInMemoryCollection(new Dictionary<string, string?>
-                {
-                    ["TvWallboard:AccessKey"] = "test-tv-wallboard-key-20260824"
-                });
-            });
-            builder.ConfigureTestServices(services =>
-'''
-          if old in text:
-              text = text.replace(old, new)
-          text = text.replace('''        var client = unavailableFactory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-TV-Display-Key", "test-tv-wallboard-key-20260824");
-''', '''        var client = unavailableFactory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-Test-User", "planner@lyonshaulage.com");
-        client.DefaultRequestHeaders.Add("X-TV-Display-Key", "test-tv-wallboard-key-20260824");
-''')
-          test.write_text(text)
-
-          progress = Path('Controllers/RunProgressController.cs')
-          text = progress.read_text()
-          marker = '''                source = "PlanningResilience+RoadTechCurrent+SiteMasterSqlGeofences+DurableGeofenceVisits",
-                geofenceAvailable = activeGeofenceCount > 0,
-'''
-          if marker in text:
-              text = text.replace(marker, '''                source = "PlanningResilience+RoadTechCurrent+SiteMasterSqlGeofences+DurableGeofenceVisits",
-                trackingState = refreshWarning is null ? "Available" : "Unavailable",
-                geofenceAvailable = activeGeofenceCount > 0,
-''', 1)
-          marker = '''                source = "PlanningResilience+StoredLiveSafeFallback",
-                geofenceAvailable = geofenceCount > 0,
-'''
-          if marker in text:
-              text = text.replace(marker, '''                source = "PlanningResilience+StoredLiveSafeFallback",
-                trackingState = "Unavailable",
-                geofenceAvailable = geofenceCount > 0,
-''', 1)
-          progress.write_text(text)
-
-      - name: Commit one-shot repair
-        if: ${{ github.event_name == 'pull_request' && github.head_ref == 'feature/e2e-regression-tests' }}
-        run: |
-          git config user.name 'danwilliams201302-max'
-          git config user.email 'daniel@lyonshaulage.com'
-          git add Slh.Tms.Api.Tests/EndToEndWorkflowTests.cs Controllers/RunProgressController.cs
-          if ! git diff --cached --quiet; then
-            git commit -m 'Harden E2E workflow contracts'
-            git push origin HEAD:feature/e2e-regression-tests
-            exit 0
-          fi
 
       - name: Setup .NET 8 SDK
         uses: actions/setup-dotnet@v4
