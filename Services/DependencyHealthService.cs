@@ -36,7 +36,7 @@ public sealed class DependencyHealthService(
                 ["RoadTech"] = new("Unavailable", null, null, "Freshness could not be read because SQL is unavailable."),
                 ["Fleetio"] = new("Unavailable", null, null, "Freshness could not be read because SQL is unavailable."),
                 ["TachoMaster"] = new("Unavailable", null, null, "Freshness could not be read because SQL is unavailable."),
-                ["SageHR"] = new("Unavailable", null, null, "Freshness could not be read because SQL is unavailable.")
+                ["Sage HR"] = new("Unavailable", null, null, "Freshness could not be read because SQL is unavailable.")
             };
             return new(now, "Unavailable", unavailable);
         }
@@ -52,7 +52,7 @@ public sealed class DependencyHealthService(
             .MaxAsync(item => (DateTimeOffset?)(item.ReviewedAtUtc ?? item.ReceivedAtUtc), ct), "TachoMaster", ct);
         var sageUtc = await SafeTimestamp(async () => await db.StagedImports.AsNoTracking()
             .Where(item => item.EntityType == "sagehrsync" && item.Status == StagingStatus.Promoted)
-            .MaxAsync(item => (DateTimeOffset?)(item.ReviewedAtUtc ?? item.ReceivedAtUtc), ct), "SageHR", ct);
+            .MaxAsync(item => (DateTimeOffset?)(item.ReviewedAtUtc ?? item.ReceivedAtUtc), ct), "Sage HR", ct);
 
         var dependencies = new Dictionary<string, DependencyState>(StringComparer.OrdinalIgnoreCase)
         {
@@ -60,7 +60,7 @@ public sealed class DependencyHealthService(
             ["RoadTech"] = Evaluate(dot.IsConfigured, roadTechUtc, now, TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(15)),
             ["Fleetio"] = Evaluate(fleetio.IsConfigured, fleetioUtc, now, TimeSpan.FromMinutes(90), TimeSpan.FromHours(3)),
             ["TachoMaster"] = Evaluate(tacho.IsConfigured, tachoUtc, now, TimeSpan.FromMinutes(15), TimeSpan.FromHours(1)),
-            ["SageHR"] = Evaluate(sage.IsConfigured, sageUtc, now, TimeSpan.FromHours(30), TimeSpan.FromHours(48))
+            ["Sage HR"] = Evaluate(sage.IsConfigured, sageUtc, now, TimeSpan.FromHours(30), TimeSpan.FromHours(48))
         };
 
         var overall = dependencies.Values.Any(item => item.Status == "Unavailable")
