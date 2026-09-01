@@ -1,0 +1,44 @@
+name: Apply OpenTelemetry refactor
+
+on:
+  push:
+    branches:
+      - feature/opentelemetry-app-insights
+    paths:
+      - scripts/apply-opentelemetry-refactor.py
+      - .github/workflows/apply-opentelemetry-refactor.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/opentelemetry-app-insights
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Apply guarded telemetry refactor
+        run: python scripts/apply-opentelemetry-refactor.py
+      - name: Restore, build and test
+        run: |
+          dotnet restore Slh.Tms.Api.csproj
+          dotnet restore Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj
+          dotnet build Slh.Tms.Api.csproj --configuration Release --no-restore
+          dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release --no-restore
+      - name: Commit telemetry implementation
+        run: |
+          git config user.name "slh-tms-telemetry-bot"
+          git config user.email "slh-tms-telemetry-bot@users.noreply.github.com"
+          git add -A
+          git reset .github/workflows/apply-opentelemetry-refactor.yml scripts/apply-opentelemetry-refactor.py
+          if git diff --cached --quiet; then
+            echo "No source changes to commit."
+            exit 0
+          fi
+          git commit -m "Add OpenTelemetry operational telemetry"
+          git push origin HEAD:feature/opentelemetry-app-insights
