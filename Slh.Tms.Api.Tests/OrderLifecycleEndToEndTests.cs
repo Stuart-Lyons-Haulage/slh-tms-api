@@ -22,6 +22,7 @@ public sealed class OrderLifecycleEndToEndTests : IClassFixture<CustomWebFactory
         var suffix = Guid.NewGuid().ToString("N")[..10].ToUpperInvariant();
         var messageId = $"e2e-order-{suffix}";
         var po = $"E2E{suffix}";
+        var canonicalReference = $"{po}/LEYLAND";
         var planningDate = new DateOnly(2026, 9, 8);
 
         var intake = await PostJson(client, "/api/v1/order-intake/email", MailboxOrder(
@@ -39,7 +40,7 @@ public sealed class OrderLifecycleEndToEndTests : IClassFixture<CustomWebFactory
             Assert.Equal(StagingStatus.PendingReview, staged.Status);
             using var payload = JsonDocument.Parse(staged.PayloadJson);
             Assert.Equal(4, payload.RootElement.GetProperty("pallets").GetInt32());
-            Assert.Equal(po, payload.RootElement.GetProperty("poNumber").GetString());
+            Assert.Equal(canonicalReference, payload.RootElement.GetProperty("poNumber").GetString());
         }
 
         var approve = await PostJson(client, $"/api/v1/staging/{stagedId}/approve", new { note = "E2E lifecycle approval" });
@@ -50,7 +51,7 @@ public sealed class OrderLifecycleEndToEndTests : IClassFixture<CustomWebFactory
         {
             var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
             order = Assert.Single(await db.TransportOrders.Where(x => x.SourceStagedImportId == stagedId).ToListAsync());
-            Assert.Equal(po, order.Reference);
+            Assert.Equal(canonicalReference, order.Reference);
             Assert.Equal(4, order.Pallets);
             Assert.Equal(planningDate, order.CollectionDate);
         }
