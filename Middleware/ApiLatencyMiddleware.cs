@@ -25,10 +25,13 @@ public sealed class ApiLatencyMiddleware(RequestDelegate next)
             var route = (context.GetEndpoint() as RouteEndpoint)?.RoutePattern.RawText
                 ?? context.Request.Path.Value
                 ?? "unknown";
-            metrics.RecordApiEndpointLatency(elapsedMs, context.Request.Method, route, context.Response.StatusCode);
+            var statusCode = failed && context.Response.StatusCode < 400
+                ? StatusCodes.Status500InternalServerError
+                : context.Response.StatusCode;
+            metrics.RecordApiEndpointLatency(elapsedMs, context.Request.Method, route, statusCode);
 
             if (context.Request.Path.Equals("/api/v1/order-intake/email", StringComparison.OrdinalIgnoreCase))
-                metrics.RecordEmailOrderIntake(!failed && context.Response.StatusCode < 400);
+                metrics.RecordEmailOrderIntake(!failed && statusCode < 400);
         }
     }
 }
