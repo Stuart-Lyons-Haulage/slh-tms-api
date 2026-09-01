@@ -8,6 +8,11 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Azure.Monitor.OpenTelemetry.Exporter;
+using OpenTelemetry.Logs;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 using Slh.Tms.Api.Authorization;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models.Tracking;
@@ -22,6 +27,42 @@ var tenantId = builder.Configuration["Entra:TenantId"] ?? throw new InvalidOpera
 var audience = builder.Configuration["Entra:Audience"] ?? throw new InvalidOperationException("Entra:Audience is required");
 var allowedTmsDomains = builder.Configuration.GetSection("Entra:AllowedDomains").Get<string[]>() ?? ["lyonshaulage.com"];
 var deploymentRevision = builder.Configuration["Deployment:Revision"] ?? "local";
+var applicationInsightsConnectionString =
+    builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"] ??
+    builder.Configuration["ApplicationInsights:ConnectionString"];
+
+var openTelemetry = builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource => resource.AddService(
+        serviceName: "slh-tms-api",
+        serviceVersion: deploymentRevision));
+
+openTelemetry.WithTracing(tracing =>
+{
+    tracing
+        .AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation()
+        .AddSqlClientInstrumentation();
+    if (!string.IsNullOrWhiteSpace(applicationInsightsConnectionString))
+        tracing.AddAzureMonitorTraceExporter(options => options.ConnectionString = applicationInsightsConnectionString);
+});
+
+openTelemetry.WithMetrics(metrics =>
+{
+    metrics
+        .AddMeter(TmsMetrics.MeterName)
+        .AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation();
+    if (!string.IsNullOrWhiteSpace(applicationInsightsConnectionString))
+        metrics.AddAzureMonitorMetricExporter(options => options.ConnectionString = applicationInsightsConnectionString);
+});
+
+builder.Logging.AddOpenTelemetry(logging =>
+{
+    logging.IncludeFormattedMessage = true;
+    logging.IncludeScopes = true;
+    if (!string.IsNullOrWhiteSpace(applicationInsightsConnectionString))
+        logging.AddAzureMonitorLogExporter(options => options.ConnectionString = applicationInsightsConnectionString);
+});
 
 builder.Services.AddControllers().AddJsonOptions(options =>
 {
@@ -37,7 +78,13 @@ var allowedOrigins = configuredOrigins is { Length: > 0 } ? configuredOrigins : 
     "https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io"
 ];
 builder.Services.AddCors(options => options.AddPolicy("Portal", policy => policy.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod()));
-builder.Services.AddDbContext<TmsDbContext>(o => o.UseSqlServer(builder.Configuration.GetConnectionString("TmsDb")));
+builder.Services.AddSingleton(TmsMetrics.Shared);
+builder.Services.AddSingleton<SqlLatencyInterceptor>();
+builder.Services.AddScoped<DependencyHealthService>();
+builder.Services.AddHostedService<DependencyTelemetrySampler>();
+builder.Services.AddDbContext<TmsDbContext>((services, options) =>
+    options.UseSqlServer(builder.Configuration.GetConnectionString("TmsDb"))
+        .AddInterceptors(services.GetRequiredService<SqlLatencyInterceptor>()));
 builder.Services.AddScoped<StagingService>();
 builder.Services.AddSingleton<CustomerCommunicationExtractionService>();
 builder.Services.AddScoped<OrderIntakeLedgerService>();
@@ -215,6 +262,7 @@ if (!app.Environment.IsEnvironment("Testing"))
 
 app.UseHttpsRedirection();
 app.UseCors("Portal");
+app.UseMiddleware<Slh.Tms.Api.Middleware.ApiLatencyMiddleware>();
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseMiddleware<Slh.Tms.Api.Middleware.PlanningControlResilienceMiddleware>();

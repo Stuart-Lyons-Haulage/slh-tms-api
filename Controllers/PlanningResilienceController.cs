@@ -19,11 +19,16 @@ internal static class PlanningResilience
     public static async Task<List<Load>> ReadLoadsAsync(TmsDbContext db, DateOnly? date, CancellationToken ct)
     {
         var merged = new Dictionary<Guid, Load>();
+        var registeredLogicalKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         try
         {
             var registered = await PlanningRegisterStore.ReadLoadsAsync(db, date, ct);
-            foreach (var load in registered) merged[load.Id] = load;
+            foreach (var load in registered)
+            {
+                merged[load.Id] = load;
+                registeredLogicalKeys.Add(LogicalRunKey(load));
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -35,6 +40,8 @@ internal static class PlanningResilience
             var query = db.Loads.AsNoTracking().Include(x => x.Stops).AsQueryable();
             if (date is not null) query = query.Where(x => x.PlanningDate == date.Value);
             var live = await query.OrderBy(x => x.PlanningDate).ThenBy(x => x.Reference).Take(2000).ToListAsync(ct);
+            var relationalFallbacks = live.Count(load => !registeredLogicalKeys.Contains(LogicalRunKey(load)));
+            TmsMetrics.Shared.RecordPlanningRecovery(relationalFallbacks, "relational_loads");
             foreach (var load in live)
             {
                 if (merged.TryGetValue(load.Id, out var registered) && KeepRegisteredOverLiveTombstone(registered, load))
@@ -58,6 +65,7 @@ internal static class PlanningResilience
                 .Where(load => load.Status != LoadStatus.Cancelled)
                 .Select(LogicalRunKey)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var auditRecoveries = 0;
             foreach (var load in audited)
             {
                 var logicalKey = LogicalRunKey(load);
@@ -76,7 +84,9 @@ internal static class PlanningResilience
 
                 merged[load.Id] = load;
                 activeKeys.Add(logicalKey);
+                auditRecoveries++;
             }
+            TmsMetrics.Shared.RecordPlanningRecovery(auditRecoveries, "planner_audit");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -113,6 +123,7 @@ internal static class PlanningResilience
             if (candidates.Count == 0) continue;
 
             var preferred = candidates[0];
+            TmsMetrics.Shared.RecordLogicalDuplicateCollapse(candidates.Count - 1);
             foreach (var duplicate in candidates.Skip(1))
                 MergeMissingOperationalData(preferred, duplicate);
             result.Add(preferred);
@@ -185,7 +196,11 @@ internal static class PlanningResilience
         try
         {
             var live = await db.Loads.AsNoTracking().Include(x => x.Stops).SingleOrDefaultAsync(x => x.Id == id, ct);
-            if (live is not null) return live;
+            if (live is not null)
+            {
+                TmsMetrics.Shared.RecordPlanningRecovery(1, "relational_loads");
+                return live;
+            }
         }
         catch (Exception ex) when (SchemaUnavailable(ex))
         {
@@ -204,6 +219,7 @@ internal static class PlanningResilience
             {
                 db.ChangeTracker.Clear();
             }
+            TmsMetrics.Shared.RecordPlanningRecovery(1, "planner_audit");
             return recovered;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

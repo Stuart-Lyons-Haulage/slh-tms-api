@@ -36,13 +36,18 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
         if (IsExplicitZeroPalletOrder(request))
             return Ok(new { ignored = true, reason = "zero_pallet_order", message = "The source row has zero pallets and was retained as source evidence rather than staged as a transport order." });
         var existing = await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(x => x.IdempotencyKey == request.IdempotencyKey, ct);
-        if (existing is not null) return Ok(service.ToResponse(existing, Request));
+        if (existing is not null)
+        {
+            TmsMetrics.Shared.RecordImportBatch(1, 1, "staging_single");
+            return Ok(service.ToResponse(existing, Request));
+        }
         try
         {
             var item = service.Create(request);
             db.StagedImports.Add(item);
             db.StagedImportEvents.Add(StagingAudit.Create(item, "Received"));
             await db.SaveChangesAsync(ct);
+            TmsMetrics.Shared.RecordImportBatch(1, 0, "staging_single");
             return Accepted(service.ToResponse(item, Request));
         }
         catch (ArgumentException ex)
@@ -80,6 +85,7 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
                 }
             }
             await db.SaveChangesAsync(ct);
+            TmsMetrics.Shared.RecordImportBatch(filteredRequests.Count, existingCount, "staging_batch");
             return Accepted(new { received = requests.Count, existing = existingCount, created = responses.Count - existingCount, skippedZeroPallets, records = responses });
         }
         catch (ArgumentException ex)
