@@ -1,8 +1,8 @@
 name: Repair E2E regression tests
 
 on:
-  push:
-    branches: [feature/e2e-regression-tests]
+  pull_request:
+    branches: [main]
     paths:
       - '.github/workflows/e2e-regression-fix.yml'
 
@@ -11,11 +11,14 @@ permissions:
 
 jobs:
   repair:
+    if: ${{ github.head_ref == 'feature/e2e-regression-tests' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
+          repository: Stuart-Lyons-Haulage/slh-tms-api
           ref: feature/e2e-regression-tests
+          token: ${{ github.token }}
       - name: Apply E2E contract repairs
         shell: python
         run: |
