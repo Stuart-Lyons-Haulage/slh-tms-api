@@ -6,6 +6,7 @@ on:
       - feature/opentelemetry-app-insights
     paths:
       - scripts/apply-opentelemetry-refactor.py
+      - scripts/fix-opentelemetry-azure-identity.py
       - .github/workflows/apply-opentelemetry-refactor.yml
 
 permissions:
@@ -23,7 +24,9 @@ jobs:
         with:
           dotnet-version: '8.0.x'
       - name: Apply guarded telemetry refactor
-        run: python scripts/apply-opentelemetry-refactor.py
+        run: |
+          python scripts/apply-opentelemetry-refactor.py
+          python scripts/fix-opentelemetry-azure-identity.py
       - name: Restore, build and test
         run: |
           dotnet restore Slh.Tms.Api.csproj
@@ -35,7 +38,7 @@ jobs:
           git config user.name "slh-tms-telemetry-bot"
           git config user.email "slh-tms-telemetry-bot@users.noreply.github.com"
           git add -A
-          git reset .github/workflows/apply-opentelemetry-refactor.yml scripts/apply-opentelemetry-refactor.py
+          git reset .github/workflows/apply-opentelemetry-refactor.yml scripts/apply-opentelemetry-refactor.py scripts/fix-opentelemetry-azure-identity.py
           if git diff --cached --quiet; then
             echo "No source changes to commit."
             exit 0
