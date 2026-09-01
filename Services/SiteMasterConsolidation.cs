@@ -23,6 +23,7 @@ public static class SiteMasterConsolidation
     private const string LocationOnly = "LOCATION_ONLY";
     private const string SiteReviewType = "masterdata:site-review";
     private const string GeofenceReviewType = "masterdata:geofence-review";
+    private const string MergedDuplicateAction = "MergedDuplicate";
 
     public static async Task<SiteMasterConsolidationResult> ReconcileAsync(
         TmsDbContext db,
@@ -57,16 +58,17 @@ public static class SiteMasterConsolidation
         if (staleReviews.Count > 0)
             await db.SaveChangesAsync(ct);
 
-        // 1. Remove only high-confidence duplicate Sites. A duplicate group is auto-merged
-        // when exactly one record owns active geofences; otherwise it is left untouched.
+        // 1. Remove only high-confidence duplicate Sites. Aliases live in the audited
+        // master-detail register, so enrich Sites before comparing identities. A duplicate
+        // group is auto-merged only when exactly one member owns an active geofence.
+        // One Site's primary Name must exactly match another Site's Name/driver name/alias;
+        // shared alias-to-alias text alone is deliberately not enough to merge Sites.
         var activeSites = await db.Sites.Where(x => x.Active).ToListAsync(ct);
+        await MasterDetailStore.EnrichSitesAsync(db, activeSites, ct);
+
         var activeFences = await db.SiteGeofences.Where(x => x.Active).ToListAsync(ct);
-        foreach (var group in activeSites
-                     .Where(x => Normalize(x.Name).Length > 0)
-                     .GroupBy(x => Normalize(x.Name), StringComparer.OrdinalIgnoreCase)
-                     .Where(x => x.Count() > 1))
+        foreach (var rows in DuplicateGroups(activeSites))
         {
-            var rows = group.ToList();
             var fenceBacked = rows
                 .Where(site => activeFences.Any(fence => fence.SiteId == site.Id))
                 .ToList();
@@ -76,19 +78,47 @@ public static class SiteMasterConsolidation
                 var canonical = fenceBacked[0];
                 foreach (var duplicate in rows.Where(x => x.Id != canonical.Id))
                 {
-                    await AddSiteAliasesAsync(db, canonical,
-                        new[] { duplicate.ExternalCode, duplicate.Name, duplicate.DriverTextName }, source, ct);
+                    await AddSiteAliasesAsync(
+                        db,
+                        canonical,
+                        SiteNames(duplicate).Append(duplicate.ExternalCode),
+                        source,
+                        ct);
+
                     duplicate.Active = false;
+                    db.MasterDataAudits.Add(new MasterDataAudit
+                    {
+                        EntityType = "Site",
+                        EntityId = duplicate.Id,
+                        Action = MergedDuplicateAction,
+                        ChangedBy = source,
+                        ChangesJson = JsonSerializer.Serialize(new
+                        {
+                            canonicalSiteId = canonical.Id,
+                            canonicalSiteCode = canonical.ExternalCode,
+                            canonicalSiteName = canonical.Name,
+                            mergedSiteId = duplicate.Id,
+                            mergedSiteCode = duplicate.ExternalCode,
+                            mergedSiteName = duplicate.Name
+                        })
+                    });
                     archivedDuplicates++;
                 }
             }
             else
             {
-                await FlagReviewAsync(db, SiteReviewType, $"duplicate:{group.Key}", new
+                var reviewSuffix = string.Join(
+                    "-",
+                    rows.Select(x => x.Id.ToString("N")).OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
+                await FlagReviewAsync(db, SiteReviewType, $"duplicate:{reviewSuffix}", new
                 {
                     reason = "duplicate_site_identity_ambiguous",
-                    normalizedName = group.Key,
-                    candidates = rows.Select(x => new { x.Id, x.ExternalCode, x.Name, x.DriverTextName }).ToArray(),
+                    identityNames = rows.SelectMany(SiteNames)
+                        .Where(x => !string.IsNullOrWhiteSpace(x))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+                        .ToArray(),
+                    candidates = rows.Select(x => new { x.Id, x.ExternalCode, x.Name, x.DriverTextName, x.Aliases }).ToArray(),
                     geofenceBackedSiteIds = fenceBacked.Select(x => x.Id).ToArray()
                 }, source, reviewKeys, ct);
             }
@@ -98,8 +128,13 @@ public static class SiteMasterConsolidation
         // 2. Fold the legacy Customer/location register into Site Master without deleting
         // Customer rows, because historical/order commercial references still use CustomerCode.
         // All Sites are considered for code ownership so an archived Site can never be duplicated.
+        // Explicit operator archives and duplicate merges are authoritative: reconciliation must
+        // not silently reactivate them. A later explicit Restore audit removes that protection.
         var allSites = await db.Sites.ToListAsync(ct);
+        await MasterDetailStore.EnrichSitesAsync(db, allSites, ct);
+
         activeSites = allSites.Where(x => x.Active).ToList();
+        var archivedDispositions = await LoadArchivedSiteDispositionsAsync(db, ct);
         var customers = await db.Customers.Where(x => x.Active).ToListAsync(ct);
         foreach (var customer in customers)
         {
@@ -114,6 +149,40 @@ public static class SiteMasterConsolidation
                 var codeMatch = codeMatches[0];
                 if (!codeMatch.Active)
                 {
+                    if (archivedDispositions.TryGetValue(codeMatch.Id, out var canonicalSiteId))
+                    {
+                        var canonicalMatches = canonicalSiteId is Guid canonicalId
+                            ? activeSites.Where(x => x.Id == canonicalId).ToList()
+                            : activeSites.Where(site => SiteNames(site).Any(name => Normalize(name) == nameKey)).ToList();
+
+                        canonicalMatches = canonicalMatches
+                            .GroupBy(x => x.Id)
+                            .Select(x => x.First())
+                            .ToList();
+
+                        if (canonicalMatches.Count == 1)
+                        {
+                            await AddSiteAliasesAsync(
+                                db,
+                                canonicalMatches[0],
+                                new[] { customer.Code, customer.Name, codeMatch.ExternalCode, codeMatch.Name, codeMatch.DriverTextName },
+                                source,
+                                ct);
+                            continue;
+                        }
+
+                        await FlagReviewAsync(db, SiteReviewType, $"archived-code:{codeKey}", new
+                        {
+                            reason = "customer_code_owned_by_intentionally_archived_site",
+                            customer = new { customer.Id, customer.Code, customer.Name },
+                            archivedSite = new { codeMatch.Id, codeMatch.ExternalCode, codeMatch.Name, codeMatch.DriverTextName },
+                            canonicalSiteId,
+                            candidates = canonicalMatches.Select(x => new { x.Id, x.ExternalCode, x.Name }).ToArray(),
+                            requestedAction = "Choose the active canonical Site or explicitly restore the archived Site."
+                        }, source, reviewKeys, ct);
+                        continue;
+                    }
+
                     if (Normalize(codeMatch.Name) != nameKey && Normalize(codeMatch.DriverTextName) != nameKey)
                     {
                         await FlagReviewAsync(db, SiteReviewType, $"archived-code:{codeKey}", new
@@ -144,7 +213,11 @@ public static class SiteMasterConsolidation
                 continue;
             }
 
-            var nameMatches = activeSites.Where(x => Normalize(x.Name) == nameKey || Normalize(x.DriverTextName) == nameKey).ToList();
+            var nameMatches = activeSites
+                .Where(site => SiteNames(site).Any(name => Normalize(name) == nameKey))
+                .GroupBy(x => x.Id)
+                .Select(x => x.First())
+                .ToList();
             if (nameMatches.Count == 1)
             {
                 await AddSiteAliasesAsync(db, nameMatches[0], new[] { customer.Code, customer.Name }, source, ct);
@@ -248,6 +321,101 @@ public static class SiteMasterConsolidation
             reviewKeys.Count);
     }
 
+    private static IReadOnlyList<IReadOnlyList<Site>> DuplicateGroups(IReadOnlyList<Site> sites)
+    {
+        var remaining = sites.ToDictionary(x => x.Id);
+        var groups = new List<IReadOnlyList<Site>>();
+
+        foreach (var seed in sites)
+        {
+            if (!remaining.Remove(seed.Id))
+                continue;
+
+            var group = new List<Site> { seed };
+            var queue = new Queue<Site>();
+            queue.Enqueue(seed);
+
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+                var matches = remaining.Values
+                    .Where(candidate => SharesDuplicateIdentity(current, candidate))
+                    .ToList();
+
+                foreach (var match in matches)
+                {
+                    remaining.Remove(match.Id);
+                    group.Add(match);
+                    queue.Enqueue(match);
+                }
+            }
+
+            if (group.Count > 1)
+                groups.Add(group);
+        }
+
+        return groups;
+    }
+
+    private static bool SharesDuplicateIdentity(Site left, Site right)
+    {
+        var leftName = Normalize(left.Name);
+        var rightName = Normalize(right.Name);
+        if (leftName.Length == 0 || rightName.Length == 0)
+            return false;
+
+        return SiteNames(right).Any(name => Normalize(name) == leftName) ||
+               SiteNames(left).Any(name => Normalize(name) == rightName);
+    }
+
+    private static async Task<Dictionary<Guid, Guid?>> LoadArchivedSiteDispositionsAsync(
+        TmsDbContext db,
+        CancellationToken ct)
+    {
+        var audits = await db.MasterDataAudits.AsNoTracking()
+            .Where(x => x.EntityType == "Site" &&
+                        (x.Action == "Archived" ||
+                         x.Action == "Restored" ||
+                         x.Action == MergedDuplicateAction))
+            .ToListAsync(ct);
+
+        var result = new Dictionary<Guid, Guid?>();
+        foreach (var group in audits.GroupBy(x => x.EntityId))
+        {
+            var latest = group
+                .OrderByDescending(x => x.ChangedAtUtc)
+                .ThenByDescending(x => x.Id)
+                .First();
+
+            if (string.Equals(latest.Action, "Restored", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            Guid? canonicalSiteId = null;
+            if (string.Equals(latest.Action, MergedDuplicateAction, StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(latest.ChangesJson))
+            {
+                try
+                {
+                    using var document = JsonDocument.Parse(latest.ChangesJson);
+                    if (document.RootElement.TryGetProperty("canonicalSiteId", out var canonical) &&
+                        canonical.TryGetGuid(out var parsed))
+                    {
+                        canonicalSiteId = parsed;
+                    }
+                }
+                catch (JsonException)
+                {
+                    // The archive itself remains authoritative even if old audit metadata
+                    // cannot identify the canonical replacement Site.
+                }
+            }
+
+            result[group.Key] = canonicalSiteId;
+        }
+
+        return result;
+    }
+
     private static IEnumerable<string?> SiteNames(Site site)
     {
         yield return site.Name;
@@ -288,8 +456,10 @@ public static class SiteMasterConsolidation
         foreach (var alias in aliases.Where(x => !string.IsNullOrWhiteSpace(x)))
             merged.Add(alias!.Trim());
 
+        var aliasText = string.Join("; ", merged.OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
         payload["externalCode"] = site.ExternalCode;
-        payload["aliases"] = string.Join("; ", merged.OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
+        payload["aliases"] = aliasText;
+        site.Aliases = aliasText;
 
         if (row is null)
         {
