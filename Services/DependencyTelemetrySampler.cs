@@ -20,7 +20,7 @@ public sealed class DependencyTelemetrySampler(
                     snapshot.Dependencies["RoadTech"].LastSuccessfulContactUtc,
                     snapshot.Dependencies["Fleetio"].LastSuccessfulContactUtc,
                     snapshot.Dependencies["TachoMaster"].LastSuccessfulContactUtc,
-                    snapshot.Dependencies["SageHR"].LastSuccessfulContactUtc);
+                    snapshot.Dependencies["Sage HR"].LastSuccessfulContactUtc);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
