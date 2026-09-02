@@ -1,0 +1,59 @@
+name: Distributed lease integration
+
+on:
+  push:
+    branches:
+      - feature/container-app-integration-jobs
+    paths:
+      - .github/workflows/distributed-lease-integration.yml
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/container-app-integration-jobs
+          fetch-depth: 0
+
+      - name: Merge current main and integrate distributed lease
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'danwilliams201302-max'
+          git config user.email 'daniel@lyonshaulage.com'
+          git fetch origin main
+
+          set +e
+          git merge --no-ff --no-commit origin/main
+          merge_status=$?
+          set -e
+
+          for file in Program.cs .github/workflows/ci.yml Slh.Tms.Api.csproj; do
+            if git diff --name-only --diff-filter=U | grep -Fxq "$file"; then
+              git checkout --theirs -- "$file"
+              git add "$file"
+            fi
+          done
+
+          remaining="$(git diff --name-only --diff-filter=U || true)"
+          if [ -n "$remaining" ]; then
+            echo 'Unresolved merge conflicts remain and require explicit repair:' >&2
+            printf '%s\n' "$remaining" >&2
+            exit 1
+          fi
+
+          python .github/scripts/integrate-distributed-lease.py
+          rm -f .github/workflows/distributed-lease-integration.yml .github/scripts/integrate-distributed-lease.py
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo 'No integration changes were produced.' >&2
+            exit 1
+          fi
+
+          git commit -m 'Merge main and register distributed lease migration 46'
+          git push origin HEAD:feature/container-app-integration-jobs
