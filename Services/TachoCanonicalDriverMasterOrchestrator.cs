@@ -22,19 +22,21 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
     IntegrationSyncCoordinator integration,
     TachoDriverMasterSyncService canonical,
     DriverMasterClassificationService classification,
+    DistributedLeaseManager leases,
     ILogger<TachoCanonicalDriverMasterOrchestrator> logger)
 {
     public async Task<TachoCanonicalOrchestrationResult> RunAsync(string actor, CancellationToken ct)
     {
-        await TachoMasterSyncGate.WaitAsync(ct);
-        try
+        await using var lease = await leases.TryAcquireAsync(IntegrationLeaseNames.TachoMaster, TimeSpan.FromMinutes(60), ct);
+        if (lease is null)
         {
-            return await RunCoreAsync(actor, ct);
+            var now = DateTimeOffset.UtcNow;
+            var canonicalResult = new TachoDriverMasterSyncResult(false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                "Canonical TachoMaster sync skipped because another distributed writer currently holds the integration lease.", now);
+            var enrichment = new IntegrationSyncResult("TachoMaster", false, now, canonicalResult.Message);
+            return new TachoCanonicalOrchestrationResult(false, canonicalResult, enrichment, now, canonicalResult.Message);
         }
-        finally
-        {
-            TachoMasterSyncGate.Release();
-        }
+        return await RunCoreAsync(actor, ct);
     }
 
     private async Task<TachoCanonicalOrchestrationResult> RunCoreAsync(string actor, CancellationToken ct)
@@ -123,60 +125,5 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
         await db.SaveChangesAsync(ct);
 
         return new TachoCanonicalOrchestrationResult(success, canonicalResult, enrichment, completed, message);
-    }
-}
-
-/// <summary>
-/// Runs the full canonical Driver Master once per day at 04:30 Europe/London.
-/// DST is resolved from the local date each time, so the UTC execution time moves correctly.
-/// </summary>
-public sealed class TachoCanonicalDriverMasterDailyBackgroundService(
-    IServiceScopeFactory scopeFactory,
-    ILogger<TachoCanonicalDriverMasterDailyBackgroundService> logger) : BackgroundService
-{
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            var now = DateTimeOffset.UtcNow;
-            var next = NextLondonRun(now);
-            var delay = next - now;
-            logger.LogInformation("Next canonical TachoMaster Driver Master sync scheduled for {NextRunUtc} UTC ({NextRunLondon} Europe/London).",
-                next, TimeZoneInfo.ConvertTime(next, LondonTimeZone()));
-
-            try { await Task.Delay(delay, stoppingToken); }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
-
-            try
-            {
-                await using var scope = scopeFactory.CreateAsyncScope();
-                var orchestrator = scope.ServiceProvider.GetRequiredService<TachoCanonicalDriverMasterOrchestrator>();
-                var result = await orchestrator.RunAsync("system:tachomaster-canonical-driver-master-daily", stoppingToken);
-                if (result.Success) logger.LogInformation("{Message}", result.Message);
-                else logger.LogWarning("{Message}", result.Message);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Scheduled daily TachoMaster canonical Driver Master sync failed unexpectedly.");
-            }
-        }
-    }
-
-    internal static DateTimeOffset NextLondonRun(DateTimeOffset utcNow)
-    {
-        var zone = LondonTimeZone();
-        var londonNow = TimeZoneInfo.ConvertTime(utcNow, zone);
-        var localDate = DateOnly.FromDateTime(londonNow.DateTime);
-        var candidateLocal = localDate.ToDateTime(new TimeOnly(4, 30), DateTimeKind.Unspecified);
-        if (candidateLocal <= londonNow.DateTime)
-            candidateLocal = localDate.AddDays(1).ToDateTime(new TimeOnly(4, 30), DateTimeKind.Unspecified);
-        return new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(candidateLocal, zone), TimeSpan.Zero);
-    }
-
-    private static TimeZoneInfo LondonTimeZone()
-    {
-        try { return TimeZoneInfo.FindSystemTimeZoneById("Europe/London"); }
-        catch (TimeZoneNotFoundException) { return TimeZoneInfo.FindSystemTimeZoneById("GMT Standard Time"); }
     }
 }

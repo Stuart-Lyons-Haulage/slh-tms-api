@@ -15,21 +15,15 @@ public sealed class IntegrationSyncCoordinator(
     SageHrClient sageHr,
     SageHrOptions sageOptions,
     FleetioClient fleetioClient,
+    DistributedLeaseManager leases,
     ILogger<IntegrationSyncCoordinator> logger)
 {
-    private static readonly SemaphoreSlim FleetioSyncGate = new(1, 1);
-
     public async Task<IntegrationSyncResult> SyncTachoMasterAsync(string actor, CancellationToken ct)
     {
-        await TachoMasterSyncGate.WaitAsync(ct);
-        try
-        {
-            return await SyncTachoMasterCoreAsync(actor, ct);
-        }
-        finally
-        {
-            TachoMasterSyncGate.Release();
-        }
+        await using var lease = await leases.TryAcquireAsync(IntegrationLeaseNames.TachoMaster, TimeSpan.FromMinutes(30), ct);
+        if (lease is null)
+            return new("TachoMaster", false, DateTimeOffset.UtcNow, "TachoMaster sync skipped because another distributed writer currently holds the integration lease.");
+        return await SyncTachoMasterCoreAsync(actor, ct);
     }
 
     internal async Task<IntegrationSyncResult> SyncTachoMasterCoreAsync(string actor, CancellationToken ct)
@@ -101,6 +95,14 @@ public sealed class IntegrationSyncCoordinator(
 
     public async Task<IntegrationSyncResult> SyncSageHrAsync(string actor, CancellationToken ct)
     {
+        await using var lease = await leases.TryAcquireAsync(IntegrationLeaseNames.SageHr, TimeSpan.FromMinutes(30), ct);
+        if (lease is null)
+            return new("Sage HR", false, DateTimeOffset.UtcNow, "Sage HR sync skipped because another distributed writer currently holds the integration lease.");
+        return await SyncSageHrCoreAsync(actor, ct);
+    }
+
+    internal async Task<IntegrationSyncResult> SyncSageHrCoreAsync(string actor, CancellationToken ct)
+    {
         if (!sageHr.IsConfigured)
             return new("Sage HR", false, DateTimeOffset.UtcNow, $"Sage HR is not configured: {string.Join(", ", sageHr.MissingSettings)}.");
 
@@ -161,13 +163,18 @@ public sealed class IntegrationSyncCoordinator(
 
     public async Task<IntegrationSyncResult> SyncFleetioAsync(string actor, CancellationToken ct)
     {
+        await using var lease = await leases.TryAcquireAsync(IntegrationLeaseNames.Fleetio, TimeSpan.FromMinutes(45), ct);
+        if (lease is null)
+            return new("Fleetio", false, DateTimeOffset.UtcNow, "Fleetio sync skipped because another distributed writer currently holds the integration lease.");
+        return await SyncFleetioCoreAsync(actor, ct);
+    }
+
+    internal async Task<IntegrationSyncResult> SyncFleetioCoreAsync(string actor, CancellationToken ct)
+    {
         if (!fleetioClient.IsConfigured)
             return new("Fleetio", false, DateTimeOffset.UtcNow, $"Fleetio is not configured: {string.Join(", ", fleetioClient.MissingSettings)}.");
 
-        await FleetioSyncGate.WaitAsync(ct);
-        try
-        {
-            var assets = await fleetioClient.GetVehiclesAsync(100, ct);
+        var assets = await fleetioClient.GetVehiclesAsync(100, ct);
             var vehicleAssets = assets.Where(asset => !IsTrailer(asset)).ToList();
             var trailerAssets = assets.Where(IsTrailer).ToList();
             var vehicles = await db.Vehicles.ToListAsync(ct);
@@ -295,13 +302,8 @@ public sealed class IntegrationSyncCoordinator(
 
             await db.SaveChangesAsync(ct);
             var changed = createdVehicles + updatedVehicles + createdTrailers + updatedTrailers + quarantinedVehicles + quarantinedTrailers + mergedTrailerAliases;
-            return new("Fleetio", true, now,
-                $"Fleetio canonical sync: {createdVehicles} vehicle(s) created, {updatedVehicles} updated, {createdTrailers} trailer(s) created, {updatedTrailers} updated, {mergedTrailerAliases} trailer alias(es) consolidated, {quarantinedVehicles} TMS-only vehicle(s) and {quarantinedTrailers} TMS-only trailer(s) quarantined, {correctedVehicleMappings} stale vehicle mapping(s) repaired, {duplicateVehicleSourceRows} duplicate source registration row(s) resolved against canonical vehicles. Trailer capacities were retained from TMS.", changed);
-        }
-        finally
-        {
-            FleetioSyncGate.Release();
-        }
+        return new("Fleetio", true, now,
+            $"Fleetio canonical sync: {createdVehicles} vehicle(s) created, {updatedVehicles} updated, {createdTrailers} trailer(s) created, {updatedTrailers} updated, {mergedTrailerAliases} trailer alias(es) consolidated, {quarantinedVehicles} TMS-only vehicle(s) and {quarantinedTrailers} TMS-only trailer(s) quarantined, {correctedVehicleMappings} stale vehicle mapping(s) repaired, {duplicateVehicleSourceRows} duplicate source registration row(s) resolved against canonical vehicles. Trailer capacities were retained from TMS.", changed);
     }
 
     public async Task<IReadOnlyList<IntegrationSyncResult>> ForceAllAsync(string actor, CancellationToken ct)
@@ -496,69 +498,4 @@ public sealed class IntegrationSyncCoordinator(
         .Where(word => word.Length > 0).OrderBy(word => word, StringComparer.Ordinal));
     private static string? Clip(string? value, int maxLength) => string.IsNullOrWhiteSpace(value) ? null : value.Trim().Length <= maxLength ? value.Trim() : value.Trim()[..maxLength];
     private static string ClipRequired(string value, int maxLength) => value.Trim().Length <= maxLength ? value.Trim() : value.Trim()[..maxLength];
-}
-
-public sealed class IntegrationBackgroundSyncService(IServiceScopeFactory scopeFactory, ILogger<IntegrationBackgroundSyncService> logger) : BackgroundService
-{
-    private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
-
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        var nextTacho = DateTimeOffset.MinValue;
-        var nextFleetio = DateTimeOffset.MinValue;
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            var now = DateTimeOffset.UtcNow;
-            try
-            {
-                if (now >= nextTacho)
-                {
-                    await Run(scope => scope.SyncTachoMasterAsync("system:scheduler", stoppingToken), stoppingToken);
-                    nextTacho = now.AddMinutes(5);
-                }
-                if (now >= nextFleetio)
-                {
-                    await Run(scope => scope.SyncFleetioAsync("system:scheduler", stoppingToken), stoppingToken);
-                    nextFleetio = now.AddHours(1);
-                }
-                await RunMorningSageIfDue(stoppingToken);
-            }
-            catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
-            {
-                logger.LogWarning(ex, "Background integration scheduler iteration failed.");
-            }
-            await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
-        }
-    }
-
-    private async Task Run(Func<IntegrationSyncCoordinator, Task<IntegrationSyncResult>> action, CancellationToken ct)
-    {
-        using var scope = scopeFactory.CreateScope();
-        var coordinator = scope.ServiceProvider.GetRequiredService<IntegrationSyncCoordinator>();
-        try
-        {
-            var result = await action(coordinator);
-            if (!result.Success) logger.LogWarning("{Provider} scheduled sync did not complete: {Message}", result.Provider, result.Message);
-        }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
-        {
-            logger.LogWarning(ex, "Scheduled integration synchronisation failed.");
-        }
-    }
-
-    private async Task RunMorningSageIfDue(CancellationToken ct)
-    {
-        var localNow = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London);
-        if (localNow.TimeOfDay < new TimeSpan(5, 30, 0)) return;
-        var localDate = DateOnly.FromDateTime(localNow.DateTime);
-        var localStart = new DateTimeOffset(localDate.ToDateTime(TimeOnly.MinValue), London.GetUtcOffset(localDate.ToDateTime(TimeOnly.MinValue))).ToUniversalTime();
-        var localEnd = localStart.AddDays(1);
-        using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-        var alreadyRun = await db.StagedImports.AsNoTracking().AnyAsync(item => item.EntityType == "sagehrsync" && item.Status == StagingStatus.Promoted && item.ReviewedAtUtc >= localStart && item.ReviewedAtUtc < localEnd, ct);
-        if (alreadyRun) return;
-        var coordinator = scope.ServiceProvider.GetRequiredService<IntegrationSyncCoordinator>();
-        try { await coordinator.SyncSageHrAsync("system:scheduler", ct); }
-        catch (Exception ex) when (!ct.IsCancellationRequested) { logger.LogWarning(ex, "Scheduled morning Sage HR synchronisation failed."); }
-    }
 }

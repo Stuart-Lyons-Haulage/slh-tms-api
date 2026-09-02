@@ -50,7 +50,7 @@ public sealed class FleetStatusTests : IClassFixture<CustomWebFactory>
     {
         var vehicle = new Vehicle { Registration = "PX24 SLH", Abbreviation = "SLH" };
         var driver = new Driver { EmployeeNumber = "D100", DisplayName = "Alex Driver" };
-        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        var today = LondonOperatingDate(DateTimeOffset.UtcNow);
         var load = new Load
         {
             Id = Guid.NewGuid(),
@@ -109,5 +109,17 @@ public sealed class FleetStatusTests : IClassFixture<CustomWebFactory>
         Assert.Equal(driver.Id, row.DriverId);
         Assert.Equal(driver.DisplayName, row.DriverName);
         Assert.Equal(driver.DisplayName, row.AllocatedDriverName);
+    }
+
+    private static DateOnly LondonOperatingDate(DateTimeOffset value)
+    {
+        try
+        {
+            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, TimeZoneInfo.FindSystemTimeZoneById("Europe/London")).DateTime);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(value, TimeZoneInfo.FindSystemTimeZoneById("GMT Standard Time")).DateTime);
+        }
     }
 }

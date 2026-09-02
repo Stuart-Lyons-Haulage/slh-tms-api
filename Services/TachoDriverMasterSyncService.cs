@@ -56,6 +56,7 @@ public sealed class TachoDriverMasterSyncService(
     TachoMasterClient tachoMaster,
     IHttpClientFactory httpClientFactory,
     TachoMasterOptions options,
+    DistributedLeaseManager leases,
     ILogger<TachoDriverMasterSyncService> logger)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
@@ -64,15 +65,11 @@ public sealed class TachoDriverMasterSyncService(
 
     public async Task<TachoDriverMasterSyncResult> SyncAsync(string actor, CancellationToken ct)
     {
-        await TachoMasterSyncGate.WaitAsync(ct);
-        try
-        {
-            return await SyncCoreAsync(actor, ct);
-        }
-        finally
-        {
-            TachoMasterSyncGate.Release();
-        }
+        await using var lease = await leases.TryAcquireAsync(IntegrationLeaseNames.TachoMaster, TimeSpan.FromMinutes(60), ct);
+        if (lease is null)
+            return new(false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                "TachoMaster Driver Master sync skipped because another distributed writer currently holds the integration lease.", DateTimeOffset.UtcNow);
+        return await SyncCoreAsync(actor, ct);
     }
 
     internal async Task<TachoDriverMasterSyncResult> SyncCoreAsync(string actor, CancellationToken ct)
