@@ -17,6 +17,10 @@ The Tacho job keeps the historical 04:30 Europe/London canonical pass without a 
 
 Container Apps scheduled-job cron expressions are evaluated in UTC. The Sage job therefore uses two UTC trigger times plus the durable local-date guard instead of relying on a fixed UTC hour.
 
+## Versioned schema ordering
+
+The distributed lease is part of the authoritative append-only schema catalogue. Canonical planning is migration 44 (`039_Canonical_Relational_Planning.sql`), the transactional audit outbox is migration 45 (`040_Audit_Outbox.sql`), and the distributed integration lease is migration 46 (`041_Distributed_Integration_Lease.sql`). Existing migration numbers and checksums must not be rewritten.
+
 Build the jobs image with:
 
 ```bash
