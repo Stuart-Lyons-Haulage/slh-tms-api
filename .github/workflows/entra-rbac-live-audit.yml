@@ -1,0 +1,125 @@
+name: Entra RBAC Live Audit
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/entra-rbac-live-audit.yml
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: Sign in to Azure with OpenID Connect
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify live Entra roles and assignments
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          expected_roles=(
+            'TMS.Viewer|888eadd4-2666-4939-a25f-4e631cb12b5c'
+            'TMS.Planner|51800200-91a2-44d3-8f2b-5ebc8098ab6b'
+            'TMS.Dispatcher|c8ff4b75-db76-4f15-8dc6-05cf59713784'
+            'TMS.OperationsController|910bfb0a-cd6e-4b45-96e3-aac17501b0cf'
+            'TMS.Approver|36d00564-8296-4ae3-8440-a7dd6e8fbe83'
+            'TMS.MasterDataAdmin|20a02e12-3103-4f59-aeac-5f18bd0a1f25'
+            'TMS.SystemAdmin|eca9f094-3e8c-4a34-83a6-297223a883fb'
+          )
+
+          env_json="$(az containerapp show \
+            --name slh-tms-api-prod \
+            --resource-group slh-tms-prod-rg \
+            --query 'properties.template.containers[0].env' \
+            --output json)"
+
+          audience="$(jq -r '[.[] | select((.name|ascii_downcase)=="entra__audience") | .value][0] // empty' <<<"$env_json")"
+          tenant_from_app="$(jq -r '[.[] | select((.name|ascii_downcase)=="entra__tenantid") | .value][0] // empty' <<<"$env_json")"
+          if [ -z "$audience" ]; then
+            echo '::error::Live Container App does not expose Entra__Audience as a direct environment value.'
+            exit 1
+          fi
+          app_id="${audience#api://}"
+          if ! [[ "$app_id" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+            echo '::error::Live Entra audience is not an api://<application-id> value.'
+            exit 1
+          fi
+
+          app_json="$(az rest --only-show-errors --method GET \
+            --url "https://graph.microsoft.com/v1.0/applications?\$filter=appId%20eq%20'$app_id'&\$select=id,appId,displayName,appRoles" \
+            --output json)"
+          app_count="$(jq '.value | length' <<<"$app_json")"
+          if [ "$app_count" -ne 1 ]; then
+            echo "::error::Expected exactly one live Entra application for appId $app_id; found $app_count."
+            exit 1
+          fi
+          app_object_id="$(jq -r '.value[0].id' <<<"$app_json")"
+          display_name="$(jq -r '.value[0].displayName' <<<"$app_json")"
+
+          sp_json="$(az rest --only-show-errors --method GET \
+            --url "https://graph.microsoft.com/v1.0/servicePrincipals?\$filter=appId%20eq%20'$app_id'&\$select=id,appId,displayName,appRoleAssignmentRequired" \
+            --output json)"
+          sp_count="$(jq '.value | length' <<<"$sp_json")"
+          if [ "$sp_count" -ne 1 ]; then
+            echo "::error::Expected exactly one service principal for appId $app_id; found $sp_count."
+            exit 1
+          fi
+          sp_id="$(jq -r '.value[0].id' <<<"$sp_json")"
+
+          assignments="$(az rest --only-show-errors --method GET \
+            --url "https://graph.microsoft.com/v1.0/servicePrincipals/$sp_id/appRoleAssignedTo?\$top=999&\$select=id,appRoleId,principalDisplayName,principalId,principalType,createdDateTime" \
+            --output json)"
+
+          mkdir -p entra-audit
+          printf '%s\n' '# SLH TMS live Entra RBAC audit' > entra-audit/report.md
+          printf '\n- Verified UTC: `%s`\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> entra-audit/report.md
+          printf -- '- Application: `%s`\n' "$display_name" >> entra-audit/report.md
+          printf -- '- App ID: `%s`\n' "$app_id" >> entra-audit/report.md
+          printf -- '- Application object ID: `%s`\n' "$app_object_id" >> entra-audit/report.md
+          printf -- '- Service principal ID: `%s`\n' "$sp_id" >> entra-audit/report.md
+          if [ -n "$tenant_from_app" ]; then
+            printf -- '- Live Container App tenant ID: `%s`\n' "$tenant_from_app" >> entra-audit/report.md
+          fi
+          printf '\n| Role | Role ID | Live role | Assignment count | Principals |\n|---|---|---:|---:|---|\n' >> entra-audit/report.md
+
+          all_ok=true
+          for expected in "${expected_roles[@]}"; do
+            role="${expected%%|*}"
+            role_id="${expected##*|}"
+            live_match="$(jq --arg role "$role" --arg id "$role_id" '[.value[0].appRoles[] | select(.value==$role and (.id|ascii_downcase)==($id|ascii_downcase) and .isEnabled==true)] | length' <<<"$app_json")"
+            assignment_count="$(jq --arg id "$role_id" '[.value[] | select((.appRoleId|ascii_downcase)==($id|ascii_downcase))] | length' <<<"$assignments")"
+            principals="$(jq -r --arg id "$role_id" '[.value[] | select((.appRoleId|ascii_downcase)==($id|ascii_downcase)) | ((.principalDisplayName // "<unnamed>") + " [" + (.principalType // "Unknown") + "]")] | join("; ")' <<<"$assignments")"
+            [ -n "$principals" ] || principals='—'
+            printf '| `%s` | `%s` | %s | %s | %s |\n' "$role" "$role_id" "$live_match" "$assignment_count" "$principals" >> entra-audit/report.md
+            if [ "$live_match" -ne 1 ] || [ "$assignment_count" -lt 1 ]; then
+              all_ok=false
+            fi
+          done
+
+          jq '{verifiedAtUtc: (now|todate), assignments: [.value[] | {appRoleId, principalDisplayName, principalId, principalType, createdDateTime}]}' <<<"$assignments" > entra-audit/assignments.json
+
+          cat entra-audit/report.md
+          if [ "$all_ok" != true ]; then
+            echo '::error::One or more required live roles are missing/disabled or have no real principal assignment.'
+            exit 1
+          fi
+
+      - name: Upload Entra audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: entra-rbac-live-audit
+          path: entra-audit/
+          if-no-files-found: warn
+          retention-days: 30
