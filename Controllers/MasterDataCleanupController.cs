@@ -14,13 +14,13 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
 {
     private const string DefaultBulkDeletePhrase = "DELETE";
 
-    [HttpPost("{entity}/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("{entity}/{id:guid}/archive"), Authorize(Policy = "TmsMasterData")]
     public Task<IActionResult> Archive(string entity, Guid id, CancellationToken ct) => SetActive(entity, id, false, ct);
 
-    [HttpPost("{entity}/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("{entity}/{id:guid}/restore"), Authorize(Policy = "TmsMasterData")]
     public Task<IActionResult> Restore(string entity, Guid id, CancellationToken ct) => SetActive(entity, id, true, ct);
 
-    [HttpDelete("{entity}/{id:guid}"), Authorize(Policy = "TmsApprove")]
+    [HttpDelete("{entity}/{id:guid}"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> Delete(string entity, Guid id, CancellationToken ct)
     {
         entity = Canonical(entity);
@@ -66,7 +66,7 @@ public sealed class MasterDataCleanupController(TmsDbContext db, IConfiguration 
         });
     }
 
-    [HttpPost("{entity}/bulk-delete"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("{entity}/bulk-delete"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> BulkDelete(string entity, BulkMasterDataDeleteRequest request, CancellationToken ct)
     {
         entity = Canonical(entity);

@@ -72,7 +72,7 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
         }
     }
 
-    [HttpPost("tachomaster/sync-drivers"), Authorize(Policy = "TmsWrite")]
+    [HttpPost("tachomaster/sync-drivers"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> SyncTachoMasterDrivers(CancellationToken ct)
     {
         if (!tachoMaster.IsConfigured)
@@ -141,7 +141,7 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
         }
     }
 
-    [HttpPost("sage-hr/sync-drivers"), Authorize(Policy = "TmsWrite")]
+    [HttpPost("sage-hr/sync-drivers"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> SyncDrivers(CancellationToken ct)
     {
         if (!sageHr.IsConfigured)
@@ -269,7 +269,7 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
     }
 
 
-    [HttpPost("fleetio/sync-vehicles"), Authorize(Policy = "TmsWrite")]
+    [HttpPost("fleetio/sync-vehicles"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> SyncFleetioVehicles(CancellationToken ct)
     {
         if (!fleetioClient.IsConfigured) return BadRequest(new { configured = false, missingSettings = fleetioClient.MissingSettings, message = $"Fleetio cannot sync until these settings are complete: {string.Join(", ", fleetioClient.MissingSettings)}." });

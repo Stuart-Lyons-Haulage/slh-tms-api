@@ -11,7 +11,7 @@ public sealed class MasterDataController(StagingService staging) : ControllerBas
 {
     private static readonly HashSet<string> DirectTypes = new(StringComparer.OrdinalIgnoreCase) { "customer", "customercontact", "vehicle", "driver", "trailer", "site", "marketcontact", "fuelprice" };
 
-    [HttpPost("apply"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("apply"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> Apply(List<StageImportRequest> requests, CancellationToken ct)
     {
         if (requests.Count == 0 || requests.Count > 10000) return BadRequest(new ErrorResponse("invalid_batch", "Submit between 1 and 10000 master-data records.", HttpContext.TraceIdentifier));
@@ -76,7 +76,7 @@ public sealed class MasterDataController(StagingService staging) : ControllerBas
         return Ok(new { received = requests.Count, applied, registered, failed, linked = 0, results });
     }
 
-    [HttpPost("register/link"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("register/link"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> LinkRegister([FromQuery] int batchSize, CancellationToken ct)
     {
         batchSize = Math.Clamp(batchSize <= 0 ? 100 : batchSize, 1, 200);

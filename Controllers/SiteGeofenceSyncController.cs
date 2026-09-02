@@ -14,7 +14,7 @@ public sealed class SiteGeofenceSyncController(TmsDbContext db, ILogger<SiteGeof
     public async Task<IActionResult> Sites(CancellationToken ct)
         => Ok(await SiteGeofenceMasterSync.GetStatusAsync(db, ct));
 
-    [HttpPost("sync-sites"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("sync-sites"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> SyncSites(CancellationToken ct)
     {
         try
@@ -37,7 +37,7 @@ public sealed class SiteGeofenceSyncController(TmsDbContext db, ILogger<SiteGeof
         }
     }
 
-    [HttpPost("geofences/{id:guid}/link"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("geofences/{id:guid}/link"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> LinkGeofence(Guid id, LinkGeofenceRequest request, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.SiteCode))

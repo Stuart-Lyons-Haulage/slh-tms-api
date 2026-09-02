@@ -15,7 +15,7 @@ namespace Slh.Tms.Api.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/v1/tracking/dot")]
-[Authorize(Policy = "TmsWrite")]
+[Authorize(Policy = "TmsAccess")]
 public sealed class DotTrackingController(
     DotTrackingClient trackingClient,
     TachoMasterClient tachoMasterClient,

@@ -38,11 +38,12 @@ public class CustomWebFactory : WebApplicationFactory<Program>
         });
     }
 
-    public HttpClient CreateClientWithUser(string userName, string scopes = "")
+    public HttpClient CreateClientWithUser(string userName, string scopes = "", string roles = "TMS.SystemAdmin")
     {
         var c = CreateClient();
         c.DefaultRequestHeaders.Add("X-Test-User", userName);
         if (!string.IsNullOrEmpty(scopes)) c.DefaultRequestHeaders.Add("X-Test-Scopes", scopes);
+        if (!string.IsNullOrWhiteSpace(roles)) c.DefaultRequestHeaders.Add("X-Test-Roles", roles);
         return c;
     }
 }

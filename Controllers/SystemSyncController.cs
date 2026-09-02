@@ -72,7 +72,7 @@ public sealed class SystemSyncController(
         });
     }
 
-    [HttpPost("force/{provider}"), Authorize(Policy = "TmsWrite")]
+    [HttpPost("force/{provider}"), Authorize(Policy = "TmsAdmin")]
     public async Task<IActionResult> Force(string provider, CancellationToken ct)
     {
         var actor = User.Identity?.Name ?? "admin:manual";

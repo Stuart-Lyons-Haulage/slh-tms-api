@@ -39,7 +39,7 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         return driver is null ? NotFound() : Ok(driver);
     }
 
-    [HttpPut("drivers/{id:guid}"), Authorize(Policy = "TmsApprove")]
+    [HttpPut("drivers/{id:guid}"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> UpdateDriver(Guid id, DriverUpdateRequest request, CancellationToken ct)
     {
         var driver = await db.Drivers.FirstOrDefaultAsync(x => x.Id == id, ct);
@@ -56,10 +56,10 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         return Ok(driver);
     }
 
-    [HttpPost("drivers/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("drivers/{id:guid}/archive"), Authorize(Policy = "TmsMasterData")]
     public Task<IActionResult> ArchiveDriver(Guid id, CancellationToken ct) => SetDriverActive(id, false, ct);
 
-    [HttpPost("drivers/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("drivers/{id:guid}/restore"), Authorize(Policy = "TmsMasterData")]
     public Task<IActionResult> RestoreDriver(Guid id, CancellationToken ct) => SetDriverActive(id, true, ct);
 
     [HttpGet("vehicles/search")]
@@ -99,7 +99,7 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         return Ok(new { vehicle, live, lastLoad });
     }
 
-    [HttpPut("vehicles/{id:guid}"), Authorize(Policy = "TmsApprove")]
+    [HttpPut("vehicles/{id:guid}"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> UpdateVehicle(Guid id, VehicleUpdateRequest request, CancellationToken ct)
     {
         var vehicle = await db.Vehicles.FirstOrDefaultAsync(x => x.Id == id, ct);
@@ -118,10 +118,10 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         return Ok(vehicle);
     }
 
-    [HttpPost("vehicles/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("vehicles/{id:guid}/archive"), Authorize(Policy = "TmsMasterData")]
     public Task<IActionResult> ArchiveVehicle(Guid id, CancellationToken ct) => SetVehicleActive(id, false, ct);
 
-    [HttpPost("vehicles/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("vehicles/{id:guid}/restore"), Authorize(Policy = "TmsMasterData")]
     public Task<IActionResult> RestoreVehicle(Guid id, CancellationToken ct) => SetVehicleActive(id, true, ct);
 
     [HttpGet("trailers/search")]
@@ -133,7 +133,7 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         return Ok(await query.OrderBy(x => x.TrailerNumber).Take(50).ToListAsync(ct));
     }
 
-    [HttpPut("trailers/{id:guid}"), Authorize(Policy = "TmsApprove")]
+    [HttpPut("trailers/{id:guid}"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> UpdateTrailer(Guid id, TrailerUpdateRequest request, CancellationToken ct)
     {
         var trailer = await db.Trailers.FirstOrDefaultAsync(x => x.Id == id, ct);
@@ -147,10 +147,10 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         return Ok(trailer);
     }
 
-    [HttpPost("trailers/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("trailers/{id:guid}/archive"), Authorize(Policy = "TmsMasterData")]
     public Task<IActionResult> ArchiveTrailer(Guid id, CancellationToken ct) => SetActive(db.Trailers, id, false, "Trailer", x => x.Active, (x, v) => x.Active = v, ct);
 
-    [HttpPost("trailers/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("trailers/{id:guid}/restore"), Authorize(Policy = "TmsMasterData")]
     public Task<IActionResult> RestoreTrailer(Guid id, CancellationToken ct) => SetActive(db.Trailers, id, true, "Trailer", x => x.Active, (x, v) => x.Active = v, ct);
 
     [HttpGet("sites/search")]
@@ -164,7 +164,7 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         return Ok(rows);
     }
 
-    [HttpPut("sites/{id:guid}"), Authorize(Policy = "TmsApprove")]
+    [HttpPut("sites/{id:guid}"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> UpdateSite(Guid id, SiteUpdateRequest request, CancellationToken ct)
     {
         var site = await db.Sites.FirstOrDefaultAsync(x => x.Id == id, ct);
@@ -182,10 +182,10 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         return Ok(site);
     }
 
-    [HttpPost("sites/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("sites/{id:guid}/archive"), Authorize(Policy = "TmsMasterData")]
     public Task<IActionResult> ArchiveSite(Guid id, CancellationToken ct) => SetActive(db.Sites, id, false, "Site", x => x.Active, (x, v) => x.Active = v, ct);
 
-    [HttpPost("sites/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("sites/{id:guid}/restore"), Authorize(Policy = "TmsMasterData")]
     public Task<IActionResult> RestoreSite(Guid id, CancellationToken ct) => SetActive(db.Sites, id, true, "Site", x => x.Active, (x, v) => x.Active = v, ct);
 
     [HttpGet("customers/search")]
@@ -197,7 +197,7 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         return Ok(await query.OrderBy(x => x.Name).Take(100).ToListAsync(ct));
     }
 
-    [HttpPut("customers/{id:guid}"), Authorize(Policy = "TmsApprove")]
+    [HttpPut("customers/{id:guid}"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> UpdateCustomer(Guid id, CustomerUpdateRequest request, CancellationToken ct)
     {
         var customer = await db.Customers.FirstOrDefaultAsync(x => x.Id == id, ct);
@@ -209,10 +209,10 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         return Ok(customer);
     }
 
-    [HttpPost("customers/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("customers/{id:guid}/archive"), Authorize(Policy = "TmsMasterData")]
     public Task<IActionResult> ArchiveCustomer(Guid id, CancellationToken ct) => SetActive(db.Customers, id, false, "Customer", x => x.Active, (x, v) => x.Active = v, ct);
 
-    [HttpPost("customers/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("customers/{id:guid}/restore"), Authorize(Policy = "TmsMasterData")]
     public Task<IActionResult> RestoreCustomer(Guid id, CancellationToken ct) => SetActive(db.Customers, id, true, "Customer", x => x.Active, (x, v) => x.Active = v, ct);
 
     [HttpGet("geofences/search")]
@@ -252,7 +252,7 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         return Ok(rows.OrderBy(x => x.Name).Take(take).ToList());
     }
 
-    [HttpPut("geofences/{id:guid}"), Authorize(Policy = "TmsApprove")]
+    [HttpPut("geofences/{id:guid}"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> UpdateGeofence(Guid id, GeofenceUpdateRequest request, CancellationToken ct)
     {
         var name = CleanRequired(request.Name, EmbeddedGeofenceEngine.ApprovedFences.FirstOrDefault(x => x.Id == id)?.Name ?? string.Empty);
@@ -273,7 +273,7 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         return Ok(await GeofenceResponse(item, ct));
     }
 
-    [HttpPost("geofences/{id:guid}/sync-site"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("geofences/{id:guid}/sync-site"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> SyncGeofenceSite(Guid id, GeofenceSiteSyncRequest request, CancellationToken ct)
     {
         var embedded = EmbeddedGeofenceEngine.ApprovedFences.FirstOrDefault(x => x.Id == id);
@@ -287,10 +287,10 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         return Ok(await GeofenceResponse(item, ct));
     }
 
-    [HttpPost("geofences/{id:guid}/archive"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("geofences/{id:guid}/archive"), Authorize(Policy = "TmsMasterData")]
     public Task<IActionResult> ArchiveGeofence(Guid id, CancellationToken ct) => SetActive(db.SiteGeofences, id, false, "Geofence", x => x.Active, (x, v) => { x.Active = v; x.UpdatedAtUtc = DateTimeOffset.UtcNow; }, ct);
 
-    [HttpPost("geofences/{id:guid}/restore"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("geofences/{id:guid}/restore"), Authorize(Policy = "TmsMasterData")]
     public Task<IActionResult> RestoreGeofence(Guid id, CancellationToken ct) => SetActive(db.SiteGeofences, id, true, "Geofence", x => x.Active, (x, v) => { x.Active = v; x.UpdatedAtUtc = DateTimeOffset.UtcNow; }, ct);
 
     [HttpGet("audit/{entityType}/{entityId:guid}")]

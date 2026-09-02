@@ -13,7 +13,7 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize]
 public sealed class MasterDataRebuildController(TmsDbContext db) : ControllerBase
 {
-    [HttpPost("rebuild-reviewed-register"), Authorize(Policy = "TmsApprove")]
+    [HttpPost("rebuild-reviewed-register"), Authorize(Policy = "TmsAdmin")]
     public async Task<IActionResult> RebuildReviewedRegister(ReviewedMasterRebuildRequest request, CancellationToken ct)
     {
         if (request.Payload.MasterSites.Count == 0)

@@ -27,7 +27,7 @@ public sealed class DriverVehiclePreferencesController(
         return Ok(new { planningDate, lookbackDays = window, generatedAtUtc = DateTimeOffset.UtcNow, preferences = protection });
     }
 
-    [HttpPost("refresh"), Authorize(Policy = "TmsWrite")]
+    [HttpPost("refresh"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> Refresh([FromQuery] int days = 28, CancellationToken ct = default)
     {
         var window = Math.Clamp(days, 7, 42);

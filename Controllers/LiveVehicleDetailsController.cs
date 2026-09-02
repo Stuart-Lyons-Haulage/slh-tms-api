@@ -10,7 +10,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController]
 [Route("api/v1/live/vehicles")]
-[Authorize(Policy = "TmsWrite")]
+[Authorize(Policy = "TmsAccess")]
 public sealed class LiveVehicleDetailsController(
     TmsDbContext db,
     TachoMasterClient tachoMasterClient,

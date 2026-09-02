@@ -10,7 +10,7 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize]
 public sealed class GeofenceRecoveryController(TmsDbContext db, ILogger<GeofenceRecoveryController> logger) : ControllerBase
 {
-    [HttpPost("ensure"), Authorize(Policy = "TmsWrite")]
+    [HttpPost("ensure"), Authorize(Policy = "TmsAdmin")]
     public async Task<IActionResult> Ensure(CancellationToken ct)
     {
         try

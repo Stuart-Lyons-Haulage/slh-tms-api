@@ -7,7 +7,7 @@ using Slh.Tms.Api.Models;
 
 namespace Slh.Tms.Api.Controllers;
 
-[ApiController, Route("api/v1/master-documents"), Authorize(Policy = "TmsWrite")]
+[ApiController, Route("api/v1/master-documents"), Authorize(Policy = "TmsAccess")]
 public sealed class MasterDocumentsController(TmsDbContext db) : ControllerBase
 {
     private const string StoreType = "masterdocument";
@@ -33,7 +33,7 @@ public sealed class MasterDocumentsController(TmsDbContext db) : ControllerBase
         return Ok(documents);
     }
 
-    [HttpPost("{entityType}/{entityId:guid}")]
+    [HttpPost("{entityType}/{entityId:guid}"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> Add(string entityType, Guid entityId, MasterDocumentRequest request, CancellationToken ct)
     {
         var normalizedType = NormalizeEntityType(entityType);
@@ -51,7 +51,7 @@ public sealed class MasterDocumentsController(TmsDbContext db) : ControllerBase
         return Ok(state);
     }
 
-    [HttpPut("{documentId:guid}")]
+    [HttpPut("{documentId:guid}"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> Update(Guid documentId, MasterDocumentRequest request, CancellationToken ct)
     {
         var row = await FindRow(documentId, ct);
@@ -76,7 +76,7 @@ public sealed class MasterDocumentsController(TmsDbContext db) : ControllerBase
         return Ok(updated);
     }
 
-    [HttpPost("{documentId:guid}/archive")]
+    [HttpPost("{documentId:guid}/archive"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> Archive(Guid documentId, CancellationToken ct)
     {
         var row = await FindRow(documentId, ct);
@@ -88,7 +88,7 @@ public sealed class MasterDocumentsController(TmsDbContext db) : ControllerBase
         return Ok(updated);
     }
 
-    [HttpPost("{documentId:guid}/restore")]
+    [HttpPost("{documentId:guid}/restore"), Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> Restore(Guid documentId, CancellationToken ct)
     {
         var row = await FindRow(documentId, ct);

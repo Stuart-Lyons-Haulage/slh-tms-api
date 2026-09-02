@@ -131,7 +131,7 @@ public sealed class FleetioAssetSyncController(
     }
 
     [HttpPost("sync-assets")]
-    [Authorize(Policy = "TmsWrite")]
+    [Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> SyncAssets(CancellationToken ct)
     {
         if (!fleetioClient.IsConfigured)

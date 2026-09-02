@@ -22,7 +22,7 @@ public sealed class FleetioResilientSyncController(
     private sealed record DesiredMapping(string ExternalKey, string ExternalLabel, string EntityType, Guid EntityId);
 
     [HttpPost("sync-assets-resilient")]
-    [Authorize(Policy = "TmsWrite")]
+    [Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> SyncAssetsResilient(CancellationToken ct)
     {
         if (!fleetioClient.IsConfigured)

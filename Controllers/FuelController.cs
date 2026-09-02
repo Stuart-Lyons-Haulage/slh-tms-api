@@ -22,7 +22,7 @@ public sealed class FuelController(TmsDbContext db) : ControllerBase
     }
 
     [HttpPost]
-    [Authorize(Policy = "TmsWrite")]
+    [Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> Upsert(FuelPriceRequest request, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.Provider)) return BadRequest("Provider is required.");

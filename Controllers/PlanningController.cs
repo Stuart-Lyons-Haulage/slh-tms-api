@@ -37,7 +37,7 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         }
     }
 
-    [HttpGet("loads"), AllowAnonymous]
+    [HttpGet("loads"), Authorize(Policy = "TmsAccess")]
     public async Task<IActionResult> Loads([FromQuery] DateOnly? date, CancellationToken ct)
     {
         if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
@@ -281,7 +281,7 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         });
     }
 
-    [HttpPost("loads/{id:guid}/dispatch/sms"), Authorize(Policy = "TmsWrite")]
+    [HttpPost("loads/{id:guid}/dispatch/sms"), Authorize(Policy = "TmsDispatch")]
     public async Task<IActionResult> SendDispatchSms(Guid id, CancellationToken ct)
     {
         var (load, register) = await FindLoadAsync(id, includeStops: true, asTracking: true, ct);

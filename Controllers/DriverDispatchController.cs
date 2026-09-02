@@ -288,7 +288,7 @@ public sealed class DriverDispatchController(
         });
     }
 
-    [HttpPost("drivers"), Authorize(Policy = "TmsWrite")]
+    [HttpPost("drivers"), Authorize(Policy = "TmsDispatch")]
     public async Task<IActionResult> AddOrRosterDriver(DriverDispatchAddDriverRequest request, CancellationToken ct)
     {
         var name = request.DisplayName?.Trim();
@@ -399,7 +399,7 @@ public sealed class DriverDispatchController(
         });
     }
 
-    [HttpPost("agency-roster"), Authorize(Policy = "TmsWrite")]
+    [HttpPost("agency-roster"), Authorize(Policy = "TmsDispatch")]
     public async Task<IActionResult> AddAgencyRoster(DriverDispatchAgencyRosterRequest request, CancellationToken ct)
     {
         if (request.Days < 1 || request.Days > 7) return BadRequest(new { message = "Agency availability must be between 1 and 7 days." });
@@ -412,7 +412,7 @@ public sealed class DriverDispatchController(
         return Ok(entry);
     }
 
-    [HttpPut("{loadId:guid}/start-time"), Authorize(Policy = "TmsWrite")]
+    [HttpPut("{loadId:guid}/start-time"), Authorize(Policy = "TmsDispatch")]
     public async Task<IActionResult> SetStartTime(Guid loadId, DriverDispatchStartTimeRequest request, CancellationToken ct)
     {
         var load = await PlanningResilience.ReadLoadAsync(db, loadId, ct);

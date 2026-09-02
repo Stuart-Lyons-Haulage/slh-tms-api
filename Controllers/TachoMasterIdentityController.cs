@@ -10,7 +10,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController]
 [Route("api/v1/integrations/tachomaster/identity")]
-[Authorize(Policy = "TmsWrite")]
+[Authorize(Policy = "TmsMasterData")]
 public sealed class TachoMasterIdentityController(TmsDbContext db, ILogger<TachoMasterIdentityController> logger) : ControllerBase
 {
     [HttpPost("workers")]

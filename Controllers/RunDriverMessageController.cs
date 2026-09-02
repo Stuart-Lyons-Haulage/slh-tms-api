@@ -36,7 +36,7 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
         return Ok(readiness with { StructuralReadiness = structural });
     }
 
-    [HttpPost("{id:guid}/driver-message/sms"), Authorize(Policy = "TmsWrite")]
+    [HttpPost("{id:guid}/driver-message/sms"), Authorize(Policy = "TmsDispatch")]
     public async Task<IActionResult> Send(Guid id, RunDriverMessageRequest request, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.Message)) return BadRequest(new { message = "The driver message is empty." });

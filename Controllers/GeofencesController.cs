@@ -13,7 +13,7 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class GeofencesController(TmsDbContext db) : ControllerBase
 {
     [HttpPost("import-falcon")]
-    [Authorize(Policy = "TmsWrite")]
+    [Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> ImportFalcon([FromBody] JsonElement payload, CancellationToken ct)
     {
         if (payload.ValueKind != JsonValueKind.Object || !payload.TryGetProperty("geofences", out var geofences) || geofences.ValueKind != JsonValueKind.Array)
@@ -36,7 +36,7 @@ public sealed class GeofencesController(TmsDbContext db) : ControllerBase
     }
 
     [HttpPost("import-slh-seed")]
-    [Authorize(Policy = "TmsWrite")]
+    [Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> ImportSlhSeed(CancellationToken ct)
     {
         var statuses = await EmbeddedGeofenceEngine.FenceStatusesAsync(db, ct);
@@ -55,7 +55,7 @@ public sealed class GeofencesController(TmsDbContext db) : ControllerBase
     }
 
     [HttpPost("repair-links")]
-    [Authorize(Policy = "TmsWrite")]
+    [Authorize(Policy = "TmsMasterData")]
     public async Task<IActionResult> RepairLinks(CancellationToken ct)
     {
         var promotion = await PromoteCodedGeofencesAsync(ct);
