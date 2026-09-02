@@ -120,6 +120,8 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             });
         }
 
+        TmsMetrics.Shared.RecordImportBatch(staged + existing, existing, "email_order");
+
         logger.LogInformation(
             "Info mailbox intake {MessageId}: staged {Staged}, existing {Existing}, superseded {Superseded}, parser warnings {Warnings}.",
             request.MessageId, staged, existing, superseded, parsed.Warnings.Count);
