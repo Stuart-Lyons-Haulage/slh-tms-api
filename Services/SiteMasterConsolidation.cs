@@ -379,6 +379,39 @@ public static class SiteMasterConsolidation
                          x.Action == MergedDuplicateAction))
             .ToListAsync(ct);
 
+        // MasterDataAudit writes are now transactionally captured in AuditOutbox and
+        // materialised asynchronously. Reconciliation decisions cannot wait for the
+        // background processor: a durable pending disposition is already authoritative.
+        // Read valid site-disposition payloads directly from the outbox as well as the
+        // materialised audit table, deduplicating by deterministic audit Id below.
+        var pendingAuditPayloads = await db.AuditOutboxes.AsNoTracking()
+            .Where(x => x.EventType == AuditOutboxEventTypes.MasterDataAudit &&
+                        x.ProcessedAt == null)
+            .Select(x => x.Payload)
+            .ToListAsync(ct);
+
+        foreach (var payload in pendingAuditPayloads)
+        {
+            try
+            {
+                var pendingAudit = JsonSerializer.Deserialize<MasterDataAudit>(payload);
+                if (pendingAudit is not null &&
+                    string.Equals(pendingAudit.EntityType, "Site", StringComparison.OrdinalIgnoreCase) &&
+                    (string.Equals(pendingAudit.Action, "Archived", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(pendingAudit.Action, "Restored", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(pendingAudit.Action, MergedDuplicateAction, StringComparison.OrdinalIgnoreCase)) &&
+                    audits.All(existing => existing.Id != pendingAudit.Id))
+                {
+                    audits.Add(pendingAudit);
+                }
+            }
+            catch (JsonException)
+            {
+                // Poison events are handled by the outbox retry policy. They cannot safely
+                // influence Site restoration decisions until their payload is valid.
+            }
+        }
+
         var result = new Dictionary<Guid, Guid?>();
         foreach (var group in audits.GroupBy(x => x.EntityId))
         {
