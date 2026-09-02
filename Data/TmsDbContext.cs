@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Models.Planning;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
 
@@ -28,6 +29,12 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<TransportOrder> TransportOrders => Set<TransportOrder>();
     public DbSet<Load> Loads => Set<Load>();
     public DbSet<LoadStop> LoadStops => Set<LoadStop>();
+    public DbSet<Run> Runs => Set<Run>();
+    public DbSet<RunStop> RunStops => Set<RunStop>();
+    public DbSet<RunOrderAllocation> RunOrderAllocations => Set<RunOrderAllocation>();
+    public DbSet<RunResourceAllocation> RunResourceAllocations => Set<RunResourceAllocation>();
+    public DbSet<RunStatusHistory> RunStatusHistory => Set<RunStatusHistory>();
+    public DbSet<RunTrackingState> RunTrackingStates => Set<RunTrackingState>();
     public DbSet<VehicleTrackingEvent> VehicleTrackingEvents => Set<VehicleTrackingEvent>();
     public DbSet<VehicleLiveStatus> VehicleLiveStatuses => Set<VehicleLiveStatus>();
     public DbSet<FuelPrice> FuelPrices => Set<FuelPrice>();
@@ -176,6 +183,8 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<Load>().HasMany(x => x.Stops).WithOne().HasForeignKey(x => x.LoadId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<LoadStop>().Property(x => x.Latitude).HasPrecision(9, 6);
         b.Entity<LoadStop>().Property(x => x.Longitude).HasPrecision(9, 6);
+
+        b.ConfigureCanonicalPlanningModel();
 
         b.Entity<SiteGeofence>().HasIndex(x => x.NormalizedName).IsUnique();
         b.Entity<SiteGeofence>().HasIndex(x => x.SiteId);

@@ -193,10 +193,18 @@ if (!app.Environment.IsEnvironment("Testing"))
 {
     await using var scope = app.Services.CreateAsyncScope();
     var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-    var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Tms.SchemaInitializer");
+    var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Tms.SchemaMigration");
+
+    // Required schema migrations are fail-fast. Any exception from the migration
+    // runner is intentionally allowed to escape this startup block so the host
+    // never begins serving against a partially migrated database.
+    await SchemaMigrationRunner.ApplyAsync(db, logger, CancellationToken.None);
+
+    // These are post-schema data-maintenance tasks rather than required DDL.
+    // Preserve their existing best-effort behaviour without weakening the schema
+    // migration guarantee above.
     try
     {
-        await PlanningSchemaInitializer.Apply(db, logger, CancellationToken.None);
         var quarantinedFleetioPlaceholders = await MasterDetailStore.QuarantineFleetioPlaceholdersAsync(db, CancellationToken.None);
         if (quarantinedFleetioPlaceholders > 0)
             logger.LogWarning("Quarantined {PlaceholderCount} Fleetio placeholder vehicle records from operational master data.", quarantinedFleetioPlaceholders);
@@ -210,7 +218,7 @@ if (!app.Environment.IsEnvironment("Testing"))
     }
     catch (Exception ex)
     {
-        logger.LogError(ex, "TMS schema repair failed during startup; continuing so health and diagnostics remain available.");
+        logger.LogError(ex, "Post-migration startup maintenance failed; required schema migrations completed successfully, so application startup will continue.");
     }
 }
 
