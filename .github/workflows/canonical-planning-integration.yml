@@ -17,68 +17,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: feature/canonical-relational-planning
-          fetch-depth: 0
-      - name: Merge current main and integrate canonical migration
+      - name: Register canonical schema in versioned migration catalogue
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'danwilliams201302-max'
           git config user.email 'daniel@lyonshaulage.com'
-          git fetch origin main
-
-          set +e
-          git merge --no-ff --no-commit origin/main
-          merge_status=$?
-          set -e
-
-          conflicts="$(git diff --name-only --diff-filter=U || true)"
-          if printf '%s\n' "$conflicts" | grep -qx 'Data/TmsDbContext.cs'; then
-            git checkout --theirs Data/TmsDbContext.cs
-            git add Data/TmsDbContext.cs
-          fi
-
-          remaining="$(git diff --name-only --diff-filter=U || true)"
-          if [ -n "$remaining" ]; then
-            echo 'Unresolved merge conflicts remain:' >&2
-            printf '%s\n' "$remaining" >&2
-            exit 1
-          fi
-
+          test -f Migrations/Sql/20260831214900_CanonicalRelationalPlanning.sql
+          cp Migrations/Sql/20260831214900_CanonicalRelationalPlanning.sql Database/039_Canonical_Relational_Planning.sql
           python - <<'PY'
           from pathlib import Path
-
-          db = Path('Data/TmsDbContext.cs')
-          text = db.read_text()
-          if 'using Slh.Tms.Api.Models.Planning;' not in text:
-              marker = 'using Slh.Tms.Api.Models;\n'
-              if marker not in text:
-                  raise SystemExit('TmsDbContext models using marker not found')
-              text = text.replace(marker, marker + 'using Slh.Tms.Api.Models.Planning;\n', 1)
-
-          load_marker = '    public DbSet<LoadStop> LoadStops => Set<LoadStop>();\n'
-          canonical_sets = '''    public DbSet<Run> Runs => Set<Run>();
-    public DbSet<RunStop> RunStops => Set<RunStop>();
-    public DbSet<RunOrderAllocation> RunOrderAllocations => Set<RunOrderAllocation>();
-    public DbSet<RunResourceAllocation> RunResourceAllocations => Set<RunResourceAllocation>();
-    public DbSet<RunStatusHistory> RunStatusHistory => Set<RunStatusHistory>();
-    public DbSet<RunTrackingState> RunTrackingStates => Set<RunTrackingState>();
-'''
-          if 'public DbSet<Run> Runs' not in text:
-              if load_marker not in text:
-                  raise SystemExit('TmsDbContext load DbSet marker not found')
-              text = text.replace(load_marker, load_marker + canonical_sets, 1)
-
-          model_marker = '        b.Entity<LoadStop>().Property(x => x.Longitude).HasPrecision(9, 6);\n'
-          if 'b.ConfigureCanonicalPlanningModel();' not in text:
-              if model_marker not in text:
-                  raise SystemExit('TmsDbContext model marker not found')
-              text = text.replace(model_marker, model_marker + '\n        b.ConfigureCanonicalPlanningModel();\n', 1)
-          db.write_text(text)
-
-          sql_source = Path('Migrations/Sql/20260831214900_CanonicalRelationalPlanning.sql')
-          if not sql_source.exists():
-              raise SystemExit('Canonical planning SQL source is missing')
-          Path('Database/039_Canonical_Relational_Planning.sql').write_text(sql_source.read_text())
 
           runner = Path('Services/SchemaMigrationRunner.cs')
           text = runner.read_text()
@@ -92,28 +40,22 @@ jobs:
 
           tests = Path('Slh.Tms.Api.Tests/SchemaResourceTests.cs')
           text = tests.read_text()
+          resource_marker = '        Assert.Contains("Slh.Tms.Api.Database.038_Driver_Tacho_Identity_Repair.sql", resources);\n'
+          resource_add = resource_marker + '        Assert.Contains("Slh.Tms.Api.Database.039_Canonical_Relational_Planning.sql", resources);\n'
           if 'Slh.Tms.Api.Database.039_Canonical_Relational_Planning.sql' not in text:
-              marker = '        Assert.Contains("Slh.Tms.Api.Database.038_Driver_Tacho_Identity_Repair.sql", resources);\n'
-              if marker not in text:
+              if resource_marker not in text:
                   raise SystemExit('Schema resource assertion marker not found')
-              text = text.replace(marker, marker + '        Assert.Contains("Slh.Tms.Api.Database.039_Canonical_Relational_Planning.sql", resources);\n', 1)
+              text = text.replace(resource_marker, resource_add, 1)
           text = text.replace('        Assert.Equal(43, migrations.Count);', '        Assert.Equal(44, migrations.Count);')
-          old_tail = '''        Assert.Equal("037_Driver_Tacho_Identity.sql", migrations[^2].Name);
-        Assert.Equal("038_Driver_Tacho_Identity_Repair.sql", migrations[^1].Name);'''
-          new_tail = '''        Assert.Equal("037_Driver_Tacho_Identity.sql", migrations[^3].Name);
-        Assert.Equal("038_Driver_Tacho_Identity_Repair.sql", migrations[^2].Name);
-        Assert.Equal("039_Canonical_Relational_Planning.sql", migrations[^1].Name);'''
+          old_tail = '        Assert.Equal("037_Driver_Tacho_Identity.sql", migrations[^2].Name);\n        Assert.Equal("038_Driver_Tacho_Identity_Repair.sql", migrations[^1].Name);'
+          new_tail = '        Assert.Equal("037_Driver_Tacho_Identity.sql", migrations[^3].Name);\n        Assert.Equal("038_Driver_Tacho_Identity_Repair.sql", migrations[^2].Name);\n        Assert.Equal("039_Canonical_Relational_Planning.sql", migrations[^1].Name);'
           if '039_Canonical_Relational_Planning.sql", migrations[^1]' not in text:
               if old_tail not in text:
                   raise SystemExit('Schema migration tail assertions not found')
               text = text.replace(old_tail, new_tail, 1)
           tests.write_text(text)
           PY
-
+          rm .github/workflows/canonical-planning-integration.yml
           git add -A
-          if git diff --cached --quiet; then
-            echo 'No integration changes required.'
-            exit 0
-          fi
-          git commit -m 'Merge main and register canonical planning migration'
+          git commit -m 'Register canonical planning as schema migration 44'
           git push origin HEAD:feature/canonical-relational-planning
