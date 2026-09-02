@@ -1,0 +1,126 @@
+name: Entra RBAC live audit
+
+on:
+  push:
+    branches:
+      - audit/entra-rbac-live-verification
+    paths:
+      - .github/workflows/entra-rbac-live-audit.yml
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sign in to Azure with OpenID Connect
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify live app roles and assignments
+        shell: bash
+        env:
+          FALLBACK_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        run: |
+          set -euo pipefail
+
+          app_env="$(az containerapp show \
+            --name slh-tms-api-prod \
+            --resource-group slh-tms-prod-rg \
+            --query 'properties.template.containers[0].env' \
+            --output json)"
+
+          tenant_id="$(jq -r '[.[] | select(.name == "Entra__TenantId") | .value][0] // empty' <<<"$app_env")"
+          audience="$(jq -r '[.[] | select(.name == "Entra__Audience") | .value][0] // empty' <<<"$app_env")"
+          tenant_id="${tenant_id:-$FALLBACK_TENANT_ID}"
+
+          if [ -z "$audience" ]; then
+            echo '::error::Live Container App does not expose Entra__Audience as a plain environment value.'
+            exit 1
+          fi
+
+          app_id="${audience#api://}"
+          if ! [[ "$app_id" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+            echo '::error::Entra__Audience is not an api://<application-id> or application-id GUID.'
+            exit 1
+          fi
+
+          app_json="$(az ad app show --id "$app_id" --output json)"
+          sp_json="$(az ad sp show --id "$app_id" --output json)"
+          sp_id="$(jq -r '.id' <<<"$sp_json")"
+
+          assignments="$(az rest \
+            --method GET \
+            --url "https://graph.microsoft.com/v1.0/servicePrincipals/$sp_id/appRoleAssignedTo?%24top=999" \
+            --output json)"
+
+          cat > /tmp/expected-roles.json <<'JSON'
+          [
+            {"value":"TMS.Viewer","id":"888eadd4-2666-4939-a25f-4e631cb12b5c"},
+            {"value":"TMS.Planner","id":"51800200-91a2-44d3-8f2b-5ebc8098ab6b"},
+            {"value":"TMS.Dispatcher","id":"c8ff4b75-db76-4f15-8dc6-05cf59713784"},
+            {"value":"TMS.OperationsController","id":"910bfb0a-cd6e-4b45-96e3-aac17501b0cf"},
+            {"value":"TMS.Approver","id":"36d00564-8296-4ae3-8440-a7dd6e8fbe83"},
+            {"value":"TMS.MasterDataAdmin","id":"20a02e12-3103-4f59-aeac-5f18bd0a1f25"},
+            {"value":"TMS.SystemAdmin","id":"eca9f094-3e8c-4a34-83a6-297223a883fb"}
+          ]
+          JSON
+
+          jq -n \
+            --arg checkedAtUtc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg tenantId "$tenant_id" \
+            --arg appId "$app_id" \
+            --arg servicePrincipalId "$sp_id" \
+            --argjson expected "$(cat /tmp/expected-roles.json)" \
+            --argjson app "$app_json" \
+            --argjson assigned "$assignments" '
+              def actualRole($id):
+                [$app.appRoles[] | select(.id == $id)][0];
+              def roleAssignments($id):
+                [$assigned.value[] | select(.appRoleId == $id)
+                  | {principalType, principalId}];
+              {
+                checkedAtUtc: $checkedAtUtc,
+                tenantId: $tenantId,
+                appId: $appId,
+                servicePrincipalId: $servicePrincipalId,
+                roles: [
+                  $expected[] as $e
+                  | (actualRole($e.id)) as $r
+                  | (roleAssignments($e.id)) as $a
+                  | {
+                      value: $e.value,
+                      id: $e.id,
+                      present: ($r != null and $r.value == $e.value and $r.isEnabled == true and ($r.allowedMemberTypes | index("User") != null)),
+                      enabled: ($r.isEnabled // false),
+                      allowedMemberTypes: ($r.allowedMemberTypes // []),
+                      assignmentCount: ($a | length),
+                      principals: $a
+                    }
+                ]
+              }
+              | .allRolesPresent = ([.roles[].present] | all)
+              | .allRolesAssigned = ([.roles[].assignmentCount > 0] | all)
+            ' > entra-rbac-live-audit.json
+
+          jq '{checkedAtUtc, appId, allRolesPresent, allRolesAssigned, roles: [.roles[] | {value,id,present,assignmentCount,principalTypes:[.principals[].principalType]}]}' entra-rbac-live-audit.json
+
+          test "$(jq -r '.allRolesPresent' entra-rbac-live-audit.json)" = true
+          test "$(jq -r '.allRolesAssigned' entra-rbac-live-audit.json)" = true
+
+      - name: Upload pseudonymous audit record
+        uses: actions/upload-artifact@v4
+        with:
+          name: entra-rbac-live-audit
+          path: entra-rbac-live-audit.json
+          if-no-files-found: error
+          retention-days: 30
