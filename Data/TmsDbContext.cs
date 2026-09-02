@@ -1,5 +1,7 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Models.Planning;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
 
@@ -27,12 +29,19 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<TransportOrder> TransportOrders => Set<TransportOrder>();
     public DbSet<Load> Loads => Set<Load>();
     public DbSet<LoadStop> LoadStops => Set<LoadStop>();
+    public DbSet<Run> Runs => Set<Run>();
+    public DbSet<RunStop> RunStops => Set<RunStop>();
+    public DbSet<RunOrderAllocation> RunOrderAllocations => Set<RunOrderAllocation>();
+    public DbSet<RunResourceAllocation> RunResourceAllocations => Set<RunResourceAllocation>();
+    public DbSet<RunStatusHistory> RunStatusHistory => Set<RunStatusHistory>();
+    public DbSet<RunTrackingState> RunTrackingStates => Set<RunTrackingState>();
     public DbSet<VehicleTrackingEvent> VehicleTrackingEvents => Set<VehicleTrackingEvent>();
     public DbSet<VehicleLiveStatus> VehicleLiveStatuses => Set<VehicleLiveStatus>();
     public DbSet<FuelPrice> FuelPrices => Set<FuelPrice>();
     public DbSet<IntegrationMapping> IntegrationMappings => Set<IntegrationMapping>();
     public DbSet<DriverStatusLog> DriverStatusLogs => Set<DriverStatusLog>();
     public DbSet<MasterDataAudit> MasterDataAudits => Set<MasterDataAudit>();
+    public DbSet<AuditOutbox> AuditOutboxes => Set<AuditOutbox>();
     public DbSet<SiteGeofence> SiteGeofences => Set<SiteGeofence>();
     public DbSet<GeofenceVisit> GeofenceVisits => Set<GeofenceVisit>();
     public DbSet<EtaSnapshot> EtaSnapshots => Set<EtaSnapshot>();
@@ -53,31 +62,32 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         foreach (var loadId in completionTransitions)
             await RunCompletionPersistenceGuard.EnsureCompletionEvidenceAsync(this, loadId, cancellationToken);
 
-        try
-        {
-            return await base.SaveChangesAsync(cancellationToken);
-        }
-        catch (DbUpdateException ex) when (AuditStorageUnavailable(ex) && ChangeTracker.Entries<MasterDataAudit>().Any(entry => entry.State == EntityState.Added))
-        {
-            // Master-data amendments are operationally authoritative. If the audit table is
-            // missing/lagging in Azure SQL, do not roll back the real edit: remove only the
-            // audit insert and retry the same unit of work.
-            foreach (var entry in ChangeTracker.Entries<MasterDataAudit>().Where(entry => entry.State == EntityState.Added).ToList())
-                entry.State = EntityState.Detached;
-
-            return await base.SaveChangesAsync(cancellationToken);
-        }
+        EnqueuePendingMasterDataAudits();
+        return await base.SaveChangesAsync(cancellationToken);
     }
 
-    private static bool AuditStorageUnavailable(Exception exception)
+    internal Task<int> SaveAuditReplayChangesAsync(CancellationToken cancellationToken = default) =>
+        base.SaveChangesAsync(cancellationToken);
+
+    private void EnqueuePendingMasterDataAudits()
     {
-        var message = exception.GetBaseException().Message;
-        return message.Contains("MasterDataAudits", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("MasterDataAudit", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("does not exist or you do not have permissions", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("permission was denied", StringComparison.OrdinalIgnoreCase);
+        var pendingAudits = ChangeTracker.Entries<MasterDataAudit>()
+            .Where(entry => entry.State == EntityState.Added)
+            .ToList();
+
+        foreach (var entry in pendingAudits)
+        {
+            var audit = entry.Entity;
+            AuditOutboxes.Add(new AuditOutbox
+            {
+                EventType = AuditOutboxEventTypes.MasterDataAudit,
+                Payload = JsonSerializer.Serialize(audit),
+                CreatedAt = DateTimeOffset.UtcNow,
+                RetryCount = 0
+            });
+
+            entry.State = EntityState.Detached;
+        }
     }
 
     protected override void OnModelCreating(ModelBuilder b)
@@ -120,6 +130,15 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<MasterDataAudit>()
             .HasIndex(x => x.ChangedAtUtc)
             .HasDatabaseName("IX_MasterDataAudits_ChangedAtUtc");
+
+        b.Entity<AuditOutbox>().ToTable("AuditOutbox");
+        b.Entity<AuditOutbox>().HasKey(x => x.OutboxId);
+        b.Entity<AuditOutbox>()
+            .HasIndex(x => new { x.ProcessedAt, x.FailedAt, x.CreatedAt })
+            .HasDatabaseName("IX_AuditOutbox_Pending");
+        b.Entity<AuditOutbox>()
+            .HasIndex(x => x.CreatedAt)
+            .HasDatabaseName("IX_AuditOutbox_CreatedAt");
 
         b.Entity<StagedImport>().HasIndex(x => x.IdempotencyKey).IsUnique();
         b.Entity<StagedImport>().Property(x => x.RowVersion).IsRowVersion();
@@ -164,6 +183,8 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<Load>().HasMany(x => x.Stops).WithOne().HasForeignKey(x => x.LoadId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<LoadStop>().Property(x => x.Latitude).HasPrecision(9, 6);
         b.Entity<LoadStop>().Property(x => x.Longitude).HasPrecision(9, 6);
+
+        b.ConfigureCanonicalPlanningModel();
 
         b.Entity<SiteGeofence>().HasIndex(x => x.NormalizedName).IsUnique();
         b.Entity<SiteGeofence>().HasIndex(x => x.SiteId);

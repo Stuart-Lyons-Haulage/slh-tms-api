@@ -23,4 +23,4 @@ Build the jobs image with:
 docker build -f Slh.Tms.Jobs/Dockerfile -t slhtmsacrprod.azurecr.io/slh-tms-jobs:<sha> .
 ```
 
-Deploy the four scheduled resources with `infra/container-app-jobs.bicep`. Production deployment should use an immutable image tag and ensure `Database/040_Distributed_Integration_Lease.sql` has been applied before enabling schedules.
+Deploy the four scheduled resources with `infra/container-app-jobs.bicep`. Production deployment should use an immutable image tag and ensure `Database/041_Distributed_Integration_Lease.sql` has been applied before enabling schedules.
