@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
@@ -86,6 +87,8 @@ public sealed class SiteMasterConsolidationTests
         Assert.Equal(1, result.ArchivedDuplicates);
         Assert.Single(db.Sites.Where(x => x.Active && (x.Id == canonical.Id || x.Id == duplicate.Id)));
 
+        var auditProcessor = new AuditOutboxProcessor(db, NullLogger<AuditOutboxProcessor>.Instance);
+        await auditProcessor.ProcessPendingAsync(CancellationToken.None);
         var mergeAudit = Assert.Single(db.MasterDataAudits.Where(x => x.EntityId == duplicate.Id && x.Action == "MergedDuplicate"));
         using (var audit = JsonDocument.Parse(mergeAudit.ChangesJson!))
             Assert.Equal(canonical.Id, audit.RootElement.GetProperty("canonicalSiteId").GetGuid());

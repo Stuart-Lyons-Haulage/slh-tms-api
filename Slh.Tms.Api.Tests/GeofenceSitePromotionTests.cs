@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
@@ -58,6 +59,9 @@ public sealed class GeofenceSitePromotionTests : IClassFixture<CustomWebFactory>
         var fence = finalDb.SiteGeofences.Single(x => x.Id == fenceId);
         Assert.Equal(site.Id, fence.SiteId);
         Assert.Equal("SITE001", fence.SiteNumber);
+
+        var auditProcessor = new AuditOutboxProcessor(finalDb, NullLogger<AuditOutboxProcessor>.Instance);
+        await auditProcessor.ProcessPendingAsync(CancellationToken.None);
         Assert.Contains(finalDb.MasterDataAudits, x => x.EntityType == "Site" && x.EntityId == site.Id && x.Action == "CreatedFromOperationalGeofence");
         Assert.Contains(finalDb.MasterDataAudits, x => x.EntityType == "Geofence" && x.EntityId == fenceId && x.Action == "PromotedToSiteMaster");
     }

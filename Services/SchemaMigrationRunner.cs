@@ -89,7 +89,8 @@ public static class SchemaMigrationRunner
         "036_Order_Review_Schema_Repair.sql",
         "037_Driver_Tacho_Identity.sql",
         "038_Driver_Tacho_Identity_Repair.sql",
-        "039_Canonical_Relational_Planning.sql"
+        "039_Canonical_Relational_Planning.sql",
+        "040_Audit_Outbox.sql"
     ];
 
     internal const string HistoryTableSql = """
