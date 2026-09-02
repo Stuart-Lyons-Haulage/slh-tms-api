@@ -23,6 +23,7 @@ public sealed class SchemaResourceTests
         Assert.Contains("Slh.Tms.Api.Database.036_Order_Review_Schema_Repair.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.037_Driver_Tacho_Identity.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.038_Driver_Tacho_Identity_Repair.sql", resources);
+        Assert.Contains("Slh.Tms.Api.Database.039_Canonical_Relational_Planning.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.000_Operational_Storage_Recovery.sql", resources);
     }
 
@@ -36,14 +37,15 @@ public sealed class SchemaResourceTests
         var migrations = SchemaMigrationRunner.GetMigrations();
 
         Assert.Equal(resources.Length, migrations.Count);
-        Assert.Equal(43, migrations.Count);
+        Assert.Equal(44, migrations.Count);
         Assert.Equal(Enumerable.Range(1, migrations.Count), migrations.Select(migration => migration.Version));
         Assert.Equal(
             resources,
             migrations.Select(migration => migration.ResourceName).OrderBy(name => name, StringComparer.Ordinal));
         Assert.All(migrations, migration => Assert.Matches("^[0-9A-F]{64}$", migration.Checksum));
-        Assert.Equal("037_Driver_Tacho_Identity.sql", migrations[^2].Name);
-        Assert.Equal("038_Driver_Tacho_Identity_Repair.sql", migrations[^1].Name);
+        Assert.Equal("037_Driver_Tacho_Identity.sql", migrations[^3].Name);
+        Assert.Equal("038_Driver_Tacho_Identity_Repair.sql", migrations[^2].Name);
+        Assert.Equal("039_Canonical_Relational_Planning.sql", migrations[^1].Name);
     }
 
     [Fact]
