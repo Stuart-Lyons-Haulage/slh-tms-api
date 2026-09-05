@@ -45,6 +45,12 @@ class WorkflowValidationTests(unittest.TestCase):
         errors = validate(workflow)
         self.assertTrue(any("attachment presence" in item for item in errors))
 
+    def test_rejects_trigger_attachment_string_loop(self):
+        workflow = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
+        workflow["properties"]["definition"]["actions"]["For_Each_Source_Attachment"]["foreach"] = "@triggerOutputs()?['body/attachments']"
+        errors = validate(workflow)
+        self.assertTrue(any("trigger attachments string" in item for item in errors))
+
     def test_rejects_skipping_tms_submit_after_attachment_failure(self):
         workflow = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
         workflow["properties"]["definition"]["actions"]["Scope_Submit_To_TMS"]["runAfter"] = {
