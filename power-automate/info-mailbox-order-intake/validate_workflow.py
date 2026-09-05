@@ -71,6 +71,12 @@ def validate(workflow):
     if trigger_concurrency.get("runs") != 4:
         errors.append("trigger concurrency must be 4")
 
+    for node in _walk(actions):
+        if isinstance(node, dict) and node.get("type") == "Foreach":
+            foreach_expression = str(node.get("foreach", ""))
+            if "triggerOutputs" in foreach_expression and "attachments" in foreach_expression:
+                errors.append("attachment loop must use the GetAttachments_V2 result, not the trigger attachments string")
+
     if "Get_Attachment_Content" not in serialized:
         errors.append("attachment content retrieval is missing")
     if "secureData" not in serialized:

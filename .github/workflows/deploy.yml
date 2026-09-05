@@ -154,10 +154,18 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --mode multiple
 
-          az containerapp revision activate \
-            --name "$AZURE_CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --revision "$previous_revision"
+          previous_active="$(jq -r --arg revision "$previous_revision" \
+            '.[] | select(.name == $revision) | (.properties.active // false)' \
+            <<<"$revisions")"
+
+          if test "$previous_active" != "true"; then
+            az containerapp revision activate \
+              --name "$AZURE_CONTAINER_APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --revision "$previous_revision"
+          else
+            echo "Current production revision $previous_revision is already active; continuing."
+          fi
 
           # Replace any latest-revision traffic rule with an explicit production revision.
           # This guarantees that creating the candidate revision cannot receive user traffic.
