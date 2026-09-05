@@ -20,9 +20,13 @@ public sealed class OperationsController(
     IConfiguration configuration) : ControllerBase
 {
     [HttpGet("delivery-etas"), AllowAnonymous]
-    public async Task<IActionResult> DeliveryEtas([FromQuery] DateOnly? date, CancellationToken ct)
+    public async Task<IActionResult> DeliveryEtas(
+        [FromHeader(Name = "X-TV-Display-Key")] string? displayKey,
+        [FromQuery] DateOnly? date,
+        CancellationToken ct)
     {
-        if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
+        var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct);
+        if (!pairedKeyAllowed && !TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
  
         var planningDate = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
         // A planning-day reset leaves cancelled rows in the legacy/live Loads table while

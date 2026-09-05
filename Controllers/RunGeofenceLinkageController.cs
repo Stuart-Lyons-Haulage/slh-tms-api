@@ -9,11 +9,18 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/v1/planning/geofence-linkage")]
 [Authorize(Policy = "TmsAccess")]
-public sealed class RunGeofenceLinkageController(TmsDbContext db) : ControllerBase
+public sealed class RunGeofenceLinkageController(TmsDbContext db, IConfiguration configuration) : ControllerBase
 {
-    [HttpGet]
-    public async Task<IActionResult> Get([FromQuery] DateOnly date, CancellationToken ct)
+    [HttpGet, AllowAnonymous]
+    public async Task<IActionResult> Get(
+        [FromHeader(Name = "X-TV-Display-Key")] string? displayKey,
+        [FromQuery] DateOnly date,
+        CancellationToken ct)
     {
+        var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct);
+        if (!pairedKeyAllowed && !TvWallboardAccess.IsAllowed(HttpContext, configuration))
+            return Unauthorized(new { message = "This TV display is not authorised." });
+
         // Use the same merged planning source and the same reconstructed + durable
         // RoadTech evidence as Run Progress. The old diagnostics endpoint only read
         // durable GeofenceVisits by exact LoadStopId, so the progress bar could advance
