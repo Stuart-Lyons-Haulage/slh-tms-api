@@ -6,6 +6,34 @@ namespace Slh.Tms.Api.Tests;
 public sealed class MailboxFullBodyTests
 {
     [Fact]
+    public void TangmereMarketBody_ParsesSevenDropsAndAllFortyEightPallets()
+    {
+        var request = Email("Tangmere markets 06/09", "Please collecty 48pt from tangmere today", "<p>Please collecty 48pt from tangmere today</p>" +
+            "<p>15pt Fresh import spit</p><p>15pt sunfresh spit</p><p>3pt m&amp;m spit</p><p>5pt quality spit</p>" +
+            "<p>5pt waldon spit</p><p>2pt m&amp;a western</p><p>3pt universal western</p>")
+            with { SenderAddress = "planner@pmtransport.co.uk" };
+        var result = new SpecialistMailboxOrderParser().TryParse(request);
+        Assert.NotNull(result);
+        Assert.Equal(7, result!.Orders.Count);
+        Assert.Equal(48, result.Orders.Sum(o => o.Payload.GetProperty("pallets").GetInt32()));
+        Assert.Equal(5, result.Orders.Count(o => o.Payload.GetProperty("marketName").GetString() == "Spit"));
+        Assert.Equal(2, result.Orders.Count(o => o.Payload.GetProperty("marketName").GetString() == "Western"));
+        Assert.All(result.Orders, o => Assert.False(o.Payload.GetProperty("plannerReady").GetBoolean()));
+        Assert.Equal(7, result.Orders.Select(o => o.NaturalKey).Distinct().Count());
+    }
+
+    [Fact]
+    public void TangmereMarketBody_MissingDropDoesNotSilentlyCreatePartialOrder()
+    {
+        var request = Email("Tangmere markets 06/09", null!, "<p>Please collecty 48pt from tangmere today</p><p>15pt Fresh import spit</p>")
+            with { SenderAddress = "planner@pmtransport.co.uk" };
+        var result = new SpecialistMailboxOrderParser().TryParse(request);
+        Assert.NotNull(result);
+        Assert.Empty(result!.Orders);
+        Assert.NotNull(result.IgnoredReason);
+    }
+
+    [Fact]
     public void CoventGarden_FullHtmlIncludesDropsBeyondPreview()
     {
         var request = Email("Covent Garden deliveries 07/09/2026", "Please see tomorrow's deliveries.",

@@ -14,6 +14,24 @@ public sealed class OrderIntakeMappingExceptionTests : IClassFixture<CustomWebFa
     public OrderIntakeMappingExceptionTests(CustomWebFactory factory) => this.factory = factory;
 
     [Fact]
+    public async Task Incomplete_body_only_market_order_is_retained_for_review()
+    {
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
+        var payload = JsonSerializer.Serialize(new
+        {
+            messageId = $"market-mapping-{Guid.NewGuid():N}",
+            mailbox = "info@lyonshaulage.com",
+            senderAddress = "planner@pmtransport.co.uk",
+            subject = "Tangmere markets 06/09",
+            receivedAtUtc = "2026-09-06T09:47:33Z",
+            bodyText = "Please collecty 48pt from tangmere today\n15pt Fresh import spit"
+        });
+        var response = await client.PostAsync("/api/v1/order-intake/email", new StringContent(payload, Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        Assert.Contains("\"outlookCategory\":\"TMS Review\"", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task Nwf_pallet_order_sender_without_readable_attachment_is_staged_for_mapping_review()
     {
         var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
