@@ -20,7 +20,7 @@ public static class MailboxBodyNormalizer
         text = Regex.Replace(text, @"<[^>]+>", " ");
         text = WebUtility.HtmlDecode(text).Replace('\u00a0', ' ');
         text = Regex.Replace(text, @"[ \t]+", " ");
-        text = Regex.Replace(text, @"\r?\n[ \t]*", "\n").Trim();
+        text = Regex.Replace(text, @"[ \t]*\r?\n[ \t]*", "\n").Trim();
         return string.IsNullOrWhiteSpace(text) ? bodyText?.Trim() ?? string.Empty : text;
     }
 }
