@@ -233,6 +233,13 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --revision-weight "$PREVIOUS_REVISION=100" "$target_revision=0"
 
+          # A zero traffic weight does not guarantee that the revision is active.
+          # Activate it explicitly so Azure provisions the revision FQDN and runs startup.
+          az containerapp revision activate \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision "$target_revision"
+
           echo "Created candidate revision $target_revision for $DEPLOY_SHA at 0% production traffic."
 
       - name: Run startup migration on the 0%-traffic revision
