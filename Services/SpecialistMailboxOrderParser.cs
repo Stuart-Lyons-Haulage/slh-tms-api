@@ -438,10 +438,7 @@ public sealed class SpecialistMailboxOrderParser
 
     private static string NormaliseBody(string? bodyText, string? bodyHtml)
     {
-        var input = !string.IsNullOrWhiteSpace(bodyText) ? bodyText! : bodyHtml ?? string.Empty;
-        input = Regex.Replace(input, @"(?i)<br\s*/?>|</p>|</div>|</tr>|</li>", "\n");
-        input = Regex.Replace(input, @"<[^>]+>", " ");
-        input = WebUtility.HtmlDecode(input);
+        var input = MailboxBodyNormalizer.Normalize(bodyText, bodyHtml);
         input = input.Replace("**", string.Empty, StringComparison.Ordinal);
         input = Regex.Replace(input, @"[ \t]+", " ");
         input = Regex.Replace(input, @"\r?\n[ \t]*", "\n");
