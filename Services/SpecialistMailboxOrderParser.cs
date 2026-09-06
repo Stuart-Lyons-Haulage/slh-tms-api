@@ -68,6 +68,9 @@ public sealed class SpecialistMailboxOrderParser
                 "Cancellation/amendment detected. Review against the existing order rather than creating a duplicate.");
         }
 
+        var marketLines = ParsePmTransportMarketLines(request, subject, body);
+        if (marketLines is not null) return marketLines;
+
         if (subject.Contains("Covent Garden", StringComparison.OrdinalIgnoreCase) &&
             body.Contains("APS Produce", StringComparison.OrdinalIgnoreCase))
         {
@@ -96,6 +99,55 @@ public sealed class SpecialistMailboxOrderParser
             return ParseTransfer(request, routeTransfer, body);
 
         return null;
+    }
+
+    private static EmailIntakeParseResult? ParsePmTransportMarketLines(
+        MailboxEmailIntakeRequest request, string subject, string body)
+    {
+        if (!(request.SenderAddress ?? string.Empty).EndsWith("@pmtransport.co.uk", StringComparison.OrdinalIgnoreCase) ||
+            !subject.Contains("market", StringComparison.OrdinalIgnoreCase)) return null;
+
+        // Quoted instructions and planner replies must not create a second set of drops.
+        // Leave those to the existing amendment/manual-review handling.
+        if (Regex.IsMatch(subject, @"^(RE|FW|FWD)\s*:", RegexOptions.IgnoreCase)) return null;
+
+        var collection = Regex.Match(body, @"(?im)^\s*Please\s+collect\w*\s+(?<total>\d+)\s*(?:pt|p|pallets?)\s+from\s+(?<site>.+?)\s+today\b",
+            RegexOptions.IgnoreCase);
+        if (!collection.Success) return null;
+        var rows = Regex.Matches(body, @"(?im)^\s*(?<qty>\d{1,3})\s*(?:pt|p|pallets?)\s+(?<stall>[^\r\n]+?)\s+(?<market>spit(?:alfields)?|(?:new\s+)?covent(?:\s+garden)?|western(?:\s+international)?)\s*$")
+            .Cast<Match>().ToList();
+        if (rows.Count == 0) return null;
+
+        var received = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
+        var date = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeBySystemTimeZoneId(received, "Europe/London").DateTime);
+        var total = int.Parse(collection.Groups["total"].Value, CultureInfo.InvariantCulture);
+        var parsedTotal = rows.Sum(row => int.Parse(row.Groups["qty"].Value, CultureInfo.InvariantCulture));
+        if (total != parsedTotal)
+            return new EmailIntakeParseResult([], ["Market line quantities do not match the stated total."],
+                "Market order requires manual review because some delivery rows may be missing.");
+
+        var orders = new List<ParsedEmailOrder>();
+        foreach (var row in rows)
+        {
+            var stall = CleanDropName(row.Groups["stall"].Value);
+            var marketText = row.Groups["market"].Value;
+            var market = marketText.StartsWith("spit", StringComparison.OrdinalIgnoreCase) ? "Spit"
+                : marketText.StartsWith("western", StringComparison.OrdinalIgnoreCase) ? "Western" : "Covent";
+            var pallets = int.Parse(row.Groups["qty"].Value, CultureInfo.InvariantCulture);
+            var warnings = new[] { "Exact collection and delivery times were not stated. Confirm market instructions before approval." };
+            var destinationKey = $"{market}/{stall}";
+            var payload = BasePayload(request, BuildReference(StableEmailReference(request.MessageId), destinationKey),
+                null, "PMTRANSPORT", date, date, pallets, CleanDropName(collection.Groups["site"].Value), stall,
+                "Market delivery", null, warnings, "PM Transport market body lines");
+            var fields = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(payload.GetRawText())!;
+            fields["marketName"] = JsonSerializer.SerializeToElement(market);
+            fields["plannerReady"] = JsonSerializer.SerializeToElement(false);
+            fields["intakeStatus"] = JsonSerializer.SerializeToElement("PendingReview");
+            var key = NaturalKey(request, "PMTRANSPORT", destinationKey, date, null);
+            fields["intakeNaturalKey"] = JsonSerializer.SerializeToElement(key);
+            orders.Add(new ParsedEmailOrder($"market-body-{orders.Count + 1}", key, JsonSerializer.SerializeToElement(fields), warnings));
+        }
+        return new EmailIntakeParseResult(orders, [], null);
     }
 
     private static EmailIntakeParseResult ParseAmazon(

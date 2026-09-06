@@ -264,6 +264,12 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var value = $"{sender} {subject} {body} {attachments}";
         if (LooksOperationalNoise(value))
             return false;
+        // Unknown market layouts and incomplete market rows must remain visible
+        // for review, including body-only instructions and planner replies.
+        if (subject.Contains("market", StringComparison.OrdinalIgnoreCase) &&
+            Regex.IsMatch(body, @"\b\d+\s*(?:pt|pallets?|p)\b", RegexOptions.IgnoreCase) &&
+            Regex.IsMatch(body, @"\b(?:collect\w*|deliver\w*)\b", RegexOptions.IgnoreCase))
+            return true;
         var hasAttachment = (request.Attachments ?? []).Any(item => item.IsInline != true);
         var internalPlannerAttachment = sender.EndsWith("@lyonshaulage.com", StringComparison.OrdinalIgnoreCase) &&
                                         hasAttachment &&
