@@ -63,7 +63,6 @@ public sealed class EmailOrderIntakeService
         @"\b(?:not\s+later\s+than|no\s+later\s+than|latest\s+by|before|by)\s*(?<time>(?:[01]?\d|2[0-3])(?:[:.]\d{2})?\s*(?:am|pm)?)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    private static readonly Regex HtmlRegex = new(@"<[^>]+>", RegexOptions.Compiled);
     private static readonly Regex ReFwRegex = new(@"^(?:(?:RE|FW|FWD)\s*:\s*)+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly IReadOnlyDictionary<string, string> SenderDomainCollectionSites = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
@@ -1360,13 +1359,7 @@ public sealed class EmailOrderIntakeService
     }
 
     private static string NormaliseBody(string? bodyText, string? bodyHtml)
-    {
-        if (!string.IsNullOrWhiteSpace(bodyText)) return bodyText.Trim();
-        if (string.IsNullOrWhiteSpace(bodyHtml)) return string.Empty;
-        var noTags = HtmlRegex.Replace(bodyHtml, " ");
-        var decoded = WebUtility.HtmlDecode(noTags);
-        return Regex.Replace(decoded, @"[ \t]+", " ").Trim();
-    }
+        => MailboxBodyNormalizer.Normalize(bodyText, bodyHtml);
 
     private static string CleanMultilineBlock(string value)
     {

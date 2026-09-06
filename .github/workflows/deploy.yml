@@ -211,17 +211,31 @@ jobs:
             "Deployment__Revision=$DEPLOY_SHA"
           )
 
-          target_revision="$(az containerapp update \
+          az containerapp update \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --image "$AZURE_CONTAINER_REGISTRY.azurecr.io/slh-tms-api:$DEPLOY_SHA" \
             --revision-suffix "$revision_suffix" \
             --set-env-vars "${env_vars[@]}" \
-            --query properties.latestRevisionName \
-            --output tsv)"
+            --output none
 
-          if test -z "$target_revision" -o "$target_revision" = "$PREVIOUS_REVISION"; then
-            echo "::error::Azure did not create a distinct candidate revision."
+          # latestRevisionName can lag an update. Resolve the revision requested
+          # by this deployment and verify its image before touching its traffic.
+          target_revision="${AZURE_CONTAINER_APP_NAME}--${revision_suffix}"
+          candidate_image=""
+          for attempt in {1..24}; do
+            candidate_image="$(az containerapp revision show \
+              --name "$AZURE_CONTAINER_APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --revision "$target_revision" \
+              --query 'properties.template.containers[0].image' \
+              --output tsv 2>/dev/null || true)"
+            if test "$candidate_image" = "$AZURE_CONTAINER_REGISTRY.azurecr.io/slh-tms-api:$DEPLOY_SHA"; then break; fi
+            echo "Waiting for exact candidate $target_revision ($attempt/24)."
+            sleep 10
+          done
+          if test "$candidate_image" != "$AZURE_CONTAINER_REGISTRY.azurecr.io/slh-tms-api:$DEPLOY_SHA"; then
+            echo "::error::The requested candidate does not expose the tested image. Production traffic remains pinned."
             exit 1
           fi
 
@@ -233,12 +247,20 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --revision-weight "$PREVIOUS_REVISION=100" "$target_revision=0"
 
-          # A zero traffic weight does not guarantee that the revision is active.
-          # Activate it explicitly so Azure provisions the revision FQDN and runs startup.
-          az containerapp revision activate \
+          candidate_active="$(az containerapp revision show \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --revision "$target_revision"
+            --revision "$target_revision" \
+            --query properties.active --output tsv)"
+          if test "$candidate_active" = "false"; then
+            az containerapp revision activate \
+              --name "$AZURE_CONTAINER_APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --revision "$target_revision"
+          elif test "$candidate_active" != "true"; then
+            echo "::error::Candidate activation state could not be established."
+            exit 1
+          fi
 
           echo "Created candidate revision $target_revision for $DEPLOY_SHA at 0% production traffic."
 
