@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
@@ -24,8 +25,8 @@ public sealed class DriverDispatchStatusController(
             .Where(item => item.PlanningDate == planningDate && item.Status != LoadStatus.Cancelled)
             .ToListAsync(ct);
         var loadIds = loads.Select(item => item.Id).ToList();
-        var logs = loadIds.Count == 0
-            ? []
+        IReadOnlyList<DriverStatusLog> logs = loadIds.Count == 0
+            ? Array.Empty<DriverStatusLog>()
             : await db.DriverStatusLogs
                 .AsNoTracking()
                 .Where(item => item.LoadId != Guid.Empty && loadIds.Contains(item.LoadId))
@@ -68,8 +69,8 @@ public sealed class DriverDispatchStatusController(
                 .OrderByDescending(item => item.UpdatedAtUtc)
                 .ThenByDescending(item => item.CreatedAtUtc)
                 .FirstOrDefault();
-            var loadLogs = load is null
-                ? []
+            IReadOnlyList<DriverStatusLog> loadLogs = load is null
+                ? Array.Empty<DriverStatusLog>()
                 : logs.Where(item => item.LoadId == load.Id).OrderByDescending(item => item.CapturedAtUtc).ToList();
             var latestOutbound = loadLogs.FirstOrDefault(item => item.Status is "Driver dispatched" or "Driver text update sent");
             var latestInbound = latestOutbound is null
