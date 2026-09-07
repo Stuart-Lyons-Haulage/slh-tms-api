@@ -21,10 +21,13 @@ public sealed class DriverDispatchStatusController(
         var planningDate = date ?? DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
         var drivers = await db.Drivers.Where(item => item.Active).ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
-        var loads = await db.Loads
-            .AsNoTracking()
-            .Where(item => item.PlanningDate == planningDate && item.Status != LoadStatus.Cancelled)
-            .ToListAsync(ct);
+
+        // Driver Dispatch workbench and allocation writes can use the resilient planning register
+        // when the core planning schema is unavailable. Status must read the same authoritative
+        // run source or a genuinely allocated driver can incorrectly remain "No Run".
+        var loads = (await PlanningResilience.ReadLoadsAsync(db, planningDate, ct))
+            .Where(item => item.Status != LoadStatus.Cancelled)
+            .ToList();
         var loadIds = loads.Select(item => item.Id).ToList();
         IReadOnlyList<DriverStatusLog> logs = loadIds.Count == 0
             ? Array.Empty<DriverStatusLog>()
