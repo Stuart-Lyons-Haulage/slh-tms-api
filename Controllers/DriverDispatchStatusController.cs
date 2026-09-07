@@ -67,8 +67,7 @@ public sealed class DriverDispatchStatusController(
         {
             var load = loads
                 .Where(item => item.DriverId == driver.Id)
-                .OrderByDescending(item => item.UpdatedAtUtc)
-                .ThenByDescending(item => item.CreatedAtUtc)
+                .OrderByDescending(item => item.CreatedAtUtc)
                 .FirstOrDefault();
             IReadOnlyList<DriverStatusLog> loadLogs = load is null
                 ? Array.Empty<DriverStatusLog>()
