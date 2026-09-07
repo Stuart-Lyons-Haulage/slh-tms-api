@@ -79,8 +79,9 @@ public sealed class AssistantController(
             var attemptedResult = await safeFixes.Apply(ct);
             db.ChangeTracker.Clear();
             var after = await ReadValidationState(ct);
-            var verified = VerifyChanges(attemptedResult.Changes, before, after);
-            var verificationFailures = attemptedResult.Changes.Except(verified, StringComparer.Ordinal).ToList();
+            var verifiedAttempted = VerifyChanges(attemptedResult.Changes, before, after);
+            var verificationFailures = attemptedResult.Changes.Except(verifiedAttempted, StringComparer.Ordinal).ToList();
+            var verified = verifiedAttempted.Select(AccurateChangeWording).ToList();
             var skippedReasons = attemptedResult.SkippedReasons
                 .Concat(verificationFailures.Select(change => $"Verification did not prove the live TMS changed for: {change}"))
                 .ToList();
@@ -166,7 +167,7 @@ public sealed class AssistantController(
         {
             var category = ChangeCategory(change);
             if (category is null || !allowances.TryGetValue(category, out var remaining) || remaining <= 0) continue;
-            verified.Add(AccurateChangeWording(change));
+            verified.Add(change);
             allowances[category] = remaining - 1;
         }
         return verified;
