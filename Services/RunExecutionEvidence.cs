@@ -36,7 +36,7 @@ public static class RunExecutionEvidenceRules
     {
         if (tacho is null && latestTrackingUtc is null) return "Unverified";
         if (tacho is null) return "TrackingOnly";
-        if (latestTrackingUtc is null) return "TachoOnly";
+        if (latestTrackingUtc is null) return tacho.EvidenceSource == "FalconLiveCard" ? "CardOnly" : "TachoOnly";
         return now - latestTrackingUtc <= MaximumLiveTrackingAge ? "VerifiedLive" : "TrackingStale";
     }
 
@@ -47,13 +47,18 @@ public static class RunExecutionEvidenceRules
         DateTimeOffset now)
     {
         if (tacho is null && latestTrackingUtc is null)
-            return "No matched TachoMaster duty or DOT/Falcon tracking evidence is available for this run.";
+            return "No matched TachoMaster duty, Falcon live-card identity or DOT/Falcon tracking evidence is available for this run.";
         if (tacho is null)
-            return "DOT/Falcon tracking is available, but no current TachoMaster duty was matched to the allocated vehicle.";
+            return "DOT/Falcon tracking is available, but no current TachoMaster duty or Falcon live-card identity was matched to the allocated vehicle.";
+
+        var identitySource = tacho.EvidenceSource == "FalconLiveCard"
+            ? $"Falcon live card observed for {tacho.DriverName} at {tacho.DutyStartUtc:O}"
+            : $"TachoMaster duty sign-on for {tacho.DriverName} at {tacho.DutyStartUtc:O}";
         if (latestTrackingUtc is null)
-            return "TachoMaster sign-on is available, but no DOT/Falcon movement has been matched to the allocated vehicle.";
+            return $"{identitySource}, but no DOT/Falcon movement has been matched to the allocated vehicle.";
+
         var freshness = now - latestTrackingUtc <= MaximumLiveTrackingAge ? "fresh" : "stale";
         var movement = firstMovementUtc is null ? "No movement event has been recorded yet." : $"First vehicle movement was recorded at {firstMovementUtc:O}.";
-        return $"TachoMaster sign-on at {tacho.DutyStartUtc:O}; DOT/Falcon tracking is {freshness}. {movement}";
+        return $"{identitySource}; DOT/Falcon tracking is {freshness}. {movement}";
     }
 }
