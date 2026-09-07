@@ -23,7 +23,7 @@ public sealed class PlanningOptimiserController(
             await new PlanningGeographicRepairService(db, geographicLogger).RepairAsync(
                 proposal.Id,
                 request.PlanningDate,
-                DateTimeOffset.UtcNow,
+                proposal.EvidenceCapturedAtUtc,
                 ct);
             var repaired = await service.GetAsync(proposal.Id, ct);
             return CreatedAtAction(nameof(Get), new { id = proposal.Id }, repaired ?? proposal);
