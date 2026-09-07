@@ -6,6 +6,7 @@ public sealed class TextBeeOptions
     public string ApiKey { get; set; } = string.Empty;
     public string DeviceId { get; set; } = string.Empty;
     public string DutyPhoneLabel { get; set; } = "Duty phone";
+    public string WebhookSigningSecret { get; set; } = string.Empty;
     public bool Enabled { get; set; }
 
     public bool IsConfigured => Enabled && !string.IsNullOrWhiteSpace(BaseUrl) && !string.IsNullOrWhiteSpace(ApiKey) && !string.IsNullOrWhiteSpace(DeviceId);
