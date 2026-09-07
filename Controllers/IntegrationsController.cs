@@ -216,8 +216,7 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
     }
 
     private bool IsDriver(SageHrEmployee employee) =>
-        (!string.IsNullOrWhiteSpace(sageHr.DriverTeamName) && string.Equals(employee.Team, sageHr.DriverTeamName, StringComparison.OrdinalIgnoreCase)) ||
-        (!string.IsNullOrWhiteSpace(sageHr.DriverPositionKeyword) && employee.Position?.Contains(sageHr.DriverPositionKeyword, StringComparison.OrdinalIgnoreCase) == true);
+        DriverPopulationRules.IsSageDriver(employee, sageHr.DriverTeamName, sageHr.DriverPositionKeyword);
 
     private static string NormalisePersonName(string? value) => string.Join(' ', (value ?? string.Empty)
         .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)

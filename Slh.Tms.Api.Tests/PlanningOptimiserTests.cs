@@ -292,8 +292,8 @@ public sealed class PlanningOptimiserTests
             .Options;
         await using var db = new TmsDbContext(options);
         db.Drivers.AddRange(
-            new Driver { Id = driverId, EmployeeNumber = "D-001", DisplayName = "Driver One", Active = true },
-            new Driver { Id = secondDriverId, EmployeeNumber = "D-002", DisplayName = "Driver Two", Active = true });
+            new Driver { Id = driverId, EmployeeNumber = "D-001", DisplayName = "Driver One", DriverGroup = "Day Drivers", Active = true },
+            new Driver { Id = secondDriverId, EmployeeNumber = "D-002", DisplayName = "Driver Two", DriverGroup = "Day Drivers", Active = true });
         db.Vehicles.AddRange(
             new Vehicle { Id = vehicleId, Registration = "AB12CDE", Active = true },
             new Vehicle { Id = secondVehicleId, Registration = "CD34EFG", Active = true });
@@ -410,6 +410,17 @@ public sealed class PlanningOptimiserTests
         Assert.Single(run.Candidates.Where(candidate => candidate.Selected));
         Assert.Contains(run.Candidates, candidate => candidate.Classification == "Alternative" && !candidate.Selected);
         Assert.All(run.Candidates, candidate => Assert.NotEmpty(candidate.Explanations));
+        db.Vehicles.AddRange(Enumerable.Range(0, 50).Select(index => new Vehicle { Registration = $"FLEET{index:00}", Active = true }));
+        await db.SaveChangesAsync();
+        var large = await service.GenerateAsync(new GeneratePlanProposalRequest(date, "AM"), "planner", CancellationToken.None);
+        var largeRun = Assert.Single(large.Runs);
+        Assert.Equal(20, largeRun.Candidates.Count);
+        Assert.Equal(run.DriverId, largeRun.DriverId);
+        Assert.Equal(run.VehicleId, largeRun.VehicleId);
+        Assert.Single(largeRun.Candidates.Where(candidate => candidate.Selected));
+        db.ChangeTracker.Clear();
+        var reloaded = await service.GetAsync(large.Id, CancellationToken.None);
+        Assert.Equal(20, Assert.Single(reloaded!.Runs).Candidates.Count);
         Assert.Empty(await db.Loads.ToListAsync());
     }
 

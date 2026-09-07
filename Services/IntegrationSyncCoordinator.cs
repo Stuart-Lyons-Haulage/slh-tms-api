@@ -384,8 +384,7 @@ public sealed class IntegrationSyncCoordinator(
     }
 
     private bool IsDriver(SageHrEmployee employee) =>
-        (!string.IsNullOrWhiteSpace(sageOptions.DriverTeamName) && string.Equals(employee.Team, sageOptions.DriverTeamName, StringComparison.OrdinalIgnoreCase)) ||
-        (!string.IsNullOrWhiteSpace(sageOptions.DriverPositionKeyword) && employee.Position?.Contains(sageOptions.DriverPositionKeyword, StringComparison.OrdinalIgnoreCase) == true);
+        DriverPopulationRules.IsSageDriver(employee, sageOptions.DriverTeamName, sageOptions.DriverPositionKeyword);
 
     private static bool IsTrailer(FleetioVehicle asset) =>
         asset.Type?.Contains("Trailer", StringComparison.OrdinalIgnoreCase) == true ||

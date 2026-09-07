@@ -21,15 +21,27 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         if (q.Length > 0)
             query = query.Where(x => x.DisplayName.Contains(q) || x.EmployeeNumber.Contains(q) || (x.TachoName != null && x.TachoName.Contains(q)));
 
-        var result = await query.OrderBy(x => x.DisplayName).Take(50)
+        var result = await query.OrderBy(x => x.DisplayName).Take(500)
             .Select(x => new
             {
                 x.Id, x.DisplayName, x.EmployeeNumber, x.TachoName, x.MobileNumber,
                 x.DriverType, x.DriverGroup, x.Skills, x.Active,
+                x.TachoMasterDriverId, x.TachoCardNumber,
                 x.TachoDriveAvailableTodayMinutes, x.TachoDriveAvailableWeekMinutes,
                 x.TachoWorkAvailableWeekMinutes, x.LastTachoSyncUtc
             }).ToListAsync(ct);
-        return Ok(result);
+        // The endpoint is a driver register: hide office references and collapse
+        // historical duplicate rows by Tacho member, card, or employee reference.
+        var filtered = result.Where(x => !DriverPopulationRules.IsOfficeReference(x.EmployeeNumber) &&
+            (!string.IsNullOrWhiteSpace(x.TachoCardNumber) ||
+             DriverPopulationRules.HasDriverRole(x.DriverType) || DriverPopulationRules.HasDriverRole(x.DriverGroup) ||
+             string.Equals(x.DriverType?.Trim(), "Agency", StringComparison.OrdinalIgnoreCase)))
+            .GroupBy(x => !string.IsNullOrWhiteSpace(x.TachoMasterDriverId) ? $"member:{x.TachoMasterDriverId}" :
+                          !string.IsNullOrWhiteSpace(x.TachoCardNumber) ? $"card:{x.TachoCardNumber}" : $"employee:{x.EmployeeNumber}", StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .OrderBy(x => x.DisplayName)
+            .Take(50);
+        return Ok(filtered);
     }
 
     [HttpGet("drivers/{id:guid}")]

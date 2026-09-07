@@ -229,7 +229,7 @@ public static class DriverDispatchAssistantService
     private static bool HasSkill(Driver driver, string skill)
     {
         var tokens = (driver.Skills ?? string.Empty)
-            .Split([',', ';', '/', '|', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            .Split(new char[] {',', ';', '/', '|', ' '}, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         return tokens.Any(token => string.Equals(token, skill, StringComparison.OrdinalIgnoreCase));
     }
 

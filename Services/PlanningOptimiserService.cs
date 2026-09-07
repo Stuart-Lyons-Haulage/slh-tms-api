@@ -11,6 +11,7 @@ public sealed class PlanningOptimiserService
 {
     private const string AllocationType = "planningpalletallocation";
     private const int MaxCandidateDriversPerRun = 80;
+    private const int MaxReviewedCandidatesPerRun = 20;
     private const int MaxCandidateVehiclesPerRun = 80;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
     private readonly TmsDbContext db;
@@ -63,6 +64,7 @@ public sealed class PlanningOptimiserService
         var warnings = new List<PlanProposalWarning>();
         var drivers = await db.Drivers.AsNoTracking().Where(item => item.Active).ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
+        drivers = drivers.Where(DriverPopulationRules.IsDriver).ToList();
         var vehicles = await db.Vehicles.AsNoTracking().Where(item => item.Active).OrderBy(item => item.Registration).ToListAsync(ct);
         var trailers = await db.Trailers.AsNoTracking().Where(item => item.Active).OrderBy(item => item.TrailerNumber).ToListAsync(ct);
         var sites = await db.Sites.AsNoTracking().Where(item => item.Active).ToListAsync(ct);
@@ -103,7 +105,7 @@ public sealed class PlanningOptimiserService
         var lockedRuns = await PlanLockStore.BaselineAsync(db, request.PlanningDate, ct);
         AddLockedRuns(proposal, lockedRuns);
         BuildRuns(proposal, balances, trailers, classification, request.PlanningDate, period);
-        AssignCandidateEvidence(proposal, drivers, vehicles, sites, liveStatuses, recentLoads, evidenceAt);
+        AssignCandidateEvidence(proposal, drivers, vehicles, sites, liveStatuses, recentLoads, evidenceAt, ct);
         proposal.Classification = WorstClassification(proposal.Runs.Select(run => run.Classification).Append(proposal.Classification));
         db.PlanProposals.Add(proposal);
         await db.SaveChangesAsync(ct);
@@ -223,8 +225,17 @@ public sealed class PlanningOptimiserService
         IReadOnlyList<Site> sites,
         IReadOnlyList<Slh.Tms.Api.Models.Tracking.VehicleLiveStatus> liveStatuses,
         IReadOnlyList<Load> recentLoads,
-        DateTimeOffset evidenceAt)
+        DateTimeOffset evidenceAt, CancellationToken ct)
     {
+        var recentDriverIds = recentLoads.Where(load => load.DriverId is not null).Select(load => load.DriverId!.Value).ToHashSet();
+        var recentVehicleIds = recentLoads.Where(load => load.VehicleId is not null).Select(load => load.VehicleId!.Value).ToHashSet();
+        var candidateDrivers = CandidateDrivers(drivers, recentDriverIds, evidenceAt);
+        var candidateVehicles = CandidateVehicles(vehicles, liveStatuses, recentVehicleIds, evidenceAt);
+        var consecutiveByDriver = candidateDrivers.ToDictionary(driver => driver.Id, driver => ConsecutiveDays(recentLoads, driver.Id, proposal.PlanningDate));
+        var liveByVehicle = candidateVehicles.ToDictionary(vehicle => vehicle.Id, vehicle => MatchLive(vehicle, liveStatuses));
+        var orderedLoads = recentLoads.OrderByDescending(load => load.PlanningDate).ThenByDescending(load => load.CreatedAtUtc).ToList();
+        var previousByPair = candidateDrivers.SelectMany(driver => candidateVehicles.Select(vehicle => (driver.Id, VehicleId: vehicle.Id)))
+            .ToDictionary(pair => pair, pair => orderedLoads.FirstOrDefault(load => load.DriverId == pair.Id || load.VehicleId == pair.VehicleId));
         foreach (var run in proposal.Runs)
         {
             if (run.IsLocked) continue;
@@ -234,15 +245,12 @@ public sealed class PlanningOptimiserService
             var delivery = MatchSite(sites, last?.DeliverySite);
             var requiredDrive = RequiredDriveMinutes(collection?.Latitude, delivery?.Latitude);
             var candidates = new List<Candidate>();
-            var recentDriverIds = recentLoads.Where(load => load.DriverId is not null).Select(load => load.DriverId!.Value).ToHashSet();
-            var recentVehicleIds = recentLoads.Where(load => load.VehicleId is not null).Select(load => load.VehicleId!.Value).ToHashSet();
-            var candidateDrivers = CandidateDrivers(drivers, recentDriverIds, evidenceAt);
-            var candidateVehicles = CandidateVehicles(vehicles, liveStatuses, recentVehicleIds, evidenceAt);
 
             foreach (var driver in candidateDrivers)
             foreach (var vehicle in candidateVehicles)
             {
-                var consecutiveDays = ConsecutiveDays(recentLoads, driver.Id, proposal.PlanningDate);
+                ct.ThrowIfCancellationRequested();
+                var consecutiveDays = consecutiveByDriver[driver.Id];
                 var constraints = constraintEvaluator.EvaluateDriver(new PlanningDriverEvidence(
                     driver.Id,
                     requiredDrive,
@@ -251,11 +259,8 @@ public sealed class PlanningOptimiserService
                     evidenceAt,
                     consecutiveDays,
                     SixthDayAllowed(driver)));
-                var live = MatchLive(vehicle, liveStatuses);
-                var previous = recentLoads
-                    .Where(load => load.DriverId == driver.Id || load.VehicleId == vehicle.Id)
-                    .OrderByDescending(load => load.PlanningDate).ThenByDescending(load => load.CreatedAtUtc)
-                    .FirstOrDefault();
+                var live = liveByVehicle[vehicle.Id];
+                var previous = previousByPair[(driver.Id, vehicle.Id)];
                 var previousEnd = previous?.Stops.OrderByDescending(stop => stop.Sequence).FirstOrDefault(stop => stop.Latitude is not null);
                 var score = candidateRanker.Score(new PlanningCandidateEvidence(
                     vehicle.Id,
@@ -276,7 +281,9 @@ public sealed class PlanningOptimiserService
             candidates.Sort(CandidateOrder);
             var selected = candidates.FirstOrDefault();
             if (selected is null) continue;
-            for (var index = 0; index < candidates.Count; index++)
+            // Rank the full bounded pool, but persist only the review shortlist.
+            // Saving 80 × 80 evidence records per run exhausted the HTTP gateway budget.
+            for (var index = 0; index < Math.Min(candidates.Count, MaxReviewedCandidatesPerRun); index++)
             {
                 var candidate = candidates[index];
                 var candidateClassification = index > 0 && candidate.Constraints.Classification == "Recommended"

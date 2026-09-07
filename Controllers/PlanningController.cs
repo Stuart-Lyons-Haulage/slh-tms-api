@@ -54,7 +54,7 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         return Ok(loads);
     }
 
-    [HttpPost("loads"), Authorize(Policy = "TmsWrite")]
+    [HttpPost("loads"), HttpPost("runs"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> CreateLoad(CreateLoadRequest request, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.Reference) || request.Stops.Count == 0) return BadRequest("A reference and at least one stop are required.");

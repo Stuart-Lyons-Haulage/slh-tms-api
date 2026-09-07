@@ -116,6 +116,15 @@ public sealed class TachoDriverMasterSyncService(
             return new(false, workers.Count, activeBefore, 0, 0, 0, 0, 0, 0, 0, CountDuplicateNames(workers), workers.Count(worker => string.IsNullOrWhiteSpace(worker.CardNumber)),
                 $"TachoMaster returned {workers.Count} live workers against {activeBefore} active TMS drivers. The result failed the population safety check, so no records were archived.", now);
 
+        var knownDriverMembers = drivers.Where(DriverPopulationRules.IsDriver)
+            .Where(driver => !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId))
+            .Select(driver => driver.TachoMasterDriverId!.Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        workers = workers.Where(worker => DriverPopulationRules.IsDriver(worker) ||
+            knownDriverMembers.Contains(worker.MemberCode.ToString(System.Globalization.CultureInfo.InvariantCulture))).ToList();
+        if (workers.Count < 25)
+            return new(false, workers.Count, activeBefore, 0, 0, 0, 0, 0, 0, 0, CountDuplicateNames(workers), workers.Count(worker => string.IsNullOrWhiteSpace(worker.CardNumber)),
+                "The driver-only population is below the safety floor; no records were changed.", now);
+
         var loadUse = await db.Loads.AsNoTracking()
             .Where(load => load.DriverId != null)
             .GroupBy(load => load.DriverId!.Value)
@@ -244,7 +253,7 @@ public sealed class TachoDriverMasterSyncService(
                 ChangedBy = actor,
                 ChangesJson = JsonSerializer.Serialize(new
                 {
-                    reason = "Not present in the current TachoMaster live worker directory",
+                    reason = "Not present in the current TachoMaster driver population",
                     driver.EmployeeNumber,
                     driver.DisplayName,
                     driver.TachoMasterDriverId,
