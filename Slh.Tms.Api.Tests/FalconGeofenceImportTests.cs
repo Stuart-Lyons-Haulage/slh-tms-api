@@ -152,7 +152,7 @@ public sealed class FalconGeofenceImportTests : IClassFixture<CustomWebFactory>
             export,
             decisions = new[]
             {
-                new { clientKey = "VALID FENCE", siteId, skip = false },
+                new { clientKey = "VALID FENCE", siteId = (Guid?)siteId, skip = false },
                 new { clientKey = "INVALID FENCE", siteId = (Guid?)null, skip = true }
             }
         });
