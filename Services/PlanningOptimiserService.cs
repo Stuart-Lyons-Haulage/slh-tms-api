@@ -63,6 +63,12 @@ public sealed class PlanningOptimiserService
             .ToList();
 
         var warnings = new List<PlanProposalWarning>();
+        var unmapped = balances.Where(item => string.IsNullOrWhiteSpace(item.Line.CollectionSite) || string.IsNullOrWhiteSpace(item.Line.DeliverySite)).Count();
+        if (unmapped > 0)
+            warnings.Add(new PlanProposalWarning("AddressMappingRequired", "Warning", $"{unmapped} order line(s) need a collection or delivery site before truck routing can be confirmed. Suggestion: open the site master and map the missing location."));
+        var temperatureLines = balances.Count(item => !string.IsNullOrWhiteSpace(item.Line.TemperatureRequirement));
+        if (temperatureLines > 0)
+            warnings.Add(new PlanProposalWarning("TemperatureCompatibilityReview", "Warning", $"{temperatureLines} line(s) have temperature requirements. Suggestion: confirm the selected trailer is temperature-compatible before applying."));
         var drivers = await db.Drivers.AsNoTracking().Where(item => item.Active).ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
         drivers = drivers.Where(DriverPopulationRules.IsDriver).ToList();
