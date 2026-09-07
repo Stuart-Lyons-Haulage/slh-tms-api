@@ -34,7 +34,7 @@ public sealed class AssistantSafeFixService(
                     Source = "SLH Assistant safe validation fixes",
                     Status = StagingStatus.Promoted,
                     ReviewedAtUtc = DateTimeOffset.UtcNow,
-                    ReviewNote = $"Applied {changes.Count} deterministic validation fixes; {skipped.Count} items left for review."
+                    ReviewNote = $"Attempted {changes.Count} deterministic validation fixes; {skipped.Count} items left for review."
                 });
             }
             await db.SaveChangesAsync(ct);
@@ -165,10 +165,11 @@ public sealed class AssistantSafeFixService(
             {
                 Contact = contact,
                 Market = CanonicalMarket(contact.Market),
-                Name = Clean(contact.Name) ?? contact.Name
+                Name = Clean(contact.Name) ?? contact.Name,
+                Stand = Clean(contact.StandOrLocation) ?? InferStand(contact.Name)
             })
             .Where(item => !string.IsNullOrWhiteSpace(item.Market) && !string.IsNullOrWhiteSpace(item.Name))
-            .GroupBy(item => $"{Normalise(item.Market)}|{Normalise(item.Name)}", StringComparer.OrdinalIgnoreCase)
+            .GroupBy(item => $"{Normalise(item.Market)}|{Normalise(item.Name)}|{Normalise(item.Stand)}", StringComparer.OrdinalIgnoreCase)
             .ToList();
 
         foreach (var group in identityGroups)
@@ -201,7 +202,7 @@ public sealed class AssistantSafeFixService(
                 duplicate.Sender = Clean(duplicate.Sender);
                 duplicate.Active = false;
             }
-            changes.Add($"Consolidated {duplicates.Count} duplicate market record{(duplicates.Count == 1 ? "" : "s")} for {canonical.Market} / {canonical.Name}.");
+            changes.Add($"Consolidated {duplicates.Count} duplicate market record{(duplicates.Count == 1 ? "" : "s")} for {canonical.Market} / {canonical.Name} / {canonical.StandOrLocation ?? "no stand"}.");
         }
 
         foreach (var contact in contacts.Where(x => x.Active && !identityGroups.SelectMany(group => group).Any(item => item.Contact.Id == x.Id)))

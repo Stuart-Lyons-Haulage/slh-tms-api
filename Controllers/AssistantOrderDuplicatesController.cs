@@ -49,7 +49,7 @@ public sealed class AssistantOrderDuplicatesController(TmsDbContext db, ILogger<
             examples,
             message = groups.Count == 0
                 ? "No exact duplicate active orders were found."
-                : $"Found {groups.Count} exact duplicate order group(s). {safe} duplicate record(s) can be removed safely; {review} linked/planned record(s) require planner review."
+                : $"Found {groups.Count} exact duplicate order group(s). {safe} duplicate record(s) can be cancelled safely; {review} linked/planned record(s) require planner review."
         });
     }
 
@@ -58,7 +58,7 @@ public sealed class AssistantOrderDuplicatesController(TmsDbContext db, ILogger<
     {
         var rows = await ReadOpenOrders(date, ct);
         var groups = ExactGroups(rows);
-        var changes = new List<string>();
+        var attempted = new List<(Guid Id, string Description)>();
         var skipped = new List<string>();
 
         foreach (var group in groups)
@@ -76,27 +76,47 @@ public sealed class AssistantOrderDuplicatesController(TmsDbContext db, ILogger<
                 }
 
                 duplicate.Status = OrderStatus.Cancelled;
-                changes.Add($"Removed exact duplicate order {duplicate.Reference} / {duplicate.CustomerCode} ({duplicate.CollectionDate:dd/MM/yyyy}); retained {canonical.Id} as the canonical record.");
+                attempted.Add((duplicate.Id, $"Cancelled exact duplicate order {duplicate.Reference} / {duplicate.CustomerCode} ({duplicate.CollectionDate:dd/MM/yyyy}); retained {canonical.Id} as the canonical record."));
             }
         }
 
-        if (changes.Count > 0 || skipped.Count > 0)
+        if (attempted.Count > 0 || skipped.Count > 0)
         {
             db.StagedImports.Add(new StagedImport
             {
                 EntityType = "assistantfix",
                 IdempotencyKey = $"assistant-order-duplicates:{Guid.NewGuid():N}",
-                PayloadJson = System.Text.Json.JsonSerializer.Serialize(new { changes, skipped, appliedAtUtc = DateTimeOffset.UtcNow }),
+                PayloadJson = System.Text.Json.JsonSerializer.Serialize(new { attempted = attempted.Select(x => x.Description), skipped, appliedAtUtc = DateTimeOffset.UtcNow }),
                 Source = "SLH Assistant exact duplicate order repair",
                 Status = StagingStatus.Promoted,
                 ReviewedAtUtc = DateTimeOffset.UtcNow,
                 ReviewedBy = User.Identity?.Name,
-                ReviewNote = $"Cancelled {changes.Count} unallocated exact duplicate order record(s); {skipped.Count} linked duplicate(s) retained for review."
+                ReviewNote = $"Attempted to cancel {attempted.Count} unallocated exact duplicate order record(s); {skipped.Count} linked duplicate(s) retained for review."
             });
         }
 
         await db.SaveChangesAsync(ct);
-        return Ok(new { applied = changes.Count, skipped = skipped.Count, changes, skippedReasons = skipped });
+        db.ChangeTracker.Clear();
+
+        var attemptedIds = attempted.Select(x => x.Id).ToList();
+        var statuses = attemptedIds.Count == 0
+            ? new Dictionary<Guid, OrderStatus>()
+            : await db.TransportOrders.AsNoTracking().Where(x => attemptedIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, x => x.Status, ct);
+        var changes = attempted.Where(x => statuses.GetValueOrDefault(x.Id) == OrderStatus.Cancelled).Select(x => x.Description).ToList();
+        var verificationFailures = attempted.Where(x => statuses.GetValueOrDefault(x.Id) != OrderStatus.Cancelled)
+            .Select(x => $"Could not verify that duplicate order {x.Id} was cancelled in the live TMS.").ToList();
+        var skippedReasons = skipped.Concat(verificationFailures).ToList();
+
+        return Ok(new
+        {
+            attempted = attempted.Count,
+            applied = changes.Count,
+            verified = verificationFailures.Count == 0,
+            skipped = skippedReasons.Count,
+            changes,
+            verificationFailures,
+            skippedReasons
+        });
     }
 
     private async Task<List<TransportOrder>> ReadOpenOrders(DateOnly? date, CancellationToken ct)
