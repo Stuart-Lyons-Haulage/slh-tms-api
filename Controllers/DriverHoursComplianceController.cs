@@ -25,7 +25,7 @@ public sealed class DriverHoursComplianceController(
     {
         var report = await Build(date, ct);
         var csv = new StringBuilder();
-        csv.AppendLine("Week Start,Week End,Date,Driver,Employee Number,Employment Type,Agency,Tacho Duty Start,Tacho Duty End,Tacho Duty Span Minutes,Tacho Activity Minutes,Tracker First Movement,Tracker Last Movement,Tracker Movement Span Minutes,Tracker Vehicle(s),Run(s),Variance Minutes,Invoice Evidence Status");
+        csv.AppendLine("Week Start,Week End,Date,Driver,Employee Number,Employment Type,Agency,Tacho Duty Start,Tacho Duty End,Tacho Duty Span Minutes,Tacho Activity Minutes,Tracker First Movement,Card To First Movement Minutes,Tracker Last Movement,Tracker Movement Span Minutes,Tracker Vehicle(s),Run(s),Span Variance Minutes,Invoice Evidence Status");
         foreach (var row in report.NonEmployedHours)
         {
             csv.AppendLine(string.Join(',', new[]
@@ -34,9 +34,9 @@ public sealed class DriverHoursComplianceController(
                 row.DriverName, row.EmployeeNumber, row.EmploymentType, row.AgencyName ?? string.Empty,
                 row.TachoDutyStartUtc?.ToString("O") ?? string.Empty, row.TachoDutyEndUtc?.ToString("O") ?? string.Empty,
                 row.TachoDutySpanMinutes?.ToString() ?? string.Empty, row.TachoActivityMinutes?.ToString() ?? string.Empty,
-                row.TrackerFirstMovementUtc?.ToString("O") ?? string.Empty, row.TrackerLastMovementUtc?.ToString("O") ?? string.Empty,
-                row.TrackerMovementSpanMinutes?.ToString() ?? string.Empty, string.Join("; ", row.TrackerVehicles),
-                string.Join("; ", row.Runs), row.VarianceMinutes?.ToString() ?? string.Empty, row.EvidenceStatus
+                row.TrackerFirstMovementUtc?.ToString("O") ?? string.Empty, row.CardToFirstMovementMinutes?.ToString() ?? string.Empty,
+                row.TrackerLastMovementUtc?.ToString("O") ?? string.Empty, row.TrackerMovementSpanMinutes?.ToString() ?? string.Empty,
+                string.Join("; ", row.TrackerVehicles), string.Join("; ", row.Runs), row.VarianceMinutes?.ToString() ?? string.Empty, row.EvidenceStatus
             }.Select(Csv)));
         }
         return File(Encoding.UTF8.GetBytes(csv.ToString()), "text/csv", $"non-employed-driver-hours-{report.WeekStart:yyyy-MM-dd}-to-{report.WeekEnd:yyyy-MM-dd}.csv");
@@ -150,21 +150,25 @@ public sealed class DriverHoursComplianceController(
                 var dutySpan = dutyStart is not null && dutyEnd is not null && dutyEnd >= dutyStart ? Minutes(dutyEnd.Value - dutyStart.Value) : (int?)null;
                 var tachoActivity = duties.Count == 0 ? (int?)null : duties.Sum(x => x.WorkMinutes + x.DriveMinutes + x.AvailableMinutes);
                 var variance = dutySpan is not null && trackerSpan is not null ? trackerSpan - dutySpan : null;
+                var cardToFirstMovement = dutyStart is not null && trackerFirst is not null ? Minutes(trackerFirst.Value - dutyStart.Value) : (int?)null;
 
                 if (!string.Equals(employment, "Employed", StringComparison.OrdinalIgnoreCase))
                 {
-                    var evidence = dutySpan is not null && trackerSpan is not null
-                        ? Math.Abs(variance ?? 0) <= 90 ? "Confirmed by Tacho + tracker" : "Review variance: Tacho + tracker disagree"
-                        : dutySpan is not null ? "Tacho only - tracker confirmation missing"
-                        : trackerSpan is not null ? "Tracker only - Tacho hours missing"
-                        : "No independent hours evidence";
+                    var evidence = cardToFirstMovement is int startGap && Math.Abs(startGap) > 45
+                        ? $"Review start discrepancy: card/duty to first movement differs by {Math.Abs(startGap)} minutes"
+                        : dutySpan is not null && trackerSpan is not null
+                            ? Math.Abs(variance ?? 0) <= 90 ? "Confirmed by Tacho + tracker" : "Review variance: Tacho + tracker disagree"
+                            : dutySpan is not null ? "Tacho only - tracker confirmation missing"
+                            : trackerSpan is not null ? "Tracker only - Tacho hours missing"
+                            : "No independent hours evidence";
                     nonEmployedRows.Add(new NonEmployedHourRow(day, driver.Id, driver.DisplayName, driver.EmployeeNumber, employment,
-                        driver.AgencyName, dutyStart, dutyEnd, dutySpan, tachoActivity, trackerFirst, trackerLast, trackerSpan,
+                        driver.AgencyName, dutyStart, dutyEnd, dutySpan, tachoActivity, trackerFirst, cardToFirstMovement, trackerLast, trackerSpan,
                         vehicleKeys.OrderBy(x => x).ToArray(), dayLoads.Select(x => x.Reference).Distinct().ToArray(), variance, evidence));
                 }
 
                 var plannerTick = dayLoads.Any(x => ReadNightOut(x.PlannerNotes) == true);
-                var tachoRest = duties.Any(x => x.RestMinutes >= 60 && SpansOvernight(day, x));
+                var cardOpenAcrossMidnight = duties.Any(x => LiveDriverEvidenceRules.SpansUkMidnight(day, x.DutyStartUtc, x.DutyEndUtc));
+                var tachoRest = duties.Any(x => x.RestMinutes >= 60 && LiveDriverEvidenceRules.SpansUkMidnight(day, x.DutyStartUtc, x.DutyEndUtc));
                 var overnightStart = StartOfDayUtc(day.AddDays(1));
                 var overnightEnd = overnightStart.AddHours(9);
                 var overnightTracking = dayTracking.Where(x => x.EventTimeUtc >= overnightStart && x.EventTimeUtc <= overnightEnd).OrderBy(x => x.EventTimeUtc).ToList();
@@ -179,9 +183,12 @@ public sealed class DriverHoursComplianceController(
                     : baseVisit is null;
                 var trackerEvidenceUtc = overnightTracking.LastOrDefault()?.EventTimeUtc ?? baseVisit?.EnteredAtUtc;
 
-                if (plannerTick || tachoRest || awayFromBase == true)
+                if (plannerTick || tachoRest || cardOpenAcrossMidnight || awayFromBase == true)
                 {
-                    var status = plannerTick && tachoRest && awayFromBase == true ? "Confirmed"
+                    var status = plannerTick && cardOpenAcrossMidnight && awayFromBase == true ? "Confirmed - card remained inserted overnight"
+                        : !plannerTick && cardOpenAcrossMidnight && awayFromBase == true ? "Detected - card remained inserted; planner tick missing"
+                        : cardOpenAcrossMidnight && awayFromBase is null ? "Review - card remained inserted across midnight; location evidence incomplete"
+                        : plannerTick && tachoRest && awayFromBase == true ? "Confirmed"
                         : !plannerTick && tachoRest && awayFromBase == true ? "Detected - planner tick missing"
                         : awayFromBase == false && plannerTick ? "Review - vehicle returned to base"
                         : "Review - evidence incomplete";
@@ -189,7 +196,7 @@ public sealed class DriverHoursComplianceController(
                         ? "Expected - Sage HR expense reconciliation not yet connected"
                         : "Not yet reconciled";
                     nightRows.Add(new NightOutEvidenceRow(day, driver.Id, driver.DisplayName, employment,
-                        dayLoads.Select(x => x.Reference).Distinct().ToArray(), plannerTick, tachoRest,
+                        dayLoads.Select(x => x.Reference).Distinct().ToArray(), plannerTick, cardOpenAcrossMidnight, tachoRest,
                         duties.Sum(x => x.RestMinutes), trackerEvidenceUtc, awayFromBase, baseVisit?.EnteredAtUtc,
                         baseGeofence?.Name, status, sageExpense));
                 }
@@ -200,7 +207,7 @@ public sealed class DriverHoursComplianceController(
             weekStart, weekEnd, DateTimeOffset.UtcNow,
             new DriverHoursPolicy("Wednesday", "Tuesday",
                 "The operating week is Wednesday through Tuesday. A PM run remains attached to its commencement day even when delivery continues after midnight.",
-                "A night out is confirmed when Tacho shows overnight rest while the driver remains out and tracker/geofence evidence shows the vehicle did not return to Base. Planner Night out = Yes records intent but is not the sole authority.",
+                "A card/open Tacho duty spanning UK midnight is immediate overnight evidence. Overnight rest and tracker/geofence evidence then confirm whether the vehicle remained away from Base. Planner Night out = Yes records intent but is not the sole authority.",
                 "Fleetio pre-use evidence remains valid across midnight while the same driver retains control; a driver/vehicle/trailer handover creates a new check requirement."),
             new DriverHoursSourceStatus(
                 tachoError is null ? "Available" : $"Partial: {tachoError}",
@@ -259,12 +266,6 @@ public sealed class DriverHoursComplianceController(
         return names.Contains(Normalise(status.DriverName));
     }
 
-    private static bool SpansOvernight(DateOnly day, TachoDriverDutyStatus duty)
-    {
-        var nextMidnight = StartOfDayUtc(day.AddDays(1));
-        return duty.DutyStartUtc < nextMidnight && (duty.DutyEndUtc is null || duty.DutyEndUtc > nextMidnight);
-    }
-
     private static string EmploymentType(Driver driver)
     {
         var value = (driver.DriverType ?? string.Empty).Trim();
@@ -304,10 +305,10 @@ public sealed class DriverHoursComplianceController(
     public sealed record DriverHoursPolicy(string WeekStarts, string WeekEnds, string OperatingDayRule, string NightOutRule, string FleetCheckRule);
     public sealed record DriverHoursSourceStatus(string TachoMaster, string Tracker, string BaseSite, string SageHrExpenses);
     public sealed record NightOutEvidenceRow(DateOnly Date, Guid DriverId, string DriverName, string EmploymentType, IReadOnlyList<string> Runs,
-        bool PlannerTicked, bool TachoRestEvidence, int TachoRestMinutes, DateTimeOffset? TrackerEvidenceUtc, bool? TrackerAwayFromBase,
+        bool PlannerTicked, bool CardOpenAcrossMidnight, bool TachoRestEvidence, int TachoRestMinutes, DateTimeOffset? TrackerEvidenceUtc, bool? TrackerAwayFromBase,
         DateTimeOffset? BaseReturnAtUtc, string? BaseGeofenceName, string Status, string SageExpenseStatus);
     public sealed record NonEmployedHourRow(DateOnly Date, Guid DriverId, string DriverName, string EmployeeNumber, string EmploymentType,
         string? AgencyName, DateTimeOffset? TachoDutyStartUtc, DateTimeOffset? TachoDutyEndUtc, int? TachoDutySpanMinutes,
-        int? TachoActivityMinutes, DateTimeOffset? TrackerFirstMovementUtc, DateTimeOffset? TrackerLastMovementUtc,
+        int? TachoActivityMinutes, DateTimeOffset? TrackerFirstMovementUtc, int? CardToFirstMovementMinutes, DateTimeOffset? TrackerLastMovementUtc,
         int? TrackerMovementSpanMinutes, IReadOnlyList<string> TrackerVehicles, IReadOnlyList<string> Runs, int? VarianceMinutes, string EvidenceStatus);
 }
