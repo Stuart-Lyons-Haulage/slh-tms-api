@@ -5,8 +5,8 @@ namespace Slh.Tms.Api.Services;
 /// <summary>
 /// Applies the assimilated weekly-rest 6 x 24-hour rule to TachoMaster duty history.
 /// A weekly rest is recognised from a continuous gap of at least 24 hours between duty blocks;
-/// the following duty start is the end of that weekly-rest period. The next weekly rest must
-/// start no later than 144 hours after that end.
+/// the rest starts when the preceding duty ends and finishes when the following duty starts.
+/// The following weekly rest must start no later than 144 hours after the end of the previous weekly rest.
 /// </summary>
 public sealed class DriverWeeklyRestComplianceService(TachoMasterClient tachoMaster, ILogger<DriverWeeklyRestComplianceService> logger)
 {
@@ -72,14 +72,51 @@ public sealed class DriverWeeklyRestComplianceService(TachoMasterClient tachoMas
         if (blocks.Count == 0)
             return WeeklyRestComplianceResult.Unknown("No usable TachoMaster duty blocks were returned for this driver.");
 
-        DateTimeOffset? lastWeeklyRestEndUtc = null;
+        var restGaps = new List<WeeklyRestGap>();
         for (var index = 1; index < blocks.Count; index++)
         {
             var previous = blocks[index - 1];
             var current = blocks[index];
             if (previous.EndUtc is not DateTimeOffset previousEnd) continue;
-            if (current.StartUtc <= referenceUtc && current.StartUtc - previousEnd >= ReducedWeeklyRest)
-                lastWeeklyRestEndUtc = current.StartUtc;
+            var gap = current.StartUtc - previousEnd;
+            if (gap >= ReducedWeeklyRest)
+                restGaps.Add(new WeeklyRestGap(previousEnd, current.StartUtc));
+        }
+
+        DateTimeOffset? lastWeeklyRestEndUtc = null;
+        DateTimeOffset? missedDeadlineUtc = null;
+        foreach (var gap in restGaps)
+        {
+            if (gap.StartUtc > referenceUtc)
+                break;
+
+            if (lastWeeklyRestEndUtc is null)
+            {
+                if (gap.EndUtc <= referenceUtc)
+                    lastWeeklyRestEndUtc = gap.EndUtc;
+                continue;
+            }
+
+            var deadline = lastWeeklyRestEndUtc.Value + WeeklyRestDeadline;
+            if (gap.StartUtc > deadline)
+            {
+                missedDeadlineUtc = deadline;
+                break;
+            }
+
+            if (gap.EndUtc <= referenceUtc)
+                lastWeeklyRestEndUtc = gap.EndUtc;
+            else
+                break;
+        }
+
+        if (missedDeadlineUtc is not null && referenceUtc >= missedDeadlineUtc.Value)
+        {
+            var elapsedHours = Math.Max(0, (referenceUtc - lastWeeklyRestEndUtc!.Value).TotalHours);
+            return WeeklyRestComplianceResult.Overdue(
+                missedDeadlineUtc.Value,
+                lastWeeklyRestEndUtc,
+                $"Weekly rest was not started by the legal 144-hour deadline. {elapsedHours:0.#} hours have elapsed since the end of the last weekly rest; the legal 6 x 24-hour window has expired.");
         }
 
         if (lastWeeklyRestEndUtc is null)
@@ -98,29 +135,29 @@ public sealed class DriverWeeklyRestComplianceService(TachoMasterClient tachoMas
                 "TachoMaster shows recent duty history within the current 6 x 24-hour window; no completed weekly-rest reset is visible in the returned period.");
         }
 
-        var deadline = lastWeeklyRestEndUtc.Value + WeeklyRestDeadline;
-        if (referenceUtc >= deadline)
+        var deadlineAfterLastRest = lastWeeklyRestEndUtc.Value + WeeklyRestDeadline;
+        if (referenceUtc >= deadlineAfterLastRest)
         {
             var elapsedHours = Math.Max(0, (referenceUtc - lastWeeklyRestEndUtc.Value).TotalHours);
             return WeeklyRestComplianceResult.Overdue(
-                deadline,
+                deadlineAfterLastRest,
                 lastWeeklyRestEndUtc,
                 $"Weekly rest is due. {elapsedHours:0.#} hours have elapsed since the end of the last weekly rest; the legal 144-hour window has expired.");
         }
 
-        var remaining = deadline - referenceUtc;
+        var remaining = deadlineAfterLastRest - referenceUtc;
         if (remaining <= TimeSpan.FromHours(12))
         {
             return WeeklyRestComplianceResult.DueSoon(
-                deadline,
+                deadlineAfterLastRest,
                 lastWeeklyRestEndUtc,
-                $"Weekly rest is due by {LocalTime(deadline)}. Only {remaining.TotalHours:0.#} hours remain in the 6 x 24-hour window.");
+                $"Weekly rest is due by {LocalTime(deadlineAfterLastRest)}. Only {remaining.TotalHours:0.#} hours remain in the 6 x 24-hour window.");
         }
 
         return WeeklyRestComplianceResult.Ready(
-            deadline,
+            deadlineAfterLastRest,
             lastWeeklyRestEndUtc,
-            $"Weekly-rest window is open until {LocalTime(deadline)}."
+            $"Weekly-rest window is open until {LocalTime(deadlineAfterLastRest)}."
         );
     }
 
@@ -160,6 +197,7 @@ public sealed class DriverWeeklyRestComplianceService(TachoMasterClient tachoMas
 
     private sealed record DutyKey(int MemberCode, DateTimeOffset StartUtc, DateTimeOffset? EndUtc, string VehicleCode);
     private sealed record DutyBlock(DateTimeOffset StartUtc, DateTimeOffset? EndUtc);
+    private sealed record WeeklyRestGap(DateTimeOffset StartUtc, DateTimeOffset EndUtc);
 }
 
 public sealed record WeeklyRestComplianceResult(
