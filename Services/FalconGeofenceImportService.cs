@@ -73,8 +73,11 @@ public static class FalconGeofenceImportService
             .Select(x => x.Key)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        if (parsed.Rows.Any(x => !x.Valid || duplicateNames.Contains(x.NormalizedName)))
-            throw new FalconGeofenceValidationException("The export contains invalid or duplicate geofence rows.");
+        var invalidSelected = parsed.Rows.Any(row =>
+            (!row.Valid || duplicateNames.Contains(row.NormalizedName))
+            && (!decisions.TryGetValue(row.ClientKey, out var decision) || decision.Skip != true));
+        if (invalidSelected)
+            throw new FalconGeofenceValidationException("Every invalid or duplicate geofence row must be skipped before import.");
 
         var sites = await db.Sites.Where(x => x.Active).ToListAsync(ct);
         var fences = await db.SiteGeofences.ToListAsync(ct);
