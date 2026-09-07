@@ -393,7 +393,8 @@ public sealed class StagingService(TmsDbContext db)
                 Text(line, "collectionAddress") ?? Text(payload, "collectionAddress"),
                 Text(line, "deliveryAddress") ?? Text(payload, "deliveryAddress"),
                 Text(line, "mapLink") ?? Text(payload, "mapLink"),
-                Text(line, "driverInstructions") ?? Text(payload, "driverInstructions"), ct);
+                Text(line, "driverInstructions") ?? Text(payload, "driverInstructions"), ct,
+                Text(line, "marketName") ?? Text(payload, "marketName"));
             var collectionSite = lineAlignment.CollectionName ?? rawCollectionSite;
             var deliverySite = lineAlignment.DeliveryName ?? rawDeliverySite;
             var lineCollectionDate = DateOnlyOrNull(line, "collectionDate") ?? DateOnlyOrNull(payload, "collectionDate");

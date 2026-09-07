@@ -27,7 +27,8 @@ public static class OrderSiteMasterAlignment
             Text(payload, "deliveryAddress"),
             Text(payload, "mapLink"),
             Text(payload, "driverInstructions"),
-            ct);
+            ct,
+            Text(payload, "marketName"));
     }
 
     public static async Task<Alignment> ResolveNamesAsync(
@@ -38,7 +39,8 @@ public static class OrderSiteMasterAlignment
         string? rawDeliveryAddress,
         string? rawMapLink,
         string? rawDriverInstructions,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? marketName = null)
     {
         List<Site> sites;
         try
@@ -56,6 +58,9 @@ public static class OrderSiteMasterAlignment
         var delivery = Match(sites, rawDelivery);
         var collectionName = DisplayName(collection) ?? rawCollection;
         var deliveryName = DisplayName(delivery) ?? rawDelivery;
+        var marketDestination = await MatchMarketDestinationAsync(db, marketName, rawDelivery, ct);
+        if (!string.IsNullOrWhiteSpace(marketDestination))
+            deliveryName = marketDestination;
         var collectionAddress = collection?.CollectionAddress ?? rawCollectionAddress;
         var deliveryAddress = delivery?.CollectionAddress ?? rawDeliveryAddress;
         var deliveryMapLink = delivery?.MapLink ?? rawMapLink;
@@ -67,6 +72,19 @@ public static class OrderSiteMasterAlignment
         instructions = UpsertTag(instructions, "Delivery address", deliveryAddress);
 
         return new Alignment(collectionName, collectionAddress, deliveryName, deliveryAddress, deliveryMapLink, instructions);
+    }
+
+    private static async Task<string?> MatchMarketDestinationAsync(TmsDbContext db, string? marketName, string? destination, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(marketName) || string.IsNullOrWhiteSpace(destination)) return null;
+        var market = Normalise(marketName);
+        var destinationKey = Normalise(destination);
+        var contacts = await db.MarketContacts.AsNoTracking().Where(x => x.Active && x.Market != null).ToListAsync(ct);
+        var match = contacts.FirstOrDefault(x => Normalise(x.Market) == market &&
+            (Normalise(x.Name) == destinationKey || Normalise(x.StandOrLocation) == destinationKey))
+            ?? contacts.FirstOrDefault(x => Normalise(x.Market) == market &&
+                (Normalise(x.Name).Contains(destinationKey, StringComparison.Ordinal) || destinationKey.Contains(Normalise(x.Name), StringComparison.Ordinal)));
+        return match is null || string.IsNullOrWhiteSpace(match.StandOrLocation) ? null : match.StandOrLocation.Trim();
     }
 
     private static Site? Match(IEnumerable<Site> sites, string? value)
