@@ -129,28 +129,36 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         return Accepted(new { ignored = false, staged, existing, superseded, warnings = parsed.Warnings, outlookCategory = "TMS Imported", records });
     }
 
+    private async Task<EmailIntakeParseResult> ParseEmail(MailboxEmailIntakeRequest request, CancellationToken ct)
+    {
+        var parsed = nwfQuantityChangeParser.TryParse(request)
+            ?? nwfCsvParser.TryParse(request)
+            ?? nwfWorkbookParser.TryParse(request)
+            ?? nwfParser.TryParse(request)
+            ?? sainsburyParser.TryParse(request)
+            ?? specialistParser.TryParse(request)
+            ?? emailParser.Parse(request, await MasterSiteNames(ct));
 
-    private async Task<EmailIntakeParseResult> ParseEmail(MailboxEmailIntakeRequest request, CancellationToken ct) =>
-        nwfQuantityChangeParser.TryParse(request)
-        ?? nwfCsvParser.TryParse(request)
-        ?? nwfWorkbookParser.TryParse(request)
-        ?? nwfParser.TryParse(request)
-        ?? sainsburyParser.TryParse(request)
-        ?? specialistParser.TryParse(request)
-        ?? emailParser.Parse(request, await MasterSiteNames(ct));
+        // Every parser, including specialist/NWF routes, now passes through the same
+        // Site Master resolver before planners see the email in Order Review.
+        return await EmailOrderSiteMasterAlignment.AlignAsync(db, parsed, ct);
+    }
 
     private async Task<IReadOnlyCollection<string>> MasterSiteNames(CancellationToken ct)
     {
         var sites = await db.Sites.AsNoTracking()
             .Where(site => site.Active)
-            .Select(site => new { site.Name, site.DriverTextName })
             .ToListAsync(ct);
+        await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
 
         return sites
-            .SelectMany(site => new[] { site.Name, site.DriverTextName })
+            .SelectMany(site => new[] { site.Name, site.DriverTextName, site.ExternalCode }
+                .Concat((site.Aliases ?? string.Empty)
+                    .Split(new[] { ',', ';', '|', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)))
             .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Select(name => name!.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList()!;
+            .ToList();
     }
 
     private async Task<IActionResult> StageMappingException(MailboxEmailIntakeRequest request, EmailIntakeParseResult parsed, CancellationToken ct)
