@@ -20,6 +20,7 @@ public sealed class DriverDispatchStatusController(
     {
         var planningDate = date ?? DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
         var drivers = await db.Drivers.Where(item => item.Active).ToListAsync(ct);
+        await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
         var loads = await db.Loads
             .AsNoTracking()
             .Where(item => item.PlanningDate == planningDate && item.Status != LoadStatus.Cancelled)
