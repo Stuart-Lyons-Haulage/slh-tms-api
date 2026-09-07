@@ -119,7 +119,8 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
             Address = Clip(stop.Address, 500),
             Latitude = stop.Latitude,
             Longitude = stop.Longitude,
-            PlannedArrivalUtc = stop.PlannedArrivalUtc
+            PlannedArrivalUtc = stop.PlannedArrivalUtc,
+            PlannerNote = Clip(stop.PlannerNote, 1000)
         }).ToList();
 
         await SaveCoreLoadAsync(load, register, ct);
@@ -268,5 +269,5 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
 
 public sealed record RunAllocationRequest(Guid? VehicleId, Guid? DriverId, Guid? TrailerId);
 public sealed record RunOperationalRequest(decimal? PalletSpacesUsed, decimal? TotalPalletSpaces, string? CapacityType, string? DepotSplits, decimal? TemperatureC, string? PlannerNotes);
-public sealed record RunStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc);
+public sealed record RunStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc, string? PlannerNote);
 public sealed record RunStatusRequest(string Status);
