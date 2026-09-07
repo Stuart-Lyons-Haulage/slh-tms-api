@@ -8,7 +8,11 @@ using Slh.Tms.Api.Services;
 namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/loads"), Authorize]
-public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatchService sms, TachoMasterClient tachoMaster) : ControllerBase
+public sealed class RunDriverMessageController(
+    TmsDbContext db,
+    DriverSmsDispatchService sms,
+    TachoMasterClient tachoMaster,
+    DriverWeeklyRestComplianceService weeklyRestCompliance) : ControllerBase
 {
     private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
     private static readonly TimeSpan SameDayLiveSignOnWindow = TimeSpan.FromMinutes(30);
@@ -30,8 +34,6 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
         if (structural.Classification == "Unverified" && !request.AcknowledgeUnverified)
             return Ok(Blocked(request.RouteDrivingMinutes, 0, "Pre-dispatch evidence is incomplete. Review the warnings and explicitly acknowledge them before dispatch.", structural: structural));
 
-        // Readiness is also used while the planner is preparing same-day work. Do not demand a
-        // live vehicle sign-on hours before the planned start; actual SMS dispatch still enforces it.
         var readiness = await AssessReadiness(load, driver, vehicle, request.RouteDrivingMinutes, actualDispatch: false, ct);
         return Ok(readiness with { StructuralReadiness = structural });
     }
@@ -46,7 +48,7 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
         var register = false;
         try
         {
-            load = await db.Loads.SingleOrDefaultAsync(item => item.Id == id, ct);
+            load = await db.Loads.Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == id, ct);
         }
         catch (Exception exception) when (IsSchemaUnavailable(exception))
         {
@@ -79,8 +81,6 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
             if (structural.Classification == "Unverified" && !request.AcknowledgeUnverified)
                 return BadRequest(new { message = "Pre-dispatch evidence is incomplete. Review and acknowledge the warnings before dispatch.", structural });
 
-            // Sending as a real dispatch is the hard safety gate: even if the run is hours away,
-            // current vehicle identity and remaining-hours evidence must be present at this point.
             var readiness = await AssessReadiness(load, driver, vehicle, routeDrivingMinutes, actualDispatch: true, ct);
             readiness = readiness with { StructuralReadiness = structural };
             if (!readiness.CanDispatch) return BadRequest(new { message = readiness.Explanation, readiness });
@@ -139,7 +139,7 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
         Load? load = null;
         try
         {
-            load = await db.Loads.AsNoTracking().SingleOrDefaultAsync(item => item.Id == id, ct);
+            load = await db.Loads.AsNoTracking().Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == id, ct);
         }
         catch (Exception exception) when (IsSchemaUnavailable(exception))
         {
@@ -166,15 +166,28 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
         var nowUtc = DateTimeOffset.UtcNow;
         var ukNow = TimeZoneInfo.ConvertTime(nowUtc, London);
         var ukToday = DateOnly.FromDateTime(ukNow.DateTime);
+        var plannedStartUtc = load.Stops
+            .OrderBy(item => item.Sequence)
+            .Select(item => item.PlannedArrivalUtc)
+            .FirstOrDefault(value => value is not null);
 
-        // Planners normally allocate and send tomorrow's work the day before. A future duty cannot
-        // have a live card in the planned vehicle yet, so require canonical identity/licence/route
-        // now and defer the live-card/remaining-hours proof to the operating-day readiness feed.
+        if (plannedStartUtc is null)
+        {
+            var dispatchState = (await DriverDispatchStateStore.ReadAsync(db, [load.Id], ct)).GetValueOrDefault(load.Id);
+            plannedStartUtc = dispatchState?.PlannedStartUtc;
+        }
+
+        var weeklyRestReferenceUtc = plannedStartUtc
+            ?? (load.PlanningDate == ukToday ? nowUtc : PlanningDayEndUtc(load.PlanningDate));
+        var weeklyRest = await weeklyRestCompliance.EvaluateAsync(driver, load.PlanningDate, weeklyRestReferenceUtc, ct);
+        if (weeklyRest.IsBlocked)
+            return Blocked(minutes, 0, weeklyRest.Message);
+
         if (!actualDispatch && load.PlanningDate > ukToday)
             return new RunDispatchReadinessResponse(
                 true,
                 "FutureDuty",
-                $"Future duty for {load.PlanningDate:dd/MM/yyyy}: canonical TachoMaster identity, Driver Master compliance and route checks passed. Live card and remaining hours will be revalidated when the duty becomes current.",
+                $"Future duty for {load.PlanningDate:dd/MM/yyyy}: canonical TachoMaster identity, Driver Master compliance, weekly rest and route checks passed. Live card and remaining hours will be revalidated when the duty becomes current.",
                 minutes,
                 0,
                 driver.TachoName ?? driver.DisplayName,
@@ -183,16 +196,11 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
                 driver.TachoDriveAvailableTodayMinutes,
                 driver.TachoWorkAvailableWeekMinutes);
 
-        // The Dispatch workbench stores an explicit planned yard start. For today's work, a driver
-        // should not be warned that they are not signed into a wagon several hours before that start.
-        // Within 30 minutes of planned start the normal live Falcon/TachoMaster check resumes.
-        // The actual dispatch action never takes this path and therefore cannot bypass live evidence.
         if (!actualDispatch && load.PlanningDate == ukToday)
         {
-            var dispatchState = (await DriverDispatchStateStore.ReadAsync(db, [load.Id], ct)).GetValueOrDefault(load.Id);
-            if (dispatchState?.PlannedStartUtc is DateTimeOffset plannedStartUtc && plannedStartUtc - nowUtc > SameDayLiveSignOnWindow)
+            if (plannedStartUtc is DateTimeOffset plannedStart && plannedStart - nowUtc > SameDayLiveSignOnWindow)
             {
-                var plannedLocal = TimeZoneInfo.ConvertTime(plannedStartUtc, London);
+                var plannedLocal = TimeZoneInfo.ConvertTime(plannedStart, London);
                 return new RunDispatchReadinessResponse(
                     true,
                     "AwaitingSignOn",
@@ -243,6 +251,13 @@ public sealed class RunDriverMessageController(TmsDbContext db, DriverSmsDispatc
             ? $"{IdentitySource(tacho)} confirms {tacho.DriverName} has {driveAvailable} driving minutes available. Dispatch can proceed and the ETA includes a {breakMinutes} minute statutory break."
             : $"{IdentitySource(tacho)} confirms {tacho.DriverName} has {driveAvailable} driving minutes available. Dispatch can proceed.";
         return new(true, status, explanation, minutes, breakMinutes, tacho.DriverName, tacho.VehicleCode, tacho.DutyStartUtc, tacho.DriveAvailableTodayMinutes, tacho.WorkAvailableWeekMinutes);
+    }
+
+    private static DateTimeOffset PlanningDayEndUtc(DateOnly date)
+    {
+        var local = date.AddDays(1).ToDateTime(TimeOnly.MinValue).AddTicks(-1);
+        var unspecified = DateTime.SpecifyKind(local, DateTimeKind.Unspecified);
+        return new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(unspecified, London), TimeSpan.Zero);
     }
 
     private static string DriverIdentitySummary(Driver driver)

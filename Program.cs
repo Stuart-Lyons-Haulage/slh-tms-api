@@ -163,6 +163,7 @@ builder.Services.AddScoped<DriverMasterClassificationService>();
 builder.Services.AddScoped<TachoCanonicalDriverMasterOrchestrator>();
 builder.Services.AddScoped<TachoDriverMasterSyncJobService>();
 builder.Services.AddTransient<TachoMasterRetryHandler>();
+builder.Services.AddScoped<DriverWeeklyRestComplianceService>();
 builder.Services.AddHttpClient<DriverSmsDispatchService>();
 builder.Services.AddHttpClient<SageHrClient>();
 builder.Services.AddHttpClient<DotTrackingClient>();
@@ -170,9 +171,6 @@ builder.Services.AddHttpClient<TachoMasterClient>()
     .AddHttpMessageHandler<TachoMasterRetryHandler>()
     .ConfigureHttpClient((sp, _) =>
     {
-        // DotTrackingClient is optional — if it is removed from DI, TachoMasterClient
-        // receives null rather than a hard startup failure (the constructor uses
-        // DotTrackingClient? = null as a default parameter).
         sp.GetService<DotTrackingClient>();
     });
 builder.Services.AddHttpClient<AzureMapsRouteClient>();
@@ -240,15 +238,7 @@ if (!app.Environment.IsEnvironment("Testing"))
     await using var scope = app.Services.CreateAsyncScope();
     var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
     var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("Tms.SchemaMigration");
-
-    // Required schema migrations are fail-fast. Any exception from the migration
-    // runner is intentionally allowed to escape this startup block so the host
-    // never begins serving against a partially migrated database.
     await SchemaMigrationRunner.ApplyAsync(db, logger, CancellationToken.None);
-
-    // These are post-schema data-maintenance tasks rather than required DDL.
-    // Preserve their existing best-effort behaviour without weakening the schema
-    // migration guarantee above.
     try
     {
         var quarantinedFleetioPlaceholders = await MasterDetailStore.QuarantineFleetioPlaceholdersAsync(db, CancellationToken.None);
