@@ -129,6 +129,40 @@ public sealed class FalconGeofenceImportTests : IClassFixture<CustomWebFactory>
         Assert.Empty(await db.SiteGeofences.ToListAsync());
     }
 
+    [Fact]
+    public async Task Commit_allows_an_invalid_row_to_be_explicitly_skipped()
+    {
+        Guid siteId;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            var site = new Site { ExternalCode = "SITE100", Name = "Valid Fence", Active = true };
+            db.Sites.Add(site);
+            await db.SaveChangesAsync();
+            siteId = site.Id;
+        }
+
+        var export = Export(
+            Fence("Valid Fence", [[0.0, 51.0], [0.1, 51.0], [0.1, 51.1]]),
+            Fence("Invalid Fence", [[0.0, 51.0], [0.1, 51.0]]));
+        var client = _factory.CreateClientWithUser("planner@lyonshaulage.com");
+        var response = await client.PostAsJsonAsync("/api/v1/geofences/import-falcon/commit", new
+        {
+            sourceFileName = "delivery.json",
+            export,
+            decisions = new[]
+            {
+                new { clientKey = "VALID FENCE", siteId = (Guid?)siteId, skip = false },
+                new { clientKey = "INVALID FENCE", siteId = (Guid?)null, skip = true }
+            }
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var finalScope = _factory.Services.CreateScope();
+        var finalDb = finalScope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        Assert.Equal("Valid Fence", Assert.Single(await finalDb.SiteGeofences.ToListAsync()).Name);
+    }
+
     private static object Export(params object[] geofences) => new
     {
         format = "falcon.geofence",
