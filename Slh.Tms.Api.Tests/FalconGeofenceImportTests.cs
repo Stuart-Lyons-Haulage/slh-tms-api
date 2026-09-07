@@ -79,8 +79,8 @@ public sealed class FalconGeofenceImportTests : IClassFixture<CustomWebFactory>
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        using var scope = _factory.Services.CreateScope();
-        var finalDb = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        using var finalScope = _factory.Services.CreateScope();
+        var finalDb = finalScope.ServiceProvider.GetRequiredService<TmsDbContext>();
         var stored = Assert.Single(await finalDb.SiteGeofences.ToListAsync());
         Assert.Equal(siteId, stored.SiteId);
         Assert.Equal("SITE023", stored.SiteNumber);
