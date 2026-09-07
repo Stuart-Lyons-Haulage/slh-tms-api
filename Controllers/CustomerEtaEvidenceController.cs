@@ -11,7 +11,7 @@ namespace Slh.Tms.Api.Controllers;
 
 /// <summary>
 /// Produces one auditable execution chain for customer ETA communication:
-/// plan allocation -> TachoMaster sign-on -> DOT/Falcon movement/tracking ->
+/// plan allocation -> Falcon live card/TachoMaster duty -> DOT/Falcon movement/tracking ->
 /// geofence execution -> Azure Maps ETA -> legal driving-time assessment.
 /// </summary>
 [ApiController, Route("api/v1/operations/customer-eta-evidence")]
@@ -37,9 +37,9 @@ public sealed class CustomerEtaEvidenceController(
         var csv = new StringBuilder();
         csv.AppendLine(string.Join(',', new[]
         {
-            "Generated UTC", "Planning date", "Run", "Order reference", "Customer", "Planned driver", "Tacho driver",
-            "Driver/Tacho match", "Vehicle", "Tacho sign-on UTC", "First DOT/Falcon movement after sign-on UTC",
-            "Sign-on to movement minutes", "Latest tracking UTC", "Geofence execution available", "Last confirmed site",
+            "Generated UTC", "Planning date", "Run", "Order reference", "Customer", "Planned driver", "Live driver",
+            "Driver/live match", "Vehicle", "Card/duty observed UTC", "First DOT/Falcon movement after card/duty UTC",
+            "Card/duty to movement minutes", "Latest tracking UTC", "Geofence execution available", "Last confirmed site",
             "Last site arrival UTC", "Last site departure UTC", "Delivery stop", "ETA UTC", "ETA source", "Window end UTC", "Risk",
             "Drive available today minutes", "Remaining route driving minutes", "Break included minutes", "Tacho status",
             "Evidence status", "Customer promise ready", "Evidence explanation"
@@ -89,14 +89,14 @@ public sealed class CustomerEtaEvidenceController(
         var aliasesByVehicle = await ExecutionIdentityResolver.VehicleAliasesAsync(db, vehicles.Values.ToList(), ct);
         var liveStatuses = await SafeList(db.VehicleLiveStatuses.AsNoTracking(), ct);
 
-        // Every open driver's own duty for the vehicle, not just whoever most recently signed on.
-        // Completed duties remain available through the daily-history method for reconciliation,
-        // but cannot provide current legal-hours authority for a live customer ETA.
+        // Pull the combined live identity view. Falcon can confirm a newly inserted card before
+        // TachoMaster exposes the open duty; TachoMaster duty remains the legal-hours authority
+        // when both sources agree. If they disagree, legal-hours authority is suppressed.
         IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> tachoStatuses = new Dictionary<string, IReadOnlyList<TachoVehicleDriverStatus>>();
-        try { tachoStatuses = await tachoMaster.GetOpenDriverStatusesByVehicleAsync(planningDate, ct); }
+        try { tachoStatuses = await tachoMaster.GetLiveDriverStatusesByVehicleAsync(planningDate, ct); }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            logger.LogWarning(exception, "TachoMaster was unavailable while building customer ETA evidence.");
+            logger.LogWarning(exception, "TachoMaster/Falcon live driver evidence was unavailable while building customer ETA evidence.");
         }
 
         var (startUtc, endUtc) = OperatingWindow(planningDate);
@@ -126,18 +126,29 @@ public sealed class CustomerEtaEvidenceController(
                 ? knownAliases
                 : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var live = vehicle is null ? null : ExecutionIdentityResolver.MatchLive(aliases, liveStatuses);
-            var tacho = vehicle is null ? null : ExecutionIdentityResolver.MatchTachoForDriver(aliases, driver, tachoStatuses);
-            var firstMovement = vehicle is null ? null : ExecutionIdentityResolver.FirstMovement(aliases, trackingEvents, tacho?.DutyStartUtc);
-            var signOnToMovementMinutes = tacho is not null && firstMovement is not null
-                ? Math.Max(0, (int)Math.Floor((firstMovement.Value - tacho.DutyStartUtc).TotalMinutes))
+            var driverEvidence = vehicle is null
+                ? new LiveDriverEvidence(null, null, null, null, "Unavailable")
+                : LiveDriverEvidenceRules.Resolve(aliases, driver, tachoStatuses);
+            var displayIdentity = driverEvidence.DisplayIdentity;
+            var etaAuthority = driverEvidence.EtaAuthority;
+            var observedAt = displayIdentity?.DutyStartUtc;
+            var firstMovement = vehicle is null ? null : ExecutionIdentityResolver.FirstMovement(aliases, trackingEvents, observedAt);
+            var signOnToMovementMinutes = observedAt is not null && firstMovement is not null
+                ? Math.Max(0, (int)Math.Floor((firstMovement.Value - observedAt.Value).TotalMinutes))
                 : (int?)null;
             var latestTracking = live is null
                 ? (DateTimeOffset?)null
                 : live.LastReceivedAtUtc >= live.LastEventTimeUtc ? live.LastReceivedAtUtc : live.LastEventTimeUtc;
-            var driverEvidenceStatus = ExecutionIdentityResolver.DriverEvidenceStatus(driver, tacho);
-            var evidenceStatus = RunExecutionEvidenceRules.EvidenceStatus(tacho, latestTracking, now);
-            var evidenceExplanation = RunExecutionEvidenceRules.Explanation(tacho, firstMovement, latestTracking, now) +
-                $" Planned/Tacho driver correlation: {driverEvidenceStatus}. Geofence execution: {(geofenceEvidenceAvailable ? "available" : "unavailable")}.";
+            var driverEvidenceStatus = driverEvidence.CardDutyStatus == "Mismatch"
+                ? "LiveCardTachoMismatch"
+                : ExecutionIdentityResolver.DriverEvidenceStatus(driver, displayIdentity);
+            var evidenceStatus = driverEvidence.CardDutyStatus == "Mismatch"
+                ? "IdentityMismatch"
+                : RunExecutionEvidenceRules.EvidenceStatus(displayIdentity, latestTracking, now);
+            var evidenceExplanation = driverEvidence.CardDutyStatus == "Mismatch"
+                ? $"Falcon live card reports {driverEvidence.LiveCard?.DriverName ?? "a driver"}, while the open TachoMaster duty reports {driverEvidence.TachoDuty?.DriverName ?? "another driver"}. Legal-hours figures are suppressed until the identities agree."
+                : RunExecutionEvidenceRules.Explanation(displayIdentity, firstMovement, latestTracking, now);
+            evidenceExplanation += $" Planned/live driver correlation: {driverEvidenceStatus}. Card/Tacho correlation: {driverEvidence.CardDutyStatus}. Geofence execution: {(geofenceEvidenceAvailable ? "available" : "unavailable")}.";
 
             var visits = geofence?.Visits.Where(visit => visit.LoadId == load.Id && visit.ConfirmedAtUtc is not null)
                 .OrderBy(visit => visit.EnteredAtUtc).ToList() ?? [];
@@ -149,7 +160,7 @@ public sealed class CustomerEtaEvidenceController(
             var cumulativeDrivingMinutes = 0d;
             var breakDelayMinutes = 0;
             var routeContainsEstimate = false;
-            var initialContinuousDriving = tacho is null ? 0 : tacho.BreakMinutes >= 45 ? tacho.DriveMinutes % 270 : Math.Min(tacho.DriveMinutes, 270);
+            var initialContinuousDriving = etaAuthority is null ? 0 : etaAuthority.BreakMinutes >= 45 ? etaAuthority.DriveMinutes % 270 : Math.Min(etaAuthority.DriveMinutes, 270);
 
             // A customer ETA is for the uncompleted journey only. Stops that have a
             // confirmed arrival and departure are evidence, not future route legs.
@@ -171,7 +182,7 @@ public sealed class CustomerEtaEvidenceController(
                         routeContainsEstimate |= routeEstimate.IsApproximate;
                         var travelTime = routeEstimate.TravelTime;
                         cumulativeDrivingMinutes += travelTime.TotalMinutes;
-                        var requiredBreaks = tacho is null ? 0 : Math.Max(0, (int)Math.Floor((initialContinuousDriving + cumulativeDrivingMinutes - 0.01) / 270d));
+                        var requiredBreaks = etaAuthority is null ? 0 : Math.Max(0, (int)Math.Floor((initialContinuousDriving + cumulativeDrivingMinutes - 0.01) / 270d));
                         if (requiredBreaks * 45 > breakDelayMinutes)
                         {
                             var extraBreakMinutes = requiredBreaks * 45 - breakDelayMinutes;
@@ -191,29 +202,31 @@ public sealed class CustomerEtaEvidenceController(
 
                 var windowStart = order?.DeliveryWindowStartUtc;
                 var windowEnd = order?.DeliveryWindowEndUtc;
-                var tachoAssessment = etaSource == "Live"
-                    ? OperationsController.TachoAssessment(tacho, cumulativeDrivingMinutes, breakDelayMinutes)
-                    : etaSource == "Estimated"
-                        ? (Status: "EstimateOnly", Explanation: "Azure Maps live truck routing was unavailable for at least one remaining leg. The resilient road estimate is advisory and is not customer-promise ready.")
-                        : (Status: "RouteUnavailable", Explanation: !geofenceEvidenceAvailable
-                            ? "Geofence execution was unavailable, so the remaining route could not be proved and no live customer ETA was issued."
-                            : latestTracking is not null && now - latestTracking.Value > RunExecutionEvidenceRules.MaximumLiveTrackingAge
-                                ? "Tracking has not been received for more than five minutes, so no live customer ETA is issued until a fresh RoadTech/DOT observation arrives."
-                                : tacho is null
-                                    ? "Live route and current TachoMaster duty are unavailable; this ETA must be verified before export."
-                                    : "TachoMaster matched the vehicle, but no fresh live route could be calculated; the planned ETA has not been adjusted for a break.");
+                var tachoAssessment = driverEvidence.CardDutyStatus == "Mismatch"
+                    ? (Status: "IdentityMismatch", Explanation: "Falcon card identity and TachoMaster duty identity disagree, so legal-hours and break calculations are not trusted for this ETA.")
+                    : etaSource == "Live"
+                        ? OperationsController.TachoAssessment(etaAuthority, cumulativeDrivingMinutes, breakDelayMinutes)
+                        : etaSource == "Estimated"
+                            ? (Status: "EstimateOnly", Explanation: "Azure Maps live truck routing was unavailable for at least one remaining leg. The resilient road estimate is advisory and is not customer-promise ready.")
+                            : (Status: "RouteUnavailable", Explanation: !geofenceEvidenceAvailable
+                                ? "Geofence execution was unavailable, so the remaining route could not be proved and no live customer ETA was issued."
+                                : latestTracking is not null && now - latestTracking.Value > RunExecutionEvidenceRules.MaximumLiveTrackingAge
+                                    ? "Tracking has not been received for more than five minutes, so no live customer ETA is issued until a fresh RoadTech/DOT observation arrives."
+                                    : etaAuthority is null
+                                        ? "A live route is available but no trusted live-card/TachoMaster legal-hours evidence is available; this ETA must be verified before export."
+                                        : "Live driver evidence matched the vehicle, but no fresh live route could be calculated; the planned ETA has not been adjusted for a break.");
                 var customerPromiseReady = geofenceEvidenceAvailable && etaSource == "Live" && evidenceStatus == "VerifiedLive" &&
-                    driverEvidenceStatus == "Matched" &&
-                    tachoAssessment.Status is "WithinDriveTime" or "BreakIncluded" && eta is not null;
+                    driverEvidenceStatus == "Matched" && driverEvidence.CardDutyStatus != "Mismatch" &&
+                    tachoAssessment.Status is "WithinDriveTime" or "BreakIncluded" or "CardConfirmedWithinDriveTime" && eta is not null;
                 var risk = etaSource == "Live" ? Risk(eta, windowStart, windowEnd) : "Pending";
 
                 records.Add(new CustomerEtaEvidenceRecord(
                     load.Id, RunDisplayLabel.For(load), load.Status.ToString(), stop.Id, stop.Sequence, stop.Name, IsDeliveryStop(stop),
-                    order?.Reference, order?.CustomerCode, driver?.DisplayName, tacho?.DriverName, driverEvidenceStatus, vehicle?.Registration,
-                    tacho?.DutyStartUtc, firstMovement, signOnToMovementMinutes, latestTracking, geofenceEvidenceAvailable,
+                    order?.Reference, order?.CustomerCode, driver?.DisplayName, displayIdentity?.DriverName, driverEvidenceStatus, vehicle?.Registration,
+                    observedAt, firstMovement, signOnToMovementMinutes, latestTracking, geofenceEvidenceAvailable,
                     lastVisit?.Fence.Name, lastVisit?.EnteredAtUtc, lastVisit?.ExitedAtUtc,
                     eta, etaSource, windowStart, windowEnd, risk,
-                    tacho?.DriveAvailableTodayMinutes, (int)Math.Ceiling(cumulativeDrivingMinutes), breakDelayMinutes,
+                    etaAuthority?.DriveAvailableTodayMinutes, (int)Math.Ceiling(cumulativeDrivingMinutes), breakDelayMinutes,
                     tachoAssessment.Status, tachoAssessment.Explanation, evidenceStatus, evidenceExplanation, customerPromiseReady));
             }
         }
@@ -221,7 +234,7 @@ public sealed class CustomerEtaEvidenceController(
         return new CustomerEtaEvidenceSnapshot(
             planningDate,
             now,
-            "PlanningRegister+TachoMaster+DOT/Falcon+EmbeddedGeofences+AzureMapsTruckLiveTraffic",
+            "PlanningRegister+TachoMaster+FalconLiveCard+DOT/Falcon+EmbeddedGeofences+AzureMapsTruckLiveTraffic",
             records.Count,
             records.Count(record => record.IsDelivery),
             records.Count(record => record.IsDelivery && record.CustomerPromiseReady),
