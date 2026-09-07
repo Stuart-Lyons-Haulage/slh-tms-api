@@ -28,7 +28,30 @@ public sealed class DriverWeeklyRestComplianceServiceTests
     }
 
     [Fact]
-    public void Six_by_twenty_four_deadline_blocks_a_seventh_period_after_the_deadline()
+    public void Late_weekly_rest_start_after_the_144_hour_deadline_is_overdue()
+    {
+        var driver = TestDriver();
+        var duties = new[]
+        {
+            Duty("2026-08-20T05:00:00Z", "2026-08-20T15:00:00Z"),
+            Duty("2026-08-22T15:00:00Z", "2026-08-22T23:00:00Z"),
+            Duty("2026-08-23T05:00:00Z", "2026-08-23T15:00:00Z"),
+            Duty("2026-08-24T05:00:00Z", "2026-08-24T15:00:00Z"),
+            Duty("2026-08-25T05:00:00Z", "2026-08-25T15:00:00Z"),
+            Duty("2026-08-26T05:00:00Z", "2026-08-26T15:00:00Z"),
+            Duty("2026-08-27T05:00:00Z", "2026-08-27T15:00:00Z"),
+            Duty("2026-08-28T05:00:00Z", "2026-08-28T16:00:00Z"),
+            Duty("2026-08-29T16:00:00Z", "2026-08-29T18:00:00Z")
+        };
+
+        var result = DriverWeeklyRestComplianceService.Evaluate(driver, DateTimeOffset.Parse("2026-08-29T16:00:00Z"), duties);
+
+        Assert.Equal("Overdue", result.Status);
+        Assert.Equal(DateTimeOffset.Parse("2026-08-28T15:00:00Z"), result.WeeklyRestDueUtc);
+    }
+
+    [Fact]
+    public void Weekly_rest_started_before_deadline_can_reset_window_after_deadline()
     {
         var driver = TestDriver();
         var duties = new[]
@@ -45,7 +68,7 @@ public sealed class DriverWeeklyRestComplianceServiceTests
 
         var result = DriverWeeklyRestComplianceService.Evaluate(driver, DateTimeOffset.Parse("2026-08-28T16:00:00Z"), duties);
 
-        Assert.Equal("Overdue", result.Status);
+        Assert.NotEqual("Overdue", result.Status);
         Assert.Equal(DateTimeOffset.Parse("2026-08-28T15:00:00Z"), result.WeeklyRestDueUtc);
     }
 
