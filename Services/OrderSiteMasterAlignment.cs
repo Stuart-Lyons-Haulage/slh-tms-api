@@ -15,6 +15,8 @@ public static class OrderSiteMasterAlignment
         string? DeliveryMapLink,
         string? DriverInstructions);
 
+    private sealed record MarketContext(string Market, string Customer, string? Stand, string? Salesman);
+
     public static async Task<Alignment> ResolveAsync(TmsDbContext db, JsonElement payload, CancellationToken ct)
     {
         var rawCollection = Text(payload, "collectionSite") ?? Text(payload, "collectionLocation") ?? Text(payload, "sellerName");
@@ -55,12 +57,14 @@ public static class OrderSiteMasterAlignment
         }
 
         var collection = Match(sites, rawCollection);
-        var delivery = Match(sites, rawDelivery);
+        var marketContext = await MatchMarketContextAsync(db, marketName, rawDelivery, ct);
+        var marketSite = marketContext is null ? null : Match(sites, marketName) ?? Match(sites, marketContext.Market);
+        var delivery = marketSite ?? Match(sites, rawDelivery);
+
         var collectionName = DisplayName(collection) ?? rawCollection;
-        var deliveryName = DisplayName(delivery) ?? rawDelivery;
-        var marketDestination = await MatchMarketDestinationAsync(db, marketName, rawDelivery, ct);
-        if (!string.IsNullOrWhiteSpace(marketDestination))
-            deliveryName = marketDestination;
+        // A market customer/stall is not a physical geofence. When Market Master resolves
+        // the order, keep the stop at the Market Site and carry the internal location as text.
+        var deliveryName = DisplayName(delivery) ?? (marketContext?.Market ?? rawDelivery);
         var collectionAddress = collection?.CollectionAddress ?? rawCollectionAddress;
         var deliveryAddress = delivery?.CollectionAddress ?? rawDeliveryAddress;
         var deliveryMapLink = delivery?.MapLink ?? rawMapLink;
@@ -70,33 +74,62 @@ public static class OrderSiteMasterAlignment
         instructions = UpsertTag(instructions, "Collection address", collectionAddress);
         instructions = UpsertTag(instructions, "Depot", deliveryName);
         instructions = UpsertTag(instructions, "Delivery address", deliveryAddress);
+        if (marketContext is not null)
+        {
+            instructions = UpsertTag(instructions, "Market", deliveryName ?? marketContext.Market);
+            instructions = UpsertTag(instructions, "Market customer", marketContext.Customer);
+            instructions = UpsertTag(instructions, "Stall / stand", marketContext.Stand);
+            instructions = UpsertTag(instructions, "Salesman", marketContext.Salesman);
+        }
 
         return new Alignment(collectionName, collectionAddress, deliveryName, deliveryAddress, deliveryMapLink, instructions);
     }
 
-    private static async Task<string?> MatchMarketDestinationAsync(TmsDbContext db, string? marketName, string? destination, CancellationToken ct)
+    private static async Task<MarketContext?> MatchMarketContextAsync(TmsDbContext db, string? marketName, string? destination, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(marketName) || string.IsNullOrWhiteSpace(destination)) return null;
-        var market = Normalise(marketName);
+        var market = CanonicalMarket(marketName);
         var destinationKey = Normalise(destination);
-        var contacts = await db.MarketContacts.AsNoTracking().Where(x => x.Active && x.Market != null).ToListAsync(ct);
-        var match = contacts.FirstOrDefault(x => Normalise(x.Market) == market &&
-            (Normalise(x.Name) == destinationKey || Normalise(x.StandOrLocation) == destinationKey))
-            ?? contacts.FirstOrDefault(x => Normalise(x.Market) == market &&
-                (Normalise(x.Name).Contains(destinationKey, StringComparison.Ordinal) || destinationKey.Contains(Normalise(x.Name), StringComparison.Ordinal)));
-        return match is null || string.IsNullOrWhiteSpace(match.StandOrLocation) ? null : match.StandOrLocation.Trim();
+        var contacts = await db.MarketContacts.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
+        var sameMarket = contacts.Where(x => CanonicalMarket(x.Market) == market).ToList();
+        if (sameMarket.Count == 0) return null;
+
+        static IEnumerable<string?> Evidence(MarketContact contact)
+        {
+            yield return contact.Name;
+            yield return contact.StandOrLocation;
+            yield return contact.Salesman;
+            yield return contact.Sender;
+        }
+
+        var exact = sameMarket.Where(contact => Evidence(contact).Any(value => Normalise(value) == destinationKey)).ToList();
+        var candidates = exact.Count > 0 ? exact : sameMarket.Where(contact => Evidence(contact).Any(value =>
+        {
+            var key = Normalise(value);
+            return key.Length >= 4 && destinationKey.Length >= 4 &&
+                (key.Contains(destinationKey, StringComparison.Ordinal) || destinationKey.Contains(key, StringComparison.Ordinal));
+        })).ToList();
+
+        var unique = candidates.GroupBy(x => x.Id).Select(x => x.First()).ToList();
+        if (unique.Count != 1) return null;
+        var match = unique[0];
+        return new MarketContext(match.Market.Trim(), match.Name.Trim(), Clean(match.StandOrLocation), Clean(match.Salesman));
     }
 
     private static Site? Match(IEnumerable<Site> sites, string? value)
     {
         var key = Normalise(value);
         if (string.IsNullOrWhiteSpace(key)) return null;
-        return sites.FirstOrDefault(site => Candidates(site).Any(candidate => Normalise(candidate) == key))
-            ?? sites.FirstOrDefault(site => Candidates(site).Any(candidate =>
-            {
-                var candidateKey = Normalise(candidate);
-                return candidateKey.Length >= 5 && (key.Contains(candidateKey, StringComparison.Ordinal) || candidateKey.Contains(key, StringComparison.Ordinal));
-            }));
+        var exact = sites.Where(site => Candidates(site).Any(candidate => Normalise(candidate) == key)).ToList();
+        if (exact.Count == 1) return exact[0];
+        if (exact.Count > 1) return null;
+        var partial = sites.Where(site => Candidates(site).Any(candidate =>
+        {
+            var candidateKey = Normalise(candidate);
+            return candidateKey.Length >= 5 && key.Length >= 5 &&
+                (key.Contains(candidateKey, StringComparison.Ordinal) || candidateKey.Contains(key, StringComparison.Ordinal));
+        })).ToList();
+        return partial.Count == 1 ? partial[0] : null;
     }
 
     private static IEnumerable<string?> Candidates(Site site)
@@ -136,6 +169,18 @@ public static class OrderSiteMasterAlignment
             };
         }
         return null;
+    }
+
+    private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private static string CanonicalMarket(string? value)
+    {
+        var normal = Normalise(value);
+        if (normal.Contains("COVENT")) return "COVENT";
+        if (normal.Contains("SPIT")) return "SPIT";
+        if (normal.Contains("WESTERN")) return "WESTERN";
+        if (normal.Contains("SENDER")) return "SENDER";
+        return normal;
     }
 
     private static string Normalise(string? value) => new((value ?? string.Empty)
