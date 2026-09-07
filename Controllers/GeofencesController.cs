@@ -12,6 +12,35 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize]
 public sealed class GeofencesController(TmsDbContext db) : ControllerBase
 {
+    [HttpPost("import-falcon/preview")]
+    [Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> PreviewFalcon([FromBody] JsonElement payload, CancellationToken ct)
+    {
+        try
+        {
+            return Ok(await FalconGeofenceImportService.PreviewAsync(db, payload, ct));
+        }
+        catch (FalconGeofenceValidationException ex)
+        {
+            return UnprocessableEntity(new { error = ex.Message });
+        }
+    }
+
+    [HttpPost("import-falcon/commit")]
+    [Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> CommitFalcon([FromBody] FalconGeofenceCommitRequest request, CancellationToken ct)
+    {
+        try
+        {
+            var actor = User.Identity?.Name ?? User.FindFirst("preferred_username")?.Value ?? "dot-geofence-import";
+            return Ok(await FalconGeofenceImportService.CommitAsync(db, request, actor, ct));
+        }
+        catch (FalconGeofenceValidationException ex)
+        {
+            return UnprocessableEntity(new { error = ex.Message });
+        }
+    }
+
     [HttpPost("import-falcon")]
     [Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> ImportFalcon([FromBody] JsonElement payload, CancellationToken ct)
