@@ -89,14 +89,22 @@ public sealed class DriverDispatchStatusController(
                         : "Awaiting Dispatch";
 
             var weekly = DriverWeeklyRestComplianceService.Evaluate(driver, referenceUtc, duties);
+            // An unavailable Tacho weekly-rest check must not remove the planner's ability to
+            // allocate a run/vehicle/trailer. Final dispatch still re-runs the authoritative
+            // weekly-rest gate and will stop an unverified or overdue driver before sending.
+            var allocationStatus = weekly.Status == "Unverified" ? "Unknown" : weekly.Status;
+            var allocationMessage = weekly.Status == "Unverified"
+                ? $"{weekly.Message} Allocation is still available; weekly rest will be checked again before dispatch."
+                : weekly.Message;
+
             return new DriverDispatchStatusRow(
                 driver.Id,
                 dispatchStatus,
                 latestInbound?.Notes,
                 latestInbound?.CapturedAtUtc,
                 latestOutbound?.CapturedAtUtc,
-                weekly.Status,
-                weekly.Message,
+                allocationStatus,
+                allocationMessage,
                 weekly.WeeklyRestDueUtc,
                 weekly.LastWeeklyRestEndUtc);
         }).ToList();
