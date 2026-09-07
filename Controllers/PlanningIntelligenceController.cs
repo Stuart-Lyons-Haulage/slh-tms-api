@@ -41,6 +41,7 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
 
         List<Driver> drivers;
         List<Vehicle> vehicles;
+        List<Trailer> trailers;
         List<VehicleLiveStatus> live;
         try
         {
@@ -50,6 +51,8 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
         catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); drivers = []; }
         try { vehicles = await db.Vehicles.AsNoTracking().Where(x => x.Active).OrderBy(x => x.Registration).ToListAsync(ct); }
         catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); vehicles = []; }
+        try { trailers = await db.Trailers.AsNoTracking().Where(x => x.Active).OrderBy(x => x.TrailerNumber).ToListAsync(ct); }
+        catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); trailers = []; }
         try { live = await db.VehicleLiveStatuses.AsNoTracking().OrderByDescending(x => x.LastEventTimeUtc).Take(1000).ToListAsync(ct); }
         catch (Exception ex) when (PlanningResilience.SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); live = []; }
 
@@ -138,6 +141,20 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
             };
         }).OrderByDescending(x => x.score).ThenBy(x => x.estimatedEmptyMiles ?? 999m).Take(12).ToList();
 
+        var trailerSuggestions = trailers.Select(trailer =>
+        {
+            var previous = previousLoads.FirstOrDefault(x => x.TrailerId == trailer.Id);
+            var score = previous?.PlanningDate == load.PlanningDate.AddDays(-1) ? 110m : 100m;
+            return new
+            {
+                trailer.Id, trailer.TrailerNumber, trailer.Type, trailer.StandardCapacity, trailer.EuroCapacity,
+                previousRun = previous?.Reference, previousDate = previous?.PlanningDate,
+                score,
+                blocked = false,
+                reason = previous?.PlanningDate == load.PlanningDate.AddDays(-1) ? "This trailer was used yesterday; allocate again?" : "Active trailer in the TMS fleet master."
+            };
+        }).OrderByDescending(x => x.score).ThenBy(x => x.TrailerNumber).Take(12).ToList();
+
         return Ok(new
         {
             load.Id,
@@ -156,6 +173,7 @@ public sealed class PlanningIntelligenceController(TmsDbContext db, TachoMasterC
             nightOutRequired = ReadNightOut(load.PlannerNotes),
             driverSuggestions,
             vehicleSuggestions,
+            trailerSuggestions,
             generatedAtUtc = DateTimeOffset.UtcNow
         });
     }
