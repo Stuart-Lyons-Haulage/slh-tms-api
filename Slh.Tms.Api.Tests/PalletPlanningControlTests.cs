@@ -140,6 +140,37 @@ public sealed class PalletPlanningControlTests : IClassFixture<CustomWebFactory>
         Assert.DoesNotContain("PENDING-REGISTER-ORDER", references);
     }
 
+    [Fact]
+    public async Task Run_stop_updates_preserve_planner_note()
+    {
+        var date = new DateOnly(2026, 9, 7);
+        var load = new Load
+        {
+            Reference = ($"RUN-NOTE-{Guid.NewGuid():N}")[..20],
+            PlanningDate = date,
+            Status = LoadStatus.Draft
+        };
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.Loads.Add(load);
+            await db.SaveChangesAsync();
+        }
+
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
+        var update = await client.PutAsync($"/api/v1/runs/{load.Id}/stops", Json(JsonSerializer.Serialize(new[]
+        {
+            new { name = "Collect · Test", plannerNote = (string?)null },
+            new { name = "Deliver · Test", plannerNote = "Ring gatehouse on arrival" }
+        })));
+        Assert.Equal(HttpStatusCode.OK, update.StatusCode);
+
+        using var response = JsonDocument.Parse(await (await client.GetAsync($"/api/v1/runs?date={date:yyyy-MM-dd}")).Content.ReadAsStringAsync());
+        var savedLoad = Assert.Single(response.RootElement.EnumerateArray().Where(x => x.GetProperty("id").GetGuid() == load.Id));
+        var delivery = Assert.Single(savedLoad.GetProperty("stops").EnumerateArray().Where(x => x.GetProperty("name").GetString() == "Deliver · Test"));
+        Assert.Equal("Ring gatehouse on arrival", delivery.GetProperty("plannerNote").GetString());
+    }
+
     private async Task<(Guid OrderId, Guid SourceLineId, Guid FirstLoadId, Guid SecondLoadId)> Seed()
     {
         using var scope = factory.Services.CreateScope();
