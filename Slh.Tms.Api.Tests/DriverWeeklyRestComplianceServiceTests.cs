@@ -68,8 +68,9 @@ public sealed class DriverWeeklyRestComplianceServiceTests
 
         var result = DriverWeeklyRestComplianceService.Evaluate(driver, DateTimeOffset.Parse("2026-08-28T16:00:00Z"), duties);
 
-        Assert.NotEqual("Overdue", result.Status);
-        Assert.Equal(DateTimeOffset.Parse("2026-08-28T15:00:00Z"), result.WeeklyRestDueUtc);
+        Assert.Equal("Ready", result.Status);
+        Assert.Equal(DateTimeOffset.Parse("2026-08-28T16:00:00Z"), result.LastWeeklyRestEndUtc);
+        Assert.Equal(DateTimeOffset.Parse("2026-09-03T16:00:00Z"), result.WeeklyRestDueUtc);
     }
 
     [Fact]
