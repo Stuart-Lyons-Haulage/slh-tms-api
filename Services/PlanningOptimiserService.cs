@@ -53,7 +53,8 @@ public sealed class PlanningOptimiserService
                 .Where(line => revisionIds.Contains(line.RevisionId) && line.CollectionDate == request.PlanningDate && line.Pallets > 0)
                 .OrderBy(line => line.CollectionTimeFrom).ThenBy(line => line.CollectionSite).ThenBy(line => line.DeliverySite).ThenBy(line => line.SourceRowKey)
                 .ToListAsync(ct);
-        lines = lines.Where(line => Period(line.CollectionTimeFrom) == period).ToList();
+        if (period != "FULL_DAY")
+            lines = lines.Where(line => Period(line.CollectionTimeFrom) == period).ToList();
 
         var allocated = await AllocatedPalletsAsync(request.PlanningDate, ct);
         var balances = lines
@@ -430,7 +431,8 @@ public sealed class PlanningOptimiserService
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(source))).ToLowerInvariant();
     }
 
-    private static string NormalisePeriod(string? value) => string.Equals(value?.Trim(), "PM", StringComparison.OrdinalIgnoreCase) ? "PM" : "AM";
+    private static string NormalisePeriod(string? value) => string.Equals(value?.Trim(), "PM", StringComparison.OrdinalIgnoreCase) ? "PM" :
+        string.Equals(value?.Trim(), "FULL_DAY", StringComparison.OrdinalIgnoreCase) || string.Equals(value?.Trim(), "FULL DAY", StringComparison.OrdinalIgnoreCase) ? "FULL_DAY" : "AM";
     private static string Period(TimeOnly? value) => value is not null && value.Value >= new TimeOnly(17, 0) ? "PM" : "AM";
     private static int Capacity(string? palletType) => palletType?.Contains("euro", StringComparison.OrdinalIgnoreCase) == true ? 33 : 26;
     private static bool IsEuro(string? palletType) => palletType?.Contains("euro", StringComparison.OrdinalIgnoreCase) == true;
