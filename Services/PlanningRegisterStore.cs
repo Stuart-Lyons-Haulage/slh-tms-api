@@ -52,8 +52,15 @@ public static class PlanningRegisterStore
         return loads;
     }
 
-    public static async Task<Load?> GetLoadAsync(TmsDbContext db, Guid id, CancellationToken ct) =>
-        (await ReadLoadsAsync(db, null, ct)).SingleOrDefault(x => x.Id == id);
+    public static async Task<Load?> GetLoadAsync(TmsDbContext db, Guid id, CancellationToken ct)
+    {
+        var key = $"planningload:{id:N}";
+        var row = await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(x =>
+            x.EntityType == LoadType
+            && x.Status == StagingStatus.Promoted
+            && x.IdempotencyKey == key, ct);
+        return row is null ? null : ParseLoad(row);
+    }
 
     public static async Task SaveLoadAsync(TmsDbContext db, Load load, string? user, CancellationToken ct)
     {
