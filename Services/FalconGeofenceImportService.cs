@@ -294,6 +294,7 @@ public static class FalconGeofenceImportService
     private static int? Integer(JsonElement element, string property) =>
         element.ValueKind == JsonValueKind.Object
         && element.TryGetProperty(property, out var value)
+        && value.ValueKind == JsonValueKind.Number
         && value.TryGetInt32(out var number)
             ? number
             : null;
