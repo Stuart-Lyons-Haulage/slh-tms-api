@@ -39,7 +39,10 @@ public sealed record PlanProposalRunResult(
     IReadOnlyList<PlanningScoreComponent> ScoreComponents,
     IReadOnlyList<string> Explanations,
     IReadOnlyList<PlanProposalAllocationResult> Allocations,
-    IReadOnlyList<PlanProposalCandidateResult> Candidates);
+    IReadOnlyList<PlanProposalCandidateResult> Candidates,
+    string? DriverName = null,
+    string? VehicleRegistration = null,
+    string? TrailerNumber = null);
 public sealed record PlanProposalResult(
     Guid Id,
     DateOnly PlanningDate,

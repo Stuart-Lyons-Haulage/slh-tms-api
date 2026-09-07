@@ -119,7 +119,7 @@ public sealed class PlanningOptimiserService
         logger.LogInformation(
             "Generated immutable planning proposal {ProposalId} version {Version} with {RunCount} runs and classification {Classification}.",
             proposal.Id, proposal.Version, proposal.Runs.Count, proposal.Classification);
-        return ToResult(proposal, warnings);
+        return await ToResult(proposal, warnings);
     }
 
     public async Task<PlanProposalResult?> GetAsync(Guid id, CancellationToken ct)
@@ -129,7 +129,7 @@ public sealed class PlanningOptimiserService
             .Include(item => item.Runs).ThenInclude(run => run.Candidates)
             .SingleOrDefaultAsync(item => item.Id == id, ct);
         if (proposal is null) return null;
-        return ToResult(proposal, DeserializeWarnings(proposal.WarningsJson));
+        return await ToResult(proposal, DeserializeWarnings(proposal.WarningsJson));
     }
 
     private static void BuildRuns(PlanProposal proposal, IReadOnlyList<Balance> balances, IReadOnlyList<Trailer> trailers, string classification, DateOnly date, string period)
@@ -342,8 +342,15 @@ public sealed class PlanningOptimiserService
         }
     }
 
-    private static PlanProposalResult ToResult(PlanProposal proposal, IReadOnlyList<PlanProposalWarning> warnings) =>
-        new(
+    private async Task<PlanProposalResult> ToResult(PlanProposal proposal, IReadOnlyList<PlanProposalWarning> warnings)
+    {
+        var driverIds = proposal.Runs.Where(x => x.DriverId != null).Select(x => x.DriverId!.Value).Distinct().ToList();
+        var vehicleIds = proposal.Runs.Where(x => x.VehicleId != null).Select(x => x.VehicleId!.Value).Distinct().ToList();
+        var trailerIds = proposal.Runs.Where(x => x.TrailerId != null).Select(x => x.TrailerId!.Value).Distinct().ToList();
+        var drivers = await db.Drivers.AsNoTracking().Where(x => driverIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, x => x.DisplayName, CancellationToken.None);
+        var vehicles = await db.Vehicles.AsNoTracking().Where(x => vehicleIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, x => x.Registration, CancellationToken.None);
+        var trailers = await db.Trailers.AsNoTracking().Where(x => trailerIds.Contains(x.Id)).ToDictionaryAsync(x => x.Id, x => x.TrailerNumber, CancellationToken.None);
+        return new(
             proposal.Id,
             proposal.PlanningDate,
             proposal.Period,
@@ -391,7 +398,11 @@ public sealed class PlanningOptimiserService
                         candidate.Score,
                         DeserializeComponents(candidate.ScoreComponentsJson),
                         DeserializeConstraints(candidate.ConstraintResultsJson),
-                        DeserializeExplanations(candidate.ExplanationJson))).ToList())).ToList());
+                        DeserializeExplanations(candidate.ExplanationJson))).ToList(),
+                run.DriverId is Guid driverId && drivers.TryGetValue(driverId, out var driverName) ? driverName : null,
+                run.VehicleId is Guid vehicleId && vehicles.TryGetValue(vehicleId, out var vehicleRegistration) ? vehicleRegistration : null,
+                run.TrailerId is Guid trailerId && trailers.TryGetValue(trailerId, out var trailerNumber) ? trailerNumber : null)).ToList());
+    }
 
     private static IReadOnlyList<PlanProposalWarning> DeserializeWarnings(string value)
     {
