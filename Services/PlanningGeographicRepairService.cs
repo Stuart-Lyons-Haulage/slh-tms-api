@@ -283,7 +283,7 @@ public sealed class PlanningGeographicRepairService(
             run.DriverId = selected.Driver.Id;
             run.VehicleId = selected.Vehicle.Id;
             run.PositionSource = selected.Score.PositionSource;
-            run.Classification = selected.Constraints.Classification;
+            run.Classification = run.Classification == "Blocked" ? "Blocked" : selected.Constraints.Classification;
             run.Score = selected.Score.Total;
             run.ScoreComponentsJson = JsonSerializer.Serialize(selected.Score.Components, JsonOptions);
             run.ExplanationJson = JsonSerializer.Serialize(
@@ -461,7 +461,9 @@ public sealed class PlanningGeographicRepairService(
             : value.Split(new[] { ';', ',', '|', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
     private static int TrailerCapacity(Trailer trailer, string? palletType)
-        => palletType?.Contains("euro", StringComparison.OrdinalIgnoreCase) == true ? trailer.EuroCapacity : trailer.StandardCapacity;
+        => palletType?.Contains("euro", StringComparison.OrdinalIgnoreCase) == true
+            ? trailer.EuroCapacity ?? trailer.StandardCapacity ?? 33
+            : trailer.StandardCapacity ?? trailer.EuroCapacity ?? 26;
 
     private static int DefaultCapacity(string? palletType) => palletType?.Contains("euro", StringComparison.OrdinalIgnoreCase) == true ? 33 : 26;
     private static bool IsEuro(string? palletType) => palletType?.Contains("euro", StringComparison.OrdinalIgnoreCase) == true;
