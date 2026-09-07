@@ -11,7 +11,8 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class PlanningOptimiserController(
     PlanningOptimiserService service,
     TmsDbContext db,
-    ILogger<PlanningOptimiserController> logger) : ControllerBase
+    ILogger<PlanningOptimiserController> logger,
+    ILogger<PlanningGeographicRepairService> geographicLogger) : ControllerBase
 {
     [HttpPost("proposals"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> Generate([FromBody] GeneratePlanProposalRequest request, CancellationToken ct)
@@ -19,7 +20,13 @@ public sealed class PlanningOptimiserController(
         try
         {
             var proposal = await service.GenerateAsync(request, User.Identity?.Name, ct);
-            return CreatedAtAction(nameof(Get), new { id = proposal.Id }, proposal);
+            await new PlanningGeographicRepairService(db, geographicLogger).RepairAsync(
+                proposal.Id,
+                request.PlanningDate,
+                proposal.EvidenceCapturedAtUtc,
+                ct);
+            var repaired = await service.GetAsync(proposal.Id, ct);
+            return CreatedAtAction(nameof(Get), new { id = proposal.Id }, repaired ?? proposal);
         }
         catch (Exception exception) when (SchemaUnavailable(exception))
         {
