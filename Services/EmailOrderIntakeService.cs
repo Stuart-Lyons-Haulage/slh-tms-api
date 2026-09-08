@@ -550,6 +550,30 @@ public sealed class EmailOrderIntakeService
                 rows.Add(values);
             }
 
+            var legacyRows = ParseKnownWaitroseWorkbookRows(request, attachment, rows);
+            if (legacyRows.Count > 0)
+            {
+                results.AddRange(legacyRows.Select((row, index) =>
+                {
+                    var warnings = new List<string>();
+                    if (row.IsAmendment) warnings.Add("Source workbook is marked AMENDED; match this row to the existing PO before approval.");
+                    return BuildStructuredOrder(
+                        request,
+                        $"waitrose-legacy-{sheetIndex}-{NormaliseKey(row.Depot)}-{index + 1}",
+                        "WAITROSE",
+                        row.Po,
+                        row.CollectionDate,
+                        row.DeliveryDate,
+                        row.Pallets,
+                        InferLegacyWaitroseCollectionSite(request, attachment),
+                        row.Depot,
+                        row.IsAmendment ? "Waitrose amended depot movement" : "Waitrose depot movement",
+                        warnings,
+                        row.ReadyTime?.ToString("HH:mm", CultureInfo.InvariantCulture));
+                }));
+                continue;
+            }
+
             var headerIndex = rows.FindIndex(IsBookingHeader);
             if (headerIndex < 0)
                 continue;
@@ -642,6 +666,28 @@ public sealed class EmailOrderIntakeService
         while (reader.NextResult());
 
         return results;
+    }
+
+    private static IReadOnlyList<WaitroseLegacyRow> ParseKnownWaitroseWorkbookRows(
+        MailboxEmailIntakeRequest request,
+        MailboxAttachmentRequest attachment,
+        IReadOnlyList<object?[]> rows)
+    {
+        var name = attachment.Name ?? string.Empty;
+        var source = $"{request.Subject}\n{request.SenderAddress}\n{name}";
+        if (source.Contains("Vitacress", StringComparison.OrdinalIgnoreCase) || name.Contains("Collections WAITROSE", StringComparison.OrdinalIgnoreCase))
+            return WaitroseLegacyWorkbookParser.ParseVitacress(rows);
+        if (source.Contains("WR Week", StringComparison.OrdinalIgnoreCase) || Regex.IsMatch(name, @"^Week-\d+\.xls", RegexOptions.IgnoreCase))
+            return WaitroseLegacyWorkbookParser.ParseApsWeekly(rows, LocalDate(request.ReceivedAtUtc ?? DateTimeOffset.UtcNow));
+        return [];
+    }
+
+    private static string InferLegacyWaitroseCollectionSite(MailboxEmailIntakeRequest request, MailboxAttachmentRequest attachment)
+    {
+        var source = $"{request.Subject}\n{request.SenderAddress}\n{attachment.Name}";
+        if (source.Contains("Vitacress", StringComparison.OrdinalIgnoreCase)) return "Vitacress Runcton";
+        if (source.Contains("apsgroup.uk.com", StringComparison.OrdinalIgnoreCase) || source.Contains("WR Week", StringComparison.OrdinalIgnoreCase)) return "APS Chichester Packhouse";
+        return "Collection site to confirm";
     }
 
     private static ParsedEmailOrder? ParseBodyOrder(
