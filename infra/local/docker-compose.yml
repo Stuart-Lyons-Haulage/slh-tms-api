@@ -1,0 +1,39 @@
+services:
+  slh-tms-api:
+    container_name: slh-tms-api
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./api.env
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:80
+    expose:
+      - "80"
+    networks:
+      - slh-tms
+
+  slh-tms-web:
+    container_name: slh-tms-web
+    build:
+      context: ../../../slh-tms-web
+      dockerfile: Dockerfile.local
+      args:
+        VITE_API_BASE_URL: /tms-api
+        VITE_ENTRA_TENANT_ID: ${VITE_ENTRA_TENANT_ID}
+        VITE_ENTRA_CLIENT_ID: ${VITE_ENTRA_CLIENT_ID}
+        VITE_ENTRA_API_SCOPE: ${VITE_ENTRA_API_SCOPE}
+        VITE_AZURE_MAPS_CLIENT_ID: ${VITE_AZURE_MAPS_CLIENT_ID}
+    restart: unless-stopped
+    depends_on:
+      - slh-tms-api
+    ports:
+      - "${SLH_TMS_HTTP_PORT:-8080}:80"
+    networks:
+      - slh-tms
+
+networks:
+  slh-tms:
+    name: slh-tms
