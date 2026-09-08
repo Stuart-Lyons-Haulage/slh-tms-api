@@ -456,7 +456,7 @@ public sealed class StagingService(TmsDbContext db)
     private static bool IsBackhaul(JsonElement payload)
     {
         var normal = NormaliseKey(Text(payload, "jobType") ?? string.Empty);
-        return normal is "backhaul" or "backload";
+        return normal.Contains("backhaul", StringComparison.Ordinal) || normal.Contains("backload", StringComparison.Ordinal);
     }
     private static int? IntOrNull(JsonElement payload, string name) => int.TryParse(Text(payload, name), out var value) ? value : null;
     private static bool Bool(JsonElement payload, string name, bool fallback) => bool.TryParse(Text(payload, name), out var value) ? value : fallback;
