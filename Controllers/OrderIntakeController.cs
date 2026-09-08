@@ -201,7 +201,8 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
         // Every parser, including specialist/NWF routes, now passes through the same
         // Site Master resolver before planners see the email in Order Review.
-        return await EmailOrderSiteMasterAlignment.AlignAsync(db, parsed, ct);
+        var aligned = await EmailOrderSiteMasterAlignment.AlignAsync(db, parsed, ct);
+        return await NwfCrateReferenceLinker.EnrichAsync(db, aligned, request, ct);
     }
 
     private async Task<IReadOnlyCollection<string>> MasterSiteNames(CancellationToken ct)
