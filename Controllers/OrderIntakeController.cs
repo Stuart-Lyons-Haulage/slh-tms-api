@@ -57,15 +57,18 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         if (string.IsNullOrWhiteSpace(request.MessageId))
             return BadRequest(new ErrorResponse("missing_message_id", "Mailbox message ID is required so repeated flow runs remain idempotent.", HttpContext.TraceIdentifier));
 
-        await EnsureSourceEmailEvidence(request, ct);
         var parsed = await ParseEmail(request, ct);
         if (parsed.IgnoredReason is not null)
         {
             if (ShouldStageMappingException(request, parsed))
+            {
+                await EnsureSourceEmailEvidence(request, ct);
                 return await StageMappingException(request, parsed, ct);
+            }
             return Ok(new { ignored = true, reason = parsed.IgnoredReason, staged = 0, existing = 0, superseded = 0, warnings = parsed.Warnings, outlookCategory = (string?)null });
         }
 
+        await EnsureSourceEmailEvidence(request, ct);
         var staged = 0;
         var existing = 0;
         var superseded = 0;
@@ -176,7 +179,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 toRecipients = TryGetProperty(orderPayload, "sourceToRecipients", out var to) ? to.Clone() : default(JsonElement?),
                 ccRecipients = TryGetProperty(orderPayload, "sourceCcRecipients", out var cc) ? cc.Clone() : default(JsonElement?),
                 attachments = TryGetProperty(orderPayload, "sourceAttachments", out var attachments) ? attachments.Clone() : default(JsonElement?),
-                bodyTruncated = true,
+                bodyTruncated = ReadBool(orderPayload, "sourceBodyPreviewTruncated") ?? false,
                 evidenceAvailable = false
             });
         }
@@ -682,7 +685,15 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             StagedImportId = evidence.Id,
             EventType = "EvidenceRetained",
             NewStatus = StagingStatus.Archived,
-            PayloadJson = payload,
+            PayloadJson = JsonSerializer.Serialize(new
+            {
+                evidenceKey,
+                request.MessageId,
+                request.InternetMessageId,
+                request.Subject,
+                request.ReceivedAtUtc,
+                attachmentCount = (request.Attachments ?? []).Count
+            }),
             Note = evidence.ReviewNote,
             Actor = evidence.ReviewedBy,
             OccurredAtUtc = now
