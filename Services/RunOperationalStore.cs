@@ -15,6 +15,7 @@ public static class RunOperationalStore
     {
         var list = loads.ToList();
         if (list.Count == 0) return;
+        var loadIds = list.Select(load => load.Id).Distinct().ToList();
 
         // Operational enrichment must never move a terminal run backwards. Resilient planning
         // reads can temporarily surface an older Planning Register/audit copy of the same run;
@@ -23,7 +24,6 @@ public static class RunOperationalStore
         // consumers cannot keep rendering a finished run as InProgress.
         try
         {
-            var loadIds = list.Select(load => load.Id).Distinct().ToList();
             var completedIds = (await db.Loads.AsNoTracking()
                     .Where(load => loadIds.Contains(load.Id) && load.Status == LoadStatus.Completed)
                     .Select(load => load.Id)
@@ -35,7 +35,28 @@ public static class RunOperationalStore
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             // The active operational schema can be unavailable on resilience paths. Keep the
-            // supplied status in that case; callers still have their Planning Register evidence.
+            // supplied status in that case and continue to the durable completion evidence check.
+            db.ChangeTracker.Clear();
+        }
+
+        // RunCompleted is the evidence gate required before a run is allowed to enter Completed.
+        // It is therefore stronger terminal evidence than a stale resilient copy whose Status still
+        // says InProgress. This also protects wallboards if the core Loads read is temporarily stale
+        // or unavailable: once completion evidence exists the run must never be projected backwards.
+        try
+        {
+            var evidenceCompletedIds = (await db.DriverStatusLogs.AsNoTracking()
+                    .Where(log => loadIds.Contains(log.LoadId) && log.Status == RunCompletionPersistenceGuard.CompletionEvidenceStatus)
+                    .Select(log => log.LoadId)
+                    .Distinct()
+                    .ToListAsync(ct))
+                .ToHashSet();
+            foreach (var load in list)
+                if (evidenceCompletedIds.Contains(load.Id)) load.Status = LoadStatus.Completed;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // Completion evidence is a resilience source, not a reason to fail a read-only screen.
             db.ChangeTracker.Clear();
         }
 
