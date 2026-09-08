@@ -24,21 +24,25 @@ public sealed class PlanningEventsController(PlanningChangeNotifier notifier) : 
             await Response.WriteAsync(": connected\n\n", ct);
             await Response.Body.FlushAsync(ct);
 
-            using var heartbeat = new PeriodicTimer(TimeSpan.FromSeconds(25));
             while (!ct.IsCancellationRequested)
             {
-                var readTask = subscription.Reader.ReadAsync(ct).AsTask();
-                var heartbeatTask = heartbeat.WaitForNextTickAsync(ct).AsTask();
-                var completed = await Task.WhenAny(readTask, heartbeatTask);
-                if (completed == readTask)
+                using var cycle = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                var readReady = subscription.Reader.WaitToReadAsync(cycle.Token).AsTask();
+                var heartbeat = Task.Delay(TimeSpan.FromSeconds(25), cycle.Token);
+                var completed = await Task.WhenAny(readReady, heartbeat);
+
+                if (completed == readReady && await readReady)
                 {
-                    var change = await readTask;
-                    await Response.WriteAsync($"event: planning-data-changed\nid: {change.Sequence}\ndata: {change.ChangedAtUtc:O}\n\n", ct);
+                    cycle.Cancel();
+                    while (subscription.Reader.TryRead(out var change))
+                        await Response.WriteAsync($"event: planning-data-changed\nid: {change.Sequence}\ndata: {change.ChangedAtUtc:O}\n\n", ct);
                 }
-                else if (await heartbeatTask)
+                else
                 {
+                    cycle.Cancel();
                     await Response.WriteAsync($": heartbeat {DateTimeOffset.UtcNow:O}\n\n", ct);
                 }
+
                 await Response.Body.FlushAsync(ct);
             }
         }
