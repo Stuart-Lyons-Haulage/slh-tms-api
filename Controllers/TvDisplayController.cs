@@ -107,6 +107,7 @@ public sealed class TvDisplayController(TmsDbContext db, AzureMapsRouteClient ma
 
         loads = PlanningResilience.CollapseLogicalDuplicates(loads);
         await RunOperationalStore.EnrichAsync(db, loads, ct);
+        WallboardPhysicalStops.Apply(loads);
 
         var driverIds = loads.Where(x => x.DriverId is not null).Select(x => x.DriverId!.Value).Distinct().ToList();
         var vehicleIds = loads.Where(x => x.VehicleId is not null).Select(x => x.VehicleId!.Value).Distinct().ToList();
