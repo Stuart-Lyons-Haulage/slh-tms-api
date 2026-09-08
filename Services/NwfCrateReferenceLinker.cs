@@ -90,6 +90,12 @@ public static class NwfCrateReferenceLinker
         payload["referenceLinkMethod"] = bestRank switch { 3 => "Reference", 2 => "Conversation", _ => "Unique date/destination/quantity" };
 
         RemoveResolvedWarnings(payload);
+        if (IsOperationallyComplete(payload))
+        {
+            payload["plannerReady"] = true;
+            payload["intakeStatus"] = "ReadyForReview";
+            payload["intakeConfidence"] = ReadWarnings(payload).Count == 0 ? "High" : "Medium";
+        }
         var remainingWarnings = ReadWarnings(payload);
         return order with { Payload = JsonSerializer.SerializeToElement(payload), Warnings = remainingWarnings };
     }
@@ -220,7 +226,15 @@ public static class NwfCrateReferenceLinker
 
     private static bool IsResolvedWarning(string warning) =>
         (warning.Contains("reference", StringComparison.OrdinalIgnoreCase) && (warning.Contains("missing", StringComparison.OrdinalIgnoreCase) || warning.Contains("TBC", StringComparison.OrdinalIgnoreCase))) ||
+        (warning.Contains("PO", StringComparison.OrdinalIgnoreCase) && (warning.Contains("missing", StringComparison.OrdinalIgnoreCase) || warning.Contains("TBC", StringComparison.OrdinalIgnoreCase))) ||
         (warning.Contains("collection", StringComparison.OrdinalIgnoreCase) && (warning.Contains("missing", StringComparison.OrdinalIgnoreCase) || warning.Contains("not explicit", StringComparison.OrdinalIgnoreCase) || warning.Contains("TBC", StringComparison.OrdinalIgnoreCase)));
+
+    private static bool IsOperationallyComplete(JsonObject payload) =>
+        FirstText(payload, "loadReference", "loadRef", "collectionReference", "cratePo", "transportPo", "customerPo") is not null &&
+        !Missing(FirstText(payload, "sellerName", "collectionSite", "collectionLocation", "collectionDepot")) &&
+        !string.IsNullOrWhiteSpace(Destination(payload)) &&
+        Values(payload, "collectionDate", "deliveryDate").Count > 0 &&
+        Int(payload, "pallets") is > 0;
 
     private static string? RemoveResolvedInstructionSegments(string? instructions)
     {
