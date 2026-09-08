@@ -120,7 +120,7 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
         var jobType = Text(payload, "jobType");
         if (string.IsNullOrWhiteSpace(jobType)) return false;
         var normal = new string(jobType.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
-        return normal is "backhaul" or "backload";
+        return normal.Contains("backhaul", StringComparison.Ordinal) || normal.Contains("backload", StringComparison.Ordinal);
     }
 
     private static bool HasWarnings(JsonElement payload)
