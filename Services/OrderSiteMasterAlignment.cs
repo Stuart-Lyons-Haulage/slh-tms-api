@@ -13,7 +13,10 @@ public static class OrderSiteMasterAlignment
         string? DeliveryName,
         string? DeliveryAddress,
         string? DeliveryMapLink,
-        string? DriverInstructions);
+        string? DriverInstructions,
+        string? MarketCustomer = null,
+        string? MarketStand = null,
+        string? MarketSalesman = null);
 
     private sealed record MarketContext(string Market, string Customer, string? Stand, string? Salesman);
 
@@ -58,12 +61,18 @@ public static class OrderSiteMasterAlignment
 
         var collection = Match(sites, rawCollection);
         var marketContext = await MatchMarketContextAsync(db, marketName, rawDelivery, ct);
-        var marketSite = marketContext is null ? null : Match(sites, marketName) ?? Match(sites, marketContext.Market);
+
+        // The market is the physical delivery location and therefore owns the geofence.
+        // Resolve it independently of the trader/stall lookup so a missing or ambiguous
+        // Market Master contact can never turn a market delivery into a fake site.
+        var marketSite = Match(sites, marketName)
+            ?? (marketContext is null ? null : Match(sites, marketContext.Market));
         var delivery = marketSite ?? Match(sites, rawDelivery);
 
         var collectionName = DisplayName(collection) ?? rawCollection;
-        // A market customer/stall is not a physical geofence. When Market Master resolves
-        // the order, keep the stop at the Market Site and carry the internal location as text.
+        // A market customer/stall is not a physical geofence. When Site Master resolves
+        // the market, keep the stop at that Market Site and carry its internal destination
+        // from Markets Master in the driver instructions and explicit market fields.
         var deliveryName = DisplayName(delivery) ?? (marketContext?.Market ?? rawDelivery);
         var collectionAddress = collection?.CollectionAddress ?? rawCollectionAddress;
         var deliveryAddress = delivery?.CollectionAddress ?? rawDeliveryAddress;
@@ -82,7 +91,16 @@ public static class OrderSiteMasterAlignment
             instructions = UpsertTag(instructions, "Salesman", marketContext.Salesman);
         }
 
-        return new Alignment(collectionName, collectionAddress, deliveryName, deliveryAddress, deliveryMapLink, instructions);
+        return new Alignment(
+            collectionName,
+            collectionAddress,
+            deliveryName,
+            deliveryAddress,
+            deliveryMapLink,
+            instructions,
+            marketContext?.Customer,
+            marketContext?.Stand,
+            marketContext?.Salesman);
     }
 
     private static async Task<MarketContext?> MatchMarketContextAsync(TmsDbContext db, string? marketName, string? destination, CancellationToken ct)
