@@ -36,6 +36,7 @@ public sealed class TvPlannedRunsController(TmsDbContext db, IConfiguration conf
             .ToList();
 
         await RunOperationalStore.EnrichAsync(db, loads, ct);
+        WallboardPhysicalStops.Apply(loads);
         foreach (var load in loads)
         {
             OvernightRunContinuity.Apply(load);
