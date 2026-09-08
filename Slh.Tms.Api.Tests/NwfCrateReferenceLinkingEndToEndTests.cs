@@ -71,6 +71,7 @@ public sealed class NwfCrateReferenceLinkingEndToEndTests : IClassFixture<Custom
             stagedId = staged.Id;
             using var payload = JsonDocument.Parse(staged.PayloadJson);
             Assert.Equal(reference, payload.RootElement.GetProperty("collectionReference").GetString());
+            Assert.Equal(reference, payload.RootElement.GetProperty("customerRef").GetString());
             Assert.Equal(collection, payload.RootElement.GetProperty("sellerName").GetString());
             Assert.Contains($"Collection ref: {reference}", payload.RootElement.GetProperty("driverInstructions").GetString());
             Assert.True(payload.RootElement.GetProperty("plannerReady").GetBoolean());
