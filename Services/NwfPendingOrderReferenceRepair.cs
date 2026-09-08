@@ -114,7 +114,8 @@ public static class NwfPendingOrderReferenceRepair
 
         if (repaired > 0)
             await db.SaveChangesAsync(ct);
-        return repaired;
+
+        return repaired + await NwfCrateReferenceLinker.RepairPendingAsync(db, ct);
     }
 
     private static bool LooksLikeNwfPalletOrder(JsonObject payload)
