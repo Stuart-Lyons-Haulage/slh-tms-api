@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
@@ -8,7 +9,9 @@ namespace Slh.Tms.Api.Controllers;
 [Route("api/v1/beta-optimiser")]
 [Authorize]
 public sealed class BetaOptimiserController(
-    BetaOptimiserService service,
+    TmsDbContext db,
+    AzureMapsRouteClient maps,
+    ILoggerFactory loggerFactory,
     ILogger<BetaOptimiserController> logger) : ControllerBase
 {
     [HttpGet("day")]
@@ -16,7 +19,7 @@ public sealed class BetaOptimiserController(
     {
         try
         {
-            return Ok(await service.AnalyseDayAsync(planningDate, ct));
+            return Ok(await Service().AnalyseDayAsync(planningDate, ct));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -40,7 +43,7 @@ public sealed class BetaOptimiserController(
     {
         try
         {
-            return Ok(await service.AnalysePlannerRoutesAsync(request, ct));
+            return Ok(await Service().AnalysePlannerRoutesAsync(request, ct));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -55,5 +58,17 @@ public sealed class BetaOptimiserController(
                 message = "The uploaded planner benchmark could not be analysed. No planning data was changed."
             });
         }
+    }
+
+    private BetaOptimiserService Service()
+    {
+        var provider = new AzureMapsHgvRouteProvider(
+            maps,
+            loggerFactory.CreateLogger<AzureMapsHgvRouteProvider>());
+        var engine = new BetaRouteOptimisationEngine(provider);
+        return new BetaOptimiserService(
+            db,
+            engine,
+            loggerFactory.CreateLogger<BetaOptimiserService>());
     }
 }
