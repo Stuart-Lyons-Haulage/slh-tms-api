@@ -37,6 +37,67 @@ public sealed class PlanningResilienceTests
     }
 
     [Fact]
+    public void Same_id_register_allocation_wins_over_stale_live_draft()
+    {
+        var id = Guid.NewGuid();
+        var driverId = Guid.NewGuid();
+        var vehicleId = Guid.NewGuid();
+        var trailerId = Guid.NewGuid();
+        var registered = new Load
+        {
+            Id = id,
+            Reference = "Run 1",
+            Status = LoadStatus.Planned,
+            DriverId = driverId,
+            VehicleId = vehicleId,
+            TrailerId = trailerId
+        };
+        var staleLive = new Load
+        {
+            Id = id,
+            Reference = "Run 1",
+            Status = LoadStatus.Draft
+        };
+
+        var preferred = PlanningResilience.PreferSameIdCopy(registered, staleLive);
+
+        Assert.Same(registered, preferred);
+        Assert.Equal(driverId, preferred.DriverId);
+        Assert.Equal(vehicleId, preferred.VehicleId);
+        Assert.Equal(trailerId, preferred.TrailerId);
+        Assert.Equal(LoadStatus.Planned, preferred.Status);
+    }
+
+    [Fact]
+    public void Same_id_executed_live_copy_wins_but_keeps_register_allocation()
+    {
+        var id = Guid.NewGuid();
+        var driverId = Guid.NewGuid();
+        var vehicleId = Guid.NewGuid();
+        var registered = new Load
+        {
+            Id = id,
+            Reference = "Run 2",
+            Status = LoadStatus.Planned,
+            DriverId = driverId,
+            VehicleId = vehicleId
+        };
+        var live = new Load
+        {
+            Id = id,
+            Reference = "Run 2",
+            Status = LoadStatus.InProgress
+        };
+
+        var preferred = PlanningResilience.PreferSameIdCopy(registered, live);
+
+        Assert.Same(live, preferred);
+        Assert.Equal(LoadStatus.InProgress, preferred.Status);
+        Assert.Equal(driverId, preferred.DriverId);
+        Assert.Equal(vehicleId, preferred.VehicleId);
+    }
+
+    [Fact]
     public void Same_planning_run_under_different_ids_is_returned_once()
     {
         var date = new DateOnly(2026, 8, 28);
