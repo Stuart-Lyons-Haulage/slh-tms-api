@@ -18,8 +18,8 @@ public sealed class NwfOrderReferenceRepairController(TmsDbContext db) : Control
         {
             repaired,
             message = repaired == 0
-                ? "No pending NWF pallet-order references required correction."
-                : $"Corrected {repaired} pending NWF pallet-order reference(s) to PO-first TMS references."
+                ? "No pending NWF references required correction."
+                : $"Corrected {repaired} pending NWF pallet/crate/tray reference(s)."
         });
     }
 }
