@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
@@ -35,6 +36,35 @@ public sealed class DriverDispatchStatusController(
                 .Where(item => item.LoadId != Guid.Empty && loadIds.Contains(item.LoadId))
                 .OrderByDescending(item => item.CapturedAtUtc)
                 .ToListAsync(ct);
+
+        // Live movement is deliberately optional enrichment. Persisted run state remains usable if
+        // the tracking table or vehicle aliases are temporarily unavailable.
+        var vehicleAliases = new Dictionary<Guid, HashSet<string>>();
+        var liveStatuses = new List<VehicleLiveStatus>();
+        if (planningDate == today)
+        {
+            try
+            {
+                var assignedVehicleIds = loads
+                    .Where(item => item.VehicleId is not null)
+                    .Select(item => item.VehicleId!.Value)
+                    .Distinct()
+                    .ToList();
+                if (assignedVehicleIds.Count > 0)
+                {
+                    var assignedVehicles = await db.Vehicles.AsNoTracking()
+                        .Where(item => assignedVehicleIds.Contains(item.Id))
+                        .ToListAsync(ct);
+                    vehicleAliases = await ExecutionIdentityResolver.VehicleAliasesAsync(db, assignedVehicles, ct);
+                    liveStatuses = await db.VehicleLiveStatuses.AsNoTracking().ToListAsync(ct);
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                db.ChangeTracker.Clear();
+                logger.LogWarning(exception, "Driver Dispatch live movement evidence was unavailable for {PlanningDate}; persisted run status will be used.", planningDate);
+            }
+        }
 
         var historyStart = planningDate.AddDays(-7);
         var recentActivity = await db.Loads.AsNoTracking()
@@ -76,16 +106,20 @@ public sealed class DriverDispatchStatusController(
             IReadOnlyList<DriverStatusLog> loadLogs = load is null
                 ? Array.Empty<DriverStatusLog>()
                 : logs.Where(item => item.LoadId == load.Id).OrderByDescending(item => item.CapturedAtUtc).ToList();
-            var latestOutbound = loadLogs.FirstOrDefault(item => item.Status is "Driver dispatched" or "Driver text update sent");
-            var latestInbound = latestOutbound is null
-                ? null
-                : loadLogs.FirstOrDefault(item => item.Status == "Driver response received" && item.CapturedAtUtc > latestOutbound.CapturedAtUtc);
 
+            // Driver confirmation is messaging evidence, not the run's operational state. Keep it
+            // separate so the future inbound-SMS automation can set confirmation without changing
+            // Dispatched/Working/Completed.
+            var latestDispatch = loadLogs.FirstOrDefault(item => item.Status == "Driver dispatched");
+            var latestInbound = latestDispatch is null
+                ? null
+                : loadLogs.FirstOrDefault(item => item.Status == "Driver response received" && item.CapturedAtUtc > latestDispatch.CapturedAtUtc);
+            var dispatchWasSent = latestDispatch is not null || load?.Status is LoadStatus.Dispatched or LoadStatus.InProgress or LoadStatus.Completed;
             var dispatchStatus = load is null
                 ? "No Run"
                 : latestInbound is not null
                     ? "Confirmed"
-                    : latestOutbound is not null
+                    : dispatchWasSent
                         ? "Sent Awaiting Response"
                         : "Awaiting Dispatch";
 
@@ -128,12 +162,34 @@ public sealed class DriverDispatchStatusController(
             var earliest = EarliestPlanningStart(planningDate, today, latestDuty);
             var availability = Availability(weekly, driveAvailablePlanningDayMinutes, workAvailableWeekMinutes, planningDate, today, tachoMaster.IsConfigured, projectedDayNumber);
 
+            var liveWorking = load is not null && HasLiveWorkingEvidence(
+                load,
+                driver,
+                planningDate,
+                today,
+                vehicleAliases,
+                liveStatuses,
+                matchedDuties,
+                latestDispatch?.CapturedAtUtc);
+            var operationalStatus = load is null
+                ? "No Run"
+                : load.Status == LoadStatus.Completed
+                    ? "Completed"
+                    : load.Status == LoadStatus.InProgress || liveWorking
+                        ? "Working"
+                        : load.Status == LoadStatus.Dispatched || latestDispatch is not null
+                            ? "Dispatched"
+                            : "Awaiting Dispatch";
+
             return new DriverDispatchStatusRow(
                 driver.Id,
                 dispatchStatus,
+                operationalStatus,
+                latestInbound is not null,
+                latestInbound?.CapturedAtUtc,
                 latestInbound?.Notes,
                 latestInbound?.CapturedAtUtc,
-                latestOutbound?.CapturedAtUtc,
+                latestDispatch?.CapturedAtUtc,
                 weekly.Status,
                 weekly.Message,
                 weekly.WeeklyRestDueUtc,
@@ -149,6 +205,46 @@ public sealed class DriverDispatchStatusController(
         }).ToList();
 
         return Ok(new { planningDate, drivers = result });
+    }
+
+    private static bool HasLiveWorkingEvidence(
+        Load load,
+        Driver driver,
+        DateOnly planningDate,
+        DateOnly today,
+        IReadOnlyDictionary<Guid, HashSet<string>> vehicleAliases,
+        IReadOnlyList<VehicleLiveStatus> liveStatuses,
+        IReadOnlyList<TachoDriverDutyStatus> matchedDuties,
+        DateTimeOffset? dispatchSentAtUtc)
+    {
+        if (planningDate != today || load.VehicleId is not Guid vehicleId) return false;
+        if (!vehicleAliases.TryGetValue(vehicleId, out var aliases) || aliases.Count == 0) return false;
+
+        var live = ExecutionIdentityResolver.MatchLive(aliases, liveStatuses);
+        if (live is null) return false;
+        var now = DateTimeOffset.UtcNow;
+        if (live.LastEventTimeUtc > now.AddMinutes(5) || now - live.LastEventTimeUtc > TimeSpan.FromMinutes(30)) return false;
+        if (live.IsMoving != true && live.SpeedKph.GetValueOrDefault() <= 3) return false;
+        if (dispatchSentAtUtc is DateTimeOffset sentAt && live.LastEventTimeUtc < sentAt) return false;
+
+        // "Working" needs both sides of the evidence requested by Operations: movement from DOT
+        // and a live card/duty identity for the allocated driver in the allocated vehicle.
+        if (CardsMatch(driver.TachoCardNumber, live.CurrentDriverCardNumber)) return true;
+        var recentDutyFloor = now.AddHours(-24);
+        return matchedDuties.Any(duty =>
+            duty.DutyEndUtc is null &&
+            duty.DutyStartUtc >= recentDutyFloor &&
+            ExecutionIdentityResolver.MatchesVehicleIdentifier(aliases, duty.VehicleCode));
+    }
+
+    private static bool CardsMatch(string? left, string? right)
+    {
+        var a = ExecutionIdentityResolver.NormaliseVehicle(left);
+        var b = ExecutionIdentityResolver.NormaliseVehicle(right);
+        if (a.Length < 8 || b.Length < 8) return false;
+        return string.Equals(a, b, StringComparison.OrdinalIgnoreCase) ||
+               a.EndsWith(b, StringComparison.OrdinalIgnoreCase) ||
+               b.EndsWith(a, StringComparison.OrdinalIgnoreCase);
     }
 
     private static DriverAvailability Availability(
@@ -260,6 +356,9 @@ public sealed class DriverDispatchStatusController(
 public sealed record DriverDispatchStatusRow(
     Guid DriverId,
     string DispatchStatus,
+    string OperationalStatus,
+    bool DriverConfirmed,
+    DateTimeOffset? DriverConfirmationAtUtc,
     string? LastDriverReply,
     DateTimeOffset? LastDriverReplyAtUtc,
     DateTimeOffset? LastDispatchSentAtUtc,
