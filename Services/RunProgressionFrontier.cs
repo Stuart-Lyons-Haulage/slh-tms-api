@@ -4,8 +4,9 @@ namespace Slh.Tms.Api.Services;
 
 /// <summary>
 /// Separates execution progression from evidence completeness. A missed earlier geofence
-/// remains an evidence gap, but once a later sequenced stop has credible completion evidence
-/// the operational route must never point the vehicle backwards to that earlier stop.
+/// remains an evidence gap, but once a later operational stop has credible completion evidence
+/// the route must never point the vehicle backwards. Operational order is collection-first,
+/// including compatibility for legacy runs that were persisted as Collect/Deliver pairs.
 /// </summary>
 public static class RunProgressionFrontier
 {
@@ -14,11 +15,13 @@ public static class RunProgressionFrontier
         IReadOnlySet<Guid> completedStopIds,
         Guid? activeStopId = null)
     {
+        var operationalStops = OperationalStopOrdering.Order(orderedStops);
         var frontier = 0;
-        foreach (var stop in orderedStops)
+        for (var index = 0; index < operationalStops.Count; index++)
         {
+            var stop = operationalStops[index];
             if (completedStopIds.Contains(stop.Id) || activeStopId == stop.Id)
-                frontier = Math.Max(frontier, stop.Sequence);
+                frontier = Math.Max(frontier, index + 1);
         }
         return frontier;
     }
@@ -28,8 +31,9 @@ public static class RunProgressionFrontier
         IReadOnlySet<Guid> completedStopIds,
         Guid? activeStopId = null)
     {
-        var frontier = Sequence(orderedStops, completedStopIds, activeStopId);
-        return orderedStops.FirstOrDefault(stop => stop.Sequence > frontier && !completedStopIds.Contains(stop.Id));
+        var operationalStops = OperationalStopOrdering.Order(orderedStops);
+        var frontier = Sequence(operationalStops, completedStopIds, activeStopId);
+        return operationalStops.Skip(frontier).FirstOrDefault(stop => !completedStopIds.Contains(stop.Id));
     }
 
     public static IReadOnlyList<LoadStop> RemainingOperationalStops(
@@ -37,9 +41,11 @@ public static class RunProgressionFrontier
         IReadOnlySet<Guid> completedStopIds,
         Guid? activeStopId = null)
     {
-        var frontier = Sequence(orderedStops, completedStopIds, activeStopId);
-        return orderedStops
-            .Where(stop => stop.Sequence > frontier && !completedStopIds.Contains(stop.Id))
+        var operationalStops = OperationalStopOrdering.Order(orderedStops);
+        var frontier = Sequence(operationalStops, completedStopIds, activeStopId);
+        return operationalStops
+            .Skip(frontier)
+            .Where(stop => !completedStopIds.Contains(stop.Id))
             .ToList();
     }
 
@@ -48,15 +54,17 @@ public static class RunProgressionFrontier
         IReadOnlySet<Guid> completedStopIds,
         Guid? activeStopId = null)
     {
-        var frontier = Sequence(orderedStops, completedStopIds, activeStopId);
-        return orderedStops
-            .Where(stop => stop.Sequence < frontier && !completedStopIds.Contains(stop.Id))
+        var operationalStops = OperationalStopOrdering.Order(orderedStops);
+        var frontier = Sequence(operationalStops, completedStopIds, activeStopId);
+        return operationalStops
+            .Take(frontier)
+            .Where(stop => !completedStopIds.Contains(stop.Id) && activeStopId != stop.Id)
             .ToList();
     }
 
     public static bool FinalStopCompleted(IReadOnlyList<LoadStop> orderedStops, IReadOnlySet<Guid> completedStopIds)
     {
-        var final = orderedStops.LastOrDefault();
+        var final = OperationalStopOrdering.Order(orderedStops).LastOrDefault();
         return final is not null && completedStopIds.Contains(final.Id);
     }
 }
