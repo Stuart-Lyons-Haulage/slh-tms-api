@@ -34,6 +34,8 @@ public sealed class OperationsController(
             .OrderBy(load => load.Reference)
             .Take(200)
             .ToList();
+        await RunOperationalStore.EnrichAsync(db, loads, ct);
+        WallboardPhysicalStops.Apply(loads);
         var orderIds = loads.SelectMany(load => load.Stops).Where(stop => stop.OrderId != null).Select(stop => stop.OrderId!.Value).Distinct().ToList();
         var orders = await SafeDictionary(db.TransportOrders.AsNoTracking().Where(order => orderIds.Contains(order.Id)), order => order.Id, ct);
         if (orders.Count == 0 && orderIds.Count > 0) orders = (await PlanningRegisterStore.ReadOrdersAsync(db, null, null, ct)).Where(order => orderIds.Contains(order.Id)).ToDictionary(order => order.Id);
