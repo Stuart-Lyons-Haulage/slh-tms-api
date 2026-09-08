@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
 
 namespace Slh.Tms.Api.Services;
 
@@ -12,6 +13,66 @@ namespace Slh.Tms.Api.Services;
 /// </summary>
 public static class NwfCrateReferenceLinker
 {
+    public static async Task<int> RepairPendingAsync(TmsDbContext db, CancellationToken ct)
+    {
+        var rows = await db.StagedImports
+            .Where(row => row.EntityType == "order" && row.Status == StagingStatus.PendingReview)
+            .OrderByDescending(row => row.ReceivedAtUtc)
+            .Take(5000)
+            .ToListAsync(ct);
+
+        var parsedRows = rows.Select(row =>
+        {
+            try { return (Row: row, Payload: JsonNode.Parse(row.PayloadJson)?.AsObject()); }
+            catch (JsonException) { return (Row: row, Payload: null); }
+        }).Where(item => item.Payload is not null).ToList();
+
+        var candidates = parsedRows
+            .Select(item => TryCandidate(item.Row.Id, item.Row.PayloadJson))
+            .Where(candidate => candidate is not null)
+            .Cast<Candidate>()
+            .ToList();
+        if (candidates.Count == 0) return 0;
+
+        var repaired = 0;
+        foreach (var item in parsedRows)
+        {
+            var payload = item.Payload!;
+            if (!NeedsLink(payload)) continue;
+
+            var original = payload.ToJsonString();
+            var request = new MailboxEmailIntakeRequest(
+                MessageId: Text(payload, "sourceMessageId") ?? item.Row.Id.ToString(),
+                InternetMessageId: null,
+                Mailbox: null,
+                SenderAddress: null,
+                SenderName: null,
+                Subject: Text(payload, "sourceSubject"),
+                ReceivedAtUtc: item.Row.ReceivedAtUtc,
+                BodyText: null,
+                BodyHtml: null,
+                WebLink: null,
+                Attachments: null,
+                ConversationId: Text(payload, "sourceConversationId"));
+            var order = new ParsedEmailOrder(
+                "pending-reference-repair",
+                Text(payload, "intakeNaturalKey") ?? item.Row.Id.ToString(),
+                JsonSerializer.SerializeToElement(payload),
+                ReadWarnings(payload));
+            var enriched = Enrich(order, candidates, request);
+            var updated = JsonNode.Parse(enriched.Payload.GetRawText())?.AsObject();
+            if (updated is null || string.Equals(original, updated.ToJsonString(), StringComparison.Ordinal)) continue;
+
+            item.Row.PayloadJson = updated.ToJsonString(new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            item.Row.ReviewedAtUtc = DateTimeOffset.UtcNow;
+            item.Row.ReviewNote = "Pending NWF crate/tray load linked automatically to its retained dump reference.";
+            repaired++;
+        }
+
+        if (repaired > 0) await db.SaveChangesAsync(ct);
+        return repaired;
+    }
+
     public static async Task<EmailIntakeParseResult> EnrichAsync(
         TmsDbContext db,
         EmailIntakeParseResult parsed,
