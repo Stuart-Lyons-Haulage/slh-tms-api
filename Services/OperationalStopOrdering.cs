@@ -20,6 +20,11 @@ public static class OperationalStopOrdering
         .Select(item => item.Stop)
         .ToList();
 
+    public static bool IsCollection(string? name) =>
+        !string.IsNullOrWhiteSpace(name)
+        && (name.TrimStart().StartsWith("Collect", StringComparison.OrdinalIgnoreCase)
+            || name.TrimStart().StartsWith("Collection", StringComparison.OrdinalIgnoreCase));
+
     public static bool IsDelivery(string? name) =>
         !string.IsNullOrWhiteSpace(name)
         && (name.TrimStart().StartsWith("Deliver", StringComparison.OrdinalIgnoreCase)
