@@ -73,6 +73,7 @@ public sealed class NwfCrateReferenceLinkingEndToEndTests : IClassFixture<Custom
             Assert.Equal(reference, payload.RootElement.GetProperty("collectionReference").GetString());
             Assert.Equal(collection, payload.RootElement.GetProperty("sellerName").GetString());
             Assert.Contains($"Collection ref: {reference}", payload.RootElement.GetProperty("driverInstructions").GetString());
+            Assert.True(payload.RootElement.GetProperty("plannerReady").GetBoolean());
         }
 
         var approve = await PostJson(client, $"/api/v1/staging/{stagedId}/approve", new { note = "Reference linking regression test" });
