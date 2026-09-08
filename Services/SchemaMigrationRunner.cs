@@ -40,10 +40,6 @@ public static class SchemaMigrationRunner
     private const string ResourcePrefix = "Slh.Tms.Api.Database.";
     private const string MigrationLockResource = "SLH.TMS.SchemaMigration";
 
-    // These are the 43 SQL resources that existed when versioned schema history
-    // was introduced. Their legacy filename prefixes are retained as names only;
-    // the authoritative migration version is the 1-based position in this list.
-    // Future migrations must be appended to the end of this catalogue.
     private static readonly string[] OrderedMigrationFiles =
     [
         "000_Critical_Master_Site_Compatibility.sql",
@@ -91,7 +87,8 @@ public static class SchemaMigrationRunner
         "038_Driver_Tacho_Identity_Repair.sql",
         "039_Canonical_Relational_Planning.sql",
         "040_Audit_Outbox.sql",
-        "041_Distributed_Integration_Lease.sql"
+        "041_Distributed_Integration_Lease.sql",
+        "042_Operational_Read_Performance_Indexes.sql"
     ];
 
     internal const string HistoryTableSql = """
