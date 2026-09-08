@@ -13,9 +13,14 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class DriverPlanningController(TmsDbContext db, IConfiguration configuration) : ControllerBase
 {
     [HttpGet("driver-assignments"), AllowAnonymous]
-    public async Task<IActionResult> Assignments([FromQuery] DateOnly? from, [FromQuery] DateOnly? to, CancellationToken ct)
+    public async Task<IActionResult> Assignments(
+        [FromHeader(Name = "X-TV-Display-Key")] string? displayKey,
+        [FromQuery] DateOnly? from,
+        [FromQuery] DateOnly? to,
+        CancellationToken ct)
     {
-        if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
+        var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct);
+        if (!pairedKeyAllowed && !TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
 
         var firstDate = from ?? DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-7);
         var lastDate = to ?? firstDate;
