@@ -10,6 +10,32 @@ namespace Slh.Tms.Api.Tests;
 public sealed class WarehouseMovementTests
 {
     [Fact]
+    public async Task Depot_aliases_include_driver_and_planned_warehouse_arrival()
+    {
+        await using var db = CreateDb();
+        var driver = new Driver { EmployeeNumber = "D1", DisplayName = "Adam Smith" };
+        var site = new Site { ExternalCode = "SLH-FRV", Name = "SLH-Lyons Consolidation Centre FRV", Aliases = "Barnham Coldstore, Stuart Lyons Distribution" };
+        var expected = new DateTimeOffset(2026, 8, 24, 18, 30, 0, TimeSpan.Zero);
+        var load = new Load { Reference = "RUN 4 PM", PlanningDate = new DateOnly(2026, 8, 24), DriverId = driver.Id, Stops =
+        [
+            new() { LoadId = Guid.Empty, Sequence = 1, Name = "Deliver · Barnham Coldstore", PlannedArrivalUtc = expected }
+        ] };
+        foreach (var stop in load.Stops) stop.LoadId = load.Id;
+        db.AddRange(driver, site, load);
+        var inbound = AddLine(db, "Vitacress Runcton", "Barnham Coldstore", 17, "Standard", "WAITROSE-17");
+        AddAllocation(db, load.Id, inbound.OrderId, inbound.LineId, 17);
+        await db.SaveChangesAsync();
+
+        var result = await new WarehouseMovementService(db).BuildDailyAsync(new DateOnly(2026, 8, 24), CancellationToken.None);
+
+        var row = Assert.Single(result.Inbound);
+        Assert.Equal("Adam Smith", row.Driver);
+        Assert.Equal(expected, row.ExpectedAtUtc);
+        Assert.Equal("RUN 4 PM", row.RunReference);
+        Assert.Equal(17, row.PlannedPallets);
+    }
+
+    [Fact]
     public async Task Genuine_slh_stops_create_separate_inbound_and_outbound_rows_but_vehicle_bulking_does_not()
     {
         await using var db = CreateDb();
