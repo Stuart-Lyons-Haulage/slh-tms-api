@@ -1,0 +1,92 @@
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
+using Xunit;
+
+namespace Slh.Tms.Api.Tests;
+
+public sealed class NwfCrateReferenceLinkingEndToEndTests : IClassFixture<CustomWebFactory>
+{
+    private readonly CustomWebFactory factory;
+
+    public NwfCrateReferenceLinkingEndToEndTests(CustomWebFactory factory) => this.factory = factory;
+
+    [Fact]
+    public async Task Later_crate_load_is_enriched_from_unique_dump_row_and_notes_survive_approval()
+    {
+        var suffix = Guid.NewGuid().ToString("N")[..8].ToUpperInvariant();
+        var destination = $"Vitacress Herbs {suffix}";
+        var collection = $"Ocado {suffix}";
+        var reference = $"228{suffix}";
+        var messageId = $"crate-load-{suffix}";
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.StagedImports.Add(new StagedImport
+            {
+                EntityType = "order",
+                IdempotencyKey = $"nwf-dump-{suffix}",
+                Status = StagingStatus.PendingReview,
+                Source = "NWF crate/tray dump",
+                PayloadJson = JsonSerializer.Serialize(new
+                {
+                    poNumber = $"NWF-EQUIP-{reference}",
+                    customerCode = "NWF",
+                    collectionDate = "2026-09-10",
+                    deliveryDate = "2026-09-10",
+                    pallets = 18,
+                    sellerName = collection,
+                    stallNumber = destination,
+                    jobType = "NWF crate return",
+                    collectionReference = reference,
+                    driverInstructions = $"NWF crate return · Collection ref: {reference}"
+                })
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write,Tms.Approve");
+        var response = await PostJson(client, "/api/v1/order-intake/email", new
+        {
+            messageId,
+            mailbox = "info@lyonshaulage.com",
+            senderAddress = "orders@ocado.com",
+            subject = $"Ocado tray return {destination} 10/09/2026",
+            receivedAtUtc = "2026-09-08T09:30:00Z",
+            bodyText = $"IFCO | TBC | | 10/09/2026 | 10/09/2026 | | TBC | TBC | TBC | {destination} | 18 | trays"
+        });
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+
+        Guid stagedId;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            var staged = Assert.Single(await db.StagedImports.Where(row => row.PayloadJson.Contains(messageId)).ToListAsync());
+            stagedId = staged.Id;
+            using var payload = JsonDocument.Parse(staged.PayloadJson);
+            Assert.Equal(reference, payload.RootElement.GetProperty("collectionReference").GetString());
+            Assert.Equal(collection, payload.RootElement.GetProperty("sellerName").GetString());
+            Assert.Contains($"Collection ref: {reference}", payload.RootElement.GetProperty("driverInstructions").GetString());
+        }
+
+        var approve = await PostJson(client, $"/api/v1/staging/{stagedId}/approve", new { note = "Reference linking regression test" });
+        Assert.Equal(HttpStatusCode.OK, approve.StatusCode);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            var order = Assert.Single(await db.TransportOrders.Where(row => row.SourceStagedImportId == stagedId).ToListAsync());
+            Assert.Equal(collection, order.SellerName);
+            Assert.Contains($"Collection ref: {reference}", order.DriverInstructions);
+        }
+    }
+
+    private static Task<HttpResponseMessage> PostJson(HttpClient client, string url, object payload) =>
+        client.PostAsync(url, new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json"));
+}
