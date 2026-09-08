@@ -85,13 +85,46 @@ public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<Opera
                 items.Add(Item(load, "High", "UnallocatedVehicle", "Run has no vehicle", "Allocate a vehicle before dispatch."));
             if (load.Stops.Count == 0)
                 items.Add(Item(load, "High", "NoStops", "Run has no operational stops", "Add the collection and delivery stops before dispatch."));
-            else if (load.Stops.Any(x => x.Latitude is null || x.Longitude is null))
-                items.Add(Item(load, "Medium", "MissingGeocode", "Run contains an unmapped stop", "Map the operational stop so routing and geofence matching can work."));
 
             if (load.VehicleId is Guid vehicleId && vehicles.TryGetValue(vehicleId, out var vehicle) && IsVor(vehicle))
                 items.Add(Item(load, "High", "VorVehicle", $"VOR vehicle allocated: {vehicle.Registration}", vehicle.FleetioStatus ?? "Vehicle is marked out of service."));
             if (load.DriverId is Guid driverId && drivers.TryGetValue(driverId, out var driver) && string.IsNullOrWhiteSpace(driver.TachoName))
                 items.Add(Item(load, "Medium", "TachoMapping", $"Driver missing Tacho mapping: {driver.DisplayName}", "Tacho-aware planning cannot be fully validated."));
+        }
+
+        // Needs Attention is an operational queue. A missing latitude/longitude is a mapping
+        // diagnostic, not proof that the route cannot be geofenced. Use the same Site Master
+        // and geofence resolver as the wallboards so this queue reflects actual geofence gaps.
+        try
+        {
+            var resolver = await PlannerSourceMasterDataResolver.CreateAsync(db, ct);
+            foreach (var load in loads.Where(load => load.Stops.Count > 0))
+            {
+                var gaps = OperationalStopOrdering.Order(load.Stops)
+                    .Select((stop, index) => new { Stop = stop, Sequence = index + 1, Resolution = resolver.Resolve(stop.Name) })
+                    .Where(item => !item.Resolution.SiteMatched || !item.Resolution.GeofenceLinked)
+                    .ToList();
+                if (gaps.Count == 0) continue;
+
+                var unresolved = gaps.Count(item => !item.Resolution.SiteMatched);
+                var unlinked = gaps.Count(item => item.Resolution.SiteMatched && !item.Resolution.GeofenceLinked);
+                var examples = string.Join(", ", gaps.Take(3).Select(item => $"{item.Sequence}. {item.Stop.Name}"));
+                if (gaps.Count > 3) examples += $" + {gaps.Count - 3} more";
+                var breakdown = string.Join(" · ", new[]
+                {
+                    unresolved > 0 ? $"{unresolved} site name unresolved" : null,
+                    unlinked > 0 ? $"{unlinked} site recognised but geofence unlinked" : null
+                }.Where(value => value is not null));
+
+                items.Add(Item(load, "Medium", "GeofenceCoverage",
+                    $"Run has {gaps.Count} geofence gap{(gaps.Count == 1 ? "" : "s")}",
+                    $"{breakdown}. {examples}. Resolve in Site Master / Geofence Integrity."));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogDebug(ex, "Geofence linkage attention enrichment unavailable for {PlanningDate}.", day);
+            db.ChangeTracker.Clear();
         }
 
         try
