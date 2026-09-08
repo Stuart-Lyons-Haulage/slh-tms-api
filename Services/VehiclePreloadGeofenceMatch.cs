@@ -48,13 +48,19 @@ public static class VehiclePreloadGeofenceMatch
         if (timed.Count > 0)
         {
             var best = timed[0];
-            if (timed.Count > 1 && timed[1].DistanceMinutes - best.DistanceMinutes < AmbiguityToleranceMinutes) return null;
+            // Several order lines can legitimately share one collection visit on the
+            // same run. That is not ambiguous: choose the first operational line and
+            // the normal same-site completion projection will carry the evidence.
+            var competingRun = timed.Skip(1).FirstOrDefault(candidate => candidate.Load.Id != best.Load.Id);
+            if (competingRun is not null && competingRun.DistanceMinutes - best.DistanceMinutes < AmbiguityToleranceMinutes) return null;
             return new VehiclePreloadMatch(best.Load, best.Stop, best.Sequence);
         }
 
-        // Untimed evidence is only safe if the vehicle has one matching collection.
-        if (candidates.Count != 1) return null;
-        var only = candidates[0];
+        // Untimed duplicates on the same run are also one physical collection. More
+        // than one run for the vehicle remains ambiguous and is deliberately not guessed.
+        var runIds = candidates.Select(candidate => candidate.Load.Id).Distinct().ToList();
+        if (runIds.Count != 1) return null;
+        var only = candidates.OrderBy(candidate => candidate.Sequence).First();
         return new VehiclePreloadMatch(only.Load, only.Stop, only.Sequence);
     }
 
