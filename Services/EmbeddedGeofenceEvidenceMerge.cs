@@ -45,11 +45,9 @@ public static class EmbeddedGeofenceEvidenceMerge
                 .GroupBy(fence => Normalise(fence.Name), StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
 
-            // BuildAsync already reconstructed today's RoadTech evidence using the active
-            // SQL geofence catalogue. Keep those linked visits visible while the durable
-            // GeofenceVisits projection catches up. The previous implementation discarded
-            // every reconstructed visit whenever any SQL geofence existed, which could turn
-            // real completed stops back into zero progress if durable LoadId linkage lagged.
+            // BuildAsync already reconstructed RoadTech evidence using the active SQL
+            // geofence catalogue. Keep those linked visits visible while the durable
+            // GeofenceVisits projection catches up.
             var combined = new Dictionary<Guid, DerivedVisit>();
             foreach (var visit in snapshot.Visits)
             {
@@ -58,43 +56,23 @@ public static class EmbeddedGeofenceEvidenceMerge
                     ?? fenceByName.GetValueOrDefault(Normalise(visit.Fence.Name));
                 if (activeFence is null) continue;
 
-                combined[visit.Id] = new DerivedVisit
-                {
-                    Id = visit.Id,
-                    VehicleId = visit.VehicleId,
-                    VehicleIdentifier = visit.VehicleIdentifier,
-                    Fence = activeFence,
-                    LoadId = visit.LoadId,
-                    LoadStopId = visit.LoadStopId,
-                    EnteredAtUtc = visit.EnteredAtUtc,
-                    ConfirmedAtUtc = visit.ConfirmedAtUtc,
-                    ExitedAtUtc = visit.ExitedAtUtc,
-                    LastInsideAtUtc = visit.LastInsideAtUtc,
-                    DwellMinutes = visit.DwellMinutes
-                };
+                combined[visit.Id] = Copy(visit, activeFence);
             }
 
-            var loadIds = loadById.Keys.ToList();
-            var durableRows = await db.GeofenceVisits.AsNoTracking()
-                .Where(visit => visit.LoadId != null && loadIds.Contains(visit.LoadId.Value))
-                .OrderBy(visit => visit.EnteredAtUtc)
-                .ToListAsync(ct);
-
+            var durableRows = await ReadDurableRowsAsync(db, loadById, ct);
             foreach (var row in durableRows)
             {
                 if (!fenceById.TryGetValue(row.GeofenceId, out var fence)) continue;
-                if (row.LoadId is not Guid loadId || !loadById.TryGetValue(loadId, out var load)) continue;
-                var vehicleId = row.VehicleId ?? load.VehicleId;
-                if (vehicleId is null) continue;
+
+                var identity = ResolveDurableIdentity(row, fence, loadById);
+                if (identity is null) continue;
+                var (load, loadStopId, vehicleId) = identity.Value;
 
                 if (combined.TryGetValue(row.Id, out var current))
                 {
-                    // Current reconstruction may have repaired run/stop linkage that an
-                    // older durable row does not yet contain, so only fill missing identity
-                    // from durable storage while retaining the strongest timing evidence.
-                    current.LoadId ??= row.LoadId;
-                    current.LoadStopId ??= row.LoadStopId;
-                    if (current.VehicleId == Guid.Empty) current.VehicleId = vehicleId.Value;
+                    current.LoadId ??= load.Id;
+                    current.LoadStopId ??= loadStopId;
+                    if (current.VehicleId == Guid.Empty) current.VehicleId = vehicleId;
                     if (string.IsNullOrWhiteSpace(current.VehicleIdentifier)) current.VehicleIdentifier = row.VehicleIdentifier;
                     current.Fence = fence;
                     if (row.EnteredAtUtc < current.EnteredAtUtc) current.EnteredAtUtc = row.EnteredAtUtc;
@@ -105,20 +83,7 @@ public static class EmbeddedGeofenceEvidenceMerge
                     continue;
                 }
 
-                combined[row.Id] = new DerivedVisit
-                {
-                    Id = row.Id,
-                    VehicleId = vehicleId.Value,
-                    VehicleIdentifier = row.VehicleIdentifier,
-                    Fence = fence,
-                    LoadId = row.LoadId,
-                    LoadStopId = row.LoadStopId,
-                    EnteredAtUtc = row.EnteredAtUtc,
-                    ConfirmedAtUtc = row.ConfirmedAtUtc,
-                    ExitedAtUtc = row.ExitedAtUtc,
-                    LastInsideAtUtc = row.LastInsideAtUtc,
-                    DwellMinutes = row.DwellMinutes
-                };
+                combined[row.Id] = FromDurable(row, fence, load.Id, loadStopId, vehicleId);
             }
 
             return Snapshot(snapshot, sqlFences, combined.Values.OrderBy(visit => visit.EnteredAtUtc).ToList());
@@ -143,11 +108,7 @@ public static class EmbeddedGeofenceEvidenceMerge
         IReadOnlyDictionary<Guid, Load> loadById,
         CancellationToken ct)
     {
-        var loadIds = loadById.Keys.ToList();
-        var durableRows = await db.GeofenceVisits.AsNoTracking()
-            .Where(visit => visit.LoadId != null && loadIds.Contains(visit.LoadId.Value))
-            .OrderBy(visit => visit.EnteredAtUtc)
-            .ToListAsync(ct);
+        var durableRows = await ReadDurableRowsAsync(db, loadById, ct);
         if (durableRows.Count == 0) return snapshot;
 
         var geofenceIds = durableRows.Select(row => row.GeofenceId).Distinct().ToList();
@@ -161,6 +122,7 @@ public static class EmbeddedGeofenceEvidenceMerge
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
 
         var combined = snapshot.Visits
+            .Where(visit => visit.LoadId is Guid loadId && loadById.ContainsKey(loadId))
             .GroupBy(visit => visit.Id)
             .ToDictionary(group => group.Key, group => group.OrderByDescending(visit => visit.LastInsideAtUtc).First());
 
@@ -170,10 +132,14 @@ public static class EmbeddedGeofenceEvidenceMerge
                 !embeddedByName.TryGetValue(Normalise(geofenceName), out var embeddedFence))
                 continue;
 
+            var identity = ResolveDurableIdentity(row, embeddedFence, loadById);
+            if (identity is null) continue;
+            var (load, loadStopId, vehicleId) = identity.Value;
+
             if (combined.TryGetValue(row.Id, out var current))
             {
-                current.LoadId ??= row.LoadId;
-                current.LoadStopId ??= row.LoadStopId;
+                current.LoadId ??= load.Id;
+                current.LoadStopId ??= loadStopId;
                 if (current.ConfirmedAtUtc is null && row.ConfirmedAtUtc is not null)
                     current.ConfirmedAtUtc = row.ConfirmedAtUtc;
                 if (current.ExitedAtUtc is null && row.ExitedAtUtc is not null)
@@ -184,28 +150,88 @@ public static class EmbeddedGeofenceEvidenceMerge
                 continue;
             }
 
-            if (row.LoadId is not Guid loadId || !loadById.TryGetValue(loadId, out var load)) continue;
-            var vehicleId = row.VehicleId ?? load.VehicleId;
-            if (vehicleId is null) continue;
-
-            combined[row.Id] = new DerivedVisit
-            {
-                Id = row.Id,
-                VehicleId = vehicleId.Value,
-                VehicleIdentifier = row.VehicleIdentifier,
-                Fence = embeddedFence,
-                LoadId = row.LoadId,
-                LoadStopId = row.LoadStopId,
-                EnteredAtUtc = row.EnteredAtUtc,
-                ConfirmedAtUtc = row.ConfirmedAtUtc,
-                ExitedAtUtc = row.ExitedAtUtc,
-                LastInsideAtUtc = row.LastInsideAtUtc,
-                DwellMinutes = row.DwellMinutes
-            };
+            combined[row.Id] = FromDurable(row, embeddedFence, load.Id, loadStopId, vehicleId);
         }
 
         return Snapshot(snapshot, snapshot.Fences, combined.Values.OrderBy(visit => visit.EnteredAtUtc).ToList());
     }
+
+    private static async Task<List<GeofenceVisit>> ReadDurableRowsAsync(
+        TmsDbContext db,
+        IReadOnlyDictionary<Guid, Load> loadById,
+        CancellationToken ct)
+    {
+        var loadIds = loadById.Keys.ToList();
+        var vehicleIds = loadById.Values
+            .Where(load => load.VehicleId is not null)
+            .Select(load => load.VehicleId!.Value)
+            .Distinct()
+            .ToList();
+        var planningDate = loadById.Values.Min(load => load.PlanningDate);
+        var (historyStart, historyEnd) = VehiclePreloadGeofenceMatch.HistoryWindow(planningDate);
+
+        return await db.GeofenceVisits.AsNoTracking()
+            .Where(visit =>
+                (visit.LoadId != null && loadIds.Contains(visit.LoadId.Value)) ||
+                (visit.LoadId == null && visit.VehicleId != null && vehicleIds.Contains(visit.VehicleId.Value) &&
+                 visit.EnteredAtUtc >= historyStart && visit.EnteredAtUtc < historyEnd))
+            .OrderBy(visit => visit.EnteredAtUtc)
+            .ToListAsync(ct);
+    }
+
+    private static (Load Load, Guid? LoadStopId, Guid VehicleId)? ResolveDurableIdentity(
+        GeofenceVisit row,
+        EmbeddedFence fence,
+        IReadOnlyDictionary<Guid, Load> loadById)
+    {
+        if (row.LoadId is Guid loadId && loadById.TryGetValue(loadId, out var linkedLoad))
+        {
+            var vehicleId = row.VehicleId ?? linkedLoad.VehicleId;
+            return vehicleId is null ? null : (linkedLoad, row.LoadStopId, vehicleId.Value);
+        }
+
+        // A preload is physical evidence about the vehicle, not about who happened to
+        // be driving it at the time. Match only unallocated visits and only to a unique
+        // collection candidate; ambiguous history remains unlinked.
+        var preload = VehiclePreloadGeofenceMatch.Match(row, fence, loadById.Values.ToList());
+        if (preload is null || row.VehicleId is not Guid preloadVehicleId) return null;
+        return (preload.Load, preload.Stop.Id, preloadVehicleId);
+    }
+
+    private static DerivedVisit Copy(DerivedVisit visit, EmbeddedFence fence) => new()
+    {
+        Id = visit.Id,
+        VehicleId = visit.VehicleId,
+        VehicleIdentifier = visit.VehicleIdentifier,
+        Fence = fence,
+        LoadId = visit.LoadId,
+        LoadStopId = visit.LoadStopId,
+        EnteredAtUtc = visit.EnteredAtUtc,
+        ConfirmedAtUtc = visit.ConfirmedAtUtc,
+        ExitedAtUtc = visit.ExitedAtUtc,
+        LastInsideAtUtc = visit.LastInsideAtUtc,
+        DwellMinutes = visit.DwellMinutes
+    };
+
+    private static DerivedVisit FromDurable(
+        GeofenceVisit row,
+        EmbeddedFence fence,
+        Guid loadId,
+        Guid? loadStopId,
+        Guid vehicleId) => new()
+    {
+        Id = row.Id,
+        VehicleId = vehicleId,
+        VehicleIdentifier = row.VehicleIdentifier,
+        Fence = fence,
+        LoadId = loadId,
+        LoadStopId = loadStopId,
+        EnteredAtUtc = row.EnteredAtUtc,
+        ConfirmedAtUtc = row.ConfirmedAtUtc,
+        ExitedAtUtc = row.ExitedAtUtc,
+        LastInsideAtUtc = row.LastInsideAtUtc,
+        DwellMinutes = row.DwellMinutes
+    };
 
     private static EmbeddedGeofenceSnapshot Snapshot(
         EmbeddedGeofenceSnapshot source,
