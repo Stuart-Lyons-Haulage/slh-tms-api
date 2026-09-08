@@ -51,8 +51,17 @@ public static class DriverDispatchAssistantService
                 ? foundPreviousVehicle
                 : null;
             var preferred = preferredVehicles.GetValueOrDefault(driver.Id);
-            var suggestedVehicle = preferred?.Vehicle ?? previousVehicle;
-            var liveVehicle = previousVehicle ?? suggestedVehicle;
+
+            // Live driver/card identity is stronger evidence than a learned or historical pairing.
+            // If Falcon/DOT says the driver is currently in a vehicle, keep that vehicle with them.
+            var livePair = vehicles
+                .Select(vehicle => new { Vehicle = vehicle, Live = liveByVehicleId.GetValueOrDefault(vehicle.Id) })
+                .Where(pair => pair.Live is not null && LiveMatchesDriver(driver, pair.Live))
+                .OrderByDescending(pair => pair.Live!.LastEventTimeUtc)
+                .FirstOrDefault();
+            var liveLinkedVehicle = livePair?.Vehicle;
+            var suggestedVehicle = liveLinkedVehicle ?? preferred?.Vehicle ?? previousVehicle;
+            var liveVehicle = liveLinkedVehicle ?? suggestedVehicle ?? previousVehicle;
             VehicleLiveStatus? live = null;
             if (liveVehicle is not null) liveByVehicleId.TryGetValue(liveVehicle.Id, out live);
             var finalStop = previous?.Stops.OrderBy(stop => stop.Sequence).LastOrDefault();
@@ -65,10 +74,11 @@ public static class DriverDispatchAssistantService
                 dayNumber,
                 latitude,
                 longitude,
-                live is not null ? "live Falcon position" : finalStop?.Name,
+                live is not null ? $"live Falcon position · {liveVehicle?.Registration}" : finalStop?.Name,
                 suggestedVehicle,
                 preferred?.ConfidencePercent,
-                previousVehicle);
+                previousVehicle,
+                liveLinkedVehicle is not null);
         }
 
         var availableLoads = targetLoads.Where(load => load.DriverId is null && load.Status != LoadStatus.Cancelled).ToList();
@@ -204,11 +214,29 @@ public static class DriverDispatchAssistantService
     private static string VehicleReason(DriverContext context)
     {
         if (context.SuggestedVehicle is null) return string.Empty;
+        if (context.LiveLinkedVehicle)
+            return $"currently linked to {context.SuggestedVehicle.Registration} · keep vehicle";
         if (context.PreferredVehicleConfidence is decimal confidence)
             return $"regular vehicle {context.SuggestedVehicle.Registration} ({confidence:0}% learned pairing)";
         if (context.PreviousVehicle?.Id == context.SuggestedVehicle.Id)
-            return $"keep yesterday's vehicle {context.SuggestedVehicle.Registration}";
+            return $"in yesterday · keep {context.SuggestedVehicle.Registration}";
         return $"suggest {context.SuggestedVehicle.Registration}";
+    }
+
+    private static bool LiveMatchesDriver(Driver driver, VehicleLiveStatus live)
+    {
+        var liveCard = Normalise(live.CurrentDriverCardNumber);
+        var driverCard = Normalise(driver.TachoCardNumber);
+        if (liveCard.Length >= 8 && driverCard.Length >= 8 &&
+            (liveCard == driverCard || liveCard.EndsWith(driverCard, StringComparison.OrdinalIgnoreCase) || driverCard.EndsWith(liveCard, StringComparison.OrdinalIgnoreCase)))
+            return true;
+
+        var liveName = ExecutionIdentityResolver.NormalisePerson(live.CurrentDriverName);
+        if (liveName.Length == 0) return false;
+        return new[] { driver.TachoName, driver.DisplayName }
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(ExecutionIdentityResolver.NormalisePerson)
+            .Any(name => name.Length > 0 && string.Equals(name, liveName, StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool IsMarket(Load load)
@@ -311,6 +339,6 @@ public static class DriverDispatchAssistantService
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     private sealed record PreferredVehicle(Vehicle Vehicle, decimal ConfidencePercent);
-    private sealed record DriverContext(Driver Driver, int DayNumber, decimal? Latitude, decimal? Longitude, string? LocationLabel, Vehicle? SuggestedVehicle, decimal? PreferredVehicleConfidence, Vehicle? PreviousVehicle);
+    private sealed record DriverContext(Driver Driver, int DayNumber, decimal? Latitude, decimal? Longitude, string? LocationLabel, Vehicle? SuggestedVehicle, decimal? PreferredVehicleConfidence, Vehicle? PreviousVehicle, bool LiveLinkedVehicle);
     private sealed record Candidate(Driver Driver, Load Load, int Score, string Reason);
 }
