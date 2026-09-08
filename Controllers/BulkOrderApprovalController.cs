@@ -93,7 +93,7 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
             if (collectionDate != requestedDate) return $"Order belongs to {collectionDate:yyyy-MM-dd}, not the selected date.";
 
             var pallets = Int(payload, "pallets", "palletQty", "palletQuantity", "quantity");
-            if (pallets is null or <= 0) return "Zero or missing pallet quantity.";
+            if (!IsBackhaul(payload) && (pallets is null or <= 0)) return "Zero or missing pallet quantity.";
 
             if (Bool(payload, "plannerReady") == false) return "Order is not planner-ready.";
             if (string.Equals(Text(payload, "intakeStatus"), "PreOrder", StringComparison.OrdinalIgnoreCase))
@@ -113,6 +113,14 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
         {
             return "Staged payload is not valid JSON.";
         }
+    }
+
+    private static bool IsBackhaul(JsonElement payload)
+    {
+        var jobType = Text(payload, "jobType");
+        if (string.IsNullOrWhiteSpace(jobType)) return false;
+        var normal = new string(jobType.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+        return normal is "backhaul" or "backload";
     }
 
     private static bool HasWarnings(JsonElement payload)
