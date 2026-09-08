@@ -97,7 +97,9 @@ public sealed class DriverWeeklyRestComplianceServiceTests
         Assert.Equal(DateTimeOffset.Parse("2026-08-28T23:00:00Z"), result.WeeklyRestDueUtc);
         Assert.Equal("Reduced24", result.LastWeeklyRestType);
         Assert.Equal(24, result.LastWeeklyRestHours);
-        Assert.Equal(21, result.ReducedRestCompensationHours);
+        // The sample contains two separate 24-hour reduced weekly rests. The evidence total
+        // therefore contains 21 hours of visible compensation for each observed reduced rest.
+        Assert.Equal(42, result.ReducedRestCompensationHours);
     }
 
     [Fact]
