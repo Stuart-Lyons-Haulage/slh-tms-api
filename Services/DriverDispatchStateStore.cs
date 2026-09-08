@@ -5,7 +5,12 @@ using Slh.Tms.Api.Models;
 
 namespace Slh.Tms.Api.Services;
 
-public sealed record DriverDispatchState(Guid LoadId, DateTimeOffset? PlannedStartUtc, DateTimeOffset UpdatedAtUtc, string? UpdatedBy);
+public sealed record DriverDispatchState(
+    Guid LoadId,
+    DateTimeOffset? PlannedStartUtc,
+    DateTimeOffset UpdatedAtUtc,
+    string? UpdatedBy,
+    string? Source = null);
 
 /// <summary>
 /// Stores planner-only dispatch state without requiring a live schema migration. The run remains
@@ -40,10 +45,16 @@ public static class DriverDispatchStateStore
         return result;
     }
 
-    public static async Task<DriverDispatchState> SetPlannedStartAsync(TmsDbContext db, Guid loadId, DateTimeOffset? plannedStartUtc, string? actor, CancellationToken ct)
+    public static async Task<DriverDispatchState> SetPlannedStartAsync(
+        TmsDbContext db,
+        Guid loadId,
+        DateTimeOffset? plannedStartUtc,
+        string? actor,
+        CancellationToken ct,
+        string source = "Manual override")
     {
         var now = DateTimeOffset.UtcNow;
-        var state = new DriverDispatchState(loadId, plannedStartUtc, now, actor);
+        var state = new DriverDispatchState(loadId, plannedStartUtc, now, actor, source);
         var key = Key(loadId);
         var row = await db.StagedImports.SingleOrDefaultAsync(item => item.EntityType == EntityType && item.IdempotencyKey == key, ct);
         if (row is null)
@@ -63,7 +74,9 @@ public static class DriverDispatchStateStore
         row.Status = StagingStatus.Promoted;
         row.ReviewedAtUtc = now;
         row.ReviewedBy = actor;
-        row.ReviewNote = plannedStartUtc is null ? "Planned dispatch start cleared." : $"Planned dispatch start set to {plannedStartUtc:O}.";
+        row.ReviewNote = plannedStartUtc is null
+            ? "Planned dispatch start cleared."
+            : $"Planned dispatch start set to {plannedStartUtc:O} ({source}).";
         await db.SaveChangesAsync(ct);
         return state;
     }
