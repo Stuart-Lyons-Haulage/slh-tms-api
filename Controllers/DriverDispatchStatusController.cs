@@ -219,11 +219,13 @@ public sealed class DriverDispatchStatusController(
         var planningFloor = ToUtc(planningDate.ToDateTime(TimeOnly.MinValue));
         if (latestDuty.DutyEndUtc is DateTimeOffset dutyEnd)
         {
-            var shortRestsUsed = Math.Max(0, latestDuty.ShortDailyRestTakenThisWeek ?? 0);
-            var restHours = shortRestsUsed < 3 ? 9 : 11;
-            var start = dutyEnd.AddHours(restHours);
+            // SLH planning policy is deliberately more conservative than the legal reduced-rest
+            // allowance: Calculate Starts must always give the driver a full 11-hour regular daily
+            // rest before the next planned duty. A 9-hour reduced rest may remain valid compliance
+            // evidence, but it must never be used to bring a planned start forward.
+            var start = dutyEnd.AddHours(11);
             if (start < planningFloor) start = planningFloor;
-            return new(start, $"Tacho duty ended {LocalTime(dutyEnd):dd/MM HH:mm}; earliest after {(restHours == 9 ? "9h reduced" : "11h regular")} daily rest.", false);
+            return new(start, $"Tacho duty ended {LocalTime(dutyEnd):dd/MM HH:mm}; planning start uses 11h regular daily rest. Reduced daily rest is not used for planning.", false);
         }
 
         // Today's duty is still open while tomorrow is being planned. Do not pretend this is an
