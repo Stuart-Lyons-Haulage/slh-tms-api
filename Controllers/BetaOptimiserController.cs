@@ -5,6 +5,7 @@ using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
 
+/// <summary>Read-only Beta Optimiser endpoints. These routes analyse planning evidence only and never mutate live runs.</summary>
 [ApiController]
 [Route("api/v1/beta-optimiser")]
 [Authorize]
