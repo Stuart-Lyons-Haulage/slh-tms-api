@@ -15,6 +15,30 @@ public static class RunOperationalStore
     {
         var list = loads.ToList();
         if (list.Count == 0) return;
+
+        // Operational enrichment must never move a terminal run backwards. Resilient planning
+        // reads can temporarily surface an older Planning Register/audit copy of the same run;
+        // the live/core Loads row is authoritative once it has reached Completed. Reconcile that
+        // terminal state before applying capacity/notes so TV, Operations and other enrichment
+        // consumers cannot keep rendering a finished run as InProgress.
+        try
+        {
+            var loadIds = list.Select(load => load.Id).Distinct().ToList();
+            var completedIds = (await db.Loads.AsNoTracking()
+                    .Where(load => loadIds.Contains(load.Id) && load.Status == LoadStatus.Completed)
+                    .Select(load => load.Id)
+                    .ToListAsync(ct))
+                .ToHashSet();
+            foreach (var load in list)
+                if (completedIds.Contains(load.Id)) load.Status = LoadStatus.Completed;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // The active operational schema can be unavailable on resilience paths. Keep the
+            // supplied status in that case; callers still have their Planning Register evidence.
+            db.ChangeTracker.Clear();
+        }
+
         var operationalKeys = list.Select(x => Key(x.Id)).ToList();
         var legacyKeys = list.Select(x => LegacyKey(x.Id)).ToList();
         var rows = await db.StagedImports.AsNoTracking()
