@@ -80,6 +80,7 @@ var allowedOrigins = configuredOrigins is { Length: > 0 } ? configuredOrigins : 
 builder.Services.AddCors(options => options.AddPolicy("Portal", policy => policy.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod()));
 builder.Services.AddSingleton(TmsMetrics.Shared);
 builder.Services.AddSingleton<SqlLatencyInterceptor>();
+builder.Services.AddSingleton<PlanningChangeNotifier>();
 builder.Services.AddScoped<DependencyHealthService>();
 builder.Services.AddHostedService<DependencyTelemetrySampler>();
 builder.Services.AddDbContext<TmsDbContext>((services, options) =>
@@ -263,6 +264,7 @@ app.UseCors("Portal");
 app.UseMiddleware<Slh.Tms.Api.Middleware.ApiLatencyMiddleware>();
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseMiddleware<Slh.Tms.Api.Middleware.PlanningChangeNotificationMiddleware>();
 app.UseMiddleware<Slh.Tms.Api.Middleware.PlanningControlResilienceMiddleware>();
 app.UseMiddleware<Slh.Tms.Api.Middleware.SiteLookupResilienceMiddleware>();
 app.UseMiddleware<Slh.Tms.Api.Middleware.PlanLockMiddleware>();
