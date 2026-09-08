@@ -125,7 +125,10 @@ public sealed class OperationsController(
                 var eta = stop.PlannedArrivalUtc;
                 var source = eta is null ? "Unavailable" : "Planned";
  
-                if (geofence is not null && current is not null && stop.Longitude is not null && stop.Latitude is not null && trackingObservedAtUtc is not null && now - trackingObservedAtUtc.Value <= RunExecutionEvidenceRules.MaximumLiveTrackingAge)
+                // A geofence confirms arrival/departure and advances the route, but is not
+                // an ETA prerequisite. Fresh DOT position plus stop coordinates is enough
+                // for Azure Maps to calculate the current leg while a missing link is repaired.
+                if (LiveEtaEligibility.CanRoute(current, stop, trackingObservedAtUtc, now))
                 {
                     try
                     {
