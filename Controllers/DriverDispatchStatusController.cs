@@ -14,6 +14,7 @@ public sealed class DriverDispatchStatusController(
     ILogger<DriverDispatchStatusController> logger) : ControllerBase
 {
     private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+    private static readonly LoadStatus[] ExecutedStatuses = [LoadStatus.Dispatched, LoadStatus.InProgress, LoadStatus.Completed];
 
     [HttpGet]
     public async Task<IActionResult> Get([FromQuery] DateOnly? date, CancellationToken ct)
@@ -37,6 +38,15 @@ public sealed class DriverDispatchStatusController(
                 .Where(item => item.LoadId != Guid.Empty && loadIds.Contains(item.LoadId))
                 .OrderByDescending(item => item.CapturedAtUtc)
                 .ToListAsync(ct);
+
+        // Tacho is the preferred day-cycle source. A short TMS execution history is also retained
+        // as a cross-check for the occasional Tacho history response that contains only the current
+        // duty/profile row. It is not allowed to override a usable multi-duty Tacho cycle.
+        var historyStart = planningDate.AddDays(-7);
+        var recentActivity = await db.Loads.AsNoTracking()
+            .Where(item => item.DriverId != null && item.PlanningDate >= historyStart && item.PlanningDate < planningDate && ExecutedStatuses.Contains(item.Status))
+            .Select(item => new { DriverId = item.DriverId!.Value, item.PlanningDate })
+            .ToListAsync(ct);
 
         IReadOnlyList<TachoDriverDutyStatus> duties = [];
         if (tachoMaster.IsConfigured)
@@ -93,9 +103,26 @@ public sealed class DriverDispatchStatusController(
                 .ThenByDescending(item => item.DutyStartUtc)
                 .ToList();
             var latestDuty = matchedDuties.FirstOrDefault();
-            var projectedDayNumber = matchedDuties.Count == 0
+            var tachoProjectedDay = matchedDuties.Count == 0
                 ? (int?)null
                 : DriverDayCycleCalculator.Calculate(planningDate, matchedDuties);
+
+            var tmsDates = recentActivity
+                .Where(item => item.DriverId == driver.Id)
+                .Select(item => item.PlanningDate)
+                .ToHashSet();
+            var tmsConsecutiveDays = 0;
+            for (var day = planningDate.AddDays(-1); tmsConsecutiveDays < 7 && tmsDates.Contains(day); day = day.AddDays(-1))
+                tmsConsecutiveDays++;
+            var tmsProjectedDay = Math.Clamp(tmsConsecutiveDays + 1, 1, 7);
+
+            // Two or more matched duties are enough for Tacho to prove a rest gap/cycle directly.
+            // With zero/one matched row, use executed TMS continuity as a conservative cross-check;
+            // this prevents a current-profile-only response from incorrectly showing Day 1.
+            var projectedDayNumber = matchedDuties.Count >= 2
+                ? tachoProjectedDay
+                : Math.Max(tachoProjectedDay ?? 1, tmsProjectedDay);
+
             var referenceUtc = planningDate <= today
                 ? DateTimeOffset.UtcNow
                 : ProjectedPlanningReferenceUtc(planningDate, matchedDuties);
