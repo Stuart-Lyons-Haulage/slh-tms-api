@@ -400,8 +400,9 @@ public sealed class StagingService(TmsDbContext db)
             var lineCollectionDate = DateOnlyOrNull(line, "collectionDate") ?? DateOnlyOrNull(payload, "collectionDate");
             var lineDeliveryDate = DateOnlyOrNull(line, "deliveryDate") ?? DateOnlyOrNull(payload, "deliveryDate");
             var pallets = IntOrNull(line, "pallets") ?? IntOrNull(line, "palletQuantity") ?? (sourceLines.Count == 1 ? IntOrNull(payload, "pallets") : null);
+            var backhaul = IsBackhaul(line) || IsBackhaul(payload);
             plannerReady |= !string.IsNullOrWhiteSpace(collectionSite) && !string.IsNullOrWhiteSpace(deliverySite)
-                && lineCollectionDate is not null && lineDeliveryDate is not null && pallets is > 0;
+                && lineCollectionDate is not null && lineDeliveryDate is not null && (backhaul || pallets is > 0);
             db.OrderSourceLines.Add(new OrderSourceLine
             {
                 RevisionId = revision.Id,
@@ -421,8 +422,8 @@ public sealed class StagingService(TmsDbContext db)
         }
 
         var declaredLifecycle = Text(payload, "lifecycleStatus") ?? Text(payload, "reviewStatus");
-        if (!hasExplicitSourceLines && DateOnlyOrNull(payload, "collectionDate") is not null && IntOrNull(payload, "pallets") is > 0)
-            plannerReady = true; // Existing single-row staging payloads remain promotable.
+        if (!hasExplicitSourceLines && DateOnlyOrNull(payload, "collectionDate") is not null && (IsBackhaul(payload) || IntOrNull(payload, "pallets") is > 0))
+            plannerReady = true; // Existing single-row staging payloads and pallet-free backhauls remain promotable.
         if (declaredLifecycle?.Contains("awaiting", StringComparison.OrdinalIgnoreCase) == true)
             plannerReady = false;
         movement.CurrentRevisionId = revision.Id;
@@ -452,6 +453,11 @@ public sealed class StagingService(TmsDbContext db)
         return false;
     }
     private static string NormaliseKey(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+    private static bool IsBackhaul(JsonElement payload)
+    {
+        var normal = NormaliseKey(Text(payload, "jobType") ?? string.Empty);
+        return normal is "backhaul" or "backload";
+    }
     private static int? IntOrNull(JsonElement payload, string name) => int.TryParse(Text(payload, name), out var value) ? value : null;
     private static bool Bool(JsonElement payload, string name, bool fallback) => bool.TryParse(Text(payload, name), out var value) ? value : fallback;
     private static bool? BoolOrNull(JsonElement payload, string name) => bool.TryParse(Text(payload, name), out var value) ? value : null;
