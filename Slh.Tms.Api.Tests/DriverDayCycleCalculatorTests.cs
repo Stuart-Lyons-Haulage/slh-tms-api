@@ -20,6 +20,19 @@ public sealed class DriverDayCycleCalculatorTests
     }
 
     [Fact]
+    public void Weekend_rest_then_monday_and_tuesday_projects_wednesday_as_day_three()
+    {
+        var duties = new[]
+        {
+            Duty("2026-09-04T05:00:00Z", "2026-09-04T15:00:00Z"),
+            Duty("2026-09-07T05:00:00Z", "2026-09-07T15:00:00Z"),
+            Duty("2026-09-08T05:00:00Z", "2026-09-08T15:00:00Z")
+        };
+
+        Assert.Equal(3, DriverDayCycleCalculator.Calculate(new DateOnly(2026, 9, 9), duties));
+    }
+
+    [Fact]
     public void Twenty_four_hour_weekly_rest_gap_resets_cycle_to_day_one()
     {
         var duties = new[]
