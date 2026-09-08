@@ -59,11 +59,6 @@ public static class RunTachoEvidenceResolver
         {
             try
             {
-                // Load the complete UK operating day once. Closed TachoMaster duties are
-                // authoritative historical sign-on/driver evidence for work already performed,
-                // while open duties and Falcon cards form the current-driver evidence subset.
-                // Live ETA legal-hours calculations use TachoMasterClient's separate live-duty
-                // path and therefore never inherit a closed duty from this audit resolver.
                 allStatuses = await tachoMaster.GetAllDriverStatusesByVehicleAsync(planningDate, ct);
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
@@ -96,8 +91,18 @@ public static class RunTachoEvidenceResolver
             var historical = available && current is null && aliases.Count > 0
                 ? ExecutionIdentityResolver.MatchTachoForDriver(aliases, driver, allStatuses)
                 : null;
-            var selected = current ?? historical;
-            var historicalOnly = current is null && historical is not null && historical.DutyEndUtc is not null;
+
+            // TachoMaster can contain the correct driver duty while the provider vehicle key
+            // has not yet been reconciled to the TMS registration/alias. Do not tell operations
+            // that sign-on evidence is unavailable when exact driver card/member/name evidence
+            // exists. This fallback proves driver identity; it does not silently repair the
+            // vehicle mapping and its explanation remains explicit.
+            var driverFallback = available && current is null && historical is null && driver is not null
+                ? MatchDriverAnywhere(driver, allStatuses)
+                : null;
+            var selected = current ?? historical ?? driverFallback;
+            var driverIdentityFallback = driverFallback is not null;
+            var historicalOnly = current is null && selected is not null && selected.DutyEndUtc is not null;
 
             var status = !available
                 ? "Unavailable"
@@ -107,12 +112,12 @@ public static class RunTachoEvidenceResolver
                         ? "NoPlannedVehicle"
                         : EvidenceStatus(driver, selected, historicalOnly);
 
-            // A closed same-day duty can prove identity/sign-on for audit and completed-work
-            // correlation, but it must never masquerade as current legal-hours authority.
             var driveAvailableToday = historicalOnly ? null : selected?.DriveAvailableTodayMinutes;
             var driveAvailableWeek = historicalOnly ? null : selected?.DriveAvailableWeekMinutes;
             var workAvailableWeek = historicalOnly ? null : selected?.WorkAvailableWeekMinutes;
-            var evidenceSource = historicalOnly ? "TachoMasterDayDuty" : selected?.EvidenceSource;
+            var evidenceSource = historicalOnly
+                ? driverIdentityFallback ? "TachoMasterDayDutyDriverIdentity" : "TachoMasterDayDuty"
+                : driverIdentityFallback && selected is not null ? $"{selected.EvidenceSource}DriverIdentity" : selected?.EvidenceSource;
 
             result[load.Id] = new RunTachoEvidence(
                 status,
@@ -126,7 +131,7 @@ public static class RunTachoEvidenceResolver
                 selected is not null,
                 !historicalOnly && driveAvailableToday is not null,
                 evidenceSource,
-                Explanation(available, driver, vehicle, selected, historicalOnly));
+                Explanation(available, driver, vehicle, selected, historicalOnly, driverIdentityFallback));
         }
 
         var statusCounts = result.Values
@@ -152,6 +157,19 @@ public static class RunTachoEvidenceResolver
             tachoDutyRecords,
             falconCardRecords,
             statusCounts);
+    }
+
+    private static TachoVehicleDriverStatus? MatchDriverAnywhere(
+        Driver driver,
+        IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> allStatuses)
+    {
+        return allStatuses.Values
+            .SelectMany(items => items)
+            .Where(status => ExecutionIdentityResolver.DriverMatches(driver, status))
+            .OrderByDescending(status => status.DutyEndUtc is null)
+            .ThenByDescending(status => string.Equals(status.EvidenceSource, "TachoMasterDuty", StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(status => status.DutyStartUtc)
+            .FirstOrDefault();
     }
 
     private static IReadOnlyDictionary<string, IReadOnlyList<TachoVehicleDriverStatus>> CurrentStatuses(
@@ -209,16 +227,21 @@ public static class RunTachoEvidenceResolver
         Driver? driver,
         Vehicle? vehicle,
         TachoVehicleDriverStatus? tacho,
-        bool historicalOnly)
+        bool historicalOnly,
+        bool driverIdentityFallback)
     {
         if (!available) return "TachoMaster could not be reached for this refresh.";
         if (driver is null) return "No planned driver is allocated to this run.";
         if (vehicle is null) return "No planned vehicle is allocated to this run.";
-        if (tacho is null) return "No Falcon current-driver evidence, open TachoMaster duty or same-day TachoMaster duty was matched to the planned driver and vehicle.";
+        if (tacho is null) return "No Falcon current-driver evidence, open TachoMaster duty or same-day TachoMaster duty was matched to the planned driver.";
         if (!ExecutionIdentityResolver.DriverMatches(driver, tacho))
             return $"Driver evidence is present for {tacho.DriverName}, but it does not match the planned driver.";
         if (historicalOnly)
-            return $"{tacho.DriverName} has a same-day TachoMaster duty on the planned vehicle from {tacho.DutyStartUtc:O} to {tacho.DutyEndUtc:O}. This proves historical sign-on identity only; closed-duty legal-hours figures are not used for a live ETA.";
+            return driverIdentityFallback
+                ? $"{tacho.DriverName} has a same-day TachoMaster duty from {tacho.DutyStartUtc:O} to {tacho.DutyEndUtc:O}. Driver identity is confirmed; the provider vehicle alias still needs reconciliation. Closed-duty legal-hours figures are not used for a live ETA."
+                : $"{tacho.DriverName} has a same-day TachoMaster duty on the planned vehicle from {tacho.DutyStartUtc:O} to {tacho.DutyEndUtc:O}. This proves historical sign-on identity only; closed-duty legal-hours figures are not used for a live ETA.";
+        if (driverIdentityFallback)
+            return $"{tacho.DriverName} is confirmed by live/same-day Tacho evidence. The Tacho provider vehicle key did not match the planned TMS vehicle alias, so driver identity is shown while vehicle mapping remains separate.";
         if (tacho.EvidenceSource == "FalconLiveCard")
             return tacho.DriveAvailableTodayMinutes is null
                 ? $"{tacho.DriverName} is confirmed by Falcon live card/driver evidence at {tacho.DutyStartUtc:O}; TachoMaster did not return legal-hours metrics."
