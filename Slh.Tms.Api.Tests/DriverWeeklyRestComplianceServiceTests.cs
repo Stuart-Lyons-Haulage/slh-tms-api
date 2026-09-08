@@ -25,6 +25,9 @@ public sealed class DriverWeeklyRestComplianceServiceTests
 
         Assert.NotEqual("Overdue", result.Status);
         Assert.Equal(DateTimeOffset.Parse("2026-08-28T15:00:00Z"), result.WeeklyRestDueUtc);
+        Assert.Equal("Regular45", result.LastWeeklyRestType);
+        Assert.Equal(48, result.LastWeeklyRestHours);
+        Assert.Equal(0, result.ReducedRestCompensationHours);
     }
 
     [Fact]
@@ -47,6 +50,7 @@ public sealed class DriverWeeklyRestComplianceServiceTests
         var result = DriverWeeklyRestComplianceService.Evaluate(driver, DateTimeOffset.Parse("2026-08-29T16:00:00Z"), duties);
 
         Assert.Equal("Overdue", result.Status);
+        Assert.True(result.IsBlocked);
         Assert.Equal(DateTimeOffset.Parse("2026-08-28T15:00:00Z"), result.WeeklyRestDueUtc);
     }
 
@@ -71,6 +75,9 @@ public sealed class DriverWeeklyRestComplianceServiceTests
         Assert.Equal("Ready", result.Status);
         Assert.Equal(DateTimeOffset.Parse("2026-08-28T16:00:00Z"), result.LastWeeklyRestEndUtc);
         Assert.Equal(DateTimeOffset.Parse("2026-09-03T16:00:00Z"), result.WeeklyRestDueUtc);
+        Assert.Equal("Reduced24", result.LastWeeklyRestType);
+        Assert.Equal(25, result.LastWeeklyRestHours);
+        Assert.Equal(20, result.ReducedRestCompensationHours);
     }
 
     [Fact]
@@ -88,10 +95,13 @@ public sealed class DriverWeeklyRestComplianceServiceTests
 
         Assert.Equal(DateTimeOffset.Parse("2026-08-22T23:00:00Z"), result.LastWeeklyRestEndUtc);
         Assert.Equal(DateTimeOffset.Parse("2026-08-28T23:00:00Z"), result.WeeklyRestDueUtc);
+        Assert.Equal("Reduced24", result.LastWeeklyRestType);
+        Assert.Equal(24, result.LastWeeklyRestHours);
+        Assert.Equal(21, result.ReducedRestCompensationHours);
     }
 
     [Fact]
-    public void Missing_weekly_rest_in_recent_history_becomes_overdue_after_144_hours()
+    public void Missing_anchor_rest_is_unverified_and_does_not_block_driver()
     {
         var driver = TestDriver();
         var duties = new[]
@@ -107,7 +117,17 @@ public sealed class DriverWeeklyRestComplianceServiceTests
 
         var result = DriverWeeklyRestComplianceService.Evaluate(driver, DateTimeOffset.Parse("2026-08-26T05:00:00Z"), duties);
 
-        Assert.Equal("Overdue", result.Status);
+        Assert.Equal("Unverified", result.Status);
+        Assert.False(result.IsBlocked);
+        Assert.Contains("Do not mark this driver unavailable", result.Message);
+    }
+
+    [Fact]
+    public void Unverified_result_is_advisory_not_a_hard_dispatch_block()
+    {
+        var result = WeeklyRestComplianceResult.Unverified("history incomplete");
+
+        Assert.False(result.IsBlocked);
     }
 
     private static Driver TestDriver() => new()
