@@ -119,10 +119,11 @@ public sealed class DriverWeeklyRestComplianceServiceTests
             Duty("2026-08-25T05:00:00Z", "2026-08-25T15:00:00Z"),
             Duty("2026-08-26T05:00:00Z", "2026-08-26T15:00:00Z"),
             Duty("2026-08-27T05:00:00Z", "2026-08-27T15:00:00Z"),
-            Duty("2026-08-28T16:00:00Z", "2026-08-28T18:00:00Z")
+            Duty("2026-08-28T05:00:00Z", "2026-08-28T15:00:00Z"),
+            Duty("2026-08-29T00:00:00Z", "2026-08-29T02:00:00Z")
         };
 
-        var result = DriverWeeklyRestComplianceService.Evaluate(driver, DateTimeOffset.Parse("2026-08-29T16:00:00Z"), duties);
+        var result = DriverWeeklyRestComplianceService.Evaluate(driver, DateTimeOffset.Parse("2026-08-29T20:00:00Z"), duties);
 
         Assert.Equal("Overdue", result.Status);
         Assert.True(result.IsBlocked);
