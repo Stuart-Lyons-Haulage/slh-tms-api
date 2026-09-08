@@ -89,13 +89,19 @@ public sealed class DriverDispatchStatusController(
                         : "Awaiting Dispatch";
 
             var weekly = DriverWeeklyRestComplianceService.Evaluate(driver, referenceUtc, duties);
-            // An unavailable Tacho weekly-rest check must not remove the planner's ability to
-            // allocate a run/vehicle/trailer. Final dispatch still re-runs the authoritative
-            // weekly-rest gate and will stop an unverified or overdue driver before sending.
-            var allocationStatus = weekly.Status == "Unverified" ? "Unknown" : weekly.Status;
-            var allocationMessage = weekly.Status == "Unverified"
-                ? $"{weekly.Message} Allocation is still available; weekly rest will be checked again before dispatch."
-                : weekly.Message;
+            var matchedDuties = duties
+                .Where(item => DriverDayCycleCalculator.MatchesDriver(driver, item))
+                .OrderByDescending(item => item.MetricsValidAtUtc ?? item.DutyStartUtc)
+                .ThenByDescending(item => item.DutyStartUtc)
+                .ToList();
+            var latestDuty = matchedDuties.FirstOrDefault();
+            var driveAvailablePlanningDayMinutes = planningDate == today
+                ? latestDuty?.DriveAvailableTodayMinutes ?? driver.TachoDriveAvailableTodayMinutes
+                : planningDate == today.AddDays(1)
+                    ? latestDuty?.DriveAvailableTomorrowMinutes
+                    : null;
+            var workAvailableWeekMinutes = latestDuty?.WorkAvailableWeekMinutes ?? driver.TachoWorkAvailableWeekMinutes;
+            var availability = Availability(weekly, driveAvailablePlanningDayMinutes, workAvailableWeekMinutes, planningDate, today, tachoMaster.IsConfigured);
 
             return new DriverDispatchStatusRow(
                 driver.Id,
@@ -103,13 +109,48 @@ public sealed class DriverDispatchStatusController(
                 latestInbound?.Notes,
                 latestInbound?.CapturedAtUtc,
                 latestOutbound?.CapturedAtUtc,
-                allocationStatus,
-                allocationMessage,
+                weekly.Status,
+                weekly.Message,
                 weekly.WeeklyRestDueUtc,
-                weekly.LastWeeklyRestEndUtc);
+                weekly.LastWeeklyRestEndUtc,
+                availability.Status,
+                availability.Message,
+                driveAvailablePlanningDayMinutes,
+                workAvailableWeekMinutes);
         }).ToList();
 
         return Ok(new { planningDate, drivers = result });
+    }
+
+    private static DriverAvailability Availability(
+        WeeklyRestComplianceResult weekly,
+        int? driveAvailablePlanningDayMinutes,
+        int? workAvailableWeekMinutes,
+        DateOnly planningDate,
+        DateOnly today,
+        bool tachoConfigured)
+    {
+        if (weekly.Status == "Overdue")
+            return new("Unavailable", weekly.Message);
+
+        if (driveAvailablePlanningDayMinutes is <= 0)
+            return new("Unavailable", "TachoMaster shows no driving time available for this planning day.");
+
+        if (workAvailableWeekMinutes is <= 0)
+            return new("Unavailable", "TachoMaster shows no working time available for the current week.");
+
+        if (!tachoConfigured)
+            return new("Unverified", "TachoMaster is unavailable, so availability cannot be verified until final dispatch.");
+
+        if (weekly.Status is "Unverified" or "Unknown")
+            return new("Unverified", weekly.Message);
+
+        if (planningDate <= today.AddDays(1) && driveAvailablePlanningDayMinutes is null)
+            return new("Unverified", "TachoMaster did not return planning-day driving availability. Final dispatch will re-check live hours.");
+
+        return new("Available", weekly.Status == "DueSoon"
+            ? $"Available for planning, but weekly rest is due soon. {weekly.Message}"
+            : "TachoMaster shows the driver as available for planning. Final dispatch still validates the selected route against live remaining hours.");
     }
 
     private static DateTimeOffset ToUtc(DateTime local)
@@ -117,6 +158,8 @@ public sealed class DriverDispatchStatusController(
         var unspecified = DateTime.SpecifyKind(local, DateTimeKind.Unspecified);
         return new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(unspecified, London), TimeSpan.Zero);
     }
+
+    private sealed record DriverAvailability(string Status, string Message);
 }
 
 public sealed record DriverDispatchStatusRow(
@@ -128,4 +171,8 @@ public sealed record DriverDispatchStatusRow(
     string WeeklyRestStatus,
     string WeeklyRestMessage,
     DateTimeOffset? WeeklyRestDueUtc,
-    DateTimeOffset? LastWeeklyRestEndUtc);
+    DateTimeOffset? LastWeeklyRestEndUtc,
+    string AvailabilityStatus,
+    string AvailabilityMessage,
+    int? DriveAvailablePlanningDayMinutes,
+    int? WorkAvailableWeekMinutes);
