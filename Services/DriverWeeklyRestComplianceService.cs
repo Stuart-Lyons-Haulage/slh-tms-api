@@ -86,6 +86,18 @@ public sealed class DriverWeeklyRestComplianceService(TachoMasterClient tachoMas
                 restGaps.Add(CreateRestGap(previousEnd, current.StartUtc));
         }
 
+        // Driver Dispatch can evaluate a driver before the next duty has started. If the most recent
+        // completed duty ended at least 24 hours before the planning/reference time, that trailing gap
+        // is a completed weekly rest for the prospective duty starting at the reference time. Counting
+        // it here keeps weekly-rest availability consistent with DriverDayCycleCalculator's Day 1 reset.
+        var lastBlock = blocks[^1];
+        if (lastBlock.EndUtc is DateTimeOffset lastDutyEnd &&
+            lastDutyEnd < referenceUtc &&
+            referenceUtc - lastDutyEnd >= ReducedWeeklyRest)
+        {
+            restGaps.Add(CreateRestGap(lastDutyEnd, referenceUtc));
+        }
+
         // Without at least one observed qualifying weekly rest we do not know where the current
         // 144-hour clock actually started. Do not manufacture an overdue decision from the first duty
         // in a truncated history window.
