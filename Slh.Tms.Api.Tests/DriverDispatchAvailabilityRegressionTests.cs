@@ -26,13 +26,26 @@ public sealed class DriverDispatchAvailabilityRegressionTests
     }
 
     [Fact]
-    public void Plain_text_update_is_an_outbound_dispatch_status_event()
+    public void Operational_status_is_separate_from_driver_confirmation()
     {
-        var messageController = Read("Controllers", "RunDriverMessageController.cs");
-        var statusController = Read("Controllers", "DriverDispatchStatusController.cs");
-        Assert.Contains("Driver text update sent", messageController);
-        Assert.Contains("Driver text update sent", statusController);
-        Assert.Contains("Sent Awaiting Response", statusController);
+        var source = Read("Controllers", "DriverDispatchStatusController.cs");
+        Assert.Contains("var latestDispatch = loadLogs.FirstOrDefault(item => item.Status == \"Driver dispatched\")", source);
+        Assert.Contains("var operationalStatus = load is null", source);
+        Assert.Contains("? \"Completed\"", source);
+        Assert.Contains("? \"Working\"", source);
+        Assert.Contains("? \"Dispatched\"", source);
+        Assert.Contains("bool DriverConfirmed", source);
+        Assert.Contains("DateTimeOffset? DriverConfirmationAtUtc", source);
+    }
+
+    [Fact]
+    public void Working_requires_live_movement_and_card_or_open_tacho_duty()
+    {
+        var source = Read("Controllers", "DriverDispatchStatusController.cs");
+        Assert.Contains("live.IsMoving != true && live.SpeedKph.GetValueOrDefault() <= 3", source);
+        Assert.Contains("CardsMatch(driver.TachoCardNumber, live.CurrentDriverCardNumber)", source);
+        Assert.Contains("duty.DutyEndUtc is null", source);
+        Assert.Contains("ExecutionIdentityResolver.MatchesVehicleIdentifier(aliases, duty.VehicleCode)", source);
     }
 
     private static string Read(params string[] parts)
