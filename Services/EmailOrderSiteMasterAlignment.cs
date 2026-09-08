@@ -51,6 +51,12 @@ public static class EmailOrderSiteMasterAlignment
         var delivery = resolver.Resolve(rawDelivery);
         var depot = resolver.Resolve(rawDepot);
         var evidence = new JsonArray();
+        var marketInternalDestination = IsMarketDepot(rawDepot)
+            && !IsMarketDepot(rawDelivery)
+            && depot.SiteMatched
+            && delivery.SiteMatched
+            && depot.SiteId is not null
+            && depot.SiteId == delivery.SiteId;
 
         if (collection.SiteMatched && !string.IsNullOrWhiteSpace(collection.SiteName))
         {
@@ -67,7 +73,14 @@ public static class EmailOrderSiteMasterAlignment
         if (delivery.SiteMatched && !string.IsNullOrWhiteSpace(delivery.SiteName))
         {
             PreserveSource(root, "sourceStallNumber", rawDelivery, delivery.SiteName);
-            root["stallNumber"] = delivery.SiteName;
+            // Market jobs have two identities: the physical Market Site for routing/geofence
+            // and the Markets Master trader/stall for the driver. Do not overwrite stallNumber
+            // with the physical market name or the downstream MarketContact lookup loses the
+            // trader/stall before approval.
+            if (!marketInternalDestination)
+                root["stallNumber"] = delivery.SiteName;
+            else if (!string.IsNullOrWhiteSpace(rawDelivery))
+                root["stallNumber"] = rawDelivery;
             root["deliverySite"] = delivery.SiteName;
             root["deliverySiteId"] = delivery.SiteId?.ToString();
             root["deliverySiteCode"] = delivery.SiteNumber;
@@ -107,6 +120,21 @@ public static class EmailOrderSiteMasterAlignment
             root["masterDataAlignmentEvidence"] = evidence;
         }
     }
+
+    private static bool IsMarketDepot(string? value)
+    {
+        var key = Normalize(value);
+        return key.Contains("COVENT", StringComparison.Ordinal)
+            || key.Contains("SPITALFIELDS", StringComparison.Ordinal)
+            || key == "SPIT"
+            || key.Contains("WESTERN", StringComparison.Ordinal)
+            || key.Contains("SENDER", StringComparison.Ordinal);
+    }
+
+    private static string Normalize(string? value) => new((value ?? string.Empty)
+        .Where(char.IsLetterOrDigit)
+        .Select(char.ToUpperInvariant)
+        .ToArray());
 
     private static void PreserveSource(JsonObject root, string key, string? raw, string canonical)
     {
