@@ -64,6 +64,9 @@ internal static partial class RunDisplayLabel
     [GeneratedRegex(@"^PLAN-\d{8}-(.+)$", RegexOptions.IgnoreCase)]
     private static partial Regex InternalReferenceRegex();
 
+    [GeneratedRegex(@"^RUN[\s_-]*\d{8}[\s_-]+0*(\d+)$", RegexOptions.IgnoreCase)]
+    private static partial Regex DatedRunRegex();
+
     [GeneratedRegex(@"^(?:RUN[\s_-]*)?(\d+)(?:[\s_-]*(AM|PM))?$", RegexOptions.IgnoreCase)]
     private static partial Regex NumericRunRegex();
 
@@ -113,6 +116,8 @@ internal static partial class RunDisplayLabel
 
     private static string StripInternalReference(string reference)
     {
+        var dated = DatedRunRegex().Match(reference.Trim());
+        if (dated.Success) return dated.Groups[1].Value;
         var match = InternalReferenceRegex().Match(reference.Trim());
         return match.Success ? match.Groups[1].Value : reference.Trim();
     }
