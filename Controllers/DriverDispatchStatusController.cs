@@ -24,9 +24,6 @@ public sealed class DriverDispatchStatusController(
         var drivers = await db.Drivers.Where(item => item.Active).ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
 
-        // Driver Dispatch workbench and allocation writes can use the resilient planning register
-        // when the core planning schema is unavailable. Status must read the same authoritative
-        // run source or a genuinely allocated driver can incorrectly remain "No Run".
         var loads = (await PlanningResilience.ReadLoadsAsync(db, planningDate, ct))
             .Where(item => item.Status != LoadStatus.Cancelled)
             .ToList();
@@ -39,41 +36,36 @@ public sealed class DriverDispatchStatusController(
                 .OrderByDescending(item => item.CapturedAtUtc)
                 .ToListAsync(ct);
 
-        // Tacho is the preferred day-cycle source. A short TMS execution history is also retained
-        // as a cross-check for the occasional Tacho history response that contains only the current
-        // duty/profile row. It is not allowed to override a usable multi-duty Tacho cycle.
         var historyStart = planningDate.AddDays(-7);
         var recentActivity = await db.Loads.AsNoTracking()
             .Where(item => item.DriverId != null && item.PlanningDate >= historyStart && item.PlanningDate < planningDate && ExecutedStatuses.Contains(item.Status))
             .Select(item => new { DriverId = item.DriverId!.Value, item.PlanningDate })
             .ToListAsync(ct);
 
-        IReadOnlyList<TachoDriverDutyStatus> duties = [];
+        var dutyBuffer = new List<TachoDriverDutyStatus>();
         if (tachoMaster.IsConfigured)
         {
             try
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 timeout.CancelAfter(TimeSpan.FromSeconds(20));
-                // Never ask TachoMaster for a future duty date. Tomorrow planning must be projected
-                // from duties that actually exist today, otherwise a future/empty response can make
-                // the current driver cycle look unavailable or reset to Day 1.
                 var throughDate = planningDate < today ? planningDate : today;
                 var fromDate = throughDate.AddDays(-8);
-                var all = new List<TachoDriverDutyStatus>();
                 for (var dutyDate = fromDate; dutyDate <= throughDate; dutyDate = dutyDate.AddDays(1))
-                    all.AddRange(await tachoMaster.GetDriverDutyStatusesAsync(dutyDate, timeout.Token));
-                duties = all;
+                    dutyBuffer.AddRange(await tachoMaster.GetDriverDutyStatusesAsync(dutyDate, timeout.Token));
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
-                logger.LogWarning("TachoMaster exceeded the Driver Dispatch status budget for {PlanningDate}.", planningDate);
+                // Keep any duty days already returned before the timeout. Discarding the partial
+                // history could incorrectly reset a Monday/Tuesday driver to Day 1 on Wednesday.
+                logger.LogWarning("TachoMaster exceeded the Driver Dispatch status budget for {PlanningDate}; retaining {DutyCount} duty rows already returned.", planningDate, dutyBuffer.Count);
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
-                logger.LogWarning(exception, "TachoMaster weekly-rest history was unavailable for Driver Dispatch status on {PlanningDate}.", planningDate);
+                logger.LogWarning(exception, "TachoMaster weekly-rest history was partially unavailable for Driver Dispatch status on {PlanningDate}; retaining {DutyCount} duty rows.", planningDate, dutyBuffer.Count);
             }
         }
+        IReadOnlyList<TachoDriverDutyStatus> duties = dutyBuffer;
 
         var result = drivers.Select(driver =>
         {
@@ -116,9 +108,9 @@ public sealed class DriverDispatchStatusController(
                 tmsConsecutiveDays++;
             var tmsProjectedDay = Math.Clamp(tmsConsecutiveDays + 1, 1, 7);
 
-            // Two or more matched duties are enough for Tacho to prove a rest gap/cycle directly.
-            // With zero/one matched row, use executed TMS continuity as a conservative cross-check;
-            // this prevents a current-profile-only response from incorrectly showing Day 1.
+            // Tacho duty periods are authoritative when there is enough history to establish the
+            // cycle. A single current row is cross-checked against executed TMS activity so a thin
+            // provider response cannot silently reset an established driver to Day 1.
             var projectedDayNumber = matchedDuties.Count >= 2
                 ? tachoProjectedDay
                 : Math.Max(tachoProjectedDay ?? 1, tmsProjectedDay);
@@ -170,20 +162,15 @@ public sealed class DriverDispatchStatusController(
     {
         if (weekly.Status == "Overdue")
         {
-            // A historic late weekly-rest event must not permanently make a driver unavailable
-            // after a later qualifying rest has reset the current duty cycle. The day-cycle evidence
-            // is the cross-check: Days 1-6 mean the current cycle has restarted, so retain a warning
-            // for compliance review rather than blocking tomorrow's allocation.
             if (projectedDayNumber is >= 1 and <= 6)
                 return new("Unverified", $"TachoMaster weekly-rest history contains overdue evidence, but the current projected duty cycle is Day {projectedDayNumber}. Keep the historic event for compliance review; do not hard-block the current allocation from that older event alone.");
             return new("Unavailable", weekly.Message);
         }
 
-        if (driveAvailablePlanningDayMinutes is <= 0)
-            return new("Unavailable", "TachoMaster shows no driving time available for this planning day.");
-
-        if (workAvailableWeekMinutes is <= 0)
-            return new("Unavailable", "TachoMaster shows no working time available for the current week.");
+        // A prospective Day 7 must remain a hard planning exception. The driver needs a qualifying
+        // weekly rest before another duty can be treated as part of a fresh cycle.
+        if (projectedDayNumber is >= 7)
+            return new("Unavailable", "Projected Day 7. A qualifying weekly rest is required before another duty can be allocated.");
 
         if (!tachoConfigured)
             return new("Unverified", "TachoMaster is unavailable, so availability cannot be verified until final dispatch.");
@@ -191,8 +178,27 @@ public sealed class DriverDispatchStatusController(
         if (weekly.Status is "Unverified" or "Unknown")
             return new("Unverified", weekly.Message);
 
+        if (planningDate <= today)
+        {
+            if (driveAvailablePlanningDayMinutes is <= 0)
+                return new("Unavailable", "TachoMaster shows no driving time available for this planning day.");
+            if (workAvailableWeekMinutes is <= 0)
+                return new("Unavailable", "TachoMaster shows no working time available for the current week.");
+        }
+        else
+        {
+            // Tomorrow is a planning decision, not a live dispatch decision. TachoMaster's current
+            // profile can report 0/null tomorrow allowance while today's duty is still open. Keep
+            // that visible as a warning, but do not prevent the planner allocating the run. The
+            // actual dispatch continues to validate live hours after the full 11-hour SLH rest.
+            if (driveAvailablePlanningDayMinutes is <= 0)
+                return new("Unverified", "Tomorrow driving allowance is not yet confirmed by the live Tacho profile. Allocation is allowed for planning; final dispatch will re-check live hours after the full 11h regular rest.");
+            if (workAvailableWeekMinutes is <= 0)
+                return new("Unverified", "Current Tacho profile does not confirm remaining weekly work for the future planning day. Allocation is allowed for planning; final dispatch will re-check before release.");
+        }
+
         if (planningDate <= today.AddDays(1) && driveAvailablePlanningDayMinutes is null)
-            return new("Unverified", "TachoMaster did not return planning-day driving availability. Final dispatch will re-check live hours.");
+            return new("Unverified", "TachoMaster did not return planning-day driving availability. Allocation can be planned, but final dispatch will re-check live hours.");
 
         return new("Available", weekly.Status == "DueSoon"
             ? $"Available for planning, but weekly rest is due soon. {weekly.Message}"
@@ -219,19 +225,11 @@ public sealed class DriverDispatchStatusController(
         var planningFloor = ToUtc(planningDate.ToDateTime(TimeOnly.MinValue));
         if (latestDuty.DutyEndUtc is DateTimeOffset dutyEnd)
         {
-            // SLH planning policy is deliberately more conservative than the legal reduced-rest
-            // allowance: Calculate Starts must always give the driver a full 11-hour regular daily
-            // rest before the next planned duty. A 9-hour reduced rest may remain valid compliance
-            // evidence, but it must never be used to bring a planned start forward.
             var start = dutyEnd.AddHours(11);
             if (start < planningFloor) start = planningFloor;
             return new(start, $"Tacho duty ended {LocalTime(dutyEnd):dd/MM HH:mm}; planning start uses 11h regular daily rest. Reduced daily rest is not used for planning.", false);
         }
 
-        // Today's duty is still open while tomorrow is being planned. Do not pretend this is an
-        // authoritative legal start. Use a deliberately conservative planning assumption: today's
-        // duty ends no earlier than the later of 'now' or 13 hours after sign-on, followed by an
-        // 11-hour regular daily rest. Re-running Calculate Starts after sign-off replaces this.
         var now = DateTimeOffset.UtcNow;
         var assumedDutyEnd = latestDuty.DutyStartUtc.AddHours(13);
         if (assumedDutyEnd < now) assumedDutyEnd = now;
