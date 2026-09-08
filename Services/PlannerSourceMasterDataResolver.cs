@@ -20,11 +20,16 @@ public sealed class PlannerSourceMasterDataResolver
 
     private readonly IReadOnlyList<Site> _sites;
     private readonly IReadOnlyList<SiteGeofence> _geofences;
+    private readonly IReadOnlyList<MarketContact> _marketContacts;
 
-    private PlannerSourceMasterDataResolver(IReadOnlyList<Site> sites, IReadOnlyList<SiteGeofence> geofences)
+    private PlannerSourceMasterDataResolver(
+        IReadOnlyList<Site> sites,
+        IReadOnlyList<SiteGeofence> geofences,
+        IReadOnlyList<MarketContact> marketContacts)
     {
         _sites = sites;
         _geofences = geofences;
+        _marketContacts = marketContacts;
     }
 
     public static async Task<PlannerSourceMasterDataResolver> CreateAsync(TmsDbContext db, CancellationToken ct)
@@ -43,7 +48,18 @@ public sealed class PlannerSourceMasterDataResolver
             geofences = [];
         }
 
-        return new PlannerSourceMasterDataResolver(sites, geofences);
+        List<MarketContact> marketContacts;
+        try
+        {
+            marketContacts = await db.MarketContacts.AsNoTracking().Where(contact => contact.Active).ToListAsync(ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            db.ChangeTracker.Clear();
+            marketContacts = [];
+        }
+
+        return new PlannerSourceMasterDataResolver(sites, geofences, marketContacts);
     }
 
     public PlannerSourceSiteResolution Resolve(string? sourceLabel)
@@ -137,6 +153,13 @@ public sealed class PlannerSourceMasterDataResolver
         var direct = ExactSites(rawKey);
         if (direct.Count == 1) return direct[0];
 
+        // Market jobs are a two-level master-data relationship: MarketContacts identifies
+        // the trader/stall, while Site Master identifies the physical market/geofence.
+        // Resolve either a market label (for example COVENTGARDEN) or a unique market
+        // customer/stall back to that physical Site before ordinary planner fuzzy matching.
+        var marketSite = MatchMarketSite(value);
+        if (marketSite is not null) return marketSite;
+
         var geofenceKey = Normalize(GeofencePlanningMatch.MatchText(value));
         if (geofenceKey.Length > 0 && geofenceKey != rawKey)
         {
@@ -163,6 +186,58 @@ public sealed class PlannerSourceMasterDataResolver
                 (key.Contains(candidateKey, StringComparison.Ordinal) || candidateKey.Contains(key, StringComparison.Ordinal)));
         })).ToList();
         return fuzzy.Select(site => site.Id).Distinct().Count() == 1 ? fuzzy[0] : null;
+    }
+
+    private Site? MatchMarketSite(string value)
+    {
+        var marketKey = CanonicalMarket(value);
+        if (marketKey is null)
+        {
+            var sourceKey = Normalize(value);
+            var matchingContacts = _marketContacts.Where(contact => MarketEvidence(contact)
+                .Any(evidence => Normalize(evidence) == sourceKey)).ToList();
+            var markets = matchingContacts
+                .Select(contact => CanonicalMarket(contact.Market))
+                .Where(key => key is not null)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (markets.Count != 1) return null;
+            marketKey = markets[0];
+        }
+
+        if (marketKey is null) return null;
+        var matches = _sites.Where(site => SiteCandidates(site).Any(candidate =>
+        {
+            var candidateKey = Normalize(candidate);
+            return marketKey switch
+            {
+                "COVENT" => candidateKey.Contains("COVENTGARDEN", StringComparison.Ordinal),
+                "SPIT" => candidateKey.Contains("SPITALFIELDS", StringComparison.Ordinal) || candidateKey.Contains("SPIT", StringComparison.Ordinal),
+                "WESTERN" => candidateKey.Contains("WESTERN", StringComparison.Ordinal),
+                "SENDER" => candidateKey.Contains("SENDER", StringComparison.Ordinal),
+                _ => false
+            };
+        })).DistinctBy(site => site.Id).ToList();
+
+        return matches.Count == 1 ? matches[0] : null;
+    }
+
+    private static IEnumerable<string?> MarketEvidence(MarketContact contact)
+    {
+        yield return contact.Name;
+        yield return contact.StandOrLocation;
+        yield return contact.Salesman;
+        yield return contact.Sender;
+    }
+
+    private static string? CanonicalMarket(string? value)
+    {
+        var key = Normalize(value);
+        if (key.Contains("COVENT", StringComparison.Ordinal)) return "COVENT";
+        if (key.Contains("SPITALFIELDS", StringComparison.Ordinal) || key == "SPIT") return "SPIT";
+        if (key.Contains("WESTERN", StringComparison.Ordinal)) return "WESTERN";
+        if (key.Contains("SENDER", StringComparison.Ordinal)) return "SENDER";
+        return null;
     }
 
     private List<Site> ExactSites(string key) => key.Length == 0
