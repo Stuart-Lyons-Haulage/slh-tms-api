@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -13,6 +14,11 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize]
 public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<OperationalSnapshotController> logger) : ControllerBase
 {
+    private static string SafeForLog(DateOnly value) =>
+        value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
+            .Replace("\r", string.Empty)
+            .Replace("\n", string.Empty);
+
     [HttpGet("readiness-snapshot")]
     public async Task<IActionResult> Readiness([FromQuery] DateOnly? date, CancellationToken ct)
     {
@@ -123,7 +129,7 @@ public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<Opera
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogDebug(ex, "Geofence linkage attention enrichment unavailable for {PlanningDate}.", day);
+            logger.LogDebug(ex, "Geofence linkage attention enrichment unavailable for {PlanningDate}.", SafeForLog(day));
             db.ChangeTracker.Clear();
         }
 
@@ -147,7 +153,7 @@ public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<Opera
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogDebug(ex, "Geofence attention enrichment unavailable for {PlanningDate}.", day);
+            logger.LogDebug(ex, "Geofence attention enrichment unavailable for {PlanningDate}.", SafeForLog(day));
             db.ChangeTracker.Clear();
         }
 
