@@ -13,9 +13,9 @@ public static class RunStopDwellProjection
         DateTimeOffset now)
     {
         var activeIds = activeVisits.Select(x => x.Id).ToHashSet();
-        return (load.Stops ?? [])
-            .OrderBy(stop => stop.Sequence)
-            .Select(stop =>
+        var orderedStops = OperationalStopOrdering.Order(load.Stops);
+        return orderedStops
+            .Select((stop, index) =>
             {
                 var visit = visits
                     .Where(candidate => candidate.LoadId == load.Id && candidate.LoadStopId == stop.Id)
@@ -26,8 +26,9 @@ public static class RunStopDwellProjection
                         .OrderByDescending(candidate => candidate.EnteredAtUtc)
                         .FirstOrDefault();
 
+                var operationalSequence = index + 1;
                 if (visit is null)
-                    return new RunStopDwellState(stop.Id, stop.Sequence, stop.Name, "EnRoute", null, null, null, null, null, null, null, null, null);
+                    return new RunStopDwellState(stop.Id, operationalSequence, stop.Name, "EnRoute", null, null, null, null, null, null, null, null, null);
 
                 var isOnSite = visit.ExitedAtUtc is null && activeIds.Contains(visit.Id);
                 var liveSeconds = isOnSite ? SecondsBetween(visit.EnteredAtUtc, now) : (int?)null;
@@ -37,7 +38,7 @@ public static class RunStopDwellProjection
 
                 return new RunStopDwellState(
                     stop.Id,
-                    stop.Sequence,
+                    operationalSequence,
                     stop.Name,
                     state,
                     visit.Fence.Id,
