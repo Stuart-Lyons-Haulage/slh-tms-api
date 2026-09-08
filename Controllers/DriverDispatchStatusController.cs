@@ -133,26 +133,21 @@ public sealed class DriverDispatchStatusController(
                 ? (int?)null
                 : DriverDayCycleCalculator.Calculate(planningDate, matchedDuties);
 
-            var tmsDates = recentActivity
-                .Where(item => item.DriverId == driver.Id)
-                .Select(item => item.PlanningDate)
-                .ToHashSet();
-            var tmsConsecutiveDays = 0;
-            for (var day = planningDate.AddDays(-1); tmsConsecutiveDays < 7 && tmsDates.Contains(day); day = day.AddDays(-1))
-                tmsConsecutiveDays++;
-            var tmsProjectedDay = Math.Clamp(tmsConsecutiveDays + 1, 1, 7);
-
-            // Tacho duty periods are authoritative when there is enough history to establish the
-            // cycle. A single current row is cross-checked against executed TMS activity so a thin
-            // provider response cannot silently reset an established driver to Day 1.
-            var projectedDayNumber = matchedDuties.Count >= 2
-                ? tachoProjectedDay
-                : Math.Max(tachoProjectedDay ?? 1, tmsProjectedDay);
-
             var referenceUtc = planningDate <= today
                 ? DateTimeOffset.UtcNow
                 : ProjectedPlanningReferenceUtc(planningDate, matchedDuties);
             var weekly = DriverWeeklyRestComplianceService.Evaluate(driver, referenceUtc, duties);
+
+            var executedDates = recentActivity
+                .Where(item => item.DriverId == driver.Id)
+                .Select(item => item.PlanningDate);
+            var projectedDayNumber = ReconcileProjectedDay(
+                planningDate,
+                tachoProjectedDay,
+                matchedDuties.Count,
+                executedDates,
+                weekly.LastWeeklyRestEndUtc);
+
             var driveAvailablePlanningDayMinutes = planningDate == today
                 ? latestDuty?.DriveAvailableTodayMinutes ?? driver.TachoDriveAvailableTodayMinutes
                 : planningDate == today.AddDays(1)
@@ -205,6 +200,32 @@ public sealed class DriverDispatchStatusController(
         }).ToList();
 
         return Ok(new { planningDate, drivers = result });
+    }
+
+    internal static int ReconcileProjectedDay(
+        DateOnly planningDate,
+        int? tachoProjectedDay,
+        int matchedDutyCount,
+        IEnumerable<DateOnly> executedTmsDates,
+        DateTimeOffset? lastWeeklyRestEndUtc)
+    {
+        var cycleResetDate = lastWeeklyRestEndUtc is DateTimeOffset restEnd
+            ? LondonDate(restEnd)
+            : (DateOnly?)null;
+        var tmsDates = executedTmsDates
+            .Where(day => cycleResetDate is null || day >= cycleResetDate.Value)
+            .ToHashSet();
+        var tmsConsecutiveDays = 0;
+        for (var day = planningDate.AddDays(-1); tmsConsecutiveDays < 7 && tmsDates.Contains(day); day = day.AddDays(-1))
+            tmsConsecutiveDays++;
+        var tmsProjectedDay = Math.Clamp(tmsConsecutiveDays + 1, 1, 7);
+
+        // Tacho is authoritative when it has enough duty periods to establish the cycle. When the
+        // provider only returns a current/profile row, executed TMS history remains a conservative
+        // cross-check — but never across a qualifying weekly rest that Tacho has already proven.
+        return matchedDutyCount >= 2
+            ? tachoProjectedDay ?? tmsProjectedDay
+            : Math.Max(tachoProjectedDay ?? 1, tmsProjectedDay);
     }
 
     private static bool HasLiveWorkingEvidence(
