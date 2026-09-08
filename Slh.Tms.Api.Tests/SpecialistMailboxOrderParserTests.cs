@@ -12,12 +12,12 @@ public sealed class SpecialistMailboxOrderParserTests
     {
         var rows = new List<object?[]>
         {
-            [null, "COLLECTION DATE", new DateTime(2026, 9, 8), "Waitrose PO number", "DELIVERY DATE", new DateTime(2026, 9, 9)],
-            [null, "Aylesford", 4d, "O78436", new DateTime(1899, 12, 30, 16, 0, 0), null],
-            [null, "Bracknell", 5d, "K78676", new DateTime(1899, 12, 30, 16, 0, 0), null],
-            [null, "Brinklow", 5d, "T78405", new DateTime(1899, 12, 30, 16, 0, 0), null],
-            [null, "Leyland", 3d, "B78729", new DateTime(1899, 12, 30, 16, 0, 0), null],
-            [null, "TOTAL", 17d, null, null, "AMENDED"]
+            new object?[] { null, "COLLECTION DATE", new DateTime(2026, 9, 8), "Waitrose PO number", "DELIVERY DATE", new DateTime(2026, 9, 9) },
+            new object?[] { null, "Aylesford", 4d, "O78436", new DateTime(1899, 12, 30, 16, 0, 0), null },
+            new object?[] { null, "Bracknell", 5d, "K78676", new DateTime(1899, 12, 30, 16, 0, 0), null },
+            new object?[] { null, "Brinklow", 5d, "T78405", new DateTime(1899, 12, 30, 16, 0, 0), null },
+            new object?[] { null, "Leyland", 3d, "B78729", new DateTime(1899, 12, 30, 16, 0, 0), null },
+            new object?[] { null, "TOTAL", 17d, null, null, "AMENDED" }
         };
 
         var result = WaitroseLegacyWorkbookParser.ParseVitacress(rows);
@@ -35,12 +35,12 @@ public sealed class SpecialistMailboxOrderParserTests
     {
         var rows = new List<object?[]>
         {
-            ["Week Commencing SUNDAY", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 10d, 9d, 2026d],
-            ["Depot day", "SUNDAY", null, null, null, "MONDAY", null, null, null, "TUESDAY", null, null, null, "WEDNESDAY"],
-            [null, "Bracknell", "Brinklow", "Aylesford", "Leyland", "Bracknell", "Brinklow", "Aylesford", "Leyland", "Bracknell", "Brinklow", "Aylesford", "Leyland"],
-            ["Number of Pallets", "N/A", "N/A", "N/A", "N/A", 11d, 7d, 6d, 4d, 11d, 6d, 5d, 4d],
-            ["Time Ready @ WSL", "19;00", "19;00", "19;00", "19;00", "19;00", "19;00", "19;00", "19;00", "19;00", "19;00", "19;00", "19;00"],
-            ["PO Number", "N/A", "N/A", "N/A", "N/A", "K78631", "T78343", "O78368", "B78667", "K78659", "T78357", "O78396", "B78713"]
+            new object?[] { "Week Commencing SUNDAY", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 10d, 9d, 2026d },
+            new object?[] { "Depot day", "SUNDAY", null, null, null, "MONDAY", null, null, null, "TUESDAY", null, null, null, "WEDNESDAY" },
+            new object?[] { null, "Bracknell", "Brinklow", "Aylesford", "Leyland", "Bracknell", "Brinklow", "Aylesford", "Leyland", "Bracknell", "Brinklow", "Aylesford", "Leyland" },
+            new object?[] { "Number of Pallets", "N/A", "N/A", "N/A", "N/A", 11d, 7d, 6d, 4d, 11d, 6d, 5d, 4d },
+            new object?[] { "Time Ready @ WSL", "19;00", "19;00", "19;00", "19;00", "19;00", "19;00", "19;00", "19;00", "19;00", "19;00", "19;00", "19;00" },
+            new object?[] { "PO Number", "N/A", "N/A", "N/A", "N/A", "K78631", "T78343", "O78368", "B78667", "K78659", "T78357", "O78396", "B78713" }
         };
 
         var result = WaitroseLegacyWorkbookParser.ParseApsWeekly(rows, new DateOnly(2026, 9, 8));
