@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -23,6 +24,9 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     private readonly NwfWorkbookSnapshotParser nwfWorkbookParser = new();
     private readonly NwfPalletOrderCsvParser nwfCsvParser = new();
     private readonly NwfQuantityChangeParser nwfQuantityChangeParser = new();
+    private const int SourceBodyPreviewLimit = 12000;
+    private const int SourceBodyTextLimit = 200000;
+    private const int SourceBodyHtmlLimit = 400000;
     private static readonly Regex DateRegex = new(
         @"\b(?<day>0?[1-9]|[12]\d|3[01])[./-](?<month>0?[1-9]|1[0-2])(?:[./-](?<year>20\d{2}|\d{2}))?\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -53,6 +57,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         if (string.IsNullOrWhiteSpace(request.MessageId))
             return BadRequest(new ErrorResponse("missing_message_id", "Mailbox message ID is required so repeated flow runs remain idempotent.", HttpContext.TraceIdentifier));
 
+        await EnsureSourceEmailEvidence(request, ct);
         var parsed = await ParseEmail(request, ct);
         if (parsed.IgnoredReason is not null)
         {
@@ -127,6 +132,58 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             request.MessageId, staged, existing, superseded, parsed.Warnings.Count);
 
         return Accepted(new { ignored = false, staged, existing, superseded, warnings = parsed.Warnings, outlookCategory = "TMS Imported", records });
+    }
+
+    [HttpGet("source-email/{stagingId:guid}")]
+    public async Task<IActionResult> SourceEmail(Guid stagingId, CancellationToken ct)
+    {
+        var staged = await db.StagedImports.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == stagingId && item.EntityType == "order", ct);
+        if (staged is null) return NotFound(new { error = "staged_order_not_found" });
+
+        try
+        {
+            using var orderDocument = JsonDocument.Parse(staged.PayloadJson);
+            var orderPayload = orderDocument.RootElement;
+            var evidenceKey = ReadText(orderPayload, "sourceEvidenceKey");
+            var messageId = ReadText(orderPayload, "sourceMessageId") ?? ReadText(orderPayload, "sourceEmailMessageId");
+            if (string.IsNullOrWhiteSpace(evidenceKey) && !string.IsNullOrWhiteSpace(messageId))
+                evidenceKey = SourceEvidenceKey(messageId);
+
+            if (!string.IsNullOrWhiteSpace(evidenceKey))
+            {
+                var evidence = await db.StagedImports.AsNoTracking()
+                    .SingleOrDefaultAsync(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey, ct);
+                if (evidence is not null)
+                    return Content(evidence.PayloadJson, "application/json");
+            }
+
+            return Ok(new
+            {
+                messageId,
+                internetMessageId = ReadText(orderPayload, "sourceInternetMessageId"),
+                conversationId = ReadText(orderPayload, "sourceConversationId"),
+                mailbox = ReadText(orderPayload, "sourceMailbox"),
+                senderAddress = ReadText(orderPayload, "sourceSender"),
+                senderName = ReadText(orderPayload, "sourceSenderName"),
+                subject = ReadText(orderPayload, "sourceSubject") ?? ReadText(orderPayload, "sourceEmailSubject"),
+                receivedAtUtc = ReadText(orderPayload, "sourceReceivedAtUtc") ?? ReadText(orderPayload, "sourceEmailReceivedAt"),
+                bodyText = ReadText(orderPayload, "sourceBodyText"),
+                bodyHtml = (string?)null,
+                bodyFormat = ReadText(orderPayload, "sourceBodyFormat"),
+                importance = ReadText(orderPayload, "sourceImportance"),
+                webLink = ReadText(orderPayload, "sourceWebLink") ?? ReadText(orderPayload, "sourceEmailWebLink"),
+                toRecipients = TryGetProperty(orderPayload, "sourceToRecipients", out var to) ? to.Clone() : default(JsonElement?),
+                ccRecipients = TryGetProperty(orderPayload, "sourceCcRecipients", out var cc) ? cc.Clone() : default(JsonElement?),
+                attachments = TryGetProperty(orderPayload, "sourceAttachments", out var attachments) ? attachments.Clone() : default(JsonElement?),
+                bodyTruncated = true,
+                evidenceAvailable = false
+            });
+        }
+        catch (JsonException)
+        {
+            return UnprocessableEntity(new { error = "staged_source_evidence_invalid" });
+        }
     }
 
     private async Task<EmailIntakeParseResult> ParseEmail(MailboxEmailIntakeRequest request, CancellationToken ct)
@@ -561,6 +618,98 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     private static string EscapeForContains(string value) =>
         value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal);
 
+    private static string SourceEvidenceKey(string messageId)
+    {
+        var key = $"email-evidence:{CompactKey(messageId)}";
+        return key.Length <= 200 ? key : key[..200];
+    }
+
+    private async Task EnsureSourceEmailEvidence(MailboxEmailIntakeRequest request, CancellationToken ct)
+    {
+        var evidenceKey = SourceEvidenceKey(request.MessageId);
+        var exists = await db.StagedImports.AsNoTracking()
+            .AnyAsync(item => item.EntityType == "email-evidence" && item.IdempotencyKey == evidenceKey, ct);
+        if (exists) return;
+
+        var bodyText = Clip(request.BodyText, SourceBodyTextLimit);
+        var bodyHtml = Clip(request.BodyHtml, SourceBodyHtmlLimit);
+        var payload = JsonSerializer.Serialize(new
+        {
+            messageId = request.MessageId,
+            internetMessageId = request.InternetMessageId,
+            conversationId = request.ConversationId,
+            mailbox = request.Mailbox,
+            senderAddress = request.SenderAddress,
+            senderName = request.SenderName,
+            subject = request.Subject,
+            receivedAtUtc = request.ReceivedAtUtc,
+            bodyText,
+            bodyHtml,
+            bodyFormat = request.BodyFormat,
+            importance = request.Importance,
+            webLink = request.WebLink,
+            toRecipients = request.ToRecipients,
+            ccRecipients = request.CcRecipients,
+            correlationId = request.CorrelationId,
+            attachments = (request.Attachments ?? []).Select(attachment => new
+            {
+                attachment.Name,
+                attachment.ContentType,
+                attachment.ContentId,
+                attachment.Size,
+                attachment.IsInline
+            }).ToList(),
+            bodyTruncated = (request.BodyText?.Length ?? 0) > SourceBodyTextLimit || (request.BodyHtml?.Length ?? 0) > SourceBodyHtmlLimit,
+            evidenceAvailable = true
+        });
+
+        var now = DateTimeOffset.UtcNow;
+        var evidence = new StagedImport
+        {
+            EntityType = "email-evidence",
+            IdempotencyKey = evidenceKey,
+            PayloadJson = payload,
+            Status = StagingStatus.Archived,
+            Source = $"Info mailbox evidence / {(request.SenderAddress ?? "unknown sender").Trim()}",
+            ReceivedAtUtc = request.ReceivedAtUtc ?? now,
+            ReviewedAtUtc = now,
+            ReviewedBy = "Info mailbox intake",
+            ReviewNote = "Immutable source email evidence retained for Order Review. Attachment bytes are intentionally not duplicated into SQL."
+        };
+        db.StagedImports.Add(evidence);
+        db.StagedImportEvents.Add(new StagedImportEvent
+        {
+            StagedImportId = evidence.Id,
+            EventType = "EvidenceRetained",
+            NewStatus = StagingStatus.Archived,
+            PayloadJson = payload,
+            Note = evidence.ReviewNote,
+            Actor = evidence.ReviewedBy,
+            OccurredAtUtc = now
+        });
+        await db.SaveChangesAsync(ct);
+    }
+
+    private static string? Clip(string? value, int limit)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return value;
+        return value.Length <= limit ? value : value[..limit];
+    }
+
+    private static (string? Text, bool Truncated) SourceBodyPreview(MailboxEmailIntakeRequest request)
+    {
+        var raw = request.BodyText;
+        if (string.IsNullOrWhiteSpace(raw) && !string.IsNullOrWhiteSpace(request.BodyHtml))
+        {
+            raw = WebUtility.HtmlDecode(Regex.Replace(request.BodyHtml, "<[^>]+>", " "));
+            raw = Regex.Replace(raw, @"\s+", " ").Trim();
+        }
+        if (string.IsNullOrWhiteSpace(raw)) return (null, false);
+        return raw.Length <= SourceBodyPreviewLimit
+            ? (raw, false)
+            : (raw[..SourceBodyPreviewLimit], true);
+    }
+
     internal static JsonElement EnrichSourceEvidence(JsonElement payload, MailboxEmailIntakeRequest request)
     {
         var root = JsonNode.Parse(payload.GetRawText())?.AsObject() ?? new JsonObject();
@@ -573,6 +722,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         root["sourceMessageId"] = request.MessageId;
         root["sourceInternetMessageId"] = request.InternetMessageId;
         root["sourceConversationId"] = request.ConversationId;
+        root["sourceEvidenceKey"] = SourceEvidenceKey(request.MessageId);
         root["sourceEmailWebLink"] = request.WebLink;
         root["sourceWebLink"] = request.WebLink;
         root["sourceSubject"] = request.Subject;
@@ -582,6 +732,9 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         root["importCorrelationId"] = request.CorrelationId;
         root["sourceToRecipients"] = request.ToRecipients is { } to ? JsonNode.Parse(to.GetRawText()) : null;
         root["sourceCcRecipients"] = request.CcRecipients is { } cc ? JsonNode.Parse(cc.GetRawText()) : null;
+        var preview = SourceBodyPreview(request);
+        root["sourceBodyText"] = preview.Text;
+        root["sourceBodyPreviewTruncated"] = preview.Truncated;
 
         var attachments = new JsonArray();
         foreach (var attachment in request.Attachments ?? [])
