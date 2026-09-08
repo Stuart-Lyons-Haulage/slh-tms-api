@@ -14,13 +14,15 @@ public sealed class RunGeofenceLinkageController(TmsDbContext db) : ControllerBa
     [HttpGet]
     public async Task<IActionResult> Get([FromQuery] DateOnly date, CancellationToken ct)
     {
-        // Use the same merged planning source and the same reconstructed + durable
-        // RoadTech evidence as Run Progress. The old diagnostics endpoint only read
-        // durable GeofenceVisits by exact LoadStopId, so the progress bar could advance
-        // while this panel incorrectly continued to report "LINKED · NO HIT".
+        // Use the same merged planning source and reconstructed + durable RoadTech evidence
+        // as Run Progress. Build evidence against the full order-level plan first, then collapse
+        // the display journey to physical visits so two orders handled at Selsey/Runcton/etc.
+        // do not appear as two separate wallboard stops.
         var loads = (await PlanningResilience.ReadLoadsAsync(db, date, ct))
             .Where(load => load.Status != LoadStatus.Cancelled)
             .ToList();
+
+        await RunOperationalStore.EnrichAsync(db, loads, ct);
         var resolver = await PlannerSourceMasterDataResolver.CreateAsync(db, ct);
         var geofenceLoads = GeofencePlanningMatch.PrepareLoads(loads);
         var snapshot = await EmbeddedGeofenceEngine.BuildAsync(db, date, geofenceLoads, ct);
@@ -30,20 +32,28 @@ public sealed class RunGeofenceLinkageController(TmsDbContext db) : ControllerBa
             .OrderBy(visit => visit.EnteredAtUtc)
             .ToList();
 
+        // The wallboard is a vehicle-visit view, not an order-line view. Collapse only after
+        // evidence has been reconstructed so historic visits attached to any of the original
+        // duplicate order stop IDs remain available to the representative physical stop.
+        WallboardPhysicalStops.Apply(loads);
+
         var rows = loads
-            .OrderBy(load => load.Reference)
+            .OrderBy(load => load.Stops.Where(stop => stop.PlannedArrivalUtc is not null)
+                .Select(stop => stop.PlannedArrivalUtc)
+                .Min() ?? DateTimeOffset.MaxValue)
+            .ThenBy(load => load.Reference)
             .SelectMany(load =>
             {
-                // Compatibility for runs saved by the old pair-wise planner. The actual
-                // operational route is all collections first, then deliveries. Preserve
-                // each phase's planner order and project fresh display sequence numbers.
                 var stops = OperationalStopOrdering.Order(load.Stops);
                 var finalSequence = stops.Count;
+                var displayRun = RunDisplayLabel.For(load);
+
                 return stops.Select((stop, index) =>
                 {
                     var resolution = resolver.Resolve(stop.Name);
                     var stopVisits = visits
-                        .Where(visit => visit.LoadId == load.Id && visit.LoadStopId == stop.Id)
+                        .Where(visit => visit.LoadId == load.Id)
+                        .Where(visit => visit.LoadStopId == stop.Id || GeofencePlanningMatch.SamePhysicalSite(stop, visit.Fence))
                         .OrderBy(visit => visit.EnteredAtUtc)
                         .ToList();
                     var latestVisit = stopVisits.LastOrDefault();
@@ -57,7 +67,7 @@ public sealed class RunGeofenceLinkageController(TmsDbContext db) : ControllerBa
                     return new
                     {
                         loadId = load.Id,
-                        run = load.Reference,
+                        run = displayRun,
                         vehicleId = load.VehicleId,
                         stopId = stop.Id,
                         sequence = operationalSequence,

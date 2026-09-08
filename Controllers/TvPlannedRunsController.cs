@@ -24,7 +24,14 @@ public sealed class TvPlannedRunsController(TmsDbContext db, IConfiguration conf
         CancellationToken ct)
     {
         var signedInAllowed = User.Identity?.IsAuthenticated == true;
-        var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct);
+        // Older Hisense browser/proxy paths can drop custom request headers. The paired key is
+        // also present on the dedicated TV URL, so accept that same read-only key from ?key= as
+        // a transport fallback. This does not widen access: it is validated against the same
+        // SQL-backed TV display key.
+        var suppliedPairedKey = !string.IsNullOrWhiteSpace(displayKey)
+            ? displayKey
+            : Request.Query.TryGetValue("key", out var queryKey) ? queryKey.FirstOrDefault() : null;
+        var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, suppliedPairedKey, ct);
         var legacyKeyAllowed = TvWallboardAccess.IsAllowed(HttpContext, configuration);
         if (!signedInAllowed && !pairedKeyAllowed && !legacyKeyAllowed)
             return Unauthorized(new { message = "This wallboard request is not authorised." });
@@ -32,7 +39,10 @@ public sealed class TvPlannedRunsController(TmsDbContext db, IConfiguration conf
         var day = date ?? UkOperatingDate(DateTimeOffset.UtcNow);
         var loads = (await PlanningResilience.ReadLoadsAsync(db, day, ct))
             .Where(load => load.PlanningDate == day && load.Status != LoadStatus.Cancelled)
-            .OrderBy(load => load.Reference)
+            .OrderBy(load => load.Stops.Where(stop => stop.PlannedArrivalUtc is not null)
+                .Select(stop => stop.PlannedArrivalUtc)
+                .Min() ?? DateTimeOffset.MaxValue)
+            .ThenBy(load => load.Reference)
             .ToList();
 
         await RunOperationalStore.EnrichAsync(db, loads, ct);

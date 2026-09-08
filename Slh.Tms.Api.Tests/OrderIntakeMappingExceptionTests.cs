@@ -114,7 +114,9 @@ public sealed class OrderIntakeMappingExceptionTests : IClassFixture<CustomWebFa
 
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-        var staged = Assert.Single(db.StagedImports.Where(item => item.PayloadJson.Contains(messageId, StringComparison.OrdinalIgnoreCase)));
+        // Email evidence is deliberately retained alongside the staged order. This regression
+        // validates the order mapping exception rather than counting its audit companion.
+        var staged = Assert.Single(db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains(messageId, StringComparison.OrdinalIgnoreCase)));
         Assert.Equal(StagingStatus.PendingReview, staged.Status);
         using var document = JsonDocument.Parse(staged.PayloadJson);
         Assert.Equal("MappingException", document.RootElement.GetProperty("intakeStatus").GetString());
