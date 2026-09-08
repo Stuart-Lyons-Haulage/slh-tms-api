@@ -100,7 +100,12 @@ public static class GeofencePlanningMatch
             var primaryId = visit.LoadStopId!.Value;
             completed.Add(primaryId);
             var index = ordered.FindIndex(stop => stop.Id == primaryId);
-            if (index < 0) continue;
+            if (index < 0)
+            {
+                foreach (var stop in ordered.Where(stop => SamePhysicalSite(stop, visit.Fence)))
+                    completed.Add(stop.Id);
+                continue;
+            }
 
             for (var i = index - 1; i >= 0 && SamePhysicalSite(ordered[i], visit.Fence); i--)
                 completed.Add(ordered[i].Id);
