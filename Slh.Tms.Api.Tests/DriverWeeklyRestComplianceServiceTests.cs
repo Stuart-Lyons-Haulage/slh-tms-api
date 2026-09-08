@@ -81,6 +81,55 @@ public sealed class DriverWeeklyRestComplianceServiceTests
     }
 
     [Fact]
+    public void Completed_trailing_regular_weekly_rest_resets_window_at_planning_reference()
+    {
+        var driver = TestDriver();
+        var duties = new[]
+        {
+            Duty("2026-08-20T05:00:00Z", "2026-08-20T15:00:00Z"),
+            Duty("2026-08-22T15:00:00Z", "2026-08-22T23:00:00Z"),
+            Duty("2026-08-23T05:00:00Z", "2026-08-23T15:00:00Z"),
+            Duty("2026-08-24T05:00:00Z", "2026-08-24T15:00:00Z"),
+            Duty("2026-08-25T05:00:00Z", "2026-08-25T15:00:00Z"),
+            Duty("2026-08-26T05:00:00Z", "2026-08-26T15:00:00Z"),
+            Duty("2026-08-27T05:00:00Z", "2026-08-27T15:00:00Z")
+        };
+        var referenceUtc = DateTimeOffset.Parse("2026-08-29T14:00:00Z");
+
+        var result = DriverWeeklyRestComplianceService.Evaluate(driver, referenceUtc, duties);
+
+        Assert.Equal("Ready", result.Status);
+        Assert.False(result.IsBlocked);
+        Assert.Equal(referenceUtc, result.LastWeeklyRestEndUtc);
+        Assert.Equal(referenceUtc.AddHours(144), result.WeeklyRestDueUtc);
+        Assert.Equal("Regular45", result.LastWeeklyRestType);
+        Assert.Equal(47, result.LastWeeklyRestHours);
+    }
+
+    [Fact]
+    public void Trailing_gap_under_24_hours_does_not_reset_an_overdue_weekly_rest_window()
+    {
+        var driver = TestDriver();
+        var duties = new[]
+        {
+            Duty("2026-08-20T05:00:00Z", "2026-08-20T15:00:00Z"),
+            Duty("2026-08-22T15:00:00Z", "2026-08-22T23:00:00Z"),
+            Duty("2026-08-23T05:00:00Z", "2026-08-23T15:00:00Z"),
+            Duty("2026-08-24T05:00:00Z", "2026-08-24T15:00:00Z"),
+            Duty("2026-08-25T05:00:00Z", "2026-08-25T15:00:00Z"),
+            Duty("2026-08-26T05:00:00Z", "2026-08-26T15:00:00Z"),
+            Duty("2026-08-27T05:00:00Z", "2026-08-27T15:00:00Z"),
+            Duty("2026-08-28T16:00:00Z", "2026-08-28T18:00:00Z")
+        };
+
+        var result = DriverWeeklyRestComplianceService.Evaluate(driver, DateTimeOffset.Parse("2026-08-29T16:00:00Z"), duties);
+
+        Assert.Equal("Overdue", result.Status);
+        Assert.True(result.IsBlocked);
+        Assert.Equal(DateTimeOffset.Parse("2026-08-28T15:00:00Z"), result.WeeklyRestDueUtc);
+    }
+
+    [Fact]
     public void Twenty_four_hour_gap_is_treated_as_a_reduced_weekly_rest_reset()
     {
         var driver = TestDriver();
