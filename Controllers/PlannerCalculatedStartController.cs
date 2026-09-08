@@ -113,8 +113,10 @@ public sealed class PlannerCalculatedStartController(
         if (lastCompleted?.DutyEndUtc is not DateTimeOffset dutyEnd)
             return PlannerStartSuggestion.Empty(load, firstCollection, existing, latestOnSite, "No completed TachoMaster duty was found. Enter the start manually until Tacho history is available.");
 
-        var shortRestsUsed = Math.Max(0, lastCompleted.ShortDailyRestTakenThisWeek ?? 0);
-        var dailyRestHours = shortRestsUsed < 3 ? 9 : 11;
+        // SLH planning policy always bases tomorrow's planned start on a full 11-hour regular
+        // daily rest. Reduced daily rest can remain legal/compliance evidence, but it is never
+        // used by Calculate Starts to bring the next planned duty forward.
+        var dailyRestHours = 11;
         var restComplete = dutyEnd.AddHours(dailyRestHours);
         var weekly = await weeklyRest.EvaluateAsync(driver, load.PlanningDate, restComplete, ct);
         if (string.Equals(weekly.Status, "Overdue", StringComparison.OrdinalIgnoreCase))
@@ -132,11 +134,11 @@ public sealed class PlannerCalculatedStartController(
 
         var travel = await TravelAsync(origin, firstCollection, firstSite, ct);
         DateTimeOffset? firstEta = travel.Minutes is null ? null : restComplete.AddMinutes(WalkaroundMinutes + travel.Minutes.Value);
-        var explanation = $"Tacho rest complete {Local(restComplete):HH:mm} · 10 min walkaround · {origin.Label} → {CleanStop(firstCollection?.Name) ?? "first collection"}{(travel.Minutes is null ? " · travel time unavailable" : $" {travel.Minutes} min")}.";
+        var explanation = $"Tacho rest complete {Local(restComplete):HH:mm} · planning policy uses minimum 11h regular daily rest · 10 min walkaround · {origin.Label} → {CleanStop(firstCollection?.Name) ?? "first collection"}{(travel.Minutes is null ? " · travel time unavailable" : $" {travel.Minutes} min")}.";
 
         return new PlannerStartSuggestion(load.Id, RunDisplayLabel.For(load), driver.DisplayName, existing?.PlannedStartUtc, existing?.Source,
             restComplete, restComplete, WalkaroundMinutes, origin.Label, travel.Minutes, firstEta, CleanStop(firstCollection?.Name), latestOnSite,
-            dailyRestHours == 45 ? "Weekly rest" : dailyRestHours == 9 ? "Reduced daily rest" : "Regular daily rest", explanation);
+            dailyRestHours == 45 ? "Weekly rest" : "Regular daily rest", explanation);
     }
 
     private async Task<PlannerStartSuggestion> BuildFromActiveDuty(
