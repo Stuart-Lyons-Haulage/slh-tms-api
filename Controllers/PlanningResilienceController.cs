@@ -177,15 +177,19 @@ internal static class PlanningResilience
 
     private static int OperationalScore(Load load)
     {
+        // Operational progression must outrank data richness. A stale InProgress/Dispatched copy
+        // may contain more allocation/capacity fields than the copy that has already reached
+        // Completed; it must never be allowed to move a terminal run backwards. Large status
+        // bands leave plenty of room for the detail score while preserving lifecycle order.
         var score = load.Status switch
         {
-            LoadStatus.Completed => 6000,
-            LoadStatus.InProgress => 5000,
-            LoadStatus.Dispatched => 4000,
-            LoadStatus.Planned => 3000,
-            LoadStatus.Draft => 2000,
+            LoadStatus.Completed => 50000,
+            LoadStatus.InProgress => 40000,
+            LoadStatus.Dispatched => 30000,
+            LoadStatus.Planned => 20000,
+            LoadStatus.Draft => 10000,
             LoadStatus.Cancelled => 0,
-            _ => 1000
+            _ => 5000
         };
         if (load.DriverId is not null) score += 300;
         if (load.VehicleId is not null) score += 300;
