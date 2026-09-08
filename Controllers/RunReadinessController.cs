@@ -34,8 +34,10 @@ public sealed class RunReadinessController(TmsDbContext db) : ControllerBase
             .OrderByDescending(x => x.ReceivedAtUtc).Take(2000).ToListAsync(ct);
         var pendingForDay = pending.Count(x => PayloadMatchesDate(x.PayloadJson, day));
 
-        var assignedDrivers = loads.Where(x => x.DriverId is not null).Select(x => x.DriverId!.Value).Distinct().Count();
-        var assignedVehicles = loads.Where(x => x.VehicleId is not null).Select(x => x.VehicleId!.Value).Distinct().Count();
+        var assignedDriverIds = loads.Where(x => x.DriverId is not null).Select(x => x.DriverId!.Value).Distinct().ToArray();
+        var assignedVehicleIds = loads.Where(x => x.VehicleId is not null).Select(x => x.VehicleId!.Value).Distinct().ToArray();
+        var assignedDrivers = assignedDriverIds.Length;
+        var assignedVehicles = assignedVehicleIds.Length;
         var missingAllocations = loads.Count(x => x.DriverId is null || x.VehicleId is null);
         var vorConflicts = loads.Count(x => x.VehicleId is Guid id && vehicles.TryGetValue(id, out var vehicle) && IsVor(vehicle));
         var tachoConcerns = loads.Count(x => x.DriverId is Guid id && drivers.TryGetValue(id, out var driver) && string.IsNullOrWhiteSpace(driver.TachoName));
@@ -55,6 +57,7 @@ public sealed class RunReadinessController(TmsDbContext db) : ControllerBase
             assignedDrivers,
             activeDrivers = drivers.Count,
             assignedVehicles,
+            assignedVehicleIds,
             activeVehicles = vehicles.Count,
             missingAllocations,
             vorConflicts,
