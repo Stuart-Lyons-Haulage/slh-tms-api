@@ -137,7 +137,6 @@ public sealed class EtaLearningController(TmsDbContext db, IConfiguration config
         var text = value?.Trim() ?? string.Empty;
         foreach (var prefix in new[] { "Collect · ", "Deliver · ", "Collect - ", "Deliver - " })
             if (text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) text = text[prefix.Length..].Trim();
-        var canonical = GeofencePlanningMatch.MatchText(text);
-        return new string(canonical.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+        return new string(text.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
     }
 }
