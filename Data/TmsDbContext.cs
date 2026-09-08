@@ -62,12 +62,43 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         foreach (var loadId in completionTransitions)
             await RunCompletionPersistenceGuard.EnsureCompletionEvidenceAsync(this, loadId, cancellationToken);
 
+        NormalizeMarketOrderProjection();
         EnqueuePendingMasterDataAudits();
         return await base.SaveChangesAsync(cancellationToken);
     }
 
     internal Task<int> SaveAuditReplayChangesAsync(CancellationToken cancellationToken = default) =>
         base.SaveChangesAsync(cancellationToken);
+
+    private void NormalizeMarketOrderProjection()
+    {
+        foreach (var entry in ChangeTracker.Entries<TransportOrder>()
+                     .Where(entry => entry.State is EntityState.Added or EntityState.Modified))
+        {
+            var instructions = entry.Entity.DriverInstructions;
+            if (string.IsNullOrWhiteSpace(instructions)) continue;
+
+            // OrderSiteMasterAlignment writes these tags from Site Master + Markets Master.
+            // Persist the physical Market Site separately from the internal stall/stand so
+            // Approved/Live Loads cannot flatten both values into StallNumber during promotion.
+            var market = TaggedValue(instructions, "Market");
+            var stand = TaggedValue(instructions, "Stall / stand");
+            if (!string.IsNullOrWhiteSpace(market)) entry.Entity.MarketName = Clip(market, 80);
+            if (!string.IsNullOrWhiteSpace(stand)) entry.Entity.StallNumber = Clip(stand, 200);
+        }
+    }
+
+    private static string? TaggedValue(string notes, string label)
+    {
+        var prefix = $"{label}:";
+        var part = notes.Split('·', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .FirstOrDefault(value => value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+        if (string.IsNullOrWhiteSpace(part)) return null;
+        var value = part[prefix.Length..].Trim();
+        return string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+
+    private static string Clip(string value, int maxLength) => value.Length <= maxLength ? value : value[..maxLength];
 
     private void EnqueuePendingMasterDataAudits()
     {
