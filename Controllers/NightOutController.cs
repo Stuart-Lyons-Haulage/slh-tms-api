@@ -22,7 +22,6 @@ public sealed class NightOutController(TmsDbContext db, TachoMasterClient tachoM
         var loads = await db.Loads.AsNoTracking().Include(x => x.Stops)
             .Where(x => x.PlanningDate >= from && x.PlanningDate <= to && x.DriverId != null && x.Status != LoadStatus.Cancelled)
             .OrderBy(x => x.PlanningDate).ThenBy(x => x.Reference).ToListAsync(ct);
-        loads = loads.Where(x => ReadNightOut(x.PlannerNotes) is not null).ToList();
 
         var driverIds = loads.Select(x => x.DriverId!.Value).Distinct().ToList();
         var vehicleIds = loads.Where(x => x.VehicleId != null).Select(x => x.VehicleId!.Value).Distinct().ToList();
@@ -35,7 +34,7 @@ public sealed class NightOutController(TmsDbContext db, TachoMasterClient tachoM
         var startUtc = StartOfUkDay(from);
         var endUtc = StartOfUkDay(to.AddDays(1));
         var trackingEvents = allIdentifiers.Count == 0 ? new List<VehicleTrackingEvent>() : await db.VehicleTrackingEvents.AsNoTracking()
-            .Where(x => x.EventTimeUtc >= startUtc && x.EventTimeUtc < endUtc && allIdentifiers.Contains(x.VehicleIdentifier))
+            .Where(x => x.EventTimeUtc >= startUtc && x.EventTimeUtc < endUtc.AddHours(12) && allIdentifiers.Contains(x.VehicleIdentifier))
             .OrderByDescending(x => x.EventTimeUtc).Take(50000).ToListAsync(ct);
 
         var tachoByDate = new Dictionary<DateOnly, IReadOnlyList<TachoDriverDutyStatus>>();
@@ -58,8 +57,9 @@ public sealed class NightOutController(TmsDbContext db, TachoMasterClient tachoM
                 : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var dayStart = StartOfUkDay(load.PlanningDate);
             var dayEnd = StartOfUkDay(load.PlanningDate.AddDays(1));
+            var overnightEnd = dayEnd.AddHours(9);
             var lastTrack = trackingEvents.FirstOrDefault(x =>
-                x.EventTimeUtc >= dayStart && x.EventTimeUtc < dayEnd &&
+                x.EventTimeUtc >= dayStart && x.EventTimeUtc < overnightEnd &&
                 ExecutionIdentityResolver.MatchesVehicleIdentifier(aliases, x.VehicleIdentifier));
 
             var duties = tachoByDate.TryGetValue(load.PlanningDate, out var dayDuties) ? dayDuties : [];
@@ -69,12 +69,16 @@ public sealed class NightOutController(TmsDbContext db, TachoMasterClient tachoM
                 .OrderByDescending(candidate => candidate.DutyStartUtc)
                 .FirstOrDefault();
             var requested = ReadNightOut(load.PlannerNotes) == true;
+            var cardOpenAcrossMidnight = duty is not null && LiveDriverEvidenceRules.SpansUkMidnight(load.PlanningDate, duty.DutyStartUtc, duty.DutyEndUtc);
             var final = load.Stops.OrderByDescending(x => x.Sequence).FirstOrDefault();
-            var evidenceStatus = !requested ? "No night out"
-                : lastTrack is not null && duty is not null ? "DOT + Tacho evidence captured"
-                : lastTrack is not null ? "DOT evidence captured"
-                : duty is not null ? "Tacho evidence captured"
-                : "Planner confirmation only";
+            var evidenceStatus = cardOpenAcrossMidnight && requested && lastTrack is not null ? "Confirmed - card remained inserted + DOT evidence"
+                : cardOpenAcrossMidnight && requested ? "Confirmed - card/open duty spans midnight"
+                : cardOpenAcrossMidnight && !requested ? "Detected - card remained inserted; planner tick missing"
+                : requested && lastTrack is not null && duty is not null ? "DOT + Tacho evidence captured"
+                : requested && lastTrack is not null ? "DOT evidence captured"
+                : requested && duty is not null ? "Tacho evidence captured"
+                : requested ? "Planner confirmation only"
+                : "No night out evidence";
             return new
             {
                 load.Id,
@@ -84,6 +88,7 @@ public sealed class NightOutController(TmsDbContext db, TachoMasterClient tachoM
                 driverName = driver?.DisplayName,
                 vehicle = vehicle?.Registration,
                 requested,
+                cardOpenAcrossMidnight,
                 finalStop = final?.Name,
                 trackerLastEventUtc = lastTrack?.EventTimeUtc,
                 trackerLatitude = lastTrack?.Latitude,
@@ -94,7 +99,7 @@ public sealed class NightOutController(TmsDbContext db, TachoMasterClient tachoM
                 tachoDutyEndUtc = duty?.DutyEndUtc,
                 evidenceStatus
             };
-        }).ToList();
+        }).Where(row => row.requested || row.cardOpenAcrossMidnight).ToList();
 
         return Ok(new
         {
@@ -102,8 +107,15 @@ public sealed class NightOutController(TmsDbContext db, TachoMasterClient tachoM
             to,
             generatedAtUtc = DateTimeOffset.UtcNow,
             rows,
-            counts = rows.Where(x => x.requested).GroupBy(x => x.driverName ?? "Unknown")
-                .Select(g => new { driver = g.Key, nights = g.Count(), fullyEvidenced = g.Count(x => x.evidenceStatus == "DOT + Tacho evidence captured") })
+            counts = rows.GroupBy(x => x.driverName ?? "Unknown")
+                .Select(g => new
+                {
+                    driver = g.Key,
+                    nights = g.Count(),
+                    planned = g.Count(x => x.requested),
+                    detectedFromOpenCard = g.Count(x => x.cardOpenAcrossMidnight),
+                    plannerTickMissing = g.Count(x => x.cardOpenAcrossMidnight && !x.requested)
+                })
                 .OrderByDescending(x => x.nights)
         });
     }
