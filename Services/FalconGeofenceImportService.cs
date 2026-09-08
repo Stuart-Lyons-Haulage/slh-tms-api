@@ -10,6 +10,11 @@ namespace Slh.Tms.Api.Services;
 
 public static class FalconGeofenceImportService
 {
+    private static readonly HashSet<string> RenameNoiseTokens = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "GEOFENCE", "SITE", "DEPOT", "WAREHOUSE", "BUILDING", "UNIT"
+    };
+
     public static async Task<FalconGeofenceImportPreview> PreviewAsync(TmsDbContext db, JsonElement payload, CancellationToken ct)
     {
         var parsed = Parse(payload);
@@ -47,9 +52,12 @@ public static class FalconGeofenceImportService
             if (exactSites.Count == 1)
                 return Row(row, "Matched", null, exactSites[0], null, null);
 
-            existingByFingerprint.TryGetValue(row.Fingerprint, out var renamed);
-            if (renamed is not null)
-                return Row(row, "PossibleRename", "The polygon matches an existing geofence with a different name.", null, null, renamed.Id);
+            existingByFingerprint.TryGetValue(row.Fingerprint, out var sameBoundary);
+            if (sameBoundary is not null && NamesSupportRename(row.Name, sameBoundary.Name))
+                return Row(row, "PossibleRename", "The polygon and geofence name closely match an existing geofence. Confirm a rename only if it is genuinely the same operational location.", null, null, sameBoundary.Id);
+
+            if (sameBoundary is not null)
+                return Row(row, "NeedsLinking", $"This boundary is also used by '{sameBoundary.Name}'. Different buildings/localities may share a site boundary, so this geofence will remain a separate record unless you explicitly link it to a Site.");
 
             return Row(row, "NeedsLinking", exactSites.Count > 1 ? "More than one Site has the same normalized name." : null);
         }).ToList();
@@ -113,7 +121,7 @@ public static class FalconGeofenceImportService
                 }
 
                 existingByName.TryGetValue(row.NormalizedName, out var fence);
-                if (fence is null && existingByFingerprint.TryGetValue(row.Fingerprint, out var possibleRename))
+                if (fence is null && existingByFingerprint.TryGetValue(row.Fingerprint, out var possibleRename) && NamesSupportRename(row.Name, possibleRename.Name))
                 {
                     if (decision?.ConfirmRenameGeofenceId != possibleRename.Id)
                         throw new FalconGeofenceValidationException($"Geofence '{row.Name}' is a possible rename and requires confirmation.");
@@ -206,6 +214,34 @@ public static class FalconGeofenceImportService
             if (transaction is not null) await transaction.DisposeAsync();
         }
     }
+
+    internal static bool NamesSupportRename(string? incomingName, string? existingName)
+    {
+        var incoming = Normalize(incomingName);
+        var existing = Normalize(existingName);
+        if (incoming.Length == 0 || existing.Length == 0) return false;
+        if (string.Equals(incoming, existing, StringComparison.OrdinalIgnoreCase)) return true;
+
+        if ((incoming.Contains(existing, StringComparison.OrdinalIgnoreCase) || existing.Contains(incoming, StringComparison.OrdinalIgnoreCase))
+            && Math.Min(incoming.Length, existing.Length) >= Math.Max(incoming.Length, existing.Length) * 0.6)
+            return true;
+
+        var left = RenameTokens(incoming);
+        var right = RenameTokens(existing);
+        if (left.Count == 0 || right.Count == 0) return false;
+        var intersection = left.Intersect(right, StringComparer.OrdinalIgnoreCase).Count();
+        var union = left.Union(right, StringComparer.OrdinalIgnoreCase).Count();
+        return union > 0 && (double)intersection / union >= 0.75;
+    }
+
+    private static HashSet<string> RenameTokens(string value) =>
+        new(value
+            .Select(character => char.IsLetterOrDigit(character) ? char.ToUpperInvariant(character) : ' ')
+            .ToArray()
+            .AsSpan()
+            .ToString()
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(token => token.Length > 1 && !RenameNoiseTokens.Contains(token)), StringComparer.OrdinalIgnoreCase);
 
     private static FalconParsedExport Parse(JsonElement payload)
     {
