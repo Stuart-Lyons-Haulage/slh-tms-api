@@ -3,9 +3,12 @@ using Slh.Tms.Api.Models;
 namespace Slh.Tms.Api.Services;
 
 /// <summary>
-/// Calculates the driver's current/planned 24-hour period from TachoMaster duty history.
-/// A gap of at least 24 continuous hours is treated as a weekly-rest cycle reset for
-/// Driver Dispatch planning purposes. This is deliberately independent of TMS run allocation.
+/// Calculates the driver's current/planned duty-day number from TachoMaster duty history.
+/// Day numbers count actual duty periods in the current cycle rather than elapsed 24-hour
+/// clock periods, so changing sign-on times cannot incorrectly reset a driver to Day 1.
+/// A gap of at least 24 continuous hours is retained as the existing reduced weekly-rest
+/// cycle reset threshold for this planning indicator; weekly-rest compliance remains the
+/// authoritative legal check elsewhere.
 /// </summary>
 public static class DriverDayCycleCalculator
 {
@@ -30,9 +33,25 @@ public static class DriverDayCycleCalculator
         var blocks = MergeOverlappingDuties(relevant, referenceUtc);
         if (blocks.Count == 0) return 1;
 
-        // If the driver has not started another duty and has already accumulated 24+ hours
-        // since the last completed duty, the prospective duty starts a new weekly-rest cycle.
-        var last = blocks[^1];
+        // Find the first duty block in the current cycle. This deliberately counts real duty
+        // periods rather than dividing wall-clock time since cycle start by 24 hours. A driver
+        // who worked Monday and Tuesday therefore projects to Day 3 on Wednesday even if the
+        // sign-on time has moved between those days.
+        var cycleStartIndex = 0;
+        for (var index = 1; index < blocks.Count; index++)
+        {
+            var previous = blocks[index - 1];
+            var current = blocks[index];
+            if (previous.EndUtc is DateTimeOffset previousEnd && current.StartUtc - previousEnd >= WeeklyRestReset)
+                cycleStartIndex = index;
+        }
+
+        var currentCycle = blocks.Skip(cycleStartIndex).ToList();
+        if (currentCycle.Count == 0) return 1;
+
+        // If no new duty has started and the driver has already accumulated a weekly-rest-sized
+        // gap before the prospective planning duty, the next duty is Day 1.
+        var last = currentCycle[^1];
         if (last.EndUtc is DateTimeOffset lastEnd &&
             lastEnd < referenceUtc &&
             referenceUtc - lastEnd >= WeeklyRestReset)
@@ -40,22 +59,12 @@ public static class DriverDayCycleCalculator
             return 1;
         }
 
-        var cycleStartUtc = blocks[0].StartUtc;
-        for (var index = 1; index < blocks.Count; index++)
-        {
-            var previous = blocks[index - 1];
-            var current = blocks[index];
-            if (previous.EndUtc is not DateTimeOffset previousEnd) continue;
-            if (current.StartUtc - previousEnd >= WeeklyRestReset)
-                cycleStartUtc = current.StartUtc;
-        }
-
-        var elapsed = referenceUtc - cycleStartUtc;
-        if (elapsed <= TimeSpan.Zero) return 1;
+        var hasDutyOnPlanningDate = currentCycle.Any(block => LondonDate(block.StartUtc) == planningDate);
+        var projectedPeriods = currentCycle.Count + (hasDutyOnPlanningDate ? 0 : 1);
 
         // Day 7 is intentionally retained as an exception signal rather than wrapping to Day 1.
         // A compliant weekly rest should have reset the cycle before this point.
-        return Math.Clamp((int)Math.Floor(elapsed.TotalHours / 24d) + 1, 1, 7);
+        return Math.Clamp(projectedPeriods, 1, 7);
     }
 
     public static bool MatchesDriver(Driver driver, TachoDriverDutyStatus duty)
@@ -93,9 +102,9 @@ public static class DriverDayCycleCalculator
             .FirstOrDefault();
         if (dutyOnPlanningDate is not null) return dutyOnPlanningDate.DutyStartUtc;
 
-        // With no run or duty yet, project the driver's own most recent sign-on time onto the
-        // planning date. This keeps day/night drivers anchored to their actual Tacho pattern
-        // without making Driver Dispatch dependent on a TMS run start time.
+        // With no duty yet, project the driver's own most recent sign-on time onto the planning
+        // date. This is only used to decide whether a qualifying rest gap exists; the Day number
+        // itself is counted from actual duty periods.
         var previousDuty = duties
             .Where(item => LondonDate(item.DutyStartUtc) < planningDate)
             .OrderByDescending(item => item.DutyStartUtc)
