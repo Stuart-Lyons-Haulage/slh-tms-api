@@ -33,6 +33,7 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
             merged[load.Id] = load;
 
         var rows = merged.Values.OrderBy(x => x.PlanningDate).ThenBy(x => x.Reference).Take(1000).ToList();
+        foreach (var load in rows) load.Stops = RenumberOperationalStops(load.Stops);
         await RunOperationalStore.EnrichAsync(db, rows, ct);
         return Ok(rows);
     }
@@ -109,7 +110,13 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
         if (load is null) return NotFound(new { message = "The run could not be found." });
 
         if (!register) db.LoadStops.RemoveRange(load.Stops);
-        load.Stops = request.Select((stop, index) => new LoadStop
+        var orderedRequest = request
+            .Select((stop, index) => new { Stop = stop, Index = index })
+            .OrderBy(item => OperationalStopOrdering.Phase(item.Stop.Name))
+            .ThenBy(item => item.Index)
+            .Select(item => item.Stop)
+            .ToList();
+        load.Stops = orderedRequest.Select((stop, index) => new LoadStop
         {
             Id = Guid.NewGuid(),
             LoadId = load.Id,
@@ -133,9 +140,8 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
     {
         var (load, _) = await FindLoadAsync(id, includeStops: true, tracking: false, ct);
         if (load is null) return NotFound(new { message = "The run could not be found." });
-        var points = load.Stops
+        var points = OperationalStopOrdering.Order(load.Stops)
             .Where(x => x.Longitude is not null && x.Latitude is not null)
-            .OrderBy(x => x.Sequence)
             .Select(x => (x.Longitude!.Value, x.Latitude!.Value))
             .ToList();
         if (points.Count < 2) return BadRequest(new { message = "At least two mapped stops are required before calculating a route." });
@@ -152,6 +158,7 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
         var driver = load.DriverId is null ? null : await db.Drivers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == load.DriverId, ct);
         var vehicle = load.VehicleId is null ? null : await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(x => x.Id == load.VehicleId, ct);
         var trailer = load.TrailerId is null ? null : await db.Trailers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == load.TrailerId, ct);
+        var orderedStops = OperationalStopOrdering.Order(load.Stops);
 
         return Ok(new
         {
@@ -162,10 +169,10 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
             driver = driver is null ? null : new { driver.DisplayName, driver.EmployeeNumber, driver.MobileNumber },
             vehicle = vehicle is null ? null : new { vehicle.Registration, vehicle.FleetNumber },
             trailer = trailer is null ? null : new { trailer.TrailerNumber, trailer.Type },
-            stops = load.Stops.OrderBy(x => x.Sequence).Select(stop => new
+            stops = orderedStops.Select((stop, index) => new
             {
                 stop.Id,
-                stop.Sequence,
+                sequence = index + 1,
                 stop.Name,
                 stop.Address,
                 stop.Latitude,
@@ -253,6 +260,14 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
             await PlanningRegisterStore.SaveLoadAsync(db, load, User.Identity?.Name, ct);
         }
     }
+
+    private static List<LoadStop> RenumberOperationalStops(IEnumerable<LoadStop>? stops) => OperationalStopOrdering.Order(stops)
+        .Select((stop, index) =>
+        {
+            stop.Sequence = index + 1;
+            return stop;
+        })
+        .ToList();
 
     private static string? Clip(string? value, int length) => string.IsNullOrWhiteSpace(value) ? null : value.Trim()[..Math.Min(value.Trim().Length, length)];
     private static bool CanTransition(LoadStatus current, LoadStatus next) => current == next || (current, next) switch

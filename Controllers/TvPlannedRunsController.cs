@@ -36,7 +36,17 @@ public sealed class TvPlannedRunsController(TmsDbContext db, IConfiguration conf
             .ToList();
 
         await RunOperationalStore.EnrichAsync(db, loads, ct);
-        foreach (var load in loads) OvernightRunContinuity.Apply(load);
+        foreach (var load in loads)
+        {
+            OvernightRunContinuity.Apply(load);
+            load.Stops = OperationalStopOrdering.Order(load.Stops)
+                .Select((stop, index) =>
+                {
+                    stop.Sequence = index + 1;
+                    return stop;
+                })
+                .ToList();
+        }
         return Ok(loads);
     }
 

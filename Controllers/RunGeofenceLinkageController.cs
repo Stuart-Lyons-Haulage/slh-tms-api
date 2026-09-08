@@ -34,9 +34,12 @@ public sealed class RunGeofenceLinkageController(TmsDbContext db) : ControllerBa
             .OrderBy(load => load.Reference)
             .SelectMany(load =>
             {
-                var stops = (load.Stops ?? []).OrderBy(stop => stop.Sequence).ToList();
-                var finalSequence = stops.Count == 0 ? 0 : stops.Max(stop => stop.Sequence);
-                return stops.Select(stop =>
+                // Compatibility for runs saved by the old pair-wise planner. The actual
+                // operational route is all collections first, then deliveries. Preserve
+                // each phase's planner order and project fresh display sequence numbers.
+                var stops = OperationalStopOrdering.Order(load.Stops);
+                var finalSequence = stops.Count;
+                return stops.Select((stop, index) =>
                 {
                     var resolution = resolver.Resolve(stop.Name);
                     var stopVisits = visits
@@ -49,6 +52,7 @@ public sealed class RunGeofenceLinkageController(TmsDbContext db) : ControllerBa
                         : !resolution.GeofenceLinked
                             ? "SiteMatchedGeofenceUnlinked"
                             : null;
+                    var operationalSequence = index + 1;
 
                     return new
                     {
@@ -56,9 +60,9 @@ public sealed class RunGeofenceLinkageController(TmsDbContext db) : ControllerBa
                         run = load.Reference,
                         vehicleId = load.VehicleId,
                         stopId = stop.Id,
-                        stop.Sequence,
+                        sequence = operationalSequence,
                         stopName = stop.Name,
-                        finalDelivery = stop.Sequence == finalSequence,
+                        finalDelivery = operationalSequence == finalSequence,
                         siteMatched = resolution.SiteMatched,
                         siteCode = resolution.SiteNumber,
                         siteName = resolution.SiteName,
