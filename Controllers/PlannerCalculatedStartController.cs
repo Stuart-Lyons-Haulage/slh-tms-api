@@ -131,7 +131,7 @@ public sealed class PlannerCalculatedStartController(
         }
 
         var travel = await TravelAsync(origin, firstCollection, firstSite, ct);
-        var firstEta = travel.Minutes is null ? null : restComplete.AddMinutes(WalkaroundMinutes + travel.Minutes.Value);
+        DateTimeOffset? firstEta = travel.Minutes is null ? null : restComplete.AddMinutes(WalkaroundMinutes + travel.Minutes.Value);
         var explanation = $"Tacho rest complete {Local(restComplete):HH:mm} · 10 min walkaround · {origin.Label} → {CleanStop(firstCollection?.Name) ?? "first collection"}{(travel.Minutes is null ? " · travel time unavailable" : $" {travel.Minutes} min")}.";
 
         return new PlannerStartSuggestion(load.Id, RunDisplayLabel.For(load), driver.DisplayName, existing?.PlannedStartUtc, existing?.Source,
