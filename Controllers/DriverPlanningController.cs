@@ -22,57 +22,12 @@ public sealed class DriverPlanningController(TmsDbContext db, IConfiguration con
         if (lastDate < firstDate || lastDate.DayNumber - firstDate.DayNumber > 92)
             return BadRequest("Choose a valid date range of no more than 93 days.");
 
-        List<Load> loads;
-        try
-        {
-            loads = await db.Loads.AsNoTracking().Include(load => load.Stops)
-                .Where(load => load.PlanningDate >= firstDate && load.PlanningDate <= lastDate)
-                .OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference).Take(2000).ToListAsync(ct);
-        }
-        catch (Exception exception) when (IsSchemaUnavailable(exception))
-        {
-            db.ChangeTracker.Clear();
-            loads = (await PlanningRegisterStore.ReadLoadsAsync(db, null, ct))
-                .Where(load => load.PlanningDate >= firstDate && load.PlanningDate <= lastDate)
-                .OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference)
-                .Take(2000).ToList();
-        }
-
-        try
-        {
-            var registerLoads = (await PlanningRegisterStore.ReadLoadsAsync(db, null, ct))
-                .Where(load => load.PlanningDate >= firstDate && load.PlanningDate <= lastDate)
-                .OrderBy(load => load.PlanningDate).ThenBy(load => load.Reference)
-                .Take(2000)
-                .ToList();
-
-            foreach (var registerLoad in registerLoads)
-            {
-                var index = loads.FindIndex(load => load.Id == registerLoad.Id);
-                if (index < 0)
-                {
-                    loads.Add(registerLoad);
-                    continue;
-                }
-
-                // Live SQL is the authoritative execution copy because RoadTech/geofence
-                // progression advances its status to InProgress/Completed. Do not let an
-                // older Planning Register snapshot downgrade that live status. The only
-                // exception is the existing resilience rule for a cancelled SQL tombstone.
-                var liveLoad = loads[index];
-                if (PlanningResilience.KeepRegisteredOverLiveTombstone(registerLoad, liveLoad))
-                    loads[index] = registerLoad;
-            }
-        }
-        catch (Exception) when (!ct.IsCancellationRequested)
-        {
-            db.ChangeTracker.Clear();
-        }
-
-        // SQL Loads and the resilient Planning Register can temporarily contain the same
-        // real-world run under different GUIDs. The Dashboard must report one operational
-        // run, not one row per persistence copy.
-        loads = PlanningResilience.CollapseLogicalDuplicates(loads)
+        // Driver Dispatch writes allocation to the resilient Planning Register whenever a
+        // register copy exists. Read assignments through the same production merger used by
+        // the Wallboard planned-runs feed so a stale dbo.Loads copy cannot hide the newly
+        // allocated DriverId / VehicleId / TrailerId and leave the board showing TBC.
+        var loads = (await PlanningResilience.ReadLoadsAsync(db, null, ct))
+            .Where(load => load.PlanningDate >= firstDate && load.PlanningDate <= lastDate)
             .OrderBy(load => load.PlanningDate)
             .ThenBy(load => load.Reference)
             .Take(2000)
