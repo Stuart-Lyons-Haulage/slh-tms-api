@@ -44,8 +44,11 @@ internal static class PlanningResilience
             TmsMetrics.Shared.RecordPlanningRecovery(relationalFallbacks, "relational_loads");
             foreach (var load in live)
             {
-                if (merged.TryGetValue(load.Id, out var registered) && KeepRegisteredOverLiveTombstone(registered, load))
+                if (merged.TryGetValue(load.Id, out var registered))
+                {
+                    merged[load.Id] = PreferSameIdCopy(registered, load);
                     continue;
+                }
                 merged[load.Id] = load;
             }
         }
@@ -102,6 +105,34 @@ internal static class PlanningResilience
 
     internal static bool KeepRegisteredOverLiveTombstone(Load registered, Load live) =>
         live.Status == LoadStatus.Cancelled && registered.Status != LoadStatus.Cancelled;
+
+    /// <summary>
+    /// A run can exist with the same GUID in both the Planning Register and dbo.Loads.
+    /// Allocation writes deliberately target the register when that resilient copy exists,
+    /// while older core rows can remain stale. Choose the stronger operational copy and merge
+    /// missing detail from the other copy so a successful Driver Dispatch allocation survives
+    /// the very next workbench refresh. Executed live progress still wins over a merely planned
+    /// register copy.
+    /// </summary>
+    internal static Load PreferSameIdCopy(Load registered, Load live)
+    {
+        if (KeepRegisteredOverLiveTombstone(registered, live))
+        {
+            MergeMissingOperationalData(registered, live);
+            return registered;
+        }
+
+        var registeredScore = OperationalScore(registered);
+        var liveScore = OperationalScore(live);
+        if (registeredScore >= liveScore)
+        {
+            MergeMissingOperationalData(registered, live);
+            return registered;
+        }
+
+        MergeMissingOperationalData(live, registered);
+        return live;
+    }
 
     /// <summary>
     /// SQL Loads and the Planning Register can temporarily contain the same real-world run
