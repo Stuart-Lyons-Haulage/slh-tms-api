@@ -43,6 +43,8 @@ public sealed class TvRouteProgressController(
             .Where(load => load.Status != LoadStatus.Cancelled)
             .OrderBy(load => load.Reference)
             .ToList();
+        await RunOperationalStore.EnrichAsync(db, loads, ct);
+        WallboardPhysicalStops.Apply(loads);
 
         // TV reads must remain bounded. Current RoadTech ingestion and the shared geofence
         // engine run continuously in the background; a display refresh must consume that durable

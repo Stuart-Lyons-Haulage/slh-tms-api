@@ -77,6 +77,8 @@ public sealed class RunProgressController(
                 .Where(x => x.Status != LoadStatus.Cancelled)
                 .OrderBy(x => x.Reference)
                 .ToList();
+            await RunOperationalStore.EnrichAsync(db, loads, ct);
+            WallboardPhysicalStops.Apply(loads);
 
             // Embedded reconstruction remains an in-memory resilience source for tracking
             // coverage. MergeDurableProjectionAsync replaces its visit evidence with active
@@ -150,6 +152,8 @@ public sealed class RunProgressController(
                 loads = (await PlanningResilience.ReadLoadsAsync(db, planningDate, ct))
                     .Where(load => load.Status != LoadStatus.Cancelled)
                     .ToList();
+                await RunOperationalStore.EnrichAsync(db, loads, ct);
+                WallboardPhysicalStops.Apply(loads);
             }
             catch
             {
