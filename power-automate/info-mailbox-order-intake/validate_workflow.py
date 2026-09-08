@@ -53,8 +53,8 @@ def validate(workflow):
 
     submit_scope = actions.get("Scope_Submit_To_TMS", {})
     receive_run_after = set(submit_scope.get("runAfter", {}).get("Scope_Receive_Source", []))
-    if not {"Succeeded", "Failed", "TimedOut"}.issubset(receive_run_after):
-        errors.append("TMS submission must still run when attachment retrieval fails or times out")
+    if receive_run_after != {"Succeeded"}:
+        errors.append("TMS submission must run only after attachment retrieval succeeds")
 
     for node in _walk(actions):
         if not isinstance(node, dict) or "runtimeConfiguration" not in node:
