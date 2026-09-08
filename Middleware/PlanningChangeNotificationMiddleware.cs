@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Text;
 using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Middleware;
@@ -44,12 +43,10 @@ public sealed class PlanningChangeNotificationMiddleware(RequestDelegate next)
             try
             {
                 await next(context);
-                buffer.Position = 0;
                 var body = buffer.ToArray();
                 if (context.Response.StatusCode is >= 200 and < 300 && IsCacheableContent(context.Response.ContentType))
                     ReadCache[cacheKey] = new CachedResponse(DateTimeOffset.UtcNow.Add(cacheTtl), context.Response.StatusCode, context.Response.ContentType, body);
                 context.Response.Body = originalBody;
-                context.Response.ContentLength = body.Length;
                 await originalBody.WriteAsync(body, context.RequestAborted);
             }
             finally
