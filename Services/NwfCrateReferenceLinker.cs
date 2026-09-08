@@ -71,6 +71,11 @@ public static class NwfCrateReferenceLinker
         var reference = FirstText(source.Payload, "loadReference", "loadRef", "collectionReference", "cratePo", "transportPo");
         if (!string.IsNullOrWhiteSpace(reference) && Missing(Text(payload, "loadReference")))
             payload["loadReference"] = reference;
+        // Existing Order Review versions already recognise customerRef as an
+        // operational driver reference, so expose the linked dump identity
+        // there as well as in the more specific crate/load fields.
+        if (!string.IsNullOrWhiteSpace(reference) && Missing(Text(payload, "customerRef")))
+            payload["customerRef"] = reference;
 
         var collection = FirstText(source.Payload, "sellerName", "collectionSite", "collectionLocation", "collectionDepot");
         if (!string.IsNullOrWhiteSpace(collection) && Missing(Text(payload, "sellerName")))
