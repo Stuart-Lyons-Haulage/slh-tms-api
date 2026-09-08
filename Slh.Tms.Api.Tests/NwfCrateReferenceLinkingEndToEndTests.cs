@@ -67,7 +67,7 @@ public sealed class NwfCrateReferenceLinkingEndToEndTests : IClassFixture<Custom
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-            var staged = Assert.Single(await db.StagedImports.Where(row => row.PayloadJson.Contains(messageId)).ToListAsync());
+            var staged = Assert.Single(await db.StagedImports.Where(row => row.EntityType == "order" && row.PayloadJson.Contains(messageId)).ToListAsync());
             stagedId = staged.Id;
             using var payload = JsonDocument.Parse(staged.PayloadJson);
             Assert.Equal(reference, payload.RootElement.GetProperty("collectionReference").GetString());
