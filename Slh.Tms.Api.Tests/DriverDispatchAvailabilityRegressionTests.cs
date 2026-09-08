@@ -1,3 +1,4 @@
+using Slh.Tms.Api.Controllers;
 using Xunit;
 
 namespace Slh.Tms.Api.Tests;
@@ -13,6 +14,46 @@ public sealed class DriverDispatchAvailabilityRegressionTests
         Assert.Contains("return new(\"Unavailable\", weekly.Message);", source);
         Assert.Contains("DriveAvailablePlanningDayMinutes", source);
         Assert.Contains("AvailabilityStatus", source);
+    }
+
+    [Fact]
+    public void Proven_weekly_rest_resets_stale_tms_day_cross_check()
+    {
+        var planningDate = new DateOnly(2026, 9, 9);
+        var executedDates = new[]
+        {
+            new DateOnly(2026, 9, 3),
+            new DateOnly(2026, 9, 4),
+            new DateOnly(2026, 9, 5),
+            new DateOnly(2026, 9, 6),
+            new DateOnly(2026, 9, 7),
+            new DateOnly(2026, 9, 8)
+        };
+
+        var projected = DriverDispatchStatusController.ReconcileProjectedDay(
+            planningDate,
+            tachoProjectedDay: 1,
+            matchedDutyCount: 1,
+            executedDates,
+            lastWeeklyRestEndUtc: DateTimeOffset.Parse("2026-09-07T05:00:00Z"));
+
+        Assert.Equal(3, projected);
+    }
+
+    [Fact]
+    public void Without_proven_weekly_rest_tms_cross_check_remains_conservative()
+    {
+        var planningDate = new DateOnly(2026, 9, 9);
+        var executedDates = Enumerable.Range(3, 6).Select(day => new DateOnly(2026, 9, day));
+
+        var projected = DriverDispatchStatusController.ReconcileProjectedDay(
+            planningDate,
+            tachoProjectedDay: 1,
+            matchedDutyCount: 1,
+            executedDates,
+            lastWeeklyRestEndUtc: null);
+
+        Assert.Equal(7, projected);
     }
 
     [Fact]
