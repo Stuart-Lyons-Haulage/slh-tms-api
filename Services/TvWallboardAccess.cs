@@ -16,11 +16,23 @@ public static class TvWallboardAccess
         // users must not depend on a particular claim shape to use the wallboard APIs.
         if (context.User.Identity?.IsAuthenticated == true) return true;
 
-        var configuredKey = ReadConfiguredKey(configuration);
-        if (string.IsNullOrWhiteSpace(configuredKey) || configuredKey.Length < 24) return false;
+        var configuredKey = ConfiguredKey(configuration);
+        if (string.IsNullOrWhiteSpace(configuredKey)) return false;
 
         var suppliedKey = ReadSuppliedKey(context.Request);
         return !string.IsNullOrWhiteSpace(suppliedKey) && FixedEquals(configuredKey, suppliedKey);
+    }
+
+    /// <summary>
+    /// Returns the existing server-side read-only wallboard key when it is strong enough
+    /// for public-TV transport. The six-digit pairing code remains the gate used to reveal
+    /// this key; using the same key afterwards lets older TV browsers authenticate every
+    /// wallboard feed via ?key= even when they strip custom request headers.
+    /// </summary>
+    public static string? ConfiguredKey(IConfiguration configuration)
+    {
+        var value = ReadConfiguredKey(configuration);
+        return string.IsNullOrWhiteSpace(value) || value.Length < 24 ? null : value;
     }
 
     private static string? ReadConfiguredKey(IConfiguration configuration) =>
@@ -39,6 +51,8 @@ public static class TvWallboardAccess
     {
         if (request.Headers.TryGetValue(HeaderName, out var headerValue))
             return headerValue.FirstOrDefault()?.Trim();
+        if (request.Headers.TryGetValue("X-TV-Display-Key", out var displayHeaderValue))
+            return displayHeaderValue.FirstOrDefault()?.Trim();
         if (request.Query.TryGetValue("key", out var queryValue))
             return queryValue.FirstOrDefault()?.Trim();
         return null;
