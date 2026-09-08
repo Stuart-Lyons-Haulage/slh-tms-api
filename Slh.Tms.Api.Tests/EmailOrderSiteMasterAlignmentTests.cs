@@ -110,4 +110,53 @@ public sealed class EmailOrderSiteMasterAlignmentTests : IClassFixture<CustomWeb
         Assert.Equal(depot.Id.ToString(), root.GetProperty("depotSiteId").GetString());
         Assert.Equal(destination.Id.ToString(), root.GetProperty("deliverySiteId").GetString());
     }
+
+    [Fact]
+    public async Task Market_customer_keeps_stall_identity_while_delivery_site_becomes_physical_market()
+    {
+        await using var scope = factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var market = new Site
+        {
+            Id = Guid.NewGuid(),
+            ExternalCode = $"COV-{suffix}",
+            Name = $"New Covent Garden Market {suffix}",
+            DriverTextName = $"New Covent Garden Market {suffix}",
+            Active = true
+        };
+        var trader = new MarketContact
+        {
+            Id = Guid.NewGuid(),
+            Market = "Covent",
+            Name = $"Trader {suffix}",
+            StandOrLocation = $"Stand D12-{suffix}",
+            Active = true
+        };
+        db.Sites.Add(market);
+        db.MarketContacts.Add(trader);
+        await db.SaveChangesAsync();
+
+        var payload = JsonSerializer.SerializeToElement(new
+        {
+            poNumber = $"MKT-{suffix}",
+            customerCode = "MARKET",
+            marketName = "COVENTGARDEN",
+            stallNumber = trader.Name
+        });
+        var parsed = new EmailIntakeParseResult(
+            [new ParsedEmailOrder($"market-{suffix}", $"market-{suffix}", payload, [])],
+            [],
+            null);
+
+        var aligned = await EmailOrderSiteMasterAlignment.AlignAsync(db, parsed, CancellationToken.None);
+        var root = aligned.Orders.Single().Payload;
+
+        Assert.Equal(market.DriverTextName, root.GetProperty("marketName").GetString());
+        Assert.Equal(market.DriverTextName, root.GetProperty("deliverySite").GetString());
+        Assert.Equal(trader.Name, root.GetProperty("stallNumber").GetString());
+        Assert.Equal(trader.Name, root.GetProperty("sourceStallNumber").GetString());
+        Assert.Equal(market.Id.ToString(), root.GetProperty("deliverySiteId").GetString());
+        Assert.Equal(market.Id.ToString(), root.GetProperty("depotSiteId").GetString());
+    }
 }
