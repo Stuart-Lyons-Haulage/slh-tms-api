@@ -51,6 +51,9 @@ public sealed class MarketOrderAlignmentTests : IClassFixture<CustomWebFactory>
         var alignment = await OrderSiteMasterAlignment.ResolveAsync(db, payload.RootElement, CancellationToken.None);
 
         Assert.Equal(site.DriverTextName, alignment.DeliveryName);
+        Assert.Equal(customer.Name, alignment.MarketCustomer);
+        Assert.Equal(customer.StandOrLocation, alignment.MarketStand);
+        Assert.Equal(customer.Salesman, alignment.MarketSalesman);
         Assert.Contains($"Market: {site.DriverTextName}", alignment.DriverInstructions);
         Assert.Contains($"Market customer: {customer.Name}", alignment.DriverInstructions);
         Assert.Contains($"Stall / stand: {customer.StandOrLocation}", alignment.DriverInstructions);
@@ -58,7 +61,7 @@ public sealed class MarketOrderAlignmentTests : IClassFixture<CustomWebFactory>
     }
 
     [Fact]
-    public async Task Ambiguous_market_customer_is_not_guessed()
+    public async Task Ambiguous_market_customer_still_uses_market_site_geofence_without_guessing_stall()
     {
         await using var scope = factory.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
@@ -85,8 +88,51 @@ public sealed class MarketOrderAlignmentTests : IClassFixture<CustomWebFactory>
 
         var alignment = await OrderSiteMasterAlignment.ResolveAsync(db, payload.RootElement, CancellationToken.None);
 
-        Assert.Equal($"Same Trader {suffix}", alignment.DeliveryName);
+        Assert.Equal(site.DriverTextName, alignment.DeliveryName);
+        Assert.Null(alignment.MarketCustomer);
+        Assert.Null(alignment.MarketStand);
         Assert.DoesNotContain("Market customer:", alignment.DriverInstructions ?? string.Empty);
+        Assert.DoesNotContain("Stall / stand:", alignment.DriverInstructions ?? string.Empty);
+    }
+
+    [Fact]
+    public async Task Market_customer_without_stand_keeps_customer_and_market_site_without_inventing_stall()
+    {
+        await using var scope = factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var suffix = Guid.NewGuid().ToString("N")[..6];
+        var site = new Site
+        {
+            Id = Guid.NewGuid(),
+            ExternalCode = $"WES-{suffix}",
+            Name = $"Western International Market {suffix}",
+            DriverTextName = $"Western International Market {suffix}",
+            Active = true
+        };
+        var customer = new MarketContact
+        {
+            Id = Guid.NewGuid(),
+            Market = "Western",
+            Name = $"Fresh Trader {suffix}",
+            StandOrLocation = null,
+            Active = true
+        };
+        db.Sites.Add(site);
+        db.MarketContacts.Add(customer);
+        await db.SaveChangesAsync();
+
+        using var payload = JsonDocument.Parse(JsonSerializer.Serialize(new
+        {
+            marketName = site.Name,
+            stallNumber = customer.Name
+        }));
+
+        var alignment = await OrderSiteMasterAlignment.ResolveAsync(db, payload.RootElement, CancellationToken.None);
+
+        Assert.Equal(site.DriverTextName, alignment.DeliveryName);
+        Assert.Equal(customer.Name, alignment.MarketCustomer);
+        Assert.Null(alignment.MarketStand);
+        Assert.Contains($"Market customer: {customer.Name}", alignment.DriverInstructions);
         Assert.DoesNotContain("Stall / stand:", alignment.DriverInstructions ?? string.Empty);
     }
 }
