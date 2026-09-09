@@ -194,7 +194,7 @@ public sealed class PlannerCalculatedStartController(
                     "TachoMaster shows an open duty but no working time remaining this week. Re-plan before dispatch.");
 
             var start = now;
-            var firstEta = travel.Minutes is null ? null : start.AddMinutes(WalkaroundMinutes + travel.Minutes.Value);
+            DateTimeOffset? firstEta = travel.Minutes is null ? null : start.AddMinutes(WalkaroundMinutes + travel.Minutes.Value);
             var drive = latestDuty.DriveAvailableTodayMinutes is int driveMinutes ? $" · {driveMinutes / 60d:0.0}h drive remaining" : string.Empty;
             var vehicleEvidence = allocatedVehicle is null ? string.Empty : $" · Fleetio vehicle {allocatedVehicle.Registration} available";
             var explanation = $"Open Tacho duty started {Local(latestDuty.DutyStartUtc):HH:mm}{drive}. Earliest run start is now · 10 min walkaround · {origin.Label ?? "current/previous location"} → {CleanStop(firstCollection?.Name) ?? "first collection"}{(travel.Minutes is null ? " · travel time unavailable" : $" {travel.Minutes} min")}{vehicleEvidence}. Final dispatch re-checks live card, remaining hours and vehicle status.";
@@ -212,7 +212,7 @@ public sealed class PlannerCalculatedStartController(
             var assumedStart = assumedDutyEnd.AddHours(11);
             var planningFloor = PlanningFloorUtc(load.PlanningDate);
             if (assumedStart < planningFloor) assumedStart = planningFloor;
-            var firstEta = travel.Minutes is null ? null : assumedStart.AddMinutes(WalkaroundMinutes + travel.Minutes.Value);
+            DateTimeOffset? firstEta = travel.Minutes is null ? null : assumedStart.AddMinutes(WalkaroundMinutes + travel.Minutes.Value);
             var explanation = $"ASSUMPTION · current Tacho duty is still open. Using assumed duty end {Local(assumedDutyEnd):dd/MM HH:mm}, then 11h regular daily rest · 10 min walkaround · {origin.Label ?? "current/previous location"} → {CleanStop(firstCollection?.Name) ?? "first collection"}{(travel.Minutes is null ? " · travel time unavailable" : $" {travel.Minutes} min")}. Recalculate when duty closes.";
             return new PlannerStartSuggestion(load.Id, RunDisplayLabel.For(load), driver.DisplayName, existing?.PlannedStartUtc, existing?.Source,
                 assumedStart, assumedStart, WalkaroundMinutes, origin.Label, travel.Minutes, firstEta, CleanStop(firstCollection?.Name), latestOnSite,
