@@ -89,10 +89,12 @@ public sealed class PreDispatchSafetyService
 
         if (load.PalletSpacesUsed is decimal used && load.TotalPalletSpaces is decimal capacity && capacity >= 0)
         {
-            checks.Add(Check("CapacityWithinLimit", capacity == 0 ? used == 0 : used <= capacity, "Critical",
+            var withinCapacity = capacity == 0 ? used == 0 : used <= capacity;
+            var severity = !withinCapacity && capacity > 0 ? "Warning" : "Critical";
+            checks.Add(Check("CapacityWithinLimit", withinCapacity, severity,
                 capacity == 0 ? (used == 0 ? "No load capacity is required." : "Load units are planned but run capacity is zero.")
                 : used <= capacity ? $"Planned load {used:0.##}/{capacity:0.##} is within capacity."
-                : $"Planned load {used:0.##} exceeds capacity {capacity:0.##}."));
+                : $"Planned load {used:0.##} exceeds the recorded capacity {capacity:0.##}. Confirm the actual pallet footprint/equipment before dispatch; planner acknowledgement is required."));
         }
         else
         {
