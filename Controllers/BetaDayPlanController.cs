@@ -27,7 +27,7 @@ public sealed class BetaDayPlanController(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Beta full-day build failed for {PlanningDate}.", planningDate);
+            logger.LogError(ex, "Beta full-day build failed.");
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new
             {
                 code = "BetaDayPlanUnavailable",
@@ -51,7 +51,7 @@ public sealed class BetaDayPlanController(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Beta Lyons-plan comparison failed for {PlanningDate}.", request.PlanningDate);
+            logger.LogError(ex, "Beta Lyons-plan comparison failed.");
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new
             {
                 code = "BetaDayPlanComparisonUnavailable",
