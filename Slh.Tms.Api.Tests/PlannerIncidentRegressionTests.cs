@@ -36,12 +36,41 @@ public sealed class PlannerIncidentRegressionTests : IClassFixture<CustomWebFact
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
         Assert.Contains("PLAN_LOCKED:", await response.Content.ReadAsStringAsync());
     }
+
+    [Fact]
+    public async Task Active_subcontractor_is_visible_in_Driver_Dispatch_without_Sage_or_Tacho_identity()
+    {
+        var name = $"Bannisters Test {Guid.NewGuid():N}";
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.Drivers.Add(new Driver
+            {
+                EmployeeNumber = $"SUB-{Guid.NewGuid():N}"[..24],
+                DisplayName = name,
+                DriverType = "Subcontractor",
+                DriverGroup = "Bannisters",
+                Active = true
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
+        var response = await client.GetAsync("/api/v1/driver-dispatch?date=2027-02-03");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var driver = payload.GetProperty("drivers").EnumerateArray().Single(item => item.GetProperty("displayName").GetString() == name);
+        Assert.Equal("Subcontractor", driver.GetProperty("driverType").GetString());
+        Assert.Equal("Bannisters", driver.GetProperty("driverGroup").GetString());
+    }
+
     [Theory]
     [InlineData("Employed", "Office", null, false)]
     [InlineData("Employed", null, null, false)]
     [InlineData("Driver Manager", "Office", null, false)]
     [InlineData("Employed", "Day Drivers", null, true)]
     [InlineData("Agency", null, null, true)]
+    [InlineData("Subcontractor", "Bannisters", null, true)]
     [InlineData("Employed", "Operating Centre", "DRIVER-CARD", true)]
     public void Member_number_does_not_make_an_office_worker_a_driver(string type, string? group, string? card, bool expected)
     {
