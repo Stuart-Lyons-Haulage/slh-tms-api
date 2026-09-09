@@ -19,8 +19,9 @@ public sealed class DriverPlanningController(TmsDbContext db, IConfiguration con
         [FromQuery] DateOnly? to,
         CancellationToken ct)
     {
+        var signedInAllowed = User.Identity?.IsAuthenticated == true;
         var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct);
-        if (!pairedKeyAllowed && !TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
+        if (!signedInAllowed && !pairedKeyAllowed && !TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
 
         var firstDate = from ?? DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-7);
         var lastDate = to ?? firstDate;
