@@ -62,7 +62,13 @@ public sealed class BetaDayPlanController(
 
     private BetaDayPlanService Service()
     {
-        var provider = new AzureMapsHgvRouteProvider(maps, loggerFactory.CreateLogger<AzureMapsHgvRouteProvider>());
+        var liveProvider = new AzureMapsHgvRouteProvider(maps, loggerFactory.CreateLogger<AzureMapsHgvRouteProvider>());
+        // One shared budget covers both the independent Beta build and the uploaded-plan
+        // routing within this HTTP request. When exhausted, remaining routes are marked
+        // unavailable instead of allowing the gateway to terminate the entire comparison.
+        var provider = new BudgetedBetaHgvRouteProvider(
+            liveProvider,
+            loggerFactory.CreateLogger<BudgetedBetaHgvRouteProvider>());
         var builder = new BetaDayPlanBuilder(provider);
         return new BetaDayPlanService(db, builder, provider, loggerFactory.CreateLogger<BetaDayPlanService>());
     }
