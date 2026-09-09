@@ -51,11 +51,13 @@ public static class BetaDayPlanReconciler
             betaMiles is not null && lyonsMiles is not null && betaDriveMinutes is not null && lyonsDriveMinutes is not null;
         var warnings = new List<string>();
         if (!coverageComplete)
-            warnings.Add("The Lyons plan does not contain exactly the same order lines as the Beta input, so mileage and drive-time deltas are suppressed until order coverage matches.");
+            warnings.Add("The Lyons plan does not contain exactly the same movement lines as the Beta input, so mileage and drive-time deltas are suppressed until work coverage matches.");
         if (coverageComplete && !betaRoutingComplete)
             warnings.Add("At least one Beta run lacks live Azure Maps HGV evidence, so a whole-day route delta is not claimed.");
         if (coverageComplete && !lyonsRoutingComplete)
             warnings.Add("At least one uploaded Lyons run lacks live Azure Maps HGV evidence, so a whole-day route delta is not claimed.");
+        if (beta.Any(line => line.Pallets <= 0) || lyons.Any(line => line.Pallets <= 0))
+            warnings.Add("Quantity-unknown tray/crate/market movements are matched by reference and/or physical movement only; no pallet quantity is invented for reconciliation.");
 
         return new BetaDayPlanReconciliation(
             beta.Count,
@@ -77,35 +79,34 @@ public static class BetaDayPlanReconciler
         var betaCollection = Normalise(beta.Collection);
         var betaDelivery = Normalise(beta.Delivery);
 
-        // Strongest match: PO/reference + physical movement + pallet quantity.
         var exact = lyons.FirstOrDefault(item =>
             betaRef.Length > 0 && betaRef == Normalise(item.Line.Reference) &&
-            beta.Pallets == item.Line.Pallets &&
+            QuantityCompatible(beta.Pallets, item.Line.Pallets) &&
             betaCollection == Normalise(item.Line.Collection) &&
             betaDelivery == Normalise(item.Line.Delivery));
         if (exact is not null) return exact;
 
-        // Customer plans sometimes use a site alias. A unique PO/reference and pallet quantity
-        // is stronger evidence than rejecting the line merely because the human sheet uses an alias.
         if (betaRef.Length > 0)
         {
             var referenceMatches = lyons.Where(item =>
-                betaRef == Normalise(item.Line.Reference) && beta.Pallets == item.Line.Pallets).ToList();
+                betaRef == Normalise(item.Line.Reference) && QuantityCompatible(beta.Pallets, item.Line.Pallets)).ToList();
             if (referenceMatches.Count == 1) return referenceMatches[0];
         }
 
-        // Final safe fallback for sheets without a PO column.
         var movementMatches = lyons.Where(item =>
-            beta.Pallets == item.Line.Pallets &&
+            QuantityCompatible(beta.Pallets, item.Line.Pallets) &&
             betaCollection == Normalise(item.Line.Collection) &&
             betaDelivery == Normalise(item.Line.Delivery)).ToList();
         return movementMatches.Count == 1 ? movementMatches[0] : null;
     }
 
+    private static bool QuantityCompatible(int left, int right) => left <= 0 || right <= 0 ? left <= 0 && right <= 0 : left == right;
+
     private static string Label(BetaComparisonOrderLine line)
     {
         var reference = string.IsNullOrWhiteSpace(line.Reference) ? "No reference" : line.Reference.Trim();
-        return $"{reference} · {line.Collection} → {line.Delivery} · {line.Pallets} pallets";
+        var quantity = line.Pallets > 0 ? $"{line.Pallets} pallets" : "quantity not stated";
+        return $"{reference} · {line.Collection} → {line.Delivery} · {quantity}";
     }
 
     private static string Normalise(string? value) => new((value ?? string.Empty)
