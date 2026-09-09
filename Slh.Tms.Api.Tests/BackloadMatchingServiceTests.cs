@@ -2,6 +2,7 @@ using Microsoft.ApplicationInsights;
 using Microsoft.ApplicationInsights.Extensibility;
 using Microsoft.Extensions.Options;
 using Slh.Tms.Api.Services;
+using Xunit;
 
 namespace Slh.Tms.Api.Tests;
 
