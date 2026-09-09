@@ -90,6 +90,7 @@ builder.Services.Configure<HgvVehicleProfile>(builder.Configuration.GetSection("
 builder.Services.Configure<AzureMapsMatrixOptions>(builder.Configuration.GetSection("Routing:AzureMapsMatrix"));
 builder.Services.Configure<BackloadMatchingOptions>(builder.Configuration.GetSection("Optimisation:Backload"));
 builder.Services.Configure<LiveEtaOptions>(builder.Configuration.GetSection("Eta:Live"));
+builder.Services.Configure<FuelCostOptions>(builder.Configuration.GetSection("Fuel:Costing"));
 
 var configuredOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()?
     .Where(origin => !string.IsNullOrWhiteSpace(origin))
@@ -122,6 +123,7 @@ builder.Services.AddScoped<BackloadOperationsService>();
 builder.Services.AddScoped<LiveEtaCalculator>();
 builder.Services.AddScoped<EtaAccuracyProcessor>();
 builder.Services.AddScoped<CustomerNotificationService>();
+builder.Services.AddScoped<FuelOptimisationService>();
 builder.Services.AddSingleton<RoadTechLiveSnapshot>();
 var assistantOptions = new AssistantOptions();
 builder.Configuration.GetSection("Integrations:OpenAI").Bind(assistantOptions);
