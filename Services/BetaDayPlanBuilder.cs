@@ -29,10 +29,11 @@ public sealed record BetaDayBuiltRun(
     IReadOnlyList<string> Warnings);
 
 /// <summary>
-/// Builds an independent read-only plan directly from order work. Quantified pallet runs are
-/// capacity-planned exactly as before. Operational movements whose quantity is not stated
-/// (common for Southbound trays, crates, trollies and market work) remain visible and routable
-/// as standalone movements without inventing a pallet count or capacity utilisation.
+/// Builds an independent read-only plan directly from order work. Quantified outbound work is
+/// capacity planned first. Southbound work is then treated as return/backhaul work and is offered
+/// to compatible outbound runs after their northern delivery phase. It is only left standalone
+/// when live HGV evidence cannot support a sensible return pairing. Unknown quantities remain
+/// visible without inventing pallet capacity.
 /// </summary>
 public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
 {
@@ -40,18 +41,31 @@ public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
     private const int EuroCapacity = 33;
     private const int MaxCandidateRouteChecksPerFill = 16;
     private const int MaxPhaseSwapChecks = 12;
+    private const decimal SouthboundLatitudeDelta = 0.05m;
+    private const decimal MaxNorthwardBackhaulDetourLatitude = 0.25m;
+    private const decimal MaxBackhaulIncrementFactor = 1.35m;
+    private const decimal BackhaulIncrementAllowanceMiles = 15m;
 
     public async Task<IReadOnlyList<BetaDayBuiltRun>> BuildAsync(
         DateOnly planningDate,
         IReadOnlyList<BetaDayOrderInput> orders,
         CancellationToken ct)
     {
-        var quantified = ExpandOversizeOrders(orders.Where(order => order.Pallets > 0).ToList())
+        var backhaulCandidates = orders
+            .Where(IsSouthboundBackhaulCandidate)
             .OrderBy(order => PeriodRank(order.Period))
             .ThenBy(order => order.CollectionTimeFrom ?? TimeOnly.MaxValue)
             .ThenBy(order => order.Reference, StringComparer.OrdinalIgnoreCase)
             .ToList();
-        var unquantified = orders
+        var backhaulIds = backhaulCandidates.Select(order => order.SourceLineId).ToHashSet();
+        var primaryOrders = orders.Where(order => !backhaulIds.Contains(order.SourceLineId)).ToList();
+
+        var quantified = ExpandOversizeOrders(primaryOrders.Where(order => order.Pallets > 0).ToList())
+            .OrderBy(order => PeriodRank(order.Period))
+            .ThenBy(order => order.CollectionTimeFrom ?? TimeOnly.MaxValue)
+            .ThenBy(order => order.Reference, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var unquantified = primaryOrders
             .Where(order => order.Pallets <= 0)
             .OrderBy(order => PeriodRank(order.Period))
             .ThenBy(order => order.CollectionTimeFrom ?? TimeOnly.MaxValue)
@@ -103,82 +117,177 @@ public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
                 }
 
                 sequence++;
-                var warnings = selected
-                    .Where(order => !order.RoutingMapped || !string.IsNullOrWhiteSpace(order.MappingWarning))
-                    .Select(order => order.MappingWarning ?? $"{order.Reference}: collection or delivery is not mapped to Site Master coordinates.")
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
-                IReadOnlyList<BetaRoutePoint> stops = BuildStops(selected);
-                BetaHgvRouteCost? route = null;
-                if (selected.All(order => order.RoutingMapped))
-                {
-                    var collectionCount = DistinctPoints(selected
-                        .OrderBy(order => order.CollectionTimeFrom ?? TimeOnly.MaxValue)
-                        .ThenBy(order => order.Reference, StringComparer.OrdinalIgnoreCase)
-                        .Select(order => order.Collection)).Count;
-                    (stops, route) = await OptimiseWithinCollectionAndDeliveryPhasesAsync(stops, collectionCount, ct);
-                    route ??= await routeProvider.GetRouteAsync(stops, ct);
-                }
-
-                if (route is null)
-                    warnings.Add("Live Azure Maps HGV evidence is unavailable for this run. It remains in the Beta day plan but no estimated mileage is substituted.");
-
-                result.Add(new BetaDayBuiltRun(
-                    $"BETA-{planningDate:yyyyMMdd}-{group.Key.Period}-{sequence:00}",
-                    group.Key.Period,
-                    group.Key.Family,
-                    capacity,
-                    planned,
-                    capacity == 0 ? 0m : Math.Round((decimal)planned / capacity * 100m, 1),
-                    route is not null,
-                    route?.Miles,
-                    route?.DriveMinutes,
-                    selected,
-                    stops,
-                    warnings));
+                result.Add(await BuildPrimaryRunAsync(planningDate, group.Key.Period, group.Key.Family, sequence, selected, ct));
             }
         }
 
-        // Unknown quantity is not zero work. Route it as a standalone operational movement so
-        // it participates in coverage and geography, but never use it to claim pallet capacity.
         foreach (var order in unquantified)
         {
             ct.ThrowIfCancellationRequested();
             sequence++;
-            var warnings = new List<string>
-            {
-                "Quantity was not stated for this movement. It is routed and reconciled, but excluded from pallet-capacity utilisation."
-            };
-            if (!order.RoutingMapped || !string.IsNullOrWhiteSpace(order.MappingWarning))
-                warnings.Add(order.MappingWarning ?? $"{order.Reference}: collection or delivery is not mapped to Site Master coordinates.");
+            result.Add(await BuildStandaloneMovementAsync(planningDate, sequence, order, false, ct));
+        }
 
-            var stops = BuildStops([order]);
-            BetaHgvRouteCost? route = null;
-            if (order.RoutingMapped && stops.Count >= 2)
-                route = await routeProvider.GetRouteAsync(stops, ct);
-            if (route is null)
-                warnings.Add("Live Azure Maps HGV evidence is unavailable for this movement. No approximate mileage was substituted.");
-
-            result.Add(new BetaDayBuiltRun(
-                $"BETA-{planningDate:yyyyMMdd}-{NormalisePeriod(order.Period)}-{sequence:00}",
-                NormalisePeriod(order.Period),
-                "Unquantified",
-                0,
-                0,
-                0m,
-                route is not null,
-                route?.Miles,
-                route?.DriveMinutes,
-                [order],
-                stops,
-                warnings));
+        foreach (var backhaul in backhaulCandidates)
+        {
+            ct.ThrowIfCancellationRequested();
+            var attached = await TryAttachBackhaulAsync(result, backhaul, ct);
+            if (attached) continue;
+            sequence++;
+            result.Add(await BuildStandaloneMovementAsync(planningDate, sequence, backhaul, true, ct));
         }
 
         return result
             .OrderBy(run => PeriodRank(run.Period))
             .ThenBy(run => run.Reference, StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    private async Task<BetaDayBuiltRun> BuildPrimaryRunAsync(
+        DateOnly planningDate,
+        string period,
+        string family,
+        int sequence,
+        IReadOnlyList<BetaDayOrderInput> selected,
+        CancellationToken ct)
+    {
+        var capacity = Capacity(family);
+        var planned = selected.Sum(order => order.Pallets);
+        var warnings = selected
+            .Where(order => !order.RoutingMapped || !string.IsNullOrWhiteSpace(order.MappingWarning))
+            .Select(order => order.MappingWarning ?? $"{order.Reference}: collection or delivery is not mapped to Site Master coordinates.")
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        IReadOnlyList<BetaRoutePoint> stops = BuildStops(selected);
+        BetaHgvRouteCost? route = null;
+        if (selected.All(order => order.RoutingMapped))
+        {
+            var collectionCount = DistinctPoints(selected
+                .OrderBy(order => order.CollectionTimeFrom ?? TimeOnly.MaxValue)
+                .ThenBy(order => order.Reference, StringComparer.OrdinalIgnoreCase)
+                .Select(order => order.Collection)).Count;
+            (stops, route) = await OptimiseWithinCollectionAndDeliveryPhasesAsync(stops, collectionCount, ct);
+            route ??= await routeProvider.GetRouteAsync(stops, ct);
+        }
+
+        if (route is null)
+            warnings.Add("Live Azure Maps HGV evidence is unavailable for this run. It remains in the Beta day plan but no estimated mileage is substituted.");
+
+        return new BetaDayBuiltRun(
+            $"BETA-{planningDate:yyyyMMdd}-{period}-{sequence:00}",
+            period,
+            family,
+            capacity,
+            planned,
+            Math.Round((decimal)planned / capacity * 100m, 1),
+            route is not null,
+            route?.Miles,
+            route?.DriveMinutes,
+            selected,
+            stops,
+            warnings);
+    }
+
+    private async Task<BetaDayBuiltRun> BuildStandaloneMovementAsync(
+        DateOnly planningDate,
+        int sequence,
+        BetaDayOrderInput order,
+        bool isUnpairedBackhaul,
+        CancellationToken ct)
+    {
+        var family = order.Pallets > 0 ? PalletFamily(order.PalletType) : "Unquantified";
+        var capacity = order.Pallets > 0 ? Capacity(family) : 0;
+        var warnings = new List<string>();
+        if (order.Pallets <= 0)
+            warnings.Add("Quantity was not stated for this movement. It is routed and reconciled, but excluded from pallet-capacity utilisation.");
+        if (isUnpairedBackhaul)
+            warnings.Add("Southbound movement could not be safely paired to a compatible returning outbound run using live HGV evidence, so it remains standalone for planner review.");
+        if (!order.RoutingMapped || !string.IsNullOrWhiteSpace(order.MappingWarning))
+            warnings.Add(order.MappingWarning ?? $"{order.Reference}: collection or delivery is not mapped to Site Master coordinates.");
+
+        var stops = BuildStops([order]);
+        BetaHgvRouteCost? route = null;
+        if (order.RoutingMapped && stops.Count >= 2)
+            route = await routeProvider.GetRouteAsync(stops, ct);
+        if (route is null)
+            warnings.Add("Live Azure Maps HGV evidence is unavailable for this movement. No approximate mileage was substituted.");
+
+        return new BetaDayBuiltRun(
+            $"BETA-{planningDate:yyyyMMdd}-{NormalisePeriod(order.Period)}-{sequence:00}",
+            NormalisePeriod(order.Period),
+            family,
+            capacity,
+            Math.Max(order.Pallets, 0),
+            capacity == 0 ? 0m : Math.Round((decimal)order.Pallets / capacity * 100m, 1),
+            route is not null,
+            route?.Miles,
+            route?.DriveMinutes,
+            [order],
+            stops,
+            warnings);
+    }
+
+    private async Task<bool> TryAttachBackhaulAsync(List<BetaDayBuiltRun> runs, BetaDayOrderInput backhaul, CancellationToken ct)
+    {
+        if (!backhaul.RoutingMapped || NormalisePeriod(backhaul.Period) == "W3") return false;
+        var backhaulFamily = backhaul.Pallets > 0 ? PalletFamily(backhaul.PalletType) : null;
+        var standalone = await routeProvider.GetRouteAsync([backhaul.Collection, backhaul.Delivery], ct);
+        if (standalone is null) return false;
+
+        var bestIndex = -1;
+        BetaHgvRouteCost? bestCombined = null;
+        decimal bestIncrement = decimal.MaxValue;
+
+        for (var index = 0; index < runs.Count; index++)
+        {
+            ct.ThrowIfCancellationRequested();
+            var run = runs[index];
+            if (!run.RoutingAvailable || run.Miles is null) continue;
+            if (NormalisePeriod(run.Period) != NormalisePeriod(backhaul.Period) || run.Period == "W3") continue;
+            if (run.Stops.Count < 2) continue;
+            if (backhaulFamily is not null && !string.Equals(run.PalletFamily, backhaulFamily, StringComparison.OrdinalIgnoreCase)) continue;
+            if (backhaul.Pallets > 0 && backhaul.Pallets > run.CapacityPallets) continue;
+
+            var terminal = run.Stops[^1];
+            if (backhaul.Collection.Latitude > terminal.Latitude + MaxNorthwardBackhaulDetourLatitude) continue;
+            if (backhaul.Delivery.Latitude >= backhaul.Collection.Latitude - SouthboundLatitudeDelta) continue;
+
+            var combinedStops = AppendDistinct(run.Stops, backhaul.Collection, backhaul.Delivery);
+            var combined = await routeProvider.GetRouteAsync(combinedStops, ct);
+            if (combined is null) continue;
+            var increment = Math.Max(combined.Miles - run.Miles.Value, 0m);
+            if (increment > standalone.Miles * MaxBackhaulIncrementFactor + BackhaulIncrementAllowanceMiles) continue;
+            if (increment >= bestIncrement) continue;
+            bestIndex = index;
+            bestCombined = combined;
+            bestIncrement = increment;
+        }
+
+        if (bestIndex < 0 || bestCombined is null) return false;
+
+        var selectedRun = runs[bestIndex];
+        var updatedStops = AppendDistinct(selectedRun.Stops, backhaul.Collection, backhaul.Delivery);
+        var peakPallets = backhaul.Pallets > 0 ? Math.Max(selectedRun.PlannedPallets, backhaul.Pallets) : selectedRun.PlannedPallets;
+        var warnings = selectedRun.Warnings
+            .Where(warning => !warning.StartsWith("Live Azure Maps HGV evidence is unavailable", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        warnings.Add($"Backhaul attached: {backhaul.Reference} is collected after the outbound delivery phase and returns south. Incremental live HGV distance: {bestIncrement:0.0} mi versus {standalone.Miles:0.0} mi as standalone work.");
+        if (backhaul.Pallets <= 0)
+            warnings.Add($"{backhaul.Reference}: return quantity is not stated, so it does not alter the outbound pallet-utilisation score.");
+
+        runs[bestIndex] = selectedRun with
+        {
+            PlannedPallets = peakPallets,
+            UtilisationPercent = selectedRun.CapacityPallets > 0 ? Math.Round((decimal)peakPallets / selectedRun.CapacityPallets * 100m, 1) : 0m,
+            RoutingAvailable = true,
+            Miles = bestCombined.Miles,
+            DriveMinutes = bestCombined.DriveMinutes,
+            Orders = selectedRun.Orders.Concat([backhaul]).ToList(),
+            Stops = updatedStops,
+            Warnings = warnings,
+        };
+        return true;
     }
 
     private async Task<(IReadOnlyList<BetaRoutePoint> Stops, BetaHgvRouteCost? Cost)> OptimiseWithinCollectionAndDeliveryPhasesAsync(
@@ -227,19 +336,28 @@ public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
         return collections.Concat(deliveries).ToList();
     }
 
+    private static List<BetaRoutePoint> AppendDistinct(IReadOnlyList<BetaRoutePoint> existing, params BetaRoutePoint[] append)
+    {
+        var result = existing.ToList();
+        var seen = result.Select(PointKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var point in append)
+            if (seen.Add(PointKey(point))) result.Add(point);
+        return result;
+    }
+
     private static List<BetaRoutePoint> DistinctPoints(IEnumerable<BetaRoutePoint> points)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var result = new List<BetaRoutePoint>();
         foreach (var point in points)
         {
-            var key = $"{point.Latitude:0.000000}|{point.Longitude:0.000000}|{NormalisePointName(point.Name)}";
-            if (!seen.Add(key)) continue;
+            if (!seen.Add(PointKey(point))) continue;
             result.Add(point);
         }
         return result;
     }
 
+    private static string PointKey(BetaRoutePoint point) => $"{point.Latitude:0.000000}|{point.Longitude:0.000000}|{NormalisePointName(point.Name)}";
     private static string NormalisePointName(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     private static IReadOnlyList<BetaDayOrderInput> ExpandOversizeOrders(IReadOnlyList<BetaDayOrderInput> orders)
@@ -258,6 +376,11 @@ public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
         }
         return result;
     }
+
+    private static bool IsSouthboundBackhaulCandidate(BetaDayOrderInput order) =>
+        NormalisePeriod(order.Period) != "W3" &&
+        order.RoutingMapped &&
+        order.Delivery.Latitude < order.Collection.Latitude - SouthboundLatitudeDelta;
 
     private static bool Better(BetaHgvRouteCost candidate, BetaHgvRouteCost current) =>
         candidate.Miles < current.Miles - 0.1m ||
