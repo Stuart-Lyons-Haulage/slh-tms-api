@@ -107,7 +107,7 @@ public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToList();
 
-                var stops = BuildStops(selected);
+                IReadOnlyList<BetaRoutePoint> stops = BuildStops(selected);
                 BetaHgvRouteCost? route = null;
                 if (selected.All(order => order.RoutingMapped))
                 {
