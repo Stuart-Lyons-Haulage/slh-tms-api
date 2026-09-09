@@ -95,13 +95,17 @@ public sealed class BetaDayPlanBuilder(
 
                     BetaDayOrderInput? best = null;
                     BetaHgvRouteCost? bestCost = null;
+                    var routeValidatedCandidate = false;
                     foreach (var candidate in fits)
                     {
                         ct.ThrowIfCancellationRequested();
                         if (!selected.All(order => order.RoutingMapped) || !candidate.RoutingMapped) continue;
                         var cost = await routeProvider.GetRouteAsync(BuildStops(selected.Append(candidate).ToList()), ct);
                         if (cost is null) continue;
-                        if (!MeetsTimingWindow(planningDate, selected.Append(candidate).ToList(), cost)) continue;
+                        routeValidatedCandidate = true;
+                        var candidateOrders = selected.Append(candidate).ToList();
+                        if (!MeetsTimingWindow(planningDate, candidateOrders, cost, options) ||
+                            !MeetsOperationalLimits(BuildStops(candidateOrders).Count, cost, options)) continue;
                         if (bestCost is null || Better(cost, bestCost))
                         {
                             best = candidate;
@@ -109,6 +113,7 @@ public sealed class BetaDayPlanBuilder(
                         }
                     }
 
+                    if (best is null && routeValidatedCandidate) break;
                     best ??= fits
                         .OrderBy(order => order.CollectionTimeFrom ?? TimeOnly.MaxValue)
                         .ThenBy(order => order.Reference, StringComparer.OrdinalIgnoreCase)
@@ -176,7 +181,8 @@ public sealed class BetaDayPlanBuilder(
 
         if (route is null)
             warnings.Add("Live Azure Maps HGV evidence is unavailable for this run. It remains in the Beta day plan but no estimated mileage is substituted.");
-        else if (!MeetsTimingWindow(planningDate, selected, route))
+        else if (!MeetsTimingWindow(planningDate, selected, route, options) ||
+                 !MeetsOperationalLimits(stops.Count, route, options))
             warnings.Add("Site Master access/depot deadline cannot be met by the current route timing; planner review is required.");
 
         return new BetaDayBuiltRun(
@@ -328,16 +334,31 @@ public sealed class BetaDayPlanBuilder(
         return (best, bestCost);
     }
 
-    internal static bool MeetsTimingWindow(DateOnly planningDate, IReadOnlyList<BetaDayOrderInput> orders, BetaHgvRouteCost route)
+    internal static bool MeetsTimingWindow(DateOnly planningDate, IReadOnlyList<BetaDayOrderInput> orders, BetaHgvRouteCost route, BetaOptimiserOptions? optimiserOptions = null)
     {
+        var options = (optimiserOptions ?? new BetaOptimiserOptions()).Validate();
         var start = orders.Select(order => order.CollectionTimeFrom).Where(value => value is not null)
             .Select(value => value!.Value).DefaultIfEmpty(new TimeOnly(0, 0)).Min();
         var deadline = orders.Select(order => order.DeliveryDeadline).Where(value => value is not null)
             .Select(value => value!.Value).DefaultIfEmpty(TimeOnly.MaxValue).Min();
         if (deadline == TimeOnly.MaxValue) return true;
-        var finish = planningDate.ToDateTime(start).AddMinutes(route.DriveMinutes);
+        var finish = planningDate.ToDateTime(start).AddMinutes(PlannedRouteMinutes(route, orders.Count, options));
         var deadlineDate = deadline < start ? planningDate.AddDays(1) : planningDate;
         return finish <= deadlineDate.ToDateTime(deadline);
+    }
+
+    internal static int PlannedRouteMinutes(BetaHgvRouteCost route, int stopCount, BetaOptimiserOptions optimiserOptions)
+    {
+        var options = optimiserOptions.Validate();
+        var bufferedDrive = (int)Math.Ceiling(route.DriveMinutes * (1m + options.TrafficBufferPercent / 100m));
+        return bufferedDrive + Math.Max(0, stopCount) * options.AverageDwellMinutes;
+    }
+
+    internal static bool MeetsOperationalLimits(int stopCount, BetaHgvRouteCost route, BetaOptimiserOptions optimiserOptions)
+    {
+        var options = optimiserOptions.Validate();
+        if (route.DriveMinutes > options.MaxDailyDrivingMinutes) return false;
+        return PlannedRouteMinutes(route, stopCount, options) <= options.MaxDayLengthMinutes;
     }
 
     internal static List<BetaRoutePoint> BuildStops(IReadOnlyList<BetaDayOrderInput> orders)

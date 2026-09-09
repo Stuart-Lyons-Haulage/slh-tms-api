@@ -86,6 +86,28 @@ public sealed class BetaDayPlanBuilderTests
         Assert.False(BetaDayPlanBuilder.MeetsTimingWindow(new DateOnly(2026, 9, 9), [order], new BetaHgvRouteCost(10m, 10, "AzureMapsHgv")));
     }
 
+    [Fact]
+    public void PlannedRouteMinutes_includes_traffic_buffer_and_stop_dwell()
+    {
+        var options = new BetaOptimiserOptions { AverageDwellMinutes = 20, TrafficBufferPercent = 15 };
+
+        var minutes = BetaDayPlanBuilder.PlannedRouteMinutes(new BetaHgvRouteCost(10m, 10, "AzureMapsHgv"), 2, options);
+
+        Assert.Equal(52, minutes);
+    }
+
+    [Fact]
+    public void MeetsOperationalLimits_rejects_route_over_daily_driving_limit()
+    {
+        var options = new BetaOptimiserOptions { MaxDailyDrivingMinutes = 540 };
+
+        var allowed = BetaDayPlanBuilder.MeetsOperationalLimits(
+            2,
+            new BetaHgvRouteCost(500m, 541, "AzureMapsHgv"), options);
+
+        Assert.False(allowed);
+    }
+
     private static void AssertCollectionsBeforeDeliveries(BetaDayBuiltRun run, IReadOnlyList<BetaDayOrderInput> orders)
     {
         var positions = run.Stops.Select((stop, index) => (stop.Name, index)).ToDictionary(item => item.Name, item => item.index);

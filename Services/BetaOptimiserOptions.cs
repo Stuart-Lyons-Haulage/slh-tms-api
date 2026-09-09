@@ -25,6 +25,18 @@ public sealed class BetaOptimiserOptions
     public int RouteDeadlineSeconds { get; set; } = 12;
     public int RequestRoutingBudgetSeconds { get; set; } = 60;
 
+    /// <summary>Planning dwell added for each distinct collection or delivery stop.</summary>
+    public int AverageDwellMinutes { get; set; } = 20;
+
+    /// <summary>Conservative percentage added to live route travel time for scheduling only.</summary>
+    public int TrafficBufferPercent { get; set; } = 15;
+
+    /// <summary>Maximum planned duty span from first collection to final delivery.</summary>
+    public int MaxDayLengthMinutes { get; set; } = 900;
+
+    /// <summary>Maximum daily driving time used before a driver-specific Tacho assignment.</summary>
+    public int MaxDailyDrivingMinutes { get; set; } = 540;
+
     public TimeSpan RouteDeadline => TimeSpan.FromSeconds(RouteDeadlineSeconds);
     public TimeSpan RequestRoutingBudget => TimeSpan.FromSeconds(RequestRoutingBudgetSeconds);
 
@@ -44,6 +56,14 @@ public sealed class BetaOptimiserOptions
             throw new InvalidOperationException("BetaOptimiser:RequestRoutingBudgetSeconds must be between 5 and 300 seconds.");
         if (RequestRoutingBudgetSeconds < RouteDeadlineSeconds)
             throw new InvalidOperationException("BetaOptimiser:RequestRoutingBudgetSeconds must not be shorter than RouteDeadlineSeconds.");
+        if (AverageDwellMinutes is < 0 or > 240)
+            throw new InvalidOperationException("BetaOptimiser:AverageDwellMinutes must be between 0 and 240.");
+        if (TrafficBufferPercent is < 0 or > 100)
+            throw new InvalidOperationException("BetaOptimiser:TrafficBufferPercent must be between 0 and 100.");
+        if (MaxDayLengthMinutes is < 60 or > 1440)
+            throw new InvalidOperationException("BetaOptimiser:MaxDayLengthMinutes must be between 60 and 1440.");
+        if (MaxDailyDrivingMinutes is < 60 or > 600)
+            throw new InvalidOperationException("BetaOptimiser:MaxDailyDrivingMinutes must be between 60 and 600.");
         return this;
     }
 }

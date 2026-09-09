@@ -140,7 +140,7 @@ public sealed class BetaDayPlanService(
         return new BetaDayPlanResult(
             planningDate,
             DateTimeOffset.UtcNow,
-            "Live Azure Maps fastest commercial truck route with traffic. Approximate/Haversine evidence is excluded from optimisation decisions.",
+            "Live Azure Maps fastest commercial HGV route with traffic, plus configured dwell and traffic-buffer assumptions. Approximate/Haversine evidence is excluded from optimisation decisions.",
             inputs.Select(input => input.SourceLineId).Distinct().Count(),
             plannedSourceLines,
             inputs.Where(input => !input.RoutingMapped).Select(input => input.SourceLineId).Distinct().Count(),
