@@ -455,6 +455,33 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --output table
 
+      - name: Capture failed revision diagnostics
+        if: ${{ failure() && env.TARGET_REVISION != '' }}
+        run: |
+          set +e
+          echo "## Failed revision diagnostics" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Revision state" >> "$GITHUB_STEP_SUMMARY"
+          az containerapp revision show \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision "$TARGET_REVISION" \
+            --output json | tee /tmp/failed-revision.json >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Replica state" >> "$GITHUB_STEP_SUMMARY"
+          az containerapp replica list \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision "$TARGET_REVISION" \
+            --output json | tee /tmp/failed-revision-replicas.json >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Recent system logs" >> "$GITHUB_STEP_SUMMARY"
+          az containerapp logs show \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision "$TARGET_REVISION" \
+            --type system \
+            --tail 100 | tee /tmp/failed-revision-system.log >> "$GITHUB_STEP_SUMMARY"
+
       - name: Publish deployment summary
         if: ${{ always() }}
         run: |
