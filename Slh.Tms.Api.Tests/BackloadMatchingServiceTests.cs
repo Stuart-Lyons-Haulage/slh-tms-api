@@ -1,5 +1,3 @@
-using Microsoft.ApplicationInsights;
-using Microsoft.ApplicationInsights.Extensibility;
 using Microsoft.Extensions.Options;
 using Slh.Tms.Api.Services;
 using Xunit;
@@ -20,12 +18,10 @@ public sealed class BackloadMatchingServiceTests
             [new MatrixPoint(52.4m, -1.5m).Key] = new(45, 72_000)  // outside 40 miles
         };
         var matrix = new StubMatrixService(routes);
-        var telemetryConfiguration = TelemetryConfiguration.CreateDefault();
-        telemetryConfiguration.DisableTelemetry = true;
         var service = new BackloadMatchingService(
             matrix,
             Options.Create(new BackloadMatchingOptions()),
-            new TelemetryClient(telemetryConfiguration));
+            TestTelemetry.Client);
         var current = new MatrixPoint(53.0000m, -1.0000m);
         var candidates = new[]
         {
