@@ -37,7 +37,7 @@ public sealed class FuelCostOptions
     public decimal DefaultMilesPerImperialGallon { get; set; } = 9m;
 
     /// <summary>
-    /// Optional per-registration MPG overrides, e.g. Routing:FuelCosting:VehicleMpg:AB12CDE = 9.4.
+    /// Optional per-registration MPG overrides, e.g. Fuel:Costing:VehicleMpg:AB12CDE = 9.4.
     /// Registration matching ignores spaces and punctuation.
     /// </summary>
     public Dictionary<string, decimal> VehicleMpg { get; set; } = new(StringComparer.OrdinalIgnoreCase);
@@ -90,8 +90,10 @@ public sealed class FuelOptimisationService(
 
     public async Task<RunFuelCostEstimate?> EstimateRunAsync(Guid runId, CancellationToken ct)
     {
-        var load = await db.Loads.AsNoTracking().Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == runId, ct)
-            ?? await PlanningRegisterStore.GetLoadAsync(db, runId, ct);
+        // Prefer the audited planning register because operational/commercial values such as
+        // EstimatedDistanceMiles and EmptyMiles are intentionally non-mapped on the SQL Load model.
+        var load = await PlanningRegisterStore.GetLoadAsync(db, runId, ct)
+            ?? await db.Loads.AsNoTracking().Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == runId, ct);
         if (load is null || load.Status == LoadStatus.Cancelled) return null;
         return await EstimateLoadAsync(load, ct);
     }
@@ -103,8 +105,9 @@ public sealed class FuelOptimisationService(
             .Where(item => item.PlanningDate == planningDate)
             .ToListAsync(ct);
         var byId = new Dictionary<Guid, Load>();
-        foreach (var load in registered) byId[load.Id] = load;
         foreach (var load in live) byId[load.Id] = load;
+        // Audited register values deliberately win when both stores contain the same logical run.
+        foreach (var load in registered) byId[load.Id] = load;
 
         var estimates = new List<RunFuelCostEstimate>();
         foreach (var load in byId.Values
