@@ -13,7 +13,8 @@ public sealed class BetaDayPlanController(
     AzureMapsRouteClient maps,
     IConfiguration configuration,
     ILoggerFactory loggerFactory,
-    ILogger<BetaDayPlanController> logger) : ControllerBase
+    ILogger<BetaDayPlanController> logger,
+    SiteTimingRuleStore timingRuleStore) : ControllerBase
 {
     [HttpGet("day-plan")]
     public async Task<IActionResult> BuildDay([FromQuery] DateOnly planningDate, CancellationToken ct)
@@ -104,6 +105,6 @@ public sealed class BetaDayPlanController(
             loggerFactory.CreateLogger<BudgetedBetaHgvRouteProvider>(),
             options.RequestRoutingBudget);
         var builder = new BetaDayPlanBuilder(provider, options);
-        return new BetaDayPlanService(db, builder, provider, loggerFactory.CreateLogger<BetaDayPlanService>());
+        return new BetaDayPlanService(db, builder, provider, loggerFactory.CreateLogger<BetaDayPlanService>(), timingRuleStore);
     }
 }

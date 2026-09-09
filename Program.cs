@@ -93,6 +93,7 @@ builder.Services.AddScoped<IntakeMappingService>();
 builder.Services.AddScoped<OrderCompletenessService>();
 builder.Services.AddScoped<WarehouseMovementService>();
 builder.Services.AddScoped<PlanningOptimiserService>();
+builder.Services.AddScoped<SiteTimingRuleStore>();
 builder.Services.AddScoped<DotTrackingTelemetryStore>();
 builder.Services.AddSingleton<RoadTechLiveSnapshot>();
 var assistantOptions = new AssistantOptions();

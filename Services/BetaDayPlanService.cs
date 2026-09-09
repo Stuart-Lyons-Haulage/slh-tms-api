@@ -89,7 +89,8 @@ public sealed class BetaDayPlanService(
     TmsDbContext db,
     BetaDayPlanBuilder builder,
     IBetaHgvRouteProvider routeProvider,
-    ILogger<BetaDayPlanService> logger)
+    ILogger<BetaDayPlanService> logger,
+    SiteTimingRuleStore timingRuleStore)
 {
     private static readonly string[] ReferenceKeys = ["reference", "orderReference", "po", "poNumber", "purchaseOrder", "loadReference"];
     private static readonly string[] CollectionKeys = ["collectionSite", "collectionLocation", "collection", "collectionAddress", "from"];
@@ -260,6 +261,7 @@ public sealed class BetaDayPlanService(
             .GroupBy(order => order.SourceMovementId!.Value)
             .ToDictionary(group => group.Key, group => group.OrderByDescending(order => order.CreatedAtUtc).First());
         var sites = await SitesAsync(ct);
+        var timingRules = await timingRuleStore.ReadAsync(ct);
         var inputs = new List<BetaDayOrderInput>();
         var representedMovementIds = new HashSet<Guid>();
 
@@ -271,7 +273,7 @@ public sealed class BetaDayPlanService(
             var collectionName = First(line.CollectionSite, live?.SellerName);
             var deliveryName = First(live?.MarketName, line.DeliverySite);
             var reference = First(live?.Reference, JsonString(line.PayloadJson, ReferenceKeys), line.LoadReference, line.SourceRowKey) ?? line.SourceRowKey;
-            inputs.Add(ToInput(
+            inputs.Add(ApplyTiming(ToInput(
                 live?.Id ?? line.Id,
                 line.Id,
                 reference,
@@ -281,7 +283,7 @@ public sealed class BetaDayPlanService(
                 line.CollectionTimeFrom,
                 collectionName,
                 deliveryName,
-                sites));
+                sites), line.CollectionDate ?? planningDate, timingRules, sites));
         }
 
         var fallbackOrders = liveOrders
@@ -298,7 +300,7 @@ public sealed class BetaDayPlanService(
             var collectionName = First(JsonString(payload, CollectionKeys), order.SellerName);
             var deliveryName = First(order.MarketName, JsonString(payload, DeliveryKeys));
             var collectionTime = ParseTime(JsonString(payload, CollectionTimeKeys));
-            inputs.Add(ToInput(
+            inputs.Add(ApplyTiming(ToInput(
                 order.Id,
                 order.Id,
                 order.Reference,
@@ -308,7 +310,7 @@ public sealed class BetaDayPlanService(
                 collectionTime,
                 collectionName,
                 deliveryName,
-                sites));
+                sites), order.CollectionDate, timingRules, sites));
         }
 
         return inputs;
@@ -357,6 +359,23 @@ public sealed class BetaDayPlanService(
             delivery,
             mapped,
             warning);
+    }
+
+    private static BetaDayOrderInput ApplyTiming(BetaDayOrderInput input, DateOnly date, IReadOnlyList<SiteTimingRule> rules, IReadOnlyList<Site> sites)
+    {
+        var rule = rules.FirstOrDefault(candidate => SiteTimingRuleMatcher.Match(candidate, input.Collection.Name, input.Delivery.Name, input.PalletType, sites));
+        if (rule is null) return input;
+        var collection = SiteTimingRuleMatcher.CollectionWindow(rule, date);
+        var deadline = SiteTimingRuleMatcher.DeliveryWindow(rule, date).End;
+        var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+        static TimeOnly? Local(DateTimeOffset? value, TimeZoneInfo zone) => value is null ? null : TimeOnly.FromDateTime(TimeZoneInfo.ConvertTime(value.Value, zone).DateTime);
+        return input with
+        {
+            CollectionTimeFrom = Local(collection.Start, zone) ?? input.CollectionTimeFrom,
+            CollectionTimeTo = Local(collection.End, zone),
+            DeliveryDeadline = Local(deadline, zone),
+            TimingRule = rule.RouteCombination
+        };
     }
 
     private static bool IsWave3(string? customerCode, string? unit, string? collection, string? delivery, TimeOnly? collectionTime)

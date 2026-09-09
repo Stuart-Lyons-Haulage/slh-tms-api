@@ -12,7 +12,10 @@ public sealed record BetaDayOrderInput(
     BetaRoutePoint Collection,
     BetaRoutePoint Delivery,
     bool RoutingMapped = true,
-    string? MappingWarning = null);
+    string? MappingWarning = null,
+    TimeOnly? CollectionTimeTo = null,
+    TimeOnly? DeliveryDeadline = null,
+    string? TimingRule = null);
 
 public sealed record BetaDayBuiltRun(
     string Reference,
@@ -98,6 +101,7 @@ public sealed class BetaDayPlanBuilder(
                         if (!selected.All(order => order.RoutingMapped) || !candidate.RoutingMapped) continue;
                         var cost = await routeProvider.GetRouteAsync(BuildStops(selected.Append(candidate).ToList()), ct);
                         if (cost is null) continue;
+                        if (!MeetsTimingWindow(planningDate, selected.Append(candidate).ToList(), cost)) continue;
                         if (bestCost is null || Better(cost, bestCost))
                         {
                             best = candidate;
@@ -172,6 +176,8 @@ public sealed class BetaDayPlanBuilder(
 
         if (route is null)
             warnings.Add("Live Azure Maps HGV evidence is unavailable for this run. It remains in the Beta day plan but no estimated mileage is substituted.");
+        else if (!MeetsTimingWindow(planningDate, selected, route))
+            warnings.Add("Site Master access/depot deadline cannot be met by the current route timing; planner review is required.");
 
         return new BetaDayBuiltRun(
             $"BETA-{planningDate:yyyyMMdd}-{period}-{sequence:00}",
@@ -320,6 +326,18 @@ public sealed class BetaDayPlanBuilder(
         }
 
         return (best, bestCost);
+    }
+
+    internal static bool MeetsTimingWindow(DateOnly planningDate, IReadOnlyList<BetaDayOrderInput> orders, BetaHgvRouteCost route)
+    {
+        var start = orders.Select(order => order.CollectionTimeFrom).Where(value => value is not null)
+            .Select(value => value!.Value).DefaultIfEmpty(new TimeOnly(0, 0)).Min();
+        var deadline = orders.Select(order => order.DeliveryDeadline).Where(value => value is not null)
+            .Select(value => value!.Value).DefaultIfEmpty(TimeOnly.MaxValue).Min();
+        if (deadline == TimeOnly.MaxValue) return true;
+        var finish = planningDate.ToDateTime(start).AddMinutes(route.DriveMinutes);
+        var deadlineDate = deadline < start ? planningDate.AddDays(1) : planningDate;
+        return finish <= deadlineDate.ToDateTime(deadline);
     }
 
     internal static List<BetaRoutePoint> BuildStops(IReadOnlyList<BetaDayOrderInput> orders)

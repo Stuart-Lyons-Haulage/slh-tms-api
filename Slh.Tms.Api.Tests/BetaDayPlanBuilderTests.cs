@@ -75,6 +75,17 @@ public sealed class BetaDayPlanBuilderTests
         Assert.Equal(26, orders.Sum(order => order.Pallets));
     }
 
+    [Fact]
+    public void MeetsTimingWindow_rejects_route_that_misses_master_deadline()
+    {
+        var order = new BetaDayOrderInput(
+            Guid.NewGuid(), Guid.NewGuid(), "DEADLINE-1", "TEST", "AM", "Standard", 10,
+            new TimeOnly(4, 0), new BetaRoutePoint("Collection", 50m, -1m), new BetaRoutePoint("Delivery", 51m, -1m),
+            DeliveryDeadline: new TimeOnly(4, 5));
+
+        Assert.False(BetaDayPlanBuilder.MeetsTimingWindow(new DateOnly(2026, 9, 9), [order], new BetaHgvRouteCost(10m, 10, "AzureMapsHgv")));
+    }
+
     private static void AssertCollectionsBeforeDeliveries(BetaDayBuiltRun run, IReadOnlyList<BetaDayOrderInput> orders)
     {
         var positions = run.Stops.Select((stop, index) => (stop.Name, index)).ToDictionary(item => item.Name, item => item.index);
