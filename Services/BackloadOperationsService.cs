@@ -82,6 +82,7 @@ public sealed class BackloadOperationsService(
         var candidate = (await ReadCandidatesAsync(load.PlanningDate, ct)).SingleOrDefault(item => item.OrderId == order.Id)
             ?? throw new InvalidOperationException($"Order {order.Reference} no longer has complete Site Master coordinates for backload allocation.");
 
+        var usedBefore = load.PalletSpacesUsed ?? await ResolveUsedPalletsAsync(load, ct);
         var remaining = await ResolveRemainingPalletCapacityAsync(load, ct);
         if (candidate.PalletCount > remaining)
             throw new InvalidOperationException($"Order {order.Reference} requires {candidate.PalletCount} pallet spaces but run {load.Reference} has {remaining} remaining.");
@@ -109,7 +110,7 @@ public sealed class BackloadOperationsService(
             Longitude = candidate.DeliveryPoint.Longitude,
             PlannerNote = $"Accepted backload · {order.Reference}"
         });
-        load.PalletSpacesUsed = (load.PalletSpacesUsed ?? await ResolveUsedPalletsAsync(load, ct)) + candidate.PalletCount;
+        load.PalletSpacesUsed = usedBefore + candidate.PalletCount;
         order.Status = OrderStatus.Planned;
 
         if (db.Entry(load).State != EntityState.Detached)
