@@ -46,12 +46,14 @@ jobs:
       - name: Commit verified hardening
         run: |
           set -euo pipefail
-          rm -f tools/apply-review-hardening.py tools/apply-review-hardening-fixups.py tools/prepatch-review-hardening.py tools/prepatch-review-hardening-v2.py .github/workflows/review-hardening-apply.yml
+          # The GitHub Actions token may not mutate workflow files. Keep both workflows at the
+          # branch HEAD here; the connected GitHub app will apply the reviewed deploy.yml edit
+          # and remove this one-shot workflow after the verified source commit lands.
+          git checkout -- .github/workflows/deploy.yml .github/workflows/review-hardening-apply.yml
+          rm -f tools/apply-review-hardening.py tools/apply-review-hardening-fixups.py tools/prepatch-review-hardening.py tools/prepatch-review-hardening-v2.py
           git config user.name "slh-tms-hardening-bot"
           git config user.email "actions@users.noreply.github.com"
           git add -A
           git diff --cached --check
           git commit -m "Implement reviewed TMS hardening"
           git push origin HEAD:fix/review-hardening-20260909
-
-      # This workflow removes itself after a verified commit; this comment only retriggers the one-shot gate.
