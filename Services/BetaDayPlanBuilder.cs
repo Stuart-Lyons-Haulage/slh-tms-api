@@ -111,7 +111,11 @@ public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
                 BetaHgvRouteCost? route = null;
                 if (selected.All(order => order.RoutingMapped))
                 {
-                    (stops, route) = await OptimiseWithinCollectionAndDeliveryPhasesAsync(stops, selected.Count, ct);
+                    var collectionCount = DistinctPoints(selected
+                        .OrderBy(order => order.CollectionTimeFrom ?? TimeOnly.MaxValue)
+                        .ThenBy(order => order.Reference, StringComparer.OrdinalIgnoreCase)
+                        .Select(order => order.Collection)).Count;
+                    (stops, route) = await OptimiseWithinCollectionAndDeliveryPhasesAsync(stops, collectionCount, ct);
                     route ??= await routeProvider.GetRouteAsync(stops, ct);
                 }
 
@@ -172,18 +176,33 @@ public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
         return (best, bestCost);
     }
 
-    private static List<BetaRoutePoint> BuildStops(IReadOnlyList<BetaDayOrderInput> orders)
+    internal static List<BetaRoutePoint> BuildStops(IReadOnlyList<BetaDayOrderInput> orders)
     {
-        var collections = orders
+        var collections = DistinctPoints(orders
             .OrderBy(order => order.CollectionTimeFrom ?? TimeOnly.MaxValue)
             .ThenBy(order => order.Reference, StringComparer.OrdinalIgnoreCase)
-            .Select(order => order.Collection);
-        var deliveries = orders
+            .Select(order => order.Collection));
+        var deliveries = DistinctPoints(orders
             .OrderBy(order => order.CollectionTimeFrom ?? TimeOnly.MaxValue)
             .ThenBy(order => order.Reference, StringComparer.OrdinalIgnoreCase)
-            .Select(order => order.Delivery);
+            .Select(order => order.Delivery));
         return collections.Concat(deliveries).ToList();
     }
+
+    private static List<BetaRoutePoint> DistinctPoints(IEnumerable<BetaRoutePoint> points)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var result = new List<BetaRoutePoint>();
+        foreach (var point in points)
+        {
+            var key = $"{point.Latitude:0.000000}|{point.Longitude:0.000000}|{NormalisePointName(point.Name)}";
+            if (!seen.Add(key)) continue;
+            result.Add(point);
+        }
+        return result;
+    }
+
+    private static string NormalisePointName(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     private static IReadOnlyList<BetaDayOrderInput> ExpandOversizeOrders(IReadOnlyList<BetaDayOrderInput> orders)
     {
