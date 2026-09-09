@@ -269,8 +269,8 @@ public sealed class DispatchService(
                 failures.Add(new DispatchLockFailure(driver.Id, allocation.RunId, $"{driver.DisplayName} has an unresolved Tacho break-compliance breach."));
 
             var dailyLimitHours = DispatchTachoRules.DailyDrivingLimitMinutes(driver, driverDuties) / 60m;
-            var providerWork = DispatchTachoRules.WorkAvailableWeekMinutes(driver, driverDuties) is int workMinutes ? workMinutes / 60m : null;
-            var providerDrive = DispatchTachoRules.DriveAvailablePlanningDayMinutes(driver, driverDuties, request.PlanningDate, today) is int driveMinutes ? driveMinutes / 60m : null;
+            decimal? providerWork = DispatchTachoRules.WorkAvailableWeekMinutes(driver, driverDuties) is int workMinutes ? workMinutes / 60m : null;
+            decimal? providerDrive = DispatchTachoRules.DriveAvailablePlanningDayMinutes(driver, driverDuties, request.PlanningDate, today) is int driveMinutes ? driveMinutes / 60m : null;
             var projected = DispatchTachoRules.DetectProjectedBreach(
                 weeklyWorking,
                 currentDailyDriving,
