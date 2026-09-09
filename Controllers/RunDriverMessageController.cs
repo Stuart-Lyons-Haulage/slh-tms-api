@@ -170,7 +170,11 @@ public sealed class RunDriverMessageController(
 
         await MasterDetailStore.EnrichDriversAsync(db, [driver], ct);
         if (string.IsNullOrWhiteSpace(driver.TachoMasterDriverId) && string.IsNullOrWhiteSpace(driver.TachoCardNumber))
+        {
+            if (DriverPopulationRules.IsSubcontractor(driver))
+                return Unverified(minutes, 0, "This is an external subcontractor and no SLH TachoMaster identity is available. Confirm the subcontractor has independently verified the driver's legal hours, fitness and compliance for this route, then acknowledge this warning to dispatch. The acknowledgement is retained as unverified external-compliance evidence.");
             return Blocked(minutes, 0, "The allocated Driver Master record has no TachoMaster member number or driver card identity. Sync the Driver Master from TachoMaster before dispatch.");
+        }
 
         var nowUtc = DateTimeOffset.UtcNow;
         var ukNow = TimeZoneInfo.ConvertTime(nowUtc, London);
