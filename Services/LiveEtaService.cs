@@ -46,7 +46,7 @@ public sealed class LiveEtaCalculator(
     {
         var loads = await PlanningResilience.ReadLoadsAsync(db, planningDate, ct);
         var activeLoads = loads
-            .Where(load => load.Status is LoadStatus.Planned or LoadStatus.Dispatched or LoadStatus.InProgress && load.VehicleId != null)
+            .Where(load => (load.Status is LoadStatus.Planned or LoadStatus.Dispatched or LoadStatus.InProgress) && load.VehicleId != null)
             .ToList();
         if (activeLoads.Count == 0) return [];
 
