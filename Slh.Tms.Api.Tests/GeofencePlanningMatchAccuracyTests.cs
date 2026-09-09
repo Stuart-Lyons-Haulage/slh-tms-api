@@ -41,7 +41,7 @@ public sealed class GeofencePlanningMatchAccuracyTests
     }
 
     [Fact]
-    public void Brief_pass_through_does_not_complete_a_stop()
+    public void Short_linked_collection_exit_counts_as_completed_so_eta_does_not_route_backwards()
     {
         var loadId = Guid.NewGuid();
         var stopId = Guid.NewGuid();
@@ -65,6 +65,40 @@ public sealed class GeofencePlanningMatchAccuracyTests
             EnteredAtUtc = entered,
             LastInsideAtUtc = entered,
             ExitedAtUtc = entered.AddSeconds(45),
+            ConfirmedAtUtc = null,
+            DwellMinutes = 0
+        };
+
+        var completed = GeofencePlanningMatch.CompletedStopIds(load, [visit]);
+
+        Assert.Contains(stopId, completed);
+    }
+
+    [Fact]
+    public void Very_brief_pass_through_does_not_complete_a_stop()
+    {
+        var loadId = Guid.NewGuid();
+        var stopId = Guid.NewGuid();
+        var fence = EmbeddedGeofenceEngine.ApprovedFences.First();
+        var entered = DateTimeOffset.UtcNow.AddMinutes(-5);
+        var load = new Load
+        {
+            Id = loadId,
+            Reference = "RUN-TEST",
+            PlanningDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            Stops = [new LoadStop { Id = stopId, LoadId = loadId, Sequence = 1, Name = fence.Name }]
+        };
+        var visit = new DerivedVisit
+        {
+            Id = Guid.NewGuid(),
+            VehicleId = Guid.NewGuid(),
+            VehicleIdentifier = "AB12CDE",
+            Fence = fence,
+            LoadId = loadId,
+            LoadStopId = stopId,
+            EnteredAtUtc = entered,
+            LastInsideAtUtc = entered,
+            ExitedAtUtc = entered.AddSeconds(10),
             ConfirmedAtUtc = null,
             DwellMinutes = 0
         };
