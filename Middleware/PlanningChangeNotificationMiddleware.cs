@@ -12,6 +12,7 @@ public sealed class PlanningChangeNotificationMiddleware(RequestDelegate next)
         "/api/v1/planning-control",
         "/api/v1/runs",
         "/api/v1/loads",
+        "/api/v1/driver-dispatch",
         "/api/v1/staging",
         "/api/v1/order-intake",
         "/api/v1/orders",
@@ -59,7 +60,15 @@ public sealed class PlanningChangeNotificationMiddleware(RequestDelegate next)
         await next(context);
 
         if (relevantMutation && context.Response.StatusCode is >= 200 and < 300)
+        {
+            // Operational read models are derived from the same planning/allocation state. Once a
+            // write succeeds, any cached wallboard/progress result can be wrong immediately (for
+            // example Dispatched still appearing as Awaiting Dispatch, or Completed as InProgress).
+            // Clear the small in-process read cache before notifying clients so their next refresh
+            // necessarily observes the committed state.
+            ReadCache.Clear();
             notifier.Publish($"{context.Request.Method} {path}");
+        }
     }
 
     private static TimeSpan? CacheTtl(string path, bool authenticated)
@@ -70,7 +79,10 @@ public sealed class PlanningChangeNotificationMiddleware(RequestDelegate next)
             || path.Equals("/api/v1/run-timing", StringComparison.OrdinalIgnoreCase)
             || path.Equals("/api/v1/tv-display/route-progress", StringComparison.OrdinalIgnoreCase)
             || path.Equals("/api/v1/tv-display/live-runs", StringComparison.OrdinalIgnoreCase))
-            return TimeSpan.FromMinutes(5);
+            // These endpoints drive live operational screens. A five-minute cache makes tracking,
+            // dispatch and completion visibly stale even without a planner mutation (tracking is
+            // also updated by background jobs), so keep only a very short coalescing window.
+            return TimeSpan.FromSeconds(10);
 
         if (path.StartsWith("/api/v1/operations-intelligence", StringComparison.OrdinalIgnoreCase)
             || path.Equals("/api/v1/operations/reconciliation", StringComparison.OrdinalIgnoreCase)

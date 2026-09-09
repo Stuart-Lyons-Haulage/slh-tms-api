@@ -109,7 +109,7 @@ public sealed class PlannerCalculatedStartController(
         var latestDuty = matched.LastOrDefault();
         var lastCompleted = matched.Where(duty => duty.DutyEndUtc is not null).OrderBy(duty => duty.DutyEndUtc).LastOrDefault();
         if (latestDuty is not null && latestDuty.DutyEndUtc is null)
-            return await BuildFromActiveDuty(load, driver, vehicles, live, history, firstCollection, firstSite, existing, latestOnSite, ct);
+            return await BuildFromActiveDuty(load, driver, latestDuty, vehicles, live, history, firstCollection, firstSite, existing, latestOnSite, ct);
         if (lastCompleted?.DutyEndUtc is not DateTimeOffset dutyEnd)
             return PlannerStartSuggestion.Empty(load, firstCollection, existing, latestOnSite, "No completed TachoMaster duty was found. Enter the start manually until Tacho history is available.");
 
@@ -142,12 +142,28 @@ public sealed class PlannerCalculatedStartController(
     }
 
     private async Task<PlannerStartSuggestion> BuildFromActiveDuty(
-        Load load, Driver driver, IReadOnlyDictionary<Guid, Vehicle> vehicles, IReadOnlyDictionary<string, DotTelemetryRecord> live,
-        IReadOnlyList<Load> history, LoadStop? firstCollection, Site? firstSite, DriverDispatchState? existing, string? latestOnSite, CancellationToken ct)
+        Load load,
+        Driver driver,
+        TachoDriverDutyStatus latestDuty,
+        IReadOnlyDictionary<Guid, Vehicle> vehicles,
+        IReadOnlyDictionary<string, DotTelemetryRecord> live,
+        IReadOnlyList<Load> history,
+        LoadStop? firstCollection,
+        Site? firstSite,
+        DriverDispatchState? existing,
+        string? latestOnSite,
+        CancellationToken ct)
     {
         var origin = default(Origin);
+        Vehicle? allocatedVehicle = null;
         if (load.VehicleId is Guid vehicleId && vehicles.TryGetValue(vehicleId, out var vehicle))
         {
+            allocatedVehicle = vehicle;
+            if (IsVor(vehicle))
+                return new PlannerStartSuggestion(load.Id, RunDisplayLabel.For(load), driver.DisplayName, existing?.PlannedStartUtc, existing?.Source,
+                    null, null, WalkaroundMinutes, vehicle.Registration, null, null, CleanStop(firstCollection?.Name), latestOnSite, "Fleetio blocked",
+                    $"Fleetio marks {vehicle.Registration} as VOR/out of service. Change the vehicle before calculating or dispatching this run.");
+
             var key = Normalise(vehicle.Registration);
             if (live.TryGetValue(key, out var record) && record.Latitude is decimal lat && record.Longitude is decimal lon)
                 origin = new Origin(vehicle.Registration, lat, lon, "DOT live vehicle location");
@@ -157,10 +173,55 @@ public sealed class PlannerCalculatedStartController(
             var previous = PreviousFinal(history, driver.Id);
             if (previous is not null) origin = previous.Value;
         }
+
         var travel = await TravelAsync(origin, firstCollection, firstSite, ct);
+        var now = DateTimeOffset.UtcNow;
+        var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(now, London).DateTime);
+
+        // For a run planned today, an open Tacho duty means the driver is already legally on duty.
+        // "Could start" therefore means the earliest point from now, using current remaining hours,
+        // current/live location and the allocated vehicle. Final Dispatch still performs the full
+        // route/hours/card check before any driver text is released.
+        if (load.PlanningDate == today)
+        {
+            if (latestDuty.DriveAvailableTodayMinutes is <= 0)
+                return new PlannerStartSuggestion(load.Id, RunDisplayLabel.For(load), driver.DisplayName, existing?.PlannedStartUtc, existing?.Source,
+                    null, null, WalkaroundMinutes, origin.Label, travel.Minutes, null, CleanStop(firstCollection?.Name), latestOnSite, "Active duty",
+                    "TachoMaster shows an open duty but no driving time remaining today. Re-plan before dispatch.");
+            if (latestDuty.WorkAvailableWeekMinutes is <= 0)
+                return new PlannerStartSuggestion(load.Id, RunDisplayLabel.For(load), driver.DisplayName, existing?.PlannedStartUtc, existing?.Source,
+                    null, null, WalkaroundMinutes, origin.Label, travel.Minutes, null, CleanStop(firstCollection?.Name), latestOnSite, "Active duty",
+                    "TachoMaster shows an open duty but no working time remaining this week. Re-plan before dispatch.");
+
+            var start = now;
+            DateTimeOffset? firstEta = travel.Minutes is null ? null : start.AddMinutes(WalkaroundMinutes + travel.Minutes.Value);
+            var drive = latestDuty.DriveAvailableTodayMinutes is int driveMinutes ? $" · {driveMinutes / 60d:0.0}h drive remaining" : string.Empty;
+            var vehicleEvidence = allocatedVehicle is null ? string.Empty : $" · Fleetio vehicle {allocatedVehicle.Registration} available";
+            var explanation = $"Open Tacho duty started {Local(latestDuty.DutyStartUtc):HH:mm}{drive}. Earliest run start is now · 10 min walkaround · {origin.Label ?? "current/previous location"} → {CleanStop(firstCollection?.Name) ?? "first collection"}{(travel.Minutes is null ? " · travel time unavailable" : $" {travel.Minutes} min")}{vehicleEvidence}. Final dispatch re-checks live card, remaining hours and vehicle status.";
+            return new PlannerStartSuggestion(load.Id, RunDisplayLabel.For(load), driver.DisplayName, existing?.PlannedStartUtc, existing?.Source,
+                null, start, WalkaroundMinutes, origin.Label, travel.Minutes, firstEta, CleanStop(firstCollection?.Name), latestOnSite, "Active duty", explanation);
+        }
+
+        // If today's duty is still open while planning a future run, provide a conservative
+        // provisional start rather than returning nothing. Assume a 13h duty cap then a full 11h
+        // regular daily rest; the value is recalculated automatically once TachoMaster closes duty.
+        if (load.PlanningDate > today)
+        {
+            var assumedDutyEnd = latestDuty.DutyStartUtc.AddHours(13);
+            if (assumedDutyEnd < now) assumedDutyEnd = now;
+            var assumedStart = assumedDutyEnd.AddHours(11);
+            var planningFloor = PlanningFloorUtc(load.PlanningDate);
+            if (assumedStart < planningFloor) assumedStart = planningFloor;
+            DateTimeOffset? firstEta = travel.Minutes is null ? null : assumedStart.AddMinutes(WalkaroundMinutes + travel.Minutes.Value);
+            var explanation = $"ASSUMPTION · current Tacho duty is still open. Using assumed duty end {Local(assumedDutyEnd):dd/MM HH:mm}, then 11h regular daily rest · 10 min walkaround · {origin.Label ?? "current/previous location"} → {CleanStop(firstCollection?.Name) ?? "first collection"}{(travel.Minutes is null ? " · travel time unavailable" : $" {travel.Minutes} min")}. Recalculate when duty closes.";
+            return new PlannerStartSuggestion(load.Id, RunDisplayLabel.For(load), driver.DisplayName, existing?.PlannedStartUtc, existing?.Source,
+                assumedStart, assumedStart, WalkaroundMinutes, origin.Label, travel.Minutes, firstEta, CleanStop(firstCollection?.Name), latestOnSite,
+                "Assumed regular daily rest", explanation);
+        }
+
         return new PlannerStartSuggestion(load.Id, RunDisplayLabel.For(load), driver.DisplayName, existing?.PlannedStartUtc, existing?.Source,
-            null, null, WalkaroundMinutes, origin.Label, travel.Minutes, null, CleanStop(firstCollection?.Name), latestOnSite, "Active duty",
-            "TachoMaster shows an open duty. DOT/previous-run location is shown, but the next legal rest completion cannot be calculated until that duty closes.");
+            null, latestDuty.DutyStartUtc, WalkaroundMinutes, origin.Label, travel.Minutes, null, CleanStop(firstCollection?.Name), latestOnSite,
+            "Active duty", $"Historic open-duty evidence starts at {Local(latestDuty.DutyStartUtc):dd/MM HH:mm}.");
     }
 
     private async Task<(int? Minutes, string Source)> TravelAsync(Origin origin, LoadStop? stop, Site? site, CancellationToken ct)
@@ -252,6 +313,18 @@ public sealed class PlannerCalculatedStartController(
             if (match.Success) return match.Value.PadLeft(5, '0');
         }
         return null;
+    }
+
+    private static bool IsVor(Vehicle vehicle) => vehicle.FleetioVor == true ||
+        (vehicle.FleetioStatus?.Contains("VOR", StringComparison.OrdinalIgnoreCase) ?? false) ||
+        (vehicle.FleetioStatus?.Contains("out of service", StringComparison.OrdinalIgnoreCase) ?? false) ||
+        (vehicle.FleetioStatus?.Contains("inactive", StringComparison.OrdinalIgnoreCase) ?? false) ||
+        (vehicle.FleetioStatus?.Contains("off road", StringComparison.OrdinalIgnoreCase) ?? false);
+
+    private static DateTimeOffset PlanningFloorUtc(DateOnly date)
+    {
+        var local = DateTime.SpecifyKind(date.ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified);
+        return new DateTimeOffset(TimeZoneInfo.ConvertTimeToUtc(local, London), TimeSpan.Zero);
     }
 
     private static string? CleanStop(string? value)

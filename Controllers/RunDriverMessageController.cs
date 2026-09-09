@@ -44,22 +44,31 @@ public sealed class RunDriverMessageController(
         if (string.IsNullOrWhiteSpace(request.Message)) return BadRequest(new { message = "The driver message is empty." });
         if (request.Message.Length > 5000) return BadRequest(new { message = "The driver message is too long." });
 
+        // Allocation writes deliberately target the Planning Register when a resilient copy exists.
+        // Prefer that copy here too, otherwise a stale dbo.Loads row can make Dispatch believe a
+        // successfully allocated run has no driver/vehicle.
         Load? load = null;
         var register = false;
         try
         {
-            load = await db.Loads.Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == id, ct);
+            load = await PlanningRegisterStore.GetLoadAsync(db, id, ct);
+            register = load is not null;
         }
         catch (Exception exception) when (IsSchemaUnavailable(exception))
         {
             db.ChangeTracker.Clear();
-            register = true;
         }
 
         if (load is null)
         {
-            load = await PlanningRegisterStore.GetLoadAsync(db, id, ct);
-            register = load is not null;
+            try
+            {
+                load = await db.Loads.Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == id, ct);
+            }
+            catch (Exception exception) when (IsSchemaUnavailable(exception))
+            {
+                db.ChangeTracker.Clear();
+            }
         }
         if (load is null) return NotFound(new { message = "The run could not be found." });
         if (load.DriverId is null || load.VehicleId is null) return BadRequest(new { message = "Allocate both a driver and vehicle before sending the driver text." });
@@ -134,20 +143,8 @@ public sealed class RunDriverMessageController(
             message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
     }
 
-    private async Task<Load?> FindLoad(Guid id, CancellationToken ct)
-    {
-        Load? load = null;
-        try
-        {
-            load = await db.Loads.AsNoTracking().Include(item => item.Stops).SingleOrDefaultAsync(item => item.Id == id, ct);
-        }
-        catch (Exception exception) when (IsSchemaUnavailable(exception))
-        {
-            db.ChangeTracker.Clear();
-        }
-
-        return load ?? await PlanningRegisterStore.GetLoadAsync(db, id, ct);
-    }
+    private Task<Load?> FindLoad(Guid id, CancellationToken ct)
+        => PlanningResilience.ReadLoadAsync(db, id, ct);
 
     private async Task<RunDispatchReadinessResponse> AssessReadiness(
         Load load,
