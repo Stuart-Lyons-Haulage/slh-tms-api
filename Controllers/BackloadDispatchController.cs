@@ -28,7 +28,7 @@ public sealed class BackloadDispatchController(BackloadOperationsService service
         {
             var actor = User.Identity?.Name ?? "TMS dispatcher";
             await service.RecordDeclineAsync(request, actor, ct);
-            return NoContent();
+            return Ok(new { declined = true });
         }
         catch (KeyNotFoundException exception) { return NotFound(new { error = exception.Message }); }
         catch (ArgumentException exception) { return BadRequest(new { error = exception.Message }); }
