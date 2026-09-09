@@ -39,6 +39,10 @@ public sealed class EmailOrderIntakeService
         @"\bCollection(?:\s+time)?\s*[:=-]?\s*(?<time>(?:[01]?\d|2[0-3])(?:[:.]\d{2})?\s*(?:am|pm)?)\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    private static readonly Regex ReadyForCollectionTimeRegex = new(
+        @"\bready\s+for\s+collection\s+(?:from|at)\s*(?<time>(?:[01]?\d|2[0-3])(?:[:.]\d{2})?\s*(?:am|pm)?)\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private static readonly Regex TemperatureRegex = new(
         @"\bTransport\s+at\s*(?<temp>[+-]?\d+(?:\.\d+)?)\s*(?:degrees?|°)\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -279,9 +283,12 @@ public sealed class EmailOrderIntakeService
         var bodySignal = DetectKnownSignal(body, []);
         var subjectSignal = DetectKnownSignal(request.Subject ?? string.Empty, []);
         var existingCustomer = PayloadText(payload, "customerCode");
+        var senderCustomer = (request.SenderAddress ?? string.Empty).EndsWith("@langmeadherbs.co.uk", StringComparison.OrdinalIgnoreCase) ||
+            (request.SenderAddress ?? string.Empty).EndsWith("@langmeadfarms.co.uk", StringComparison.OrdinalIgnoreCase)
+            ? "LANGMEADS" : null;
         var resolvedCustomer = !string.IsNullOrWhiteSpace(explicitCustomer) ? CustomerCode(explicitCustomer)
             : !string.IsNullOrWhiteSpace(masterCustomer) ? masterCustomer
-            : bodySignal?.CustomerCode
+            : senderCustomer ?? bodySignal?.CustomerCode
             ?? (IsTemplateSource(order.SourceKey) && !string.Equals(existingCustomer, "EMAIL", StringComparison.OrdinalIgnoreCase) ? existingCustomer : null)
             ?? subjectSignal?.CustomerCode
             ?? existingCustomer;
@@ -1009,7 +1016,8 @@ public sealed class EmailOrderIntakeService
         var pallets = ExtractInt(TotalPalletsRegex, body, "qty")
             ?? ExtractInt(LabelledQuantityRegex, sourceText, "qty")
             ?? ExtractInt(PalletQuantityRegex, sourceText, "qty");
-        var requestedTime = NormaliseTime(ExtractMatch(CollectionTimeRegex, body, "time"));
+        var requestedTime = NormaliseTime(ExtractMatch(CollectionTimeRegex, body, "time"))
+            ?? NormaliseTime(ExtractMatch(ReadyForCollectionTimeRegex, body, "time"));
         var recognisedCustomerOrSite = signal is not null || !string.Equals(customer, "EMAIL", StringComparison.OrdinalIgnoreCase);
         if (!HasEnoughBodyOrderEvidence(rawPo, collection, destination, pallets, requestedTime, jobType, recognisedCustomerOrSite))
         {
@@ -1602,6 +1610,9 @@ public sealed class EmailOrderIntakeService
 
     private static string InferCustomerCode(string? subject, string? senderAddress, string? depot)
     {
+        if ((senderAddress ?? string.Empty).EndsWith("@langmeadherbs.co.uk", StringComparison.OrdinalIgnoreCase) ||
+            (senderAddress ?? string.Empty).EndsWith("@langmeadfarms.co.uk", StringComparison.OrdinalIgnoreCase))
+            return "LANGMEADS";
         var source = $"{subject} {depot}".ToUpperInvariant();
         foreach (var brand in new[] { "MORRISONS", "ALDI", "WAITROSE", "WEIGHTROSE", "COOP", "CO-OP", "OCADO", "SAINSBURYS", "SAINSBURY", "NATURES WAY", "NATURE'S WAY", "NWF", "NWAY", "BARFOOTS", "LANGMEADS", "LANGMEAD", "LANGMEAD HERBS" })
         {
@@ -1655,6 +1666,8 @@ public sealed class EmailOrderIntakeService
         if (body.Contains("Langmead Herbs", StringComparison.OrdinalIgnoreCase) ||
             body.Contains("Ham Farm", StringComparison.OrdinalIgnoreCase))
             return "Ham Farm";
+        if (body.Contains("Walton Farm", StringComparison.OrdinalIgnoreCase))
+            return "Walton Farm";
         if (jobType == "Tray collection")
         {
             var match = Regex.Match(subject ?? string.Empty, @"Tray\s+collection\s+(?<site>.+?)(?:\s+\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)?$", RegexOptions.IgnoreCase);

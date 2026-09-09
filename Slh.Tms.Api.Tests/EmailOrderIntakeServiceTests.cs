@@ -133,6 +133,37 @@ public sealed class EmailOrderIntakeServiceTests
     }
 
     [Fact]
+    public void LangmeadHamFarmBooking_IsStagedAsLangmeadsOrder()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "langmead-ham-09092026", null, "info@lyonshaulage.com", "AndrejsLupins@langmeadherbs.co.uk", "Andrejs Lupins",
+            "Ham Farm to NISA Transport WED 09/09/2026 depot", DateTimeOffset.Parse("2026-09-08T13:02:00Z"),
+            "Good afternoon, Please find attached Ham Farm Langmead Herbs booking form for NISA transport WED 09/09/2026 depot. Product will be ready for collection at 16:30. 2 pallets. Collection from Ham Farm.", null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("LANGMEADS", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("Ham Farm", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal(2, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.Equal("2026-09-09", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Contains("16:30", order.Payload.GetProperty("driverInstructions").GetString());
+    }
+
+    [Fact]
+    public void WaltonFarmAldiBooking_IsStagedAsLangmeadsOrder()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "walton-aldi-09092026", null, "info@lyonshaulage.com", "ewa@langmeadherbs.co.uk", "Ewa Kuszczak",
+            "Aldi Order 09/09/2026", DateTimeOffset.Parse("2026-09-08T12:41:00Z"),
+            "Please find attached the Walton Farm booking forms for Aldi transport 09/09/2026 depot day. 2 pallets from Walton Farm.", null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("LANGMEADS", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("Walton Farm", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Aldi", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal(2, order.Payload.GetProperty("pallets").GetInt32());
+    }
+
+    [Fact]
     public void HallHunterDirectDepotDelivery_UsesSeparateCollectionAndDeliveryDates()
     {
         var result = service.Parse(new MailboxEmailIntakeRequest(

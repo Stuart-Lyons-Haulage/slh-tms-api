@@ -34,7 +34,7 @@
               "mailboxAddress": "@parameters('SLH_InfoMailboxUPN')",
               "folderId": "Inbox",
               "importance": "Any",
-              "includeAttachments": false
+              "includeAttachments": true
             }
           },
           "runtimeConfiguration": { "concurrency": { "runs": 4 } }
