@@ -32,6 +32,25 @@ public sealed class BetaDayPlanBuilderTests
         AssertCollectionsBeforeDeliveries(pm, orders.Where(order => order.Period == "PM").ToList());
     }
 
+    [Fact]
+    public void BuildStops_ConsolidatesRepeatedPhysicalSitesWithoutLosingOrderLines()
+    {
+        var sharedCollection = new BetaRoutePoint("NWF-Selsey", 50.74m, -0.78m);
+        var sharedDelivery = new BetaRoutePoint("Aldi-Darlington", 54.52m, -1.56m);
+        var orders = new[]
+        {
+            new BetaDayOrderInput(Guid.NewGuid(), Guid.NewGuid(), "SO-1", "NWF", "AM", "Euro", 16, new TimeOnly(5, 0), sharedCollection, sharedDelivery),
+            new BetaDayOrderInput(Guid.NewGuid(), Guid.NewGuid(), "SO-2", "NWF", "AM", "Euro", 6, new TimeOnly(5, 0), sharedCollection, sharedDelivery),
+            new BetaDayOrderInput(Guid.NewGuid(), Guid.NewGuid(), "SO-3", "NWF", "AM", "Euro", 4, new TimeOnly(6, 0), new BetaRoutePoint("NWF-Runcton", 50.84m, -0.72m), sharedDelivery),
+        };
+
+        var stops = BetaDayPlanBuilder.BuildStops(orders);
+
+        Assert.Equal(new[] { "NWF-Selsey", "NWF-Runcton", "Aldi-Darlington" }, stops.Select(stop => stop.Name));
+        Assert.Equal(3, orders.Length);
+        Assert.Equal(26, orders.Sum(order => order.Pallets));
+    }
+
     private static void AssertCollectionsBeforeDeliveries(BetaDayBuiltRun run, IReadOnlyList<BetaDayOrderInput> orders)
     {
         var positions = run.Stops.Select((stop, index) => (stop.Name, index)).ToDictionary(item => item.Name, item => item.index);
