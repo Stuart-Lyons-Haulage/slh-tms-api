@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using Microsoft.ApplicationInsights;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -31,6 +32,13 @@ public class CustomWebFactory : WebApplicationFactory<Program>
             var dbRegistrations = services.Where(descriptor => descriptor.ServiceType == typeof(DbContextOptions<TmsDbContext>) || descriptor.ServiceType == typeof(TmsDbContext)).ToList();
             foreach (var registration in dbRegistrations) services.Remove(registration);
             services.AddDbContext<TmsDbContext>(options => options.UseInMemoryDatabase(_databaseName));
+
+            // Application Insights 3.x uses one process-wide configuration. Tests use the
+            // assembly-initialised disabled client so the production factory never mutates that
+            // already-built configuration and no telemetry leaves the test process.
+            var telemetryRegistrations = services.Where(descriptor => descriptor.ServiceType == typeof(TelemetryClient)).ToList();
+            foreach (var registration in telemetryRegistrations) services.Remove(registration);
+            services.AddSingleton(TestTelemetry.Client);
 
             // Operational intelligence workers are production schedulers, not endpoint dependencies.
             // Starting them inside WebApplicationFactory makes them race the shared in-memory provider
