@@ -454,3 +454,31 @@ jobs:
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --output table
+
+      - name: Publish deployment summary
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+
+          revision_json="$(az containerapp revision show \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision "${TARGET_REVISION:-${PREVIOUS_REVISION:-}}" \
+            --output json 2>/dev/null || echo '{}')"
+          image_digest="$(jq -r '.properties.template.containers[0].image // "unknown"' <<<"$revision_json")"
+          health_state="$(jq -r '.properties.healthState // "unknown"' <<<"$revision_json")"
+          rollback_status="not-required"
+          if [[ "${{ job.status }}" != "success" ]]; then
+            rollback_status="attempted-or-required"
+          fi
+
+          {
+            echo "## Production deployment summary"
+            echo "- Tested revision: `${DEPLOY_SHA}`"
+            echo "- Candidate revision: `${TARGET_REVISION:-unknown}`"
+            echo "- Previous revision: `${PREVIOUS_REVISION:-unknown}`"
+            echo "- Image: `${image_digest}`"
+            echo "- Candidate health: `${health_state}`"
+            echo "- Workflow result: `${{ job.status }}`"
+            echo "- Rollback status: `${rollback_status}`"
+          } >> "$GITHUB_STEP_SUMMARY"
