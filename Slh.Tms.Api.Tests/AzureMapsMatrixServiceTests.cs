@@ -1,8 +1,6 @@
 using System.Net;
 using System.Text;
 using Azure.Core;
-using Microsoft.ApplicationInsights;
-using Microsoft.ApplicationInsights.Extensibility;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
@@ -108,15 +106,13 @@ public sealed class AzureMapsMatrixServiceTests
         {
             ["Maps:ClientId"] = "test-client-id"
         }).Build();
-        var telemetryConfiguration = TelemetryConfiguration.CreateDefault();
-        telemetryConfiguration.DisableTelemetry = true;
         return new AzureMapsMatrixService(
             factory,
             new MemoryCache(new MemoryCacheOptions()),
             new StubCredential(),
             configuration,
             Options.Create(options ?? new AzureMapsMatrixOptions()),
-            new TelemetryClient(telemetryConfiguration),
+            TestTelemetry.Client,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<AzureMapsMatrixService>.Instance);
     }
 
