@@ -25,6 +25,7 @@ public sealed class TelemetryContractTests
         {
             "api_endpoint_latency_ms",
             "sql_query_latency_ms",
+            "dependency_request_latency_ms",
             "roadtech_data_age_seconds",
             "fleetio_last_successful_sync_age_seconds",
             "tachomaster_last_successful_sync_age_seconds",

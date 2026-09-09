@@ -164,18 +164,20 @@ builder.Services.AddScoped<DriverMasterClassificationService>();
 builder.Services.AddScoped<TachoCanonicalDriverMasterOrchestrator>();
 builder.Services.AddScoped<TachoDriverMasterSyncJobService>();
 builder.Services.AddTransient<TachoMasterRetryHandler>();
+builder.Services.AddTransient<DependencyTelemetryHandler>();
 builder.Services.AddScoped<DriverWeeklyRestComplianceService>();
-builder.Services.AddHttpClient<DriverSmsDispatchService>();
-builder.Services.AddHttpClient<SageHrClient>();
-builder.Services.AddHttpClient<DotTrackingClient>();
+builder.Services.AddHttpClient<DriverSmsDispatchService>().AddHttpMessageHandler<DependencyTelemetryHandler>();
+builder.Services.AddHttpClient<SageHrClient>().AddHttpMessageHandler<DependencyTelemetryHandler>();
+builder.Services.AddHttpClient<DotTrackingClient>().AddHttpMessageHandler<DependencyTelemetryHandler>();
 builder.Services.AddHttpClient<TachoMasterClient>()
+    .AddHttpMessageHandler<DependencyTelemetryHandler>()
     .AddHttpMessageHandler<TachoMasterRetryHandler>()
     .ConfigureHttpClient((sp, _) =>
     {
         sp.GetService<DotTrackingClient>();
     });
-builder.Services.AddHttpClient<AzureMapsRouteClient>();
-builder.Services.AddHttpClient<FleetioClient>();
+builder.Services.AddHttpClient<AzureMapsRouteClient>().AddHttpMessageHandler<DependencyTelemetryHandler>();
+builder.Services.AddHttpClient<FleetioClient>().AddHttpMessageHandler<DependencyTelemetryHandler>();
 builder.Services.AddHostedService<DotTrackingIngestionService>();
 builder.Services.AddHostedService<TachoDriverMasterSyncJobWorker>();
 builder.Services.AddHostedService<DriverMasterClassificationBackgroundService>();
