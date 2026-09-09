@@ -60,4 +60,22 @@ public sealed class OrderIntakeOperationalUpdateTests : IClassFixture<CustomWebF
         Assert.Single(await verifyDb.StagedImports.Where(item => item.EntityType == "email-evidence" && item.PayloadJson.Contains(messageId)).ToListAsync());
         Assert.Single(await verifyDb.StagedImports.Where(item => item.EntityType == "order" && item.Id == orderId).ToListAsync());
     }
+
+    [Fact]
+    public async Task PluralReadyForCollectionStatus_IsIgnoredAsOperationalUpdate()
+    {
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
+        var request = JsonSerializer.Serialize(new
+        {
+            messageId = $"market-ready-{Guid.NewGuid():N}", mailbox = "info@lyonshaulage.com",
+            senderAddress = "ilia.angelakidis@barfoots.co.uk", subject = "Waitrose + Market DD 10/09/26",
+            receivedAtUtc = "2026-09-09T11:12:00Z",
+            bodyText = "Waitrose and Markets pallets are ready for collection from Leythorne."
+        });
+        var response = await client.PostAsync("/api/v1/order-intake/email", new StringContent(request, Encoding.UTF8, "application/json"));
+        var text = await response.Content.ReadAsStringAsync();
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("\"ignored\":true", text);
+        Assert.Contains("\"staged\":0", text);
+    }
 }

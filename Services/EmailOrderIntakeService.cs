@@ -1815,6 +1815,8 @@ public sealed class EmailOrderIntakeService
             || value.Contains("Please find attached ETA", StringComparison.OrdinalIgnoreCase)
             || value.Contains("is ready to be collected", StringComparison.OrdinalIgnoreCase)
             || value.Contains("is ready for collection", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("are ready for collection", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("ready for collection from", StringComparison.OrdinalIgnoreCase)
             || value.Contains("missing PO request log", StringComparison.OrdinalIgnoreCase)
             || value.Contains("fleetio.com", StringComparison.OrdinalIgnoreCase)
             || value.Contains("notifications@fleetio.com", StringComparison.OrdinalIgnoreCase)
