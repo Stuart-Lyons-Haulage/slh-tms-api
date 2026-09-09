@@ -29,6 +29,12 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
             try { sites = await GeofenceSiteResolver.LoadActiveSitesAsync(db, ct); }
             catch { sites = []; db.ChangeTracker.Clear(); }
 
+            var activeSiteIdsWithGeofence = fences.Where(x => x.SiteId is not null).Select(x => x.SiteId!.Value).ToHashSet();
+            var duplicateReferenceGroups = sites
+                .Where(x => !string.IsNullOrWhiteSpace(x.ExternalCode))
+                .GroupBy(x => NormalizeCode(x.ExternalCode), StringComparer.OrdinalIgnoreCase)
+                .Count(x => x.Count() > 1);
+
             var linkDiagnostics = fences.ToDictionary(
                 item => item.Fence.Id,
                 item => GeofenceLinkDiagnostics.Analyze(item.Fence, sites));
@@ -70,6 +76,10 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
                     invalid = 0,
                     reconciliation = new
                     {
+                        activeSites = sites.Count,
+                        sitesMissingReference = sites.Count(x => string.IsNullOrWhiteSpace(x.ExternalCode)),
+                        duplicateReferenceGroups,
+                        sitesMissingGeofence = sites.Count(x => !activeSiteIdsWithGeofence.Contains(x.Id)),
                         safeCandidates = linkDiagnostics.Values.Count(item => item.SafeToAutoLink),
                         exactCode = linkDiagnostics.Values.Count(item => item.Reason == "ExactCode"),
                         exactNameOrAlias = linkDiagnostics.Values.Count(item => item.Reason == "ExactNameOrAlias"),
@@ -183,6 +193,7 @@ public sealed class GeofenceIntegrityController(TmsDbContext db) : ControllerBas
     }
 
     private static string NormalizeName(string value) => string.Join(' ', value.Trim().ToUpperInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries));
+    private static string NormalizeCode(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     private static DateOnly UkOperatingDate(DateTimeOffset value)
     {
