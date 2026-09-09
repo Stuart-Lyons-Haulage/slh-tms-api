@@ -58,7 +58,13 @@ public sealed class DotTrackingClient
         }
 
         if (_liveSnapshot is not null)
-            return _liveSnapshot.Read().Records;
+        {
+            var snapshot = _liveSnapshot.Read();
+            if (snapshot.CapturedAtUtc is null)
+                throw new RoadTechLiveSnapshotUnavailableException(
+                    "The central RoadTech ingestion worker has not yet completed a successful live snapshot.");
+            return snapshot.Records;
+        }
 
         // Unit tests and explicitly constructed clients that do not use application DI retain
         // direct-provider behaviour. Production registers RoadTechLiveSnapshot, so this path is
@@ -372,6 +378,8 @@ public sealed class DotTrackingClient
         return $"RoadTech {endpoint} returned {(int)response.StatusCode} ({response.ReasonPhrase}). {detail}";
     }
 }
+
+public sealed class RoadTechLiveSnapshotUnavailableException(string message) : Exception(message);
 
 public sealed class RoadTechTelemetryPage
 {
