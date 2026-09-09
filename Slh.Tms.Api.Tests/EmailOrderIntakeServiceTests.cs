@@ -490,4 +490,37 @@ public sealed class EmailOrderIntakeServiceTests
         Assert.Empty(result.Orders);
         Assert.Contains("Operational request", result.IgnoredReason);
     }
+
+    [Fact]
+    public void AndoverAndAvonmouthAttachmentStyle_IsSplitIntoTwoOrders()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-depot-split", null, "info@lyonshaulage.com", "loads@example.com", "Leythorne",
+            "Waitrose depot collections 09/09/26", DateTimeOffset.Parse("2026-09-08T09:00:00Z"),
+            "Please arrange 1 pallet to Andover and 2 pallets to Avonmouth for 09/09/26.",
+            null, null, null));
+
+        Assert.Equal(2, result.Orders.Count);
+        Assert.Equal(new[] { "Andover", "Avonmouth" }, result.Orders.Select(x => x.Payload.GetProperty("stallNumber").GetString()).OrderBy(x => x));
+        Assert.Equal(new[] { 1, 2 }, result.Orders.Select(x => x.Payload.GetProperty("pallets").GetInt32()).OrderBy(x => x));
+    }
+
+    [Fact]
+    public void WholesaleMarketWithoutCollectionDate_StagesOvernightDepartureOnPreviousDay()
+    {
+        var rows = new List<object?[]>
+        {
+            new[] { "COLLECTION Sefter", "", "", "", "" },
+            new[] { "Market", "Customer", "Delivery addess", "Pallets", "Delivery Date" },
+            new[] { "New Covent Garden", "Premier Foods", "PFW01", "2", "10/09/2026" }
+        };
+        var request = new MailboxEmailIntakeRequest(
+            "message-market-overnight", null, "info@lyonshaulage.com", "mariela.popova@barfoots.co.uk", "Mariela Popova",
+            "Wholesale Market Pallet Bookings for delivery on 10/09/26", DateTimeOffset.Parse("2026-09-09T10:00:00Z"),
+            "Wholesale Market Pallet Bookings", null, null, null);
+
+        var order = Assert.Single(EmailOrderIntakeService.ParseBarfootsWholesaleMarketRows(request, "Wholesale Market Pallet Bookings.xlsx", "Sheet1", rows));
+        Assert.Equal("2026-09-09", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("2026-09-10", order.Payload.GetProperty("deliveryDate").GetString());
+    }
 }

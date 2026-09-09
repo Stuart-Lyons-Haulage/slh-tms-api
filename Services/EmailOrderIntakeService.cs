@@ -318,6 +318,9 @@ public sealed class EmailOrderIntakeService
         var barfootsWaitrose = ParseBarfootsWaitroseWaveBody(request, body, receivedAt);
         if (barfootsWaitrose.Count > 0) return barfootsWaitrose;
 
+        var depotSplit = ParseAndoverAvonmouthSplit(request, rawPo, body, receivedAt);
+        if (depotSplit.Count > 0) return depotSplit;
+
         var waitrose = ParseWaitroseDepotTable(request, rawPo, body, sourceText, sourceDate, receivedAt);
         if (waitrose.Count > 0) return waitrose;
 
@@ -863,7 +866,10 @@ public sealed class EmailOrderIntakeService
             var warnings = new List<string>();
             if (string.IsNullOrWhiteSpace(customerPo))
                 warnings.Add("Wholesale source row has no sales-order reference; a stable message-and-row reference was generated for review.");
-            var collectionDate = LocalDate(request.ReceivedAtUtc ?? DateTimeOffset.UtcNow);
+            // Wholesale market work is commonly an overnight PM route. When the
+            // workbook supplies delivery only, stage collection on the preceding
+            // day so the planner can allocate the departure correctly.
+            var collectionDate = deliveryDate.Value.AddDays(-1);
             var baseReference = customerPo ?? StableEmailReference(request.MessageId);
             var orderReference = BuildRowReference(baseReference, "BARFOOTS", customer, deliveryDate.Value, rowIndex + 1);
             var naturalKey = $"barfoots|wholesale|{deliveryDate:yyyy-MM-dd}|{NormaliseKey(collection)}|{NormaliseKey(market)}|{NormaliseKey(customer)}|{NormaliseKey(customerPo)}";
@@ -907,6 +913,43 @@ public sealed class EmailOrderIntakeService
             results.Add(new ParsedEmailOrder($"barfoots-wholesale-{NormaliseKey(collection)}-{rowIndex + 1}", naturalKey, JsonSerializer.SerializeToElement(payload), warnings));
         }
         return results;
+    }
+
+    private static List<ParsedEmailOrder> ParseAndoverAvonmouthSplit(
+        MailboxEmailIntakeRequest request,
+        string? rawPo,
+        string body,
+        DateTimeOffset receivedAt)
+    {
+        if (!Regex.IsMatch(body, @"\bAndover\b", RegexOptions.IgnoreCase) ||
+            !Regex.IsMatch(body, @"\bAvonmouth\b", RegexOptions.IgnoreCase))
+            return [];
+
+        var date = ExtractDate(body, receivedAt) ?? ExtractDate(request.Subject ?? string.Empty, receivedAt);
+        if (date is null) return [];
+        var rows = Regex.Matches(body, @"(?im)(?:(?<qty>\d{1,3})\s*(?:pallets?|plts?)\s*(?:to\s+)?(?<site>Andover|Avonmouth)|(?<site2>Andover|Avonmouth)[^\r\n]{0,80}?\b(?<qty2>\d{1,3})\s*(?:pallets?|plts?)\b)")
+            .Cast<Match>()
+            .Select(m => (Site: CultureInfo.InvariantCulture.TextInfo.ToTitleCase((m.Groups["site"].Success ? m.Groups["site"].Value : m.Groups["site2"].Value).ToLowerInvariant()),
+                          Pallets: int.Parse(m.Groups["qty"].Success ? m.Groups["qty"].Value : m.Groups["qty2"].Value, CultureInfo.InvariantCulture)))
+            .Where(x => x.Pallets > 0)
+            .GroupBy(x => x.Site, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .ToList();
+        if (rows.Count < 2) return [];
+
+        var customer = sourceTextCustomer(request, body);
+        var warnings = new[] { "Split from one source email into separate depot orders; verify attachment evidence before approval." };
+        return rows.Select((row, index) => BuildStructuredOrder(
+            request, $"depot-split-{NormaliseKey(row.Site)}-{index + 1}", customer, rawPo,
+            date.Value, date.Value, row.Pallets, InferCollectionSiteFromSender(request.SenderAddress),
+            row.Site, "Depot pallet delivery", warnings)).ToList();
+
+        static string sourceTextCustomer(MailboxEmailIntakeRequest request, string body)
+        {
+            if ($"{request.Subject}\n{body}".Contains("Waitrose", StringComparison.OrdinalIgnoreCase)) return "WAITROSE";
+            if ($"{request.Subject}\n{body}".Contains("Barfoots", StringComparison.OrdinalIgnoreCase)) return "BARFOOTS";
+            return CustomerCode(request.SenderName) == "UNKNOWN" ? "EMAIL" : CustomerCode(request.SenderName);
+        }
     }
 
     private static string CanonicalWholesaleMarket(string value)
