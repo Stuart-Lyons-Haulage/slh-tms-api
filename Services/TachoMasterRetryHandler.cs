@@ -29,6 +29,18 @@ public sealed class TachoMasterRetryHandler(ILogger<TachoMasterRetryHandler> log
                 continue;
             }
 
+            // HTTP 429 is an explicit provider back-pressure signal. Returning it immediately
+            // lets the caller keep its previous cached snapshot instead of multiplying the rate
+            // limit with three rapid authentication/data retries.
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+            {
+                logger.LogWarning(
+                    "TachoMaster upstream returned HTTP 429 for {Method} {Path}; immediate retries suppressed.",
+                    request.Method,
+                    request.RequestUri?.AbsolutePath);
+                return response;
+            }
+
             if (!ShouldRetry(request.RequestUri?.AbsolutePath, response.StatusCode))
                 return response;
 
@@ -53,7 +65,7 @@ public sealed class TachoMasterRetryHandler(ILogger<TachoMasterRetryHandler> log
 
     private static bool ShouldRetry(string? path, HttpStatusCode statusCode)
     {
-        if (statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests or HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout)
+        if (statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout)
             return true;
 
         // TachoMaster historically uses HTTP 500 during one of its login password-format checks.
