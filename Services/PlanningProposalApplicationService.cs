@@ -34,7 +34,8 @@ public sealed class PlanningProposalApplicationService(TmsDbContext db)
         if (unverified && !request.AcknowledgeUnverified)
             throw new PlanProposalApplyException("UnverifiedAcknowledgementRequired", "This proposal contains Unverified evidence and requires explicit planner acknowledgement before application.");
 
-        if (generatedRuns.Any(run => run.DriverId is null || run.VehicleId is null))
+        var betaRouteBuild = IsBetaRouteBuild(proposal);
+        if (!betaRouteBuild && generatedRuns.Any(run => run.DriverId is null || run.VehicleId is null))
             throw new PlanProposalApplyException("ProposalIncomplete", "Every new optimiser run must have a selected driver and vehicle before it can be applied.");
 
         var lockedLoadIds = proposal.Runs
@@ -52,13 +53,14 @@ public sealed class PlanningProposalApplicationService(TmsDbContext db)
         foreach (var run in generatedRuns)
         {
             var conflict = existingLoads.FirstOrDefault(load => !lockedLoadIds.Contains(load.Id) &&
-                (load.DriverId == run.DriverId || load.VehicleId == run.VehicleId ||
+                ((run.DriverId is not null && load.DriverId == run.DriverId) ||
+                 (run.VehicleId is not null && load.VehicleId == run.VehicleId) ||
                  (run.TrailerId is not null && load.TrailerId == run.TrailerId)));
             if (conflict is not null)
                 throw new PlanProposalApplyException("LiveResourceConflict", $"Live planning changed after proposal generation; run {conflict.Reference} now uses a selected driver, vehicle or trailer.");
         }
 
-        await VerifyPalletBalancesAsync(proposal, generatedRuns, ct);
+        await VerifyPalletBalancesAsync(proposal, generatedRuns, betaRouteBuild, ct);
 
         var created = new List<Guid>();
         foreach (var run in generatedRuns)
@@ -74,10 +76,12 @@ public sealed class PlanningProposalApplicationService(TmsDbContext db)
                 PalletSpacesUsed = run.PlannedPallets,
                 TotalPalletSpaces = run.CapacityPallets,
                 CapacityType = run.Allocations.Any(allocation => IsEuro(allocation.PalletType)) ? "Euro pallets" : "Standard pallets",
-                PlannerNotes = $"Applied from optimiser proposal {proposal.Id:N} version {proposal.Version}; planner approval required before dispatch."
+                PlannerNotes = betaRouteBuild
+                    ? $"Built by Beta Optimiser proposal {proposal.Id:N} version {proposal.Version}. Route approved into Runs; resource allocation remains in Driver Dispatch and manual planner changes are authoritative."
+                    : $"Applied from optimiser proposal {proposal.Id:N} version {proposal.Version}; planner approval required before dispatch."
             };
 
-            foreach (var allocation in run.Allocations.OrderBy(item => item.CollectionSequence))
+            foreach (var allocation in run.Allocations.OrderBy(item => item.CollectionSequence).ThenBy(item => item.CollectionSite))
             {
                 load.Stops.Add(new LoadStop
                 {
@@ -86,7 +90,7 @@ public sealed class PlanningProposalApplicationService(TmsDbContext db)
                     Name = $"Collect · {allocation.CollectionSite ?? "Unspecified collection"}"
                 });
             }
-            foreach (var allocation in run.Allocations.OrderBy(item => item.DeliverySequence))
+            foreach (var allocation in run.Allocations.OrderBy(item => item.DeliverySequence).ThenBy(item => item.DeliverySite))
             {
                 load.Stops.Add(new LoadStop
                 {
@@ -105,11 +109,13 @@ public sealed class PlanningProposalApplicationService(TmsDbContext db)
                 {
                     EntityType = AllocationType,
                     IdempotencyKey = $"optimiserapply:{proposal.Id:N}:{allocation.Id:N}",
-                    Source = "Planner-approved optimiser proposal",
+                    Source = betaRouteBuild ? "Planner-approved Beta route proposal" : "Planner-approved optimiser proposal",
                     Status = StagingStatus.Promoted,
                     ReviewedAtUtc = DateTimeOffset.UtcNow,
                     ReviewedBy = actor,
-                    ReviewNote = $"Applied from optimiser proposal version {proposal.Version}.",
+                    ReviewNote = betaRouteBuild
+                        ? $"Route copied into Draft Runs from Beta proposal version {proposal.Version}; Dispatch resource allocation remains outstanding."
+                        : $"Applied from optimiser proposal version {proposal.Version}.",
                     PayloadJson = JsonSerializer.Serialize(new
                     {
                         sourceLineId = allocation.SourceLineId,
@@ -126,13 +132,17 @@ public sealed class PlanningProposalApplicationService(TmsDbContext db)
         proposal.Status = "Applied";
         await db.SaveChangesAsync(ct);
 
-        var warnings = unverified
-            ? new[] { "Planner explicitly acknowledged Unverified evidence before application." }
-            : Array.Empty<string>();
+        var warnings = new List<string>();
+        if (unverified) warnings.Add("Planner explicitly acknowledged Unverified evidence before application.");
+        if (betaRouteBuild) warnings.Add("Beta routes were created as Draft Runs. Driver, vehicle and trailer allocation remains in Driver Dispatch/manual planning.");
         return new ApplyPlanProposalResult(proposal.Id, proposal.Status, created.Count, created, warnings);
     }
 
-    private async Task VerifyPalletBalancesAsync(PlanProposal proposal, IReadOnlyList<PlanProposalRun> runs, CancellationToken ct)
+    private async Task VerifyPalletBalancesAsync(
+        PlanProposal proposal,
+        IReadOnlyList<PlanProposalRun> runs,
+        bool betaRouteBuild,
+        CancellationToken ct)
     {
         var requested = runs.SelectMany(run => run.Allocations)
             .GroupBy(allocation => allocation.SourceLineId)
@@ -170,15 +180,41 @@ public sealed class PlanningProposalApplicationService(TmsDbContext db)
 
         foreach (var line in sourceLines)
         {
-            if (line.CollectionDate != proposal.PlanningDate || line.Pallets is null || line.Pallets < 0)
+            var effectiveDate = betaRouteBuild ? line.CollectionDate ?? line.DeliveryDate : line.CollectionDate;
+            if (effectiveDate != proposal.PlanningDate)
                 throw new PlanProposalApplyException("SourceEvidenceChanged", "A proposal source line changed after proposal generation.");
-            if (allocated.GetValueOrDefault(line.Id) + requested[line.Id] > line.Pallets.Value)
+
+            var requestedPallets = requested[line.Id];
+            if (line.Pallets is null)
+            {
+                if (betaRouteBuild && requestedPallets == 0) continue;
+                throw new PlanProposalApplyException("SourceEvidenceChanged", "A proposal source line no longer has the quantity used by the optimiser.");
+            }
+            if (line.Pallets < 0)
+                throw new PlanProposalApplyException("SourceEvidenceChanged", "A proposal source line changed after proposal generation.");
+            if (allocated.GetValueOrDefault(line.Id) + requestedPallets > line.Pallets.Value)
                 throw new PlanProposalApplyException("PalletConflict", "Live pallet allocations changed after proposal generation. Generate a fresh proposal before applying.");
         }
     }
 
+    private static bool IsBetaRouteBuild(PlanProposal proposal)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(proposal.EvidenceJson);
+            return document.RootElement.TryGetProperty("proposalMode", out var mode) &&
+                   string.Equals(mode.GetString(), BetaPlanProposalService.ProposalMode, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
     private static string LiveReference(PlanProposal proposal, PlanProposalRun run) =>
-        $"RUN-{proposal.PlanningDate:yyyyMMdd}-{proposal.Period}-{run.Sequence:00}";
+        IsBetaRouteBuild(proposal)
+            ? run.Reference
+            : $"RUN-{proposal.PlanningDate:yyyyMMdd}-{proposal.Period}-{run.Sequence:00}";
 
     private static bool IsEuro(string? palletType) => palletType?.Contains("euro", StringComparison.OrdinalIgnoreCase) == true;
 }
