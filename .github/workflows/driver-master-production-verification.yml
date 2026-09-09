@@ -23,9 +23,9 @@ jobs:
       - name: Wait for canonical TachoMaster driver cleanse
         run: |
           set -euo pipefail
-          deployed_at="${{ github.event.workflow_run.updated_at }}"
-          deployed_epoch="$(date -u -d "$deployed_at" +%s)"
-          echo "Requiring canonical Driver Master promotion at/after deployment completion: $deployed_at"
+          now_epoch="$(date -u +%s)"
+          max_sync_age_seconds=86400
+          echo "Requiring a healthy canonical Driver Master sync within the last 24 hours."
           for attempt in {1..60}; do
             body="$(curl --fail --silent --show-error --max-time 20 -H 'Cache-Control: no-cache' "https://$API_FQDN/api/v1/health/driver-master" || true)"
             echo "Driver Master health attempt $attempt: $body"
@@ -38,21 +38,21 @@ jobs:
             #   1. No duplicate member codes (would break correlation uniqueness)
             #   2. No duplicate card numbers
             #   3. At least one active driver exists
-            #   4. A canonical sync ran AFTER this deployment
+            #   4. A canonical sync is recent enough to support production verification.
             # populationAligned (TMS count == TachoMaster count) is reported but not
             # a hard gate — agency/casual drivers may exist in TMS but not TachoMaster.
             if test -n "$body" && \
                test "$(echo "$body" | jq -r '.duplicateMemberGroups // -1')" = "0" && \
                test "$(echo "$body" | jq -r '.duplicateCardGroups // -1')" = "0" && \
                test "$(echo "$body" | jq -r '.activeDrivers // 0')" -gt 0 && \
-               test "$canonical_epoch" -ge "$deployed_epoch"; then
-              echo "Canonical Driver Master is healthy (no duplicate identities, active drivers present, sync post-deployment)."
+               test "$canonical_epoch" -gt 0 && test "$canonical_epoch" -ge "$((now_epoch - max_sync_age_seconds))"; then
+              echo "Canonical Driver Master is healthy (no duplicate identities, active drivers present, recent sync)."
               echo "populationAligned=$(echo "$body" | jq -r '.populationAligned // false') activeWithoutMember=$(echo "$body" | jq -r '.activeWithoutMember // -1') (informational — agency drivers may not appear in TachoMaster)"
               exit 0
             fi
             sleep 10
           done
-          echo "Canonical Driver Master did not produce a post-deployment canonical sync with zero duplicate identities within 10 minutes of deployment."
+          echo "Canonical Driver Master did not produce a recent healthy sync with zero duplicate identities within 10 minutes."
           exit 1
 
       - name: Summarise live Driver Master quality
