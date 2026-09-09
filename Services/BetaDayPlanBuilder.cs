@@ -29,11 +29,10 @@ public sealed record BetaDayBuiltRun(
     IReadOnlyList<string> Warnings);
 
 /// <summary>
-/// Builds an independent read-only plan directly from order work. Runs are separated by
-/// AM/PM and pallet family, never exceed the family capacity, and always visit every
-/// collection before the first delivery. Live Azure Maps HGV cost is used when deciding
-/// which compatible order should fill the remaining run capacity. Approximate routing is
-/// never supplied by IBetaHgvRouteProvider.
+/// Builds an independent read-only plan directly from order work. Quantified pallet runs are
+/// capacity-planned exactly as before. Operational movements whose quantity is not stated
+/// (common for Southbound trays, crates, trollies and market work) remain visible and routable
+/// as standalone movements without inventing a pallet count or capacity utilisation.
 /// </summary>
 public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
 {
@@ -47,8 +46,13 @@ public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
         IReadOnlyList<BetaDayOrderInput> orders,
         CancellationToken ct)
     {
-        var expanded = ExpandOversizeOrders(orders)
-            .Where(order => order.Pallets > 0)
+        var quantified = ExpandOversizeOrders(orders.Where(order => order.Pallets > 0).ToList())
+            .OrderBy(order => PeriodRank(order.Period))
+            .ThenBy(order => order.CollectionTimeFrom ?? TimeOnly.MaxValue)
+            .ThenBy(order => order.Reference, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var unquantified = orders
+            .Where(order => order.Pallets <= 0)
             .OrderBy(order => PeriodRank(order.Period))
             .ThenBy(order => order.CollectionTimeFrom ?? TimeOnly.MaxValue)
             .ThenBy(order => order.Reference, StringComparer.OrdinalIgnoreCase)
@@ -57,7 +61,7 @@ public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
         var result = new List<BetaDayBuiltRun>();
         var sequence = 0;
 
-        foreach (var group in expanded.GroupBy(order => (Period: NormalisePeriod(order.Period), Family: PalletFamily(order.PalletType))))
+        foreach (var group in quantified.GroupBy(order => (Period: NormalisePeriod(order.Period), Family: PalletFamily(order.PalletType))))
         {
             var remaining = group.ToList();
             while (remaining.Count > 0)
@@ -88,8 +92,6 @@ public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
                         }
                     }
 
-                    // If no candidate has live HGV evidence, still keep all work visible and
-                    // capacity-safe. The run will be explicitly marked routing-unavailable.
                     best ??= fits
                         .OrderBy(order => order.CollectionTimeFrom ?? TimeOnly.MaxValue)
                         .ThenBy(order => order.Reference, StringComparer.OrdinalIgnoreCase)
@@ -138,7 +140,45 @@ public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
             }
         }
 
-        return result;
+        // Unknown quantity is not zero work. Route it as a standalone operational movement so
+        // it participates in coverage and geography, but never use it to claim pallet capacity.
+        foreach (var order in unquantified)
+        {
+            ct.ThrowIfCancellationRequested();
+            sequence++;
+            var warnings = new List<string>
+            {
+                "Quantity was not stated for this movement. It is routed and reconciled, but excluded from pallet-capacity utilisation."
+            };
+            if (!order.RoutingMapped || !string.IsNullOrWhiteSpace(order.MappingWarning))
+                warnings.Add(order.MappingWarning ?? $"{order.Reference}: collection or delivery is not mapped to Site Master coordinates.");
+
+            var stops = BuildStops([order]);
+            BetaHgvRouteCost? route = null;
+            if (order.RoutingMapped && stops.Count >= 2)
+                route = await routeProvider.GetRouteAsync(stops, ct);
+            if (route is null)
+                warnings.Add("Live Azure Maps HGV evidence is unavailable for this movement. No approximate mileage was substituted.");
+
+            result.Add(new BetaDayBuiltRun(
+                $"BETA-{planningDate:yyyyMMdd}-{NormalisePeriod(order.Period)}-{sequence:00}",
+                NormalisePeriod(order.Period),
+                "Unquantified",
+                0,
+                0,
+                0m,
+                route is not null,
+                route?.Miles,
+                route?.DriveMinutes,
+                [order],
+                stops,
+                warnings));
+        }
+
+        return result
+            .OrderBy(run => PeriodRank(run.Period))
+            .ThenBy(run => run.Reference, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private async Task<(IReadOnlyList<BetaRoutePoint> Stops, BetaHgvRouteCost? Cost)> OptimiseWithinCollectionAndDeliveryPhasesAsync(
@@ -151,8 +191,6 @@ public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
         if (bestCost is null) return (best, null);
 
         var checks = 0;
-        // Adjacent swaps are deliberately restricted to within each phase. The final collection
-        // can never cross the first delivery, preserving the SLH operating rule by construction.
         foreach (var (start, endExclusive) in new[] { (0, collectionCount), (collectionCount, best.Count) })
         {
             var changed = true;
@@ -227,6 +265,10 @@ public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
 
     private static int Capacity(string family) => family == "Euro" ? EuroCapacity : StandardCapacity;
     private static string PalletFamily(string? value) => value?.Contains("euro", StringComparison.OrdinalIgnoreCase) == true ? "Euro" : "Standard";
-    private static string NormalisePeriod(string? value) => string.Equals(value, "PM", StringComparison.OrdinalIgnoreCase) ? "PM" : "AM";
-    private static int PeriodRank(string? value) => NormalisePeriod(value) == "AM" ? 0 : 1;
+    private static string NormalisePeriod(string? value)
+    {
+        if (string.Equals(value, "W3", StringComparison.OrdinalIgnoreCase) || string.Equals(value, "Wave 3", StringComparison.OrdinalIgnoreCase)) return "W3";
+        return string.Equals(value, "PM", StringComparison.OrdinalIgnoreCase) ? "PM" : "AM";
+    }
+    private static int PeriodRank(string? value) => NormalisePeriod(value) switch { "AM" => 0, "PM" => 1, "W3" => 2, _ => 3 };
 }
