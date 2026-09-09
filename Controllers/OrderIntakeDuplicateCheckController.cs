@@ -189,7 +189,8 @@ public sealed class OrderIntakeDuplicateCheckController(
 
     private static void AddChange(List<object> changes, string field, string? from, string? to)
     {
-        if (string.IsNullOrWhiteSpace(to) || BothBlankOrSame(from, to)) return;
+        if (string.IsNullOrWhiteSpace(to)) return;
+        if (Normalise(from) == Normalise(to)) return;
         changes.Add(new { field, from = string.IsNullOrWhiteSpace(from) ? "—" : from, to });
     }
 
