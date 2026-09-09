@@ -53,3 +53,5 @@ jobs:
           git diff --cached --check
           git commit -m "Implement reviewed TMS hardening"
           git push origin HEAD:fix/review-hardening-20260909
+
+      # This workflow removes itself after a verified commit; this comment only retriggers the one-shot gate.
