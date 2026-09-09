@@ -28,7 +28,8 @@ public sealed class BetaOptimiserController(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Beta Optimiser day analysis failed for {PlanningDate}.", planningDate);
+            var safePlanningDate = planningDate.ToString().Replace("\r", "").Replace("\n", "");
+            logger.LogError(ex, "Beta Optimiser day analysis failed for {PlanningDate}.", safePlanningDate);
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new
             {
                 code = "BetaOptimiserUnavailable",
