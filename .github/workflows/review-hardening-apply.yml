@@ -22,6 +22,7 @@ jobs:
       - name: Apply reviewed code changes
         run: |
           set -euo pipefail
+          python tools/prepatch-review-hardening-v2.py
           python tools/apply-review-hardening.py
           python tools/apply-review-hardening-fixups.py
 
@@ -45,7 +46,7 @@ jobs:
       - name: Commit verified hardening
         run: |
           set -euo pipefail
-          rm -f tools/apply-review-hardening.py tools/apply-review-hardening-fixups.py .github/workflows/review-hardening-apply.yml
+          rm -f tools/apply-review-hardening.py tools/apply-review-hardening-fixups.py tools/prepatch-review-hardening.py tools/prepatch-review-hardening-v2.py .github/workflows/review-hardening-apply.yml
           git config user.name "slh-tms-hardening-bot"
           git config user.email "actions@users.noreply.github.com"
           git add -A
