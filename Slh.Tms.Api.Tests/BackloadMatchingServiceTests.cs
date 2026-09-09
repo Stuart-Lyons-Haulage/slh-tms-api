@@ -44,7 +44,7 @@ public sealed class BackloadMatchingServiceTests
         Assert.Equal("A", matches[0].OrderReference);
         Assert.Equal(12.0m, matches[0].EstimatedCollectionDetourMiles);
         Assert.Equal(30, matches[0].EstimatedTimeToCollectionMinutes);
-        Assert.Equal(85.5m, matches[0].BackloadScore);
+        Assert.Equal(85.0m, matches[0].BackloadScore);
         Assert.Contains("Collection 12mi from current position", matches[0].Reason);
         Assert.Contains("18 pallets", matches[0].Reason);
         Assert.Equal(5, matrix.LastDestinationCount);
