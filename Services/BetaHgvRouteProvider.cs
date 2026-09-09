@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 
 namespace Slh.Tms.Api.Services;
@@ -76,5 +77,63 @@ public sealed class AzureMapsHgvRouteProvider(
             logger.LogWarning(ex, "Azure Maps HGV evidence was unavailable to the Beta Optimiser.");
             return null;
         }
+    }
+}
+
+/// <summary>
+/// Applies one wall-clock routing budget to the whole read-only Beta request. Once the budget
+/// is exhausted, later route checks return unavailable immediately so the API can still return
+/// reconciliation and workload evidence before the upstream gateway timeout. No approximate
+/// route is substituted. A fresh instance must be created for each Beta request.
+/// </summary>
+public sealed class BudgetedBetaHgvRouteProvider : IBetaHgvRouteProvider
+{
+    public static readonly TimeSpan DefaultBudget = TimeSpan.FromSeconds(60);
+
+    private readonly IBetaHgvRouteProvider inner;
+    private readonly ILogger<BudgetedBetaHgvRouteProvider> logger;
+    private readonly TimeSpan budget;
+    private readonly Stopwatch elapsed = Stopwatch.StartNew();
+    private int budgetWarningLogged;
+
+    public BudgetedBetaHgvRouteProvider(
+        IBetaHgvRouteProvider inner,
+        ILogger<BudgetedBetaHgvRouteProvider> logger,
+        TimeSpan? budget = null)
+    {
+        this.inner = inner;
+        this.logger = logger;
+        this.budget = budget ?? DefaultBudget;
+    }
+
+    public async Task<BetaHgvRouteCost?> GetRouteAsync(IReadOnlyList<BetaRoutePoint> points, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var remaining = budget - elapsed.Elapsed;
+        if (remaining <= TimeSpan.Zero)
+        {
+            LogBudgetExhausted();
+            return null;
+        }
+
+        using var budgetCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budgetCts.CancelAfter(remaining);
+        try
+        {
+            return await inner.GetRouteAsync(points, budgetCts.Token);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested && budgetCts.IsCancellationRequested)
+        {
+            LogBudgetExhausted();
+            return null;
+        }
+    }
+
+    private void LogBudgetExhausted()
+    {
+        if (Interlocked.Exchange(ref budgetWarningLogged, 1) != 0) return;
+        logger.LogWarning(
+            "Beta Optimiser live HGV routing budget of {BudgetSeconds}s was exhausted. Remaining route checks will be returned as unavailable so the comparison can complete before the gateway timeout.",
+            budget.TotalSeconds);
     }
 }
