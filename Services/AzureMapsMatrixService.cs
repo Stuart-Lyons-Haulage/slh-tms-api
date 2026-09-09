@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -295,7 +296,8 @@ public sealed class AzureMapsMatrixService(
 
     private static string ExtractRequestId(Uri location)
     {
-        var segments = location.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var path = location.IsAbsoluteUri ? location.AbsolutePath : location.OriginalString.Split('?', 2)[0];
+        var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
         return segments.LastOrDefault() ?? Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(location.ToString())))[..12];
     }
 
