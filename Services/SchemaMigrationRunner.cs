@@ -39,6 +39,7 @@ public static class SchemaMigrationRunner
 {
     private const string ResourcePrefix = "Slh.Tms.Api.Database.";
     private const string MigrationLockResource = "SLH.TMS.SchemaMigration";
+    private const string DeferredOnlineMaintenanceMigration = "042_Operational_Read_Performance_Indexes.sql";
 
     private static readonly string[] OrderedMigrationFiles =
     [
@@ -168,6 +169,7 @@ public static class SchemaMigrationRunner
                 await db.Database.ExecuteSqlRawAsync(HistoryTableSql, ct);
                 var applied = await ReadAppliedMigrationsAsync(connection, ct);
                 ValidateAppliedHistory(migrations, applied);
+                var appliedCount = applied.Count;
 
                 foreach (var migration in migrations)
                 {
@@ -179,16 +181,30 @@ public static class SchemaMigrationRunner
                         continue;
                     }
 
+                    // Index builds over large live tracking/operational tables are online maintenance,
+                    // not a prerequisite for correctness. Running them synchronously during API process
+                    // startup can keep a zero-traffic candidate revision unhealthy until Azure rolls it
+                    // back. Preserve the immutable catalogue/checksum so environments where it already
+                    // completed still validate, but defer a pending copy to a maintenance window/job.
+                    if (string.Equals(migration.Name, DeferredOnlineMaintenanceMigration, StringComparison.Ordinal))
+                    {
+                        logger.LogWarning(
+                            "Deferring schema migration {Version} {MigrationName} during API startup. It contains non-essential operational indexes and must be applied by maintenance without blocking availability.",
+                            migration.Version, migration.Name);
+                        continue;
+                    }
+
                     logger.LogInformation(
                         "Applying required schema migration {Version} {MigrationName} ({Checksum}).",
                         migration.Version, migration.Name, migration.Checksum);
 
                     await ApplySingleMigrationAsync(db, migration, logger, ct);
+                    appliedCount++;
                 }
 
                 logger.LogInformation(
-                    "Schema migration check complete. Database is at version {SchemaVersion} with {MigrationCount} migration(s) registered.",
-                    migrations.Count, migrations.Count);
+                    "Schema migration check complete. {AppliedMigrationCount} of {MigrationCount} registered migration(s) are applied; deferred online-maintenance migrations do not block API startup.",
+                    appliedCount, migrations.Count);
             }
             finally
             {
