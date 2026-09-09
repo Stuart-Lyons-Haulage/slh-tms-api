@@ -33,6 +33,30 @@ public sealed class BetaDayPlanBuilderTests
     }
 
     [Fact]
+    public async Task BuildAsync_AttachesSouthboundWorkAfterNorthernDeliveryAsBackhaul()
+    {
+        var provider = new FakeRouteProvider();
+        var builder = new BetaDayPlanBuilder(provider);
+        var date = new DateOnly(2026, 9, 9);
+        var outbound = new BetaDayOrderInput(
+            Guid.NewGuid(), Guid.NewGuid(), "NORTH-1", "TEST", "AM", "Standard", 20, new TimeOnly(4, 0),
+            new BetaRoutePoint("Selsey", 50.74m, -0.78m),
+            new BetaRoutePoint("Darlington", 54.52m, -1.56m));
+        var southbound = new BetaDayOrderInput(
+            Guid.NewGuid(), Guid.NewGuid(), "BACK-1", "TEST", "AM", "Standard", 10, new TimeOnly(10, 0),
+            new BetaRoutePoint("Bedford", 52.14m, -0.46m),
+            new BetaRoutePoint("Merston", 50.82m, -0.70m));
+
+        var runs = await builder.BuildAsync(date, [outbound, southbound], CancellationToken.None);
+
+        var run = Assert.Single(runs);
+        Assert.Equal(2, run.Orders.Count);
+        Assert.Equal(new[] { "Selsey", "Darlington", "Bedford", "Merston" }, run.Stops.Select(stop => stop.Name));
+        Assert.Equal(20, run.PlannedPallets);
+        Assert.Contains(run.Warnings, warning => warning.Contains("Backhaul attached: BACK-1", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void BuildStops_ConsolidatesRepeatedPhysicalSitesWithoutLosingOrderLines()
     {
         var sharedCollection = new BetaRoutePoint("NWF-Selsey", 50.74m, -0.78m);
