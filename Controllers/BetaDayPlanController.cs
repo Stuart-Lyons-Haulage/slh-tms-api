@@ -37,6 +37,31 @@ public sealed class BetaDayPlanController(
         }
     }
 
+    [HttpPost("day-plan/proposal")]
+    [Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> BuildProposal([FromQuery] DateOnly planningDate, CancellationToken ct)
+    {
+        try
+        {
+            var proposalService = new BetaPlanProposalService(db, loggerFactory.CreateLogger<BetaPlanProposalService>());
+            var proposal = await proposalService.GenerateAsync(planningDate, Service(), User.Identity?.Name, ct);
+            return Ok(proposal);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Beta route proposal generation failed.");
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                code = "BetaRouteProposalUnavailable",
+                message = "Beta could not create the review proposal. No Runs or Dispatch allocations were changed."
+            });
+        }
+    }
+
     [HttpPost("day-plan/compare")]
     public async Task<IActionResult> Compare([FromBody] BetaPlannerComparisonRequest request, CancellationToken ct)
     {

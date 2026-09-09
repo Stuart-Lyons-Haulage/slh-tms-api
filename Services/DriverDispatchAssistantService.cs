@@ -19,6 +19,7 @@ public sealed record DriverDispatchAssistantSuggestion(
 public static class DriverDispatchAssistantService
 {
     private const string DriverDetailType = "masterdetail:driver";
+    private static readonly PositionPoint ChichesterFallback = new(50.8367, -0.7792);
 
     public static async Task<IReadOnlyDictionary<Guid, DriverDispatchAssistantSuggestion>> BuildAsync(
         TmsDbContext db,
@@ -38,6 +39,7 @@ public static class DriverDispatchAssistantService
         var preferredVehicles = await ReadPreferredVehiclesAsync(db, drivers, vehicleById, ct);
         var liveStatuses = await db.VehicleLiveStatuses.AsNoTracking().ToListAsync(ct);
         var liveByVehicleId = BuildLiveLookup(vehicles, liveStatuses);
+        var homeBase = await ResolveHomeBaseAsync(db, ct);
 
         var contexts = new Dictionary<Guid, DriverContext>();
         foreach (var driver in drivers)
@@ -74,11 +76,18 @@ public static class DriverDispatchAssistantService
                 dayNumber,
                 latitude,
                 longitude,
-                live is not null ? $"live Falcon position · {liveVehicle?.Registration}" : finalStop?.Name,
+                live is not null ? $"live DOT/Falcon position · {liveVehicle?.Registration}" : finalStop?.Name,
                 suggestedVehicle,
                 preferred?.ConfidencePercent,
                 previousVehicle,
-                liveLinkedVehicle is not null);
+                liveLinkedVehicle is not null,
+                live?.Latitude,
+                live?.Longitude,
+                finalStop?.Latitude,
+                finalStop?.Longitude,
+                finalStop?.Name,
+                previous is null ? null : RunDisplayLabel.For(previous),
+                previous?.PlanningDate == planningDate.AddDays(-1));
         }
 
         var availableLoads = targetLoads.Where(load => load.DriverId is null && load.Status != LoadStatus.Cancelled).ToList();
@@ -87,7 +96,7 @@ public static class DriverDispatchAssistantService
         {
             foreach (var load in availableLoads)
             {
-                var scored = Score(context, load, trailerById);
+                var scored = Score(context, load, trailerById, homeBase);
                 if (scored is not null) candidates.Add(scored);
             }
         }
@@ -124,7 +133,11 @@ public static class DriverDispatchAssistantService
         return result;
     }
 
-    private static Candidate? Score(DriverContext context, Load load, IReadOnlyDictionary<Guid, Trailer> trailers)
+    private static Candidate? Score(
+        DriverContext context,
+        Load load,
+        IReadOnlyDictionary<Guid, Trailer> trailers,
+        PositionPoint homeBase)
     {
         var first = load.Stops.OrderBy(stop => stop.Sequence).FirstOrDefault();
         var last = load.Stops.OrderBy(stop => stop.Sequence).LastOrDefault();
@@ -154,29 +167,24 @@ public static class DriverDispatchAssistantService
         }
         else score += 12;
 
-        if (context.Latitude is decimal driverLat && context.Longitude is decimal driverLon && first?.Latitude is decimal firstLat && first.Longitude is decimal firstLon)
-        {
-            var kilometres = HaversineKm((double)driverLat, (double)driverLon, (double)firstLat, (double)firstLon);
-            score -= Math.Min(45, (int)Math.Round(kilometres / 18d));
-            reasons.Add($"first collection ≈ {Math.Round(kilometres):0} km from {context.LocationLabel ?? "last known position"}");
-        }
+        var livePosition = Point(context.LiveLatitude, context.LiveLongitude);
+        var previousFinish = Point(context.PreviousLatitude, context.PreviousLongitude);
+        var candidateStart = Point(first?.Latitude, first?.Longitude);
+        var candidateEnd = Point(last?.Latitude, last?.Longitude);
+        var positioning = DriverPositioningIntelligence.Score(
+            context.DayNumber,
+            livePosition,
+            previousFinish,
+            candidateStart,
+            candidateEnd,
+            homeBase);
+        score += (int)Math.Round(positioning.TotalScore);
+        reasons.AddRange(positioning.Reasons);
 
-        var southbound = first?.Latitude is decimal firstLatitude && last?.Latitude is decimal lastLatitude && lastLatitude < firstLatitude - 0.35m;
-        var driverNorth = context.Latitude >= 52.5m;
-        if (context.DayNumber >= 5 && driverNorth && southbound)
+        if (!string.IsNullOrWhiteSpace(context.PreviousRunReference) || !string.IsNullOrWhiteSpace(context.PreviousFinishLabel))
         {
-            score += 85;
-            reasons.Add($"Day {context.DayNumber} and north: prioritises a southbound/homeward Run");
-        }
-        else if (context.DayNumber >= 5 && southbound)
-        {
-            score += 35;
-            reasons.Add($"Day {context.DayNumber}: favours homeward work");
-        }
-        else if (driverNorth && southbound)
-        {
-            score += 28;
-            reasons.Add("driver is north and the Run travels south");
+            var when = context.PreviousWasYesterday ? "yesterday" : "previous duty";
+            reasons.Add($"{when}: {context.PreviousRunReference ?? "run"} finished at {context.PreviousFinishLabel ?? "last recorded stop"}");
         }
 
         if (string.Equals(code, "3", StringComparison.OrdinalIgnoreCase))
@@ -286,6 +294,42 @@ public static class DriverDispatchAssistantService
     private static IEnumerable<string> VehicleKeys(Vehicle vehicle) => new[] { vehicle.Registration, vehicle.FleetNumber, vehicle.Abbreviation }
         .Where(value => !string.IsNullOrWhiteSpace(value)).Select(Normalise);
 
+    private static async Task<PositionPoint> ResolveHomeBaseAsync(TmsDbContext db, CancellationToken ct)
+    {
+        try
+        {
+            var sites = await db.Sites.AsNoTracking().Where(site => site.Active).ToListAsync(ct);
+            await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
+            var ranked = sites
+                .Where(site => site.Latitude is not null && site.Longitude is not null)
+                .Select(site => new
+                {
+                    Site = site,
+                    Text = $"{site.Name} {site.DriverTextName} {site.CollectionAddress} {site.Aliases}",
+                    Rank = HomeBaseRank(site)
+                })
+                .Where(item => item.Rank > 0)
+                .OrderByDescending(item => item.Rank)
+                .FirstOrDefault();
+            if (ranked?.Site.Latitude is decimal latitude && ranked.Site.Longitude is decimal longitude)
+                return new PositionPoint((double)latitude, (double)longitude);
+        }
+        catch
+        {
+            // Dispatch suggestions must remain available if optional Site Master enrichment is unavailable.
+        }
+        return ChichesterFallback;
+    }
+
+    private static int HomeBaseRank(Site site)
+    {
+        var text = $"{site.Name} {site.DriverTextName} {site.CollectionAddress} {site.Aliases}";
+        if (text.Contains("Stuart Lyons", StringComparison.OrdinalIgnoreCase)) return 100;
+        if (text.Contains("Chichester", StringComparison.OrdinalIgnoreCase)) return 80;
+        if (text.Contains("Selsey", StringComparison.OrdinalIgnoreCase)) return 50;
+        return 0;
+    }
+
     private static async Task<Dictionary<Guid, PreferredVehicle>> ReadPreferredVehiclesAsync(
         TmsDbContext db,
         IReadOnlyCollection<Driver> drivers,
@@ -318,6 +362,9 @@ public static class DriverDispatchAssistantService
         return result;
     }
 
+    private static PositionPoint? Point(decimal? latitude, decimal? longitude) =>
+        latitude is decimal lat && longitude is decimal lon ? new PositionPoint((double)lat, (double)lon) : null;
+
     private static string? Text(JsonElement root, string property) => root.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
     private static decimal? Decimal(JsonElement root, string property)
     {
@@ -326,19 +373,25 @@ public static class DriverDispatchAssistantService
         return value.ValueKind == JsonValueKind.String && decimal.TryParse(value.GetString(), out numeric) ? numeric : null;
     }
 
-    private static double HaversineKm(double lat1, double lon1, double lat2, double lon2)
-    {
-        const double radius = 6371d;
-        static double Radians(double value) => value * Math.PI / 180d;
-        var dLat = Radians(lat2 - lat1);
-        var dLon = Radians(lon2 - lon1);
-        var a = Math.Sin(dLat / 2) * Math.Sin(dLat / 2) + Math.Cos(Radians(lat1)) * Math.Cos(Radians(lat2)) * Math.Sin(dLon / 2) * Math.Sin(dLon / 2);
-        return radius * 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
-    }
-
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     private sealed record PreferredVehicle(Vehicle Vehicle, decimal ConfidencePercent);
-    private sealed record DriverContext(Driver Driver, int DayNumber, decimal? Latitude, decimal? Longitude, string? LocationLabel, Vehicle? SuggestedVehicle, decimal? PreferredVehicleConfidence, Vehicle? PreviousVehicle, bool LiveLinkedVehicle);
+    private sealed record DriverContext(
+        Driver Driver,
+        int DayNumber,
+        decimal? Latitude,
+        decimal? Longitude,
+        string? LocationLabel,
+        Vehicle? SuggestedVehicle,
+        decimal? PreferredVehicleConfidence,
+        Vehicle? PreviousVehicle,
+        bool LiveLinkedVehicle,
+        decimal? LiveLatitude,
+        decimal? LiveLongitude,
+        decimal? PreviousLatitude,
+        decimal? PreviousLongitude,
+        string? PreviousFinishLabel,
+        string? PreviousRunReference,
+        bool PreviousWasYesterday);
     private sealed record Candidate(Driver Driver, Load Load, int Score, string Reason);
 }
