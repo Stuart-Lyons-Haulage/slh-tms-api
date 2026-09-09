@@ -171,7 +171,7 @@ public static class CustomerLoadPlanPdf
         b.Append(FormattableString.Invariant($"{lineWidth:0.##} w {r:0.###} {g:0.###} {bl:0.###} RG {x1:0.##} {y1:0.##} m {x2:0.##} {y2:0.##} l S\n"));
 
     private static string Escape(string? value) => Clean(value).Replace("\\", "\\\\", StringComparison.Ordinal).Replace("(", "\\(", StringComparison.Ordinal).Replace(")", "\\)", StringComparison.Ordinal);
-    private static string Clean(string? value) => new((value ?? string.Empty).Select(character => character is >= ' ' and <= '~' ? character : character is '–' or '—' ? '-' : character is '→' ? '>' : ' ').ToArray()).Replace("  ", " ", StringComparison.Ordinal).Trim();
+    private static string Clean(string? value) => new string((value ?? string.Empty).Select(character => character is >= ' ' and <= '~' ? character : character is '–' or '—' ? '-' : character is '→' ? '>' : ' ').ToArray()).Replace("  ", " ", StringComparison.Ordinal).Trim();
     private static string N(double value) => value.ToString("0.##", CultureInfo.InvariantCulture);
     private static byte[] Ascii(string value) => Encoding.ASCII.GetBytes(value);
     private static byte[] Join(params byte[][] arrays) { var length = arrays.Sum(array => array.Length); var result = new byte[length]; var offset = 0; foreach (var array in arrays) { Buffer.BlockCopy(array, 0, result, offset, array.Length); offset += array.Length; } return result; }
