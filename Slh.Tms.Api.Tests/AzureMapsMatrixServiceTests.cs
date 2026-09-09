@@ -7,6 +7,7 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
 using Slh.Tms.Api.Services;
+using Xunit;
 
 namespace Slh.Tms.Api.Tests;
 
