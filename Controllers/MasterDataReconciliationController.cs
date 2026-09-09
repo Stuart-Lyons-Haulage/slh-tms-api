@@ -91,7 +91,7 @@ public sealed class MasterDataReconciliationController(TmsDbContext db, StagingS
                 {
                     x.Id, x.Registration, x.FleetNumber, x.Abbreviation, x.Transmission, x.DvsCompliant, x.CabMobile,
                     x.FuelProvider, x.FuelPin, x.ShellCard, x.BpRedCard, x.BpPlainCard, x.FuelPinSecretName,
-                    x.FuelCardLastFour, x.FleetioId, x.FleetioName, x.FleetioStatus, x.TrackingIdentifier, x.Notes, x.Active
+                    x.FuelCardLastFour, x.FleetioId, x.FleetioName, x.FleetioStatus, x.Notes, x.Active
                 })).ToList();
             }
             case "trailer":
