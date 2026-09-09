@@ -29,16 +29,17 @@ public sealed class TachoMasterRetryHandler(ILogger<TachoMasterRetryHandler> log
                 continue;
             }
 
-            // HTTP 429 is an explicit provider back-pressure signal. Returning it immediately
-            // lets the caller keep its previous cached snapshot instead of multiplying the rate
-            // limit with three rapid authentication/data retries.
+            // HTTP 429 is an explicit provider back-pressure signal. Throw a dedicated
+            // non-HttpRequestException so the client-level retry loop cannot multiply it.
             if (response.StatusCode == HttpStatusCode.TooManyRequests)
             {
+                var retryAfter = response.Headers.RetryAfter?.Delta;
+                response.Dispose();
                 logger.LogWarning(
                     "TachoMaster upstream returned HTTP 429 for {Method} {Path}; immediate retries suppressed.",
                     request.Method,
                     request.RequestUri?.AbsolutePath);
-                return response;
+                throw new TachoMasterRateLimitException(request.RequestUri?.AbsolutePath, retryAfter);
             }
 
             if (!ShouldRetry(request.RequestUri?.AbsolutePath, response.StatusCode))
@@ -123,4 +124,10 @@ public sealed class TachoMasterRetryHandler(ILogger<TachoMasterRetryHandler> log
             return clone;
         }
     }
+}
+
+public sealed class TachoMasterRateLimitException(string? path, TimeSpan? retryAfter)
+    : Exception($"TachoMaster upstream {path ?? "request"} returned HTTP 429 (TooManyRequests). Immediate retries were suppressed{(retryAfter is null ? "." : $"; provider retry-after is {retryAfter.Value.TotalSeconds:0} seconds.")}")
+{
+    public TimeSpan? RetryAfter { get; } = retryAfter;
 }
