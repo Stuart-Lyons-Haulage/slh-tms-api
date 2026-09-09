@@ -36,6 +36,10 @@ def validate(workflow):
     if "hasAttachments" in trigger_parameters:
         errors.append("shared-mailbox trigger must not filter by attachment presence")
 
+    trigger_conditions = json.dumps(trigger.get("conditions", []), separators=(",", ":")).lower()
+    if not trigger_conditions or "@lyonshaulage.com" not in trigger_conditions or "load plan" not in trigger_conditions:
+        errors.append("shared-mailbox trigger must ignore internal outbound Lyons load-plan emails before TMS intake")
+
     serialized = json.dumps(workflow, separators=(",", ":"))
     if "/api/v1/orders" in serialized or '"operationId":"CreateOrder"' in serialized:
         errors.append("live-order endpoint/action is forbidden")
