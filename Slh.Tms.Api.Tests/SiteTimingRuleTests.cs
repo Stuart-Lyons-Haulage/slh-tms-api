@@ -26,9 +26,10 @@ public sealed class SiteTimingRuleTests
     {
         var rule = new SiteTimingRule("NWF-Mer-Booker-Wellingborough", "Std", "07:00", "23:00", "00:00", "06:00");
 
-        var window = SiteTimingRuleMatcher.DeliveryWindow(rule, new DateOnly(2026, 9, 10));
+        var collectionWindow = SiteTimingRuleMatcher.CollectionWindow(rule, new DateOnly(2026, 9, 10));
+        var deliveryWindow = SiteTimingRuleMatcher.DeliveryWindow(rule, new DateOnly(2026, 9, 10));
 
-        Assert.Equal(new DateTimeOffset(2026, 9, 9, 23, 0, 0, TimeSpan.Zero), window.Start);
-        Assert.Equal(new DateTimeOffset(2026, 9, 10, 5, 0, 0, TimeSpan.Zero), window.End);
+        Assert.Equal(new DateTimeOffset(2026, 9, 9, 22, 0, 0, TimeSpan.Zero), collectionWindow.Start);
+        Assert.Equal(new DateTimeOffset(2026, 9, 10, 5, 0, 0, TimeSpan.Zero), deliveryWindow.End);
     }
 }
