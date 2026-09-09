@@ -204,12 +204,16 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<ReferenceChaseEvent>().HasOne<OrderReferenceIssue>().WithMany().HasForeignKey(x => x.ReferenceIssueId).OnDelete(DeleteBehavior.Restrict);
         b.Entity<TransportOrder>().HasIndex(x => x.Reference).IsUnique();
         b.Entity<TransportOrder>().HasIndex(x => x.CollectionDate);
+        b.Entity<TransportOrder>().HasIndex(x => new { x.CollectionDate, x.Status })
+            .HasDatabaseName("IX_TransportOrders_CollectionDate_Status");
         b.Entity<TransportOrder>().HasIndex(x => x.SourceStagedImportId);
         b.Entity<TransportOrder>().HasOne<StagedImport>().WithMany().HasForeignKey(x => x.SourceStagedImportId).OnDelete(DeleteBehavior.Restrict);
         b.Entity<TransportOrder>().HasIndex(x => x.SourceMovementId);
         b.Entity<TransportOrder>().HasOne<OrderMovement>().WithMany().HasForeignKey(x => x.SourceMovementId).OnDelete(DeleteBehavior.Restrict);
         b.Entity<Load>().HasIndex(x => x.Reference).IsUnique();
         b.Entity<Load>().HasIndex(x => x.PlanningDate);
+        b.Entity<Load>().HasIndex(x => new { x.PlanningDate, x.Status })
+            .HasDatabaseName("IX_Loads_PlanningDate_Status");
         b.Entity<LoadStop>().HasIndex(x => new { x.LoadId, x.Sequence }).IsUnique();
         b.Entity<Load>().HasMany(x => x.Stops).WithOne().HasForeignKey(x => x.LoadId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<LoadStop>().Property(x => x.Latitude).HasPrecision(9, 6);
