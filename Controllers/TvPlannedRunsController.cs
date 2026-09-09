@@ -47,6 +47,7 @@ public sealed class TvPlannedRunsController(TmsDbContext db, IConfiguration conf
 
         await RunOperationalStore.EnrichAsync(db, loads, ct);
         WallboardPhysicalStops.Apply(loads);
+        var dispatchStates = await DriverDispatchStateStore.ReadAsync(db, loads.Select(load => load.Id), ct);
         foreach (var load in loads)
         {
             OvernightRunContinuity.Apply(load);
@@ -57,6 +58,18 @@ public sealed class TvPlannedRunsController(TmsDbContext db, IConfiguration conf
                     return stop;
                 })
                 .ToList();
+
+            // Preserve the true first collection time whenever the plan has one. Some resilient
+            // planning-register copies currently retain the route but not the first stop timestamp;
+            // in that case use the dispatch-calculated start as a bounded operational fallback so
+            // the wallboards do not regress to --:-- while driver/vehicle/ETA data remain live.
+            var firstStop = load.Stops.OrderBy(stop => stop.Sequence).FirstOrDefault();
+            if (firstStop?.PlannedArrivalUtc is null
+                && dispatchStates.TryGetValue(load.Id, out var dispatchState)
+                && dispatchState.PlannedStartUtc is not null)
+            {
+                firstStop.PlannedArrivalUtc = dispatchState.PlannedStartUtc;
+            }
         }
         return Ok(loads);
     }
