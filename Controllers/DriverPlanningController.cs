@@ -28,16 +28,20 @@ public sealed class DriverPlanningController(TmsDbContext db, IConfiguration con
         if (lastDate < firstDate || lastDate.DayNumber - firstDate.DayNumber > 92)
             return BadRequest("Choose a valid date range of no more than 93 days.");
 
-        // Driver Dispatch writes allocation to the resilient Planning Register whenever a
-        // register copy exists. Read assignments through the same production merger used by
-        // the Wallboard planned-runs feed so a stale dbo.Loads copy cannot hide the newly
-        // allocated DriverId / VehicleId / TrailerId and leave the board showing TBC.
+        // Read assignments through the same resilient production source used by the
+        // planned-runs wallboard feed. The operational enrichment is essential here:
+        // Dispatch can persist the newest allocation in the operational register while a
+        // stale dbo.Loads / planning-register copy still has blank DriverId / VehicleId.
+        // Without this enrichment the route is visible but both wallboards show TBC.
         var loads = (await PlanningResilience.ReadLoadsAsync(db, null, ct))
             .Where(load => load.PlanningDate >= firstDate && load.PlanningDate <= lastDate)
             .OrderBy(load => load.PlanningDate)
             .ThenBy(load => load.Reference)
             .Take(2000)
             .ToList();
+
+        await RunOperationalStore.EnrichAsync(db, loads, ct);
+        loads = PlanningResilience.CollapseLogicalDuplicates(loads);
 
         try { await LoadCommercialStore.EnrichAsync(db, loads, ct); }
         catch (Exception exception) when (IsSchemaUnavailable(exception)) { db.ChangeTracker.Clear(); }
