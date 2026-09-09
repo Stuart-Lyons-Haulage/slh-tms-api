@@ -35,8 +35,41 @@ public sealed class DotTrackingHealthController(
             // Resolve inside the guarded block so a malformed runtime setting can never
             // fail during controller construction and surface as an opaque HTTP 500.
             var trackingClient = services.GetRequiredService<DotTrackingClient>();
-
+            var snapshotCapturedAtUtc = trackingClient.LiveSnapshotCapturedAtUtc;
             var providerRows = await trackingClient.GetLatestVehicleEventsAsync(cancellationToken);
+
+            if (snapshotCapturedAtUtc is null)
+            {
+                return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+                {
+                    status = "awaiting-central-snapshot",
+                    configured = true,
+                    dataMask = options.DataMask,
+                    pollIntervalMinutes = options.PollIntervalMinutes,
+                    providerRecords = 0,
+                    snapshotCapturedAtUtc,
+                    checkedAtUtc,
+                    message = "The central RoadTech ingestion worker has not yet completed a successful live snapshot."
+                });
+            }
+
+            var snapshotAge = checkedAtUtc - snapshotCapturedAtUtc.Value;
+            if (snapshotAge > TimeSpan.FromMinutes(Math.Max(2, options.StaleAfterMinutes)))
+            {
+                return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+                {
+                    status = "stale-central-snapshot",
+                    configured = true,
+                    dataMask = options.DataMask,
+                    pollIntervalMinutes = options.PollIntervalMinutes,
+                    providerRecords = providerRows.Count,
+                    snapshotCapturedAtUtc,
+                    snapshotAgeSeconds = Math.Round(snapshotAge.TotalSeconds),
+                    checkedAtUtc,
+                    message = "The last successful central RoadTech snapshot is stale. API request paths are intentionally not probing RoadTech independently."
+                });
+            }
+
             var records = providerRows.Select(DotTelemetryRecord.FromProvider).ToList();
             var gpsRecords = records
                 .Where(record => record.Latitude is not null && record.Longitude is not null)
@@ -67,15 +100,15 @@ public sealed class DotTrackingHealthController(
                     driverNameRecords,
                     driverCardRecords,
                     extraPayloadSections,
+                    snapshotCapturedAtUtc,
+                    snapshotAgeSeconds = Math.Round(snapshotAge.TotalSeconds),
                     checkedAtUtc,
-                    message = "RoadTech current telemetry returned no GPS coordinates."
+                    message = "The latest central RoadTech snapshot contains no GPS coordinates."
                 });
             }
 
-            // Health probes are deliberately read-only. The one-minute ingestion worker owns
-            // persistence/live-status freshness; writing here could race the worker and make a
-            // healthy RoadTech feed fail its own diagnostic because of a SQL write collision.
-            // Driver diagnostics remain aggregate-only: do not expose names/card numbers here.
+            // Health probes are deliberately cache-only. The one-minute ingestion worker owns
+            // the single RoadTech live request and persistence/live-status freshness.
             return Ok(new
             {
                 status = "healthy",
@@ -88,16 +121,18 @@ public sealed class DotTrackingHealthController(
                 driverNameRecords,
                 driverCardRecords,
                 extraPayloadSections,
+                snapshotCapturedAtUtc,
+                snapshotAgeSeconds = Math.Round(snapshotAge.TotalSeconds),
                 newestProviderEventUtc = gpsRecords.Max(record => record.EventTimeUtc),
                 checkedAtUtc
             });
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            logger.LogWarning(exception, "RoadTech live tracking health check failed.");
+            logger.LogWarning(exception, "RoadTech central live snapshot health check failed.");
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new
             {
-                status = "upstream-failure",
+                status = "snapshot-failure",
                 configured = true,
                 dataMask = options.DataMask,
                 baseUrlValid = options.BaseUrlConfigurationError is null,
