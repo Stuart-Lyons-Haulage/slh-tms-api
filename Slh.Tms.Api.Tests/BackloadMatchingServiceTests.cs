@@ -13,11 +13,11 @@ public sealed class BackloadMatchingServiceTests
     {
         var routes = new Dictionary<string, RouteMatrixCell?>
         {
-            ["52.000000,-1.000000"] = new(30, 19_312), // 12 miles
-            ["52.100000,-1.200000"] = new(60, 32_187), // 20 miles
-            ["52.200000,-1.300000"] = new(90, 48_280), // 30 miles
-            ["52.300000,-1.400000"] = new(100, 56_327), // 35 miles
-            ["52.400000,-1.500000"] = new(45, 72_000)  // outside 40 miles
+            [new MatrixPoint(52.0m, -1.0m).Key] = new(30, 19_312), // 12 miles
+            [new MatrixPoint(52.1m, -1.2m).Key] = new(60, 32_187), // 20 miles
+            [new MatrixPoint(52.2m, -1.3m).Key] = new(90, 48_280), // 30 miles
+            [new MatrixPoint(52.3m, -1.4m).Key] = new(100, 56_327), // 35 miles
+            [new MatrixPoint(52.4m, -1.5m).Key] = new(45, 72_000)  // outside 40 miles
         };
         var matrix = new StubMatrixService(routes);
         var telemetryConfiguration = TelemetryConfiguration.CreateDefault();
