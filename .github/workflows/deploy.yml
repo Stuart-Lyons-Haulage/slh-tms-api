@@ -345,6 +345,7 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --revision-weight "$PREVIOUS_REVISION=90" "$TARGET_REVISION=10"
 
+          echo "TRAFFIC_SHIFTED=true" >> "$GITHUB_ENV"
           echo "CANARY_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
           echo "Candidate $TARGET_REVISION is receiving 10% production traffic for 120 seconds."
           sleep 120
@@ -434,6 +435,7 @@ jobs:
           test "$auth_status" = "401" -o "$auth_status" = "403"
 
       - name: Roll back traffic on deployment failure
+        id: rollback
         if: ${{ failure() && env.PREVIOUS_REVISION != '' && env.TARGET_REVISION != '' }}
         run: |
           set -euo pipefail
@@ -487,16 +489,28 @@ jobs:
         run: |
           set -euo pipefail
 
-          revision_json="$(az containerapp revision show \
-            --name "$AZURE_CONTAINER_APP_NAME" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --revision "${TARGET_REVISION:-${PREVIOUS_REVISION:-}}" \
-            --output json 2>/dev/null || echo '{}')"
+          revision_name="${TARGET_REVISION:-${PREVIOUS_REVISION:-}}"
+          revision_json='{}'
+          if test -n "$revision_name"; then
+            revision_json="$(az containerapp revision show \
+              --name "$AZURE_CONTAINER_APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --revision "$revision_name" \
+              --output json 2>/dev/null || echo '{}')"
+          fi
           image_digest="$(jq -r '.properties.template.containers[0].image // "unknown"' <<<"$revision_json")"
           health_state="$(jq -r '.properties.healthState // "unknown"' <<<"$revision_json")"
           rollback_status="not-required"
           if [[ "${{ job.status }}" != "success" ]]; then
-            rollback_status="attempted-or-required"
+            if [[ "${TRAFFIC_SHIFTED:-false}" != "true" ]]; then
+              rollback_status="not-required-pre-traffic-shift"
+            elif [[ "${{ steps.rollback.outcome }}" == "success" ]]; then
+              rollback_status="completed-after-traffic-shift"
+            elif [[ "${{ steps.rollback.outcome }}" == "failure" ]]; then
+              rollback_status="failed-after-traffic-shift"
+            else
+              rollback_status="required-but-not-run"
+            fi
           fi
 
           {
