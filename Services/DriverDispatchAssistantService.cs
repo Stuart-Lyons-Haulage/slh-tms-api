@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Contracts;
 using Slh.Tms.Api.Controllers;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
@@ -264,9 +265,9 @@ public static class DriverDispatchAssistantService
 
     private static bool HasSkill(Driver driver, string skill)
     {
-        var tokens = (driver.Skills ?? string.Empty)
-            .Split(new char[] {',', ';', '/', '|', ' '}, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        return tokens.Any(token => string.Equals(token, skill, StringComparison.OrdinalIgnoreCase));
+        var held = DispatchSkillRules.Parse(driver.Skills);
+        var required = DispatchSkillRules.Parse(skill);
+        return required != DispatchSkill.None && DispatchSkillRules.HasAll(held, required);
     }
 
     private static int ConsecutiveWorkedDays(IEnumerable<Load> history, Driver driver, DateOnly planningDate)
