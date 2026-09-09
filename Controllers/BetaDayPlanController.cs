@@ -1,0 +1,69 @@
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Services;
+
+namespace Slh.Tms.Api.Controllers;
+
+[ApiController]
+[Route("api/v1/beta-optimiser")]
+[Authorize]
+public sealed class BetaDayPlanController(
+    TmsDbContext db,
+    AzureMapsRouteClient maps,
+    ILoggerFactory loggerFactory,
+    ILogger<BetaDayPlanController> logger) : ControllerBase
+{
+    [HttpGet("day-plan")]
+    public async Task<IActionResult> BuildDay([FromQuery] DateOnly planningDate, CancellationToken ct)
+    {
+        try
+        {
+            return Ok(await Service().BuildDayAsync(planningDate, ct));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Beta full-day build failed for {PlanningDate}.", planningDate);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                code = "BetaDayPlanUnavailable",
+                message = "Beta could not complete the read-only day build. Planner and Dispatch were not changed."
+            });
+        }
+    }
+
+    [HttpPost("day-plan/compare")]
+    public async Task<IActionResult> Compare([FromBody] BetaPlannerComparisonRequest request, CancellationToken ct)
+    {
+        if (request.Routes.Count == 0)
+            return BadRequest(new { code = "LyonsPlanEmpty", message = "The uploaded Lyons plan contains no included runs." });
+        try
+        {
+            return Ok(await Service().CompareAsync(request, ct));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Beta Lyons-plan comparison failed for {PlanningDate}.", request.PlanningDate);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                code = "BetaDayPlanComparisonUnavailable",
+                message = "Beta could not compare the uploaded Lyons plan. Planner and Dispatch were not changed."
+            });
+        }
+    }
+
+    private BetaDayPlanService Service()
+    {
+        var provider = new AzureMapsHgvRouteProvider(maps, loggerFactory.CreateLogger<AzureMapsHgvRouteProvider>());
+        var builder = new BetaDayPlanBuilder(provider);
+        return new BetaDayPlanService(db, builder, provider, loggerFactory.CreateLogger<BetaDayPlanService>());
+    }
+}
