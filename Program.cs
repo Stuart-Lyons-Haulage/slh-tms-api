@@ -1,6 +1,10 @@
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.Json.Serialization;
+using Azure.Core;
+using Azure.Identity;
+using Microsoft.ApplicationInsights;
+using Microsoft.ApplicationInsights.Extensibility;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -15,6 +19,7 @@ using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using Slh.Tms.Api.Authorization;
 using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Hubs;
 using Slh.Tms.Api.Models.Tracking;
 using Slh.Tms.Api.Models.Integrations;
 using Slh.Tms.Api.Models.Assistant;
@@ -70,6 +75,23 @@ builder.Services.AddControllers().AddJsonOptions(options =>
 });
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddSignalR();
+builder.Services.AddMemoryCache();
+builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
+builder.Services.AddSingleton<TokenCredential>(_ => new DefaultAzureCredential());
+builder.Services.AddSingleton(_ =>
+{
+    var telemetryConfiguration = TelemetryConfiguration.CreateDefault();
+    telemetryConfiguration.ConnectionString = applicationInsightsConnectionString;
+    telemetryConfiguration.DisableTelemetry = string.IsNullOrWhiteSpace(applicationInsightsConnectionString);
+    return new TelemetryClient(telemetryConfiguration);
+});
+builder.Services.Configure<HgvVehicleProfile>(builder.Configuration.GetSection("Routing:HgvVehicleProfile"));
+builder.Services.Configure<AzureMapsMatrixOptions>(builder.Configuration.GetSection("Routing:AzureMapsMatrix"));
+builder.Services.Configure<BackloadMatchingOptions>(builder.Configuration.GetSection("Optimisation:Backload"));
+builder.Services.Configure<LiveEtaOptions>(builder.Configuration.GetSection("Eta:Live"));
+builder.Services.Configure<FuelCostOptions>(builder.Configuration.GetSection("Fuel:Costing"));
+
 var configuredOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()?
     .Where(origin => !string.IsNullOrWhiteSpace(origin))
     .Select(origin => origin.Trim())
@@ -81,6 +103,7 @@ builder.Services.AddCors(options => options.AddPolicy("Portal", policy => policy
 builder.Services.AddSingleton(TmsMetrics.Shared);
 builder.Services.AddSingleton<SqlLatencyInterceptor>();
 builder.Services.AddSingleton<PlanningChangeNotifier>();
+builder.Services.AddSingleton<OutboundHttpPolicyRegistry>();
 builder.Services.AddScoped<DependencyHealthService>();
 builder.Services.AddHostedService<DependencyTelemetrySampler>();
 builder.Services.AddDbContext<TmsDbContext>((services, options) =>
@@ -95,6 +118,13 @@ builder.Services.AddScoped<WarehouseMovementService>();
 builder.Services.AddScoped<PlanningOptimiserService>();
 builder.Services.AddScoped<SiteTimingRuleStore>();
 builder.Services.AddScoped<DotTrackingTelemetryStore>();
+builder.Services.AddScoped<IAzureMapsMatrixService, AzureMapsMatrixService>();
+builder.Services.AddScoped<IBackloadMatchingService, BackloadMatchingService>();
+builder.Services.AddScoped<BackloadOperationsService>();
+builder.Services.AddScoped<LiveEtaCalculator>();
+builder.Services.AddScoped<EtaAccuracyProcessor>();
+builder.Services.AddScoped<CustomerNotificationService>();
+builder.Services.AddScoped<FuelOptimisationService>();
 builder.Services.AddSingleton<RoadTechLiveSnapshot>();
 var assistantOptions = new AssistantOptions();
 builder.Configuration.GetSection("Integrations:OpenAI").Bind(assistantOptions);
@@ -172,7 +202,9 @@ builder.Services.AddTransient<ProviderResilienceHandler>();
 builder.Services.AddScoped<DriverWeeklyRestComplianceService>();
 builder.Services.AddHttpClient<DriverSmsDispatchService>().AddHttpMessageHandler<DependencyTelemetryHandler>().AddHttpMessageHandler<ProviderResilienceHandler>();
 builder.Services.AddHttpClient<SageHrClient>().AddHttpMessageHandler<DependencyTelemetryHandler>().AddHttpMessageHandler<ProviderResilienceHandler>();
-builder.Services.AddHttpClient<DotTrackingClient>().AddHttpMessageHandler<DependencyTelemetryHandler>().AddHttpMessageHandler<ProviderResilienceHandler>();
+builder.Services.AddHttpClient<DotTrackingClient>()
+    .AddHttpMessageHandler<DependencyTelemetryHandler>()
+    .AddPolicyHandler((services, _) => services.GetRequiredService<OutboundHttpPolicyRegistry>().Get("DOT/RoadTech"));
 builder.Services.AddHttpClient<TachoMasterClient>()
     .AddHttpMessageHandler<DependencyTelemetryHandler>()
     .AddHttpMessageHandler<TachoMasterResponseCacheHandler>()
@@ -181,12 +213,23 @@ builder.Services.AddHttpClient<TachoMasterClient>()
     {
         sp.GetService<DotTrackingClient>();
     });
-builder.Services.AddHttpClient<AzureMapsRouteClient>().AddHttpMessageHandler<DependencyTelemetryHandler>().AddHttpMessageHandler<ProviderResilienceHandler>();
-builder.Services.AddHttpClient<FleetioClient>().AddHttpMessageHandler<DependencyTelemetryHandler>().AddHttpMessageHandler<ProviderResilienceHandler>();
+builder.Services.AddHttpClient<AzureMapsRouteClient>()
+    .AddHttpMessageHandler<DependencyTelemetryHandler>()
+    .AddPolicyHandler((services, _) => services.GetRequiredService<OutboundHttpPolicyRegistry>().Get("Azure Maps"));
+builder.Services.AddHttpClient("AzureMapsMatrix", client =>
+    client.BaseAddress = new Uri((builder.Configuration["Maps:Endpoint"] ?? "https://atlas.microsoft.com").TrimEnd('/')))
+    .AddHttpMessageHandler<DependencyTelemetryHandler>()
+    .AddPolicyHandler((services, _) => services.GetRequiredService<OutboundHttpPolicyRegistry>().Get("Azure Maps"));
+builder.Services.AddHttpClient<FleetioClient>()
+    .AddHttpMessageHandler<DependencyTelemetryHandler>()
+    .AddPolicyHandler((services, _) => services.GetRequiredService<OutboundHttpPolicyRegistry>().Get("Fleetio"));
 builder.Services.AddHostedService<DotTrackingIngestionService>();
 builder.Services.AddHostedService<TachoDriverMasterSyncJobWorker>();
 builder.Services.AddHostedService<DriverMasterClassificationBackgroundService>();
 builder.Services.AddHostedService<AuditOutboxBackgroundService>();
+builder.Services.AddHostedService<BackloadTriggerHostedService>();
+builder.Services.AddHostedService<LiveEtaService>();
+builder.Services.AddHostedService<EtaAccuracyService>();
 
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
 
@@ -207,6 +250,15 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJw
     };
     o.Events = new JwtBearerEvents
     {
+        OnMessageReceived = ctx =>
+        {
+            var accessToken = ctx.Request.Query["access_token"];
+            var path = ctx.HttpContext.Request.Path;
+            if (!string.IsNullOrWhiteSpace(accessToken) &&
+                (path.StartsWithSegments("/dispatch-hub") || path.StartsWithSegments("/eta-hub")))
+                ctx.Token = accessToken;
+            return Task.CompletedTask;
+        },
         OnAuthenticationFailed = ctx =>
         {
             ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
@@ -252,6 +304,8 @@ if (!app.Environment.IsEnvironment("Testing"))
     await SchemaMigrationRunner.ApplyAsync(db, logger, CancellationToken.None);
     try
     {
+        await ManagementReportingStore.EnsureSchemaAsync(db, CancellationToken.None);
+        await CustomerNotificationStore.EnsureSchemaAsync(db, CancellationToken.None);
         var quarantinedFleetioPlaceholders = await MasterDetailStore.QuarantineFleetioPlaceholdersAsync(db, CancellationToken.None);
         if (quarantinedFleetioPlaceholders > 0)
             logger.LogWarning("Quarantined {PlaceholderCount} Fleetio placeholder vehicle records from operational master data.", quarantinedFleetioPlaceholders);
@@ -296,6 +350,8 @@ app.MapHealthChecks("/api/v1/health/ready", new HealthCheckOptions
 }).AllowAnonymous();
 
 app.MapControllers();
+app.MapHub<DispatchHub>("/dispatch-hub");
+app.MapHub<EtaHub>("/eta-hub");
 
 if (app.Environment.IsDevelopment()) { app.UseSwagger(); app.UseSwaggerUI(); }
 app.Run();
