@@ -34,6 +34,7 @@ public sealed class DispatchService(
         var runProfiles = runProfilesTask.Result;
         var liveStatuses = liveTask.Result;
         var history = historyTask.Result;
+        var signOffTracking = await ReadTachoSignOffTrackingAsync(duties, ct);
         var today = LondonDate(DateTimeOffset.UtcNow);
         var activityReferenceDate = planningDate > today ? today : planningDate;
 
@@ -46,6 +47,8 @@ public sealed class DispatchService(
             var rest = DispatchTachoRules.DeriveRequiredRestPeriod(driver, driverDuties);
             var shiftEnd = DispatchTachoRules.LatestShiftEndUtc(driver, driverDuties);
             var lastVehicle = DispatchTachoRules.LastVehicleRegistration(driver, driverDuties);
+            var completedVehicle = DispatchTachoRules.LastCompletedVehicleRegistration(driver, driverDuties);
+            var reducedRestAvailable = DispatchTachoRules.ReducedDailyRestAvailable(driver, driverDuties);
             var weeklyWorking = DispatchTachoRules.WeeklyWorkingTimeHours(driver, driverDuties, activityReferenceDate);
             var dailyDriving = DispatchTachoRules.DailyDrivingTimeHours(driver, driverDuties, activityReferenceDate);
             var breakCompliant = DispatchTachoRules.BreakCompliant(driver, driverDuties, activityReferenceDate);
@@ -54,16 +57,22 @@ public sealed class DispatchService(
             var workAvailable = DispatchTachoRules.WorkAvailableWeekMinutes(driver, driverDuties);
             var skills = DispatchSkillRules.Parse(profile.SkillsText ?? driver.Skills);
 
-            var live = MatchLiveDriver(driver, lastVehicle, liveStatuses);
+            var hasOpenDuty = driverDuties.Any(duty => duty.DutyEndUtc is null);
+            var live = MatchLiveDriver(driver, liveStatuses, hasOpenDuty, shiftEnd);
+            var signOff = live is null
+                ? DispatchLocationRules.ResolveTachoSignOffPosition(completedVehicle, shiftEnd, signOffTracking)
+                : null;
             var previous = history.Where(load => load.DriverId == driver.Id)
                 .OrderByDescending(load => load.PlanningDate)
                 .ThenByDescending(load => load.CreatedAtUtc)
                 .FirstOrDefault();
             var previousFinal = previous is null ? null : OperationalStopOrdering.Order(previous.Stops).LastOrDefault();
-            var latitude = live?.Latitude ?? previousFinal?.Latitude;
-            var longitude = live?.Longitude ?? previousFinal?.Longitude;
-            var locationName = HumanLocation(live?.LastKnownStatus) ?? previousFinal?.Name;
-            var positionAtUtc = live?.LastEventTimeUtc;
+            var latitude = live?.Latitude ?? signOff?.Latitude ?? previousFinal?.Latitude;
+            var longitude = live?.Longitude ?? signOff?.Longitude ?? previousFinal?.Longitude;
+            var locationName = live is not null
+                ? HumanLocation(live.LastKnownStatus) ?? $"Live GPS · {live.VehicleIdentifier}"
+                : signOff?.Label ?? previousFinal?.Name;
+            var positionAtUtc = live?.LastEventTimeUtc ?? signOff?.AtUtc;
 
             var onHoliday = profile.HolidayDates.Contains(planningDate);
             var offContract = IsHalfTramper(profile.EmploymentType) &&
@@ -95,7 +104,8 @@ public sealed class DispatchService(
                     rest.ReducedDailyRestsUsed,
                     dailyDrivingLimit,
                     driveAvailable,
-                    workAvailable),
+                    workAvailable,
+                    reducedRestAvailable),
                 new DispatchTrackingDataDto(
                     latitude is decimal lat && longitude is decimal lon ? new DispatchGeoPointDto(lat, lon) : null,
                     CleanStopName(locationName),
@@ -128,6 +138,7 @@ public sealed class DispatchService(
     {
         var ids = request.DriverIds.Distinct().ToArray();
         if (ids.Length == 0) return [];
+        var reducedRestDriverIds = request.ReducedRestDriverIds?.ToHashSet() ?? new HashSet<Guid>();
 
         var drivers = await db.Drivers.AsNoTracking().Where(driver => driver.Active && ids.Contains(driver.Id)).ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
@@ -144,7 +155,8 @@ public sealed class DispatchService(
         {
             var profile = profiles.GetValueOrDefault(driver.Id) ?? DriverMasterProfile.Fallback(driver);
             var driverDuties = duties.Where(duty => DriverDayCycleCalculator.MatchesDriver(driver, duty)).ToList();
-            var rest = DispatchTachoRules.DeriveRequiredRestPeriod(driver, driverDuties);
+            var useReducedRest = reducedRestDriverIds.Contains(driver.Id);
+            var rest = DispatchTachoRules.DeriveRequiredRestPeriod(driver, driverDuties, useReducedRest);
             var shiftEnd = DispatchTachoRules.LatestShiftEndUtc(driver, driverDuties);
             var weeklyWorking = DispatchTachoRules.WeeklyWorkingTimeHours(driver, driverDuties, referenceDate);
             var dailyDriving = DispatchTachoRules.DailyDrivingTimeHours(driver, driverDuties, referenceDate);
@@ -153,7 +165,9 @@ public sealed class DispatchService(
             var availableFrom = DispatchTachoRules.AvailableFrom(shiftEnd, rest);
 
             string? breach = null;
-            if (profile.HolidayDates.Contains(request.PlanningDate)) breach = "Annual leave";
+            if (useReducedRest && rest.Hours != 9)
+                breach = "Reduced 9h daily rest is not available; the statutory reduced-rest allowance is exhausted or cannot be evidenced.";
+            else if (profile.HolidayDates.Contains(request.PlanningDate)) breach = "Annual leave";
             else if (IsHalfTramper(profile.EmploymentType) && profile.ContractedDays.Count > 0 && !profile.ContractedDays.Contains(request.PlanningDate.DayOfWeek))
                 breach = "Not contracted tomorrow";
             else if (!breakCompliant) breach = "Break compliance breach — required Tacho break is not evidenced.";
@@ -256,7 +270,14 @@ public sealed class DispatchService(
                 continue;
             }
 
-            var rest = DispatchTachoRules.DeriveRequiredRestPeriod(driver, driverDuties);
+            var rest = DispatchTachoRules.DeriveRequiredRestPeriod(driver, driverDuties, allocation.UseReducedDailyRest);
+            if (allocation.UseReducedDailyRest && rest.Hours != 9)
+            {
+                failures.Add(new DispatchLockFailure(driver.Id, allocation.RunId,
+                    $"{driver.DisplayName} cannot use reduced 9h daily rest because the statutory reduced-rest allowance is exhausted or cannot be evidenced."));
+                continue;
+            }
+
             var availableFrom = DispatchTachoRules.AvailableFrom(DispatchTachoRules.LatestShiftEndUtc(driver, driverDuties), rest);
             if (availableFrom is DateTimeOffset legalStart && allocation.PlannedStartTime < legalStart)
                 failures.Add(new DispatchLockFailure(driver.Id, allocation.RunId,
@@ -316,7 +337,7 @@ public sealed class DispatchService(
                     allocation.PlannedStartTime.ToUniversalTime(),
                     actor,
                     ct,
-                    "Locked smart dispatch plan");
+                    allocation.UseReducedDailyRest ? "Locked smart dispatch plan · reduced 9h daily rest" : "Locked smart dispatch plan · regular 11h daily rest");
             }
 
             await transaction.CommitAsync(ct);
@@ -552,6 +573,50 @@ public sealed class DispatchService(
         }
     }
 
+    private async Task<List<VehicleTrackingEvent>> ReadTachoSignOffTrackingAsync(
+        IReadOnlyCollection<TachoDriverDutyStatus> duties,
+        CancellationToken ct)
+    {
+        var completed = duties
+            .Where(duty => duty.DutyEndUtc is not null && !string.IsNullOrWhiteSpace(duty.VehicleCode))
+            .ToList();
+        if (completed.Count == 0) return [];
+
+        var latestEnd = completed.Max(duty => duty.DutyEndUtc!.Value);
+        var recentCutoff = latestEnd.AddHours(-48);
+        var candidateIdentifiers = completed
+            .Where(duty => duty.DutyEndUtc >= recentCutoff)
+            .SelectMany(duty => new[]
+            {
+                duty.VehicleCode.Trim(),
+                ExecutionIdentityResolver.NormaliseVehicle(duty.VehicleCode)
+            })
+            .Where(value => value.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (candidateIdentifiers.Length == 0) return [];
+
+        var from = recentCutoff.AddHours(-12);
+        var through = latestEnd.AddMinutes(30);
+        try
+        {
+            return await db.VehicleTrackingEvents.AsNoTracking()
+                .Where(item =>
+                    item.EventTimeUtc >= from &&
+                    item.EventTimeUtc <= through &&
+                    candidateIdentifiers.Contains(item.VehicleIdentifier))
+                .OrderByDescending(item => item.EventTimeUtc)
+                .Take(25000)
+                .ToListAsync(ct);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(exception, "Historical RoadTech positions were unavailable for Tacho sign-off location fallback.");
+            db.ChangeTracker.Clear();
+            return [];
+        }
+    }
+
     private async Task<List<Load>> ReadRecentHistoryAsync(DateOnly planningDate, CancellationToken ct)
     {
         var from = planningDate.AddDays(-7);
@@ -572,7 +637,11 @@ public sealed class DispatchService(
         }
     }
 
-    private static VehicleLiveStatus? MatchLiveDriver(Driver driver, string? lastVehicleRegistration, IEnumerable<VehicleLiveStatus> statuses)
+    private static VehicleLiveStatus? MatchLiveDriver(
+        Driver driver,
+        IEnumerable<VehicleLiveStatus> statuses,
+        bool hasOpenDuty,
+        DateTimeOffset? latestCompletedDutyEnd)
     {
         var driverCard = Normalise(driver.TachoCardNumber);
         var driverNames = new[] { driver.TachoName, driver.DisplayName }
@@ -581,27 +650,19 @@ public sealed class DispatchService(
             .Where(value => value.Length > 0)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        var direct = statuses
-            .Where(status =>
-            {
-                var liveCard = Normalise(status.CurrentDriverCardNumber);
-                if (driverCard.Length >= 8 && liveCard.Length >= 8 &&
-                    (driverCard == liveCard || driverCard.EndsWith(liveCard, StringComparison.OrdinalIgnoreCase) || liveCard.EndsWith(driverCard, StringComparison.OrdinalIgnoreCase)))
-                    return true;
-                var liveName = NormalisePerson(status.CurrentDriverName);
-                return liveName.Length > 0 && driverNames.Contains(liveName);
-            })
-            .OrderByDescending(status => status.LastEventTimeUtc)
-            .FirstOrDefault();
-        if (direct is not null) return direct;
-
-        var vehicleKey = Normalise(lastVehicleRegistration);
-        if (vehicleKey.Length == 0) return null;
         return statuses
             .Where(status =>
             {
-                var liveVehicle = Normalise(status.VehicleIdentifier);
-                return liveVehicle == vehicleKey || liveVehicle.EndsWith(vehicleKey, StringComparison.OrdinalIgnoreCase) || vehicleKey.EndsWith(liveVehicle, StringComparison.OrdinalIgnoreCase);
+                var liveCard = Normalise(status.CurrentDriverCardNumber);
+                var cardMatch = driverCard.Length >= 8 && liveCard.Length >= 8 &&
+                    (driverCard == liveCard || driverCard.EndsWith(liveCard, StringComparison.OrdinalIgnoreCase) || liveCard.EndsWith(driverCard, StringComparison.OrdinalIgnoreCase));
+                var liveName = NormalisePerson(status.CurrentDriverName);
+                var nameMatch = liveName.Length > 0 && driverNames.Contains(liveName);
+                if (!cardMatch && !nameMatch) return false;
+
+                // If Tacho says the duty has ended, don't let a stale driver identity on a
+                // vehicle that was moved later become this driver's current position.
+                return hasOpenDuty || latestCompletedDutyEnd is null || status.LastEventTimeUtc <= latestCompletedDutyEnd.Value.AddMinutes(30);
             })
             .OrderByDescending(status => status.LastEventTimeUtc)
             .FirstOrDefault();
