@@ -5,7 +5,10 @@ using Slh.Tms.Api.Models.Tracking;
 
 namespace Slh.Tms.Api.Services;
 
-public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTrackingTelemetryStore> logger)
+public sealed class DotTrackingTelemetryStore(
+    TmsDbContext db,
+    ILogger<DotTrackingTelemetryStore> logger,
+    RoadTechLiveSnapshot? liveSnapshot = null)
 {
     private static readonly ConcurrentDictionary<string, byte> NormalisedProviderIdentifiers = new(StringComparer.OrdinalIgnoreCase);
     private static readonly TimeSpan MaximumLiveFutureSkew = TimeSpan.FromMinutes(5);
@@ -14,7 +17,12 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
     public async Task PersistAsync(IEnumerable<DotTelemetryRecord> records, CancellationToken ct, bool markAsLiveReceipt = true)
     {
         var batch = records.ToList();
-        var receivedAt = DateTimeOffset.UtcNow;
+        // In production every live caller is reading the same central RoadTech snapshot. Reuse
+        // that snapshot's capture time when updating receipt freshness, so a wallboard refresh
+        // cannot make an old provider batch look newer than the actual RoadTech read.
+        var receivedAt = markAsLiveReceipt
+            ? liveSnapshot?.Read().CapturedAtUtc ?? DateTimeOffset.UtcNow
+            : DateTimeOffset.UtcNow;
         var futureCeiling = receivedAt.Add(MaximumLiveFutureSkew);
         var currentAnchors = new Dictionary<string, DateTimeOffset>(StringComparer.OrdinalIgnoreCase);
 
@@ -151,7 +159,8 @@ public sealed class DotTrackingTelemetryStore(TmsDbContext db, ILogger<DotTracki
 
                 // Receipt freshness answers whether GetCurrentTelemetry is actively
                 // confirming this GPS position. Stationary vehicles may keep the same
-                // provider event timestamp throughout a long unload.
+                // provider event timestamp throughout a long unload. Every consumer of
+                // the same central snapshot therefore retains the same receipt timestamp.
                 live.LastReceivedAtUtc = receivedAt;
                 live.UpdatedAtUtc = receivedAt;
 

@@ -94,6 +94,7 @@ builder.Services.AddScoped<OrderCompletenessService>();
 builder.Services.AddScoped<WarehouseMovementService>();
 builder.Services.AddScoped<PlanningOptimiserService>();
 builder.Services.AddScoped<DotTrackingTelemetryStore>();
+builder.Services.AddSingleton<RoadTechLiveSnapshot>();
 var assistantOptions = new AssistantOptions();
 builder.Configuration.GetSection("Integrations:OpenAI").Bind(assistantOptions);
 assistantOptions.Enabled = ReadBool(builder.Configuration, assistantOptions.Enabled,
@@ -164,6 +165,7 @@ builder.Services.AddScoped<DriverMasterClassificationService>();
 builder.Services.AddScoped<TachoCanonicalDriverMasterOrchestrator>();
 builder.Services.AddScoped<TachoDriverMasterSyncJobService>();
 builder.Services.AddTransient<TachoMasterRetryHandler>();
+builder.Services.AddTransient<TachoMasterResponseCacheHandler>();
 builder.Services.AddTransient<DependencyTelemetryHandler>();
 builder.Services.AddTransient<ProviderResilienceHandler>();
 builder.Services.AddScoped<DriverWeeklyRestComplianceService>();
@@ -172,6 +174,7 @@ builder.Services.AddHttpClient<SageHrClient>().AddHttpMessageHandler<DependencyT
 builder.Services.AddHttpClient<DotTrackingClient>().AddHttpMessageHandler<DependencyTelemetryHandler>().AddHttpMessageHandler<ProviderResilienceHandler>();
 builder.Services.AddHttpClient<TachoMasterClient>()
     .AddHttpMessageHandler<DependencyTelemetryHandler>()
+    .AddHttpMessageHandler<TachoMasterResponseCacheHandler>()
     .AddHttpMessageHandler<TachoMasterRetryHandler>()
     .ConfigureHttpClient((sp, _) =>
     {
