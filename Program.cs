@@ -165,10 +165,11 @@ builder.Services.AddScoped<TachoCanonicalDriverMasterOrchestrator>();
 builder.Services.AddScoped<TachoDriverMasterSyncJobService>();
 builder.Services.AddTransient<TachoMasterRetryHandler>();
 builder.Services.AddTransient<DependencyTelemetryHandler>();
+builder.Services.AddTransient<ProviderResilienceHandler>();
 builder.Services.AddScoped<DriverWeeklyRestComplianceService>();
-builder.Services.AddHttpClient<DriverSmsDispatchService>().AddHttpMessageHandler<DependencyTelemetryHandler>();
-builder.Services.AddHttpClient<SageHrClient>().AddHttpMessageHandler<DependencyTelemetryHandler>();
-builder.Services.AddHttpClient<DotTrackingClient>().AddHttpMessageHandler<DependencyTelemetryHandler>();
+builder.Services.AddHttpClient<DriverSmsDispatchService>().AddHttpMessageHandler<DependencyTelemetryHandler>().AddHttpMessageHandler<ProviderResilienceHandler>();
+builder.Services.AddHttpClient<SageHrClient>().AddHttpMessageHandler<DependencyTelemetryHandler>().AddHttpMessageHandler<ProviderResilienceHandler>();
+builder.Services.AddHttpClient<DotTrackingClient>().AddHttpMessageHandler<DependencyTelemetryHandler>().AddHttpMessageHandler<ProviderResilienceHandler>();
 builder.Services.AddHttpClient<TachoMasterClient>()
     .AddHttpMessageHandler<DependencyTelemetryHandler>()
     .AddHttpMessageHandler<TachoMasterRetryHandler>()
@@ -176,8 +177,8 @@ builder.Services.AddHttpClient<TachoMasterClient>()
     {
         sp.GetService<DotTrackingClient>();
     });
-builder.Services.AddHttpClient<AzureMapsRouteClient>().AddHttpMessageHandler<DependencyTelemetryHandler>();
-builder.Services.AddHttpClient<FleetioClient>().AddHttpMessageHandler<DependencyTelemetryHandler>();
+builder.Services.AddHttpClient<AzureMapsRouteClient>().AddHttpMessageHandler<DependencyTelemetryHandler>().AddHttpMessageHandler<ProviderResilienceHandler>();
+builder.Services.AddHttpClient<FleetioClient>().AddHttpMessageHandler<DependencyTelemetryHandler>().AddHttpMessageHandler<ProviderResilienceHandler>();
 builder.Services.AddHostedService<DotTrackingIngestionService>();
 builder.Services.AddHostedService<TachoDriverMasterSyncJobWorker>();
 builder.Services.AddHostedService<DriverMasterClassificationBackgroundService>();
