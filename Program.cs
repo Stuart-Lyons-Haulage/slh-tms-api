@@ -94,6 +94,7 @@ builder.Services.AddScoped<OrderCompletenessService>();
 builder.Services.AddScoped<WarehouseMovementService>();
 builder.Services.AddScoped<PlanningOptimiserService>();
 builder.Services.AddScoped<DotTrackingTelemetryStore>();
+builder.Services.AddSingleton<RoadTechLiveSnapshot>();
 var assistantOptions = new AssistantOptions();
 builder.Configuration.GetSection("Integrations:OpenAI").Bind(assistantOptions);
 assistantOptions.Enabled = ReadBool(builder.Configuration, assistantOptions.Enabled,
