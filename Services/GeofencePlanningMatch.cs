@@ -9,9 +9,9 @@ namespace Slh.Tms.Api.Services;
 public static class GeofencePlanningMatch
 {
     // Falcon history can be sample-sparse at short collection stops. A linked entry and exit
-    // one minute apart is enough to prove the vehicle visited and left that planned stop;
-    // zero-duration/drive-by samples remain unconfirmed unless the visit was explicitly confirmed.
-    private const int CredibleCompletedVisitMinutes = 1;
+    // at least 30 seconds apart is enough to prove the vehicle visited and left that planned stop;
+    // zero-duration/very brief drive-by samples remain unconfirmed unless explicitly confirmed.
+    private const int CredibleCompletedVisitSeconds = 30;
 
     private static readonly HashSet<string> NoiseTokens = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -165,7 +165,7 @@ public static class GeofencePlanningMatch
         if (visit.LoadStopId is null || visit.ExitedAtUtc is null) return false;
         if (visit.ConfirmedAtUtc is not null) return true;
 
-        return visit.ExitedAtUtc.Value - visit.EnteredAtUtc >= TimeSpan.FromMinutes(CredibleCompletedVisitMinutes);
+        return visit.ExitedAtUtc.Value - visit.EnteredAtUtc >= TimeSpan.FromSeconds(CredibleCompletedVisitSeconds);
     }
 
     private static string MatchStop(LoadStop stop)
