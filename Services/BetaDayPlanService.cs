@@ -132,13 +132,19 @@ public sealed class BetaDayPlanService(
         if (inputs.Count == 0)
             warnings.Add("No PlannerReady/current order lines were found for this collection date.");
 
+        var plannedSourceLines = resultRuns
+            .SelectMany(run => run.Orders)
+            .Select(order => order.SourceLineId)
+            .Distinct()
+            .Count();
+
         return new BetaDayPlanResult(
             planningDate,
             DateTimeOffset.UtcNow,
             "Live Azure Maps fastest commercial truck route with traffic. Approximate/Haversine evidence is excluded from optimisation decisions.",
-            inputs.Count,
-            resultRuns.Sum(run => run.Orders.Count),
-            unmapped,
+            inputs.Select(input => input.SourceLineId).Distinct().Count(),
+            plannedSourceLines,
+            inputs.Where(input => !input.RoutingMapped).Select(input => input.SourceLineId).Distinct().Count(),
             resultRuns.Count,
             resultRuns.Count(run => run.RoutingAvailable),
             resultRuns.Sum(run => run.PlannedPallets),
@@ -249,7 +255,6 @@ public sealed class BetaDayPlanService(
 
         var movementById = movements.ToDictionary(item => item.Id);
         var revisionById = revisions.ToDictionary(item => item.Id);
-        var movementIds = movements.Select(item => item.Id).ToList();
         var liveOrders = await db.TransportOrders.AsNoTracking()
             .Where(order => order.Status != OrderStatus.Cancelled && order.CollectionDate == planningDate)
             .OrderBy(order => order.Reference)
@@ -259,13 +264,13 @@ public sealed class BetaDayPlanService(
             .ToDictionary(group => group.Key, group => group.OrderByDescending(order => order.CreatedAtUtc).First());
         var sites = await SitesAsync(ct);
         var inputs = new List<BetaDayOrderInput>();
-        var representedOrderIds = new HashSet<Guid>();
+        var representedMovementIds = new HashSet<Guid>();
 
         foreach (var line in lines)
         {
             if (!revisionById.TryGetValue(line.RevisionId, out var revision) || !movementById.TryGetValue(revision.MovementId, out var movement)) continue;
+            representedMovementIds.Add(movement.Id);
             liveByMovement.TryGetValue(movement.Id, out var live);
-            if (live is not null) representedOrderIds.Add(live.Id);
             var collectionName = First(line.CollectionSite, live?.SellerName);
             var deliveryName = First(live?.MarketName, line.DeliverySite);
             var reference = First(live?.Reference, JsonString(line.PayloadJson, ReferenceKeys), line.LoadReference, line.SourceRowKey) ?? line.SourceRowKey;
@@ -285,7 +290,9 @@ public sealed class BetaDayPlanService(
         // Live promoted orders are included as a safety net when an older/alternate intake path
         // did not materialise OrderSourceLines. This is important for proving that the Beta day
         // did not quietly omit work before comparing it with the human Lyons sheet.
-        var fallbackOrders = liveOrders.Where(order => !representedOrderIds.Contains(order.Id)).ToList();
+        var fallbackOrders = liveOrders
+            .Where(order => order.SourceMovementId is null || !representedMovementIds.Contains(order.SourceMovementId.Value))
+            .ToList();
         var stagedIds = fallbackOrders.Where(order => order.SourceStagedImportId is not null).Select(order => order.SourceStagedImportId!.Value).Distinct().ToList();
         var staged = stagedIds.Count == 0
             ? new Dictionary<Guid, StagedImport>()
@@ -406,7 +413,7 @@ public sealed class BetaDayPlanService(
     {
         yield return site.Name;
         if (!string.IsNullOrWhiteSpace(site.DriverTextName)) yield return site.DriverTextName;
-        if (!string.IsNullOrWhiteSpace(site.Code)) yield return site.Code;
+        if (!string.IsNullOrWhiteSpace(site.ExternalCode)) yield return site.ExternalCode;
         if (!string.IsNullOrWhiteSpace(site.Aliases))
             foreach (var alias in site.Aliases.Split(new[] { ',', ';', '|', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
                 yield return alias;
