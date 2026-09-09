@@ -53,13 +53,21 @@ public sealed class BetaOptimiserController(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Beta Optimiser planner CSV comparison failed for {PlanningDate}.", request.PlanningDate);
+            var safePlanningDate = SanitizeForLog(request?.PlanningDate.ToString());
+            logger.LogError(ex, "Beta Optimiser planner CSV comparison failed for {PlanningDate}.", safePlanningDate);
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new
             {
                 code = "BetaOptimiserPlannerComparisonUnavailable",
                 message = "The uploaded planner benchmark could not be analysed. No planning data was changed."
             });
         }
+    }
+
+    private static string SanitizeForLog(string? value)
+    {
+        return (value ?? string.Empty)
+            .Replace("\r", string.Empty)
+            .Replace("\n", string.Empty);
     }
 
     private BetaOptimiserService Service()
