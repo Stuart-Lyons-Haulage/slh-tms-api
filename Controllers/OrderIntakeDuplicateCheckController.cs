@@ -15,7 +15,7 @@ public sealed class OrderIntakeDuplicateCheckController(
     ILogger<OrderIntakeDuplicateCheckController> logger) : ControllerBase
 {
     [HttpGet("staging/{stagingId:guid}/comparison")]
-    [Authorize(Policy = "TmsWrite")]
+    [Authorize(Policy = "TmsRead")]
     public async Task<IActionResult> CompareStagedOrder(Guid stagingId, CancellationToken ct)
     {
         var staged = await db.StagedImports.AsNoTracking()
@@ -38,9 +38,12 @@ public sealed class OrderIntakeDuplicateCheckController(
                     .OrderByDescending(x => x.CreatedAtUtc)
                     .FirstOrDefaultAsync(ct);
             }
-            catch (Exception ex) when (ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase))
+            catch (Exception ex) when (IsSchemaUnavailable(ex))
             {
-                current = null;
+                logger.LogWarning(ex,
+                    "Staged-order comparison could not read live TransportOrders for staging item {StagingId}; comparison is unavailable and will not be reported as a new order.",
+                    stagingId);
+                return LiveOrderComparisonUnavailable();
             }
 
             if (current is null)
@@ -174,6 +177,24 @@ public sealed class OrderIntakeDuplicateCheckController(
             rule = "PO/purchase-order is the primary cross-message identity when available; otherwise customer/date/location/reference signatures are used conservatively. No record is deleted, promoted or amended by this endpoint."
         });
     }
+
+    internal static bool IsSchemaUnavailable(Exception exception)
+    {
+        var message = exception.GetBaseException().Message;
+        return message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("no such table", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static ObjectResult LiveOrderComparisonUnavailable() => new(new
+    {
+        code = "LiveOrderComparisonUnavailable",
+        message = "The live order register could not be checked. Do not treat this staged order as new until comparison is available."
+    })
+    {
+        StatusCode = StatusCodes.Status503ServiceUnavailable
+    };
 
     private static List<object> BuildChanges(OrderSnapshot current, OrderSnapshot incoming)
     {

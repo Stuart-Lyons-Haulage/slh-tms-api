@@ -35,16 +35,15 @@ public sealed record BetaDayBuiltRun(
 /// when live HGV evidence cannot support a sensible return pairing. Unknown quantities remain
 /// visible without inventing pallet capacity.
 /// </summary>
-public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
+public sealed class BetaDayPlanBuilder(
+    IBetaHgvRouteProvider routeProvider,
+    BetaOptimiserOptions? optimiserOptions = null)
 {
     private const int StandardCapacity = 26;
     private const int EuroCapacity = 33;
     private const int MaxCandidateRouteChecksPerFill = 16;
     private const int MaxPhaseSwapChecks = 12;
-    private const decimal SouthboundLatitudeDelta = 0.05m;
-    private const decimal MaxNorthwardBackhaulDetourLatitude = 0.25m;
-    private const decimal MaxBackhaulIncrementFactor = 1.35m;
-    private const decimal BackhaulIncrementAllowanceMiles = 15m;
+    private readonly BetaOptimiserOptions options = (optimiserOptions ?? new BetaOptimiserOptions()).Validate();
 
     public async Task<IReadOnlyList<BetaDayBuiltRun>> BuildAsync(
         DateOnly planningDate,
@@ -52,7 +51,7 @@ public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
         CancellationToken ct)
     {
         var backhaulCandidates = orders
-            .Where(IsSouthboundBackhaulCandidate)
+            .Where(order => IsSouthboundBackhaulCandidate(order, options.MinSouthboundLatitudeDelta))
             .OrderBy(order => PeriodRank(order.Period))
             .ThenBy(order => order.CollectionTimeFrom ?? TimeOnly.MaxValue)
             .ThenBy(order => order.Reference, StringComparer.OrdinalIgnoreCase)
@@ -250,14 +249,14 @@ public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
             if (backhaul.Pallets > 0 && backhaul.Pallets > run.CapacityPallets) continue;
 
             var terminal = run.Stops[^1];
-            if (backhaul.Collection.Latitude > terminal.Latitude + MaxNorthwardBackhaulDetourLatitude) continue;
-            if (backhaul.Delivery.Latitude >= backhaul.Collection.Latitude - SouthboundLatitudeDelta) continue;
+            if (backhaul.Collection.Latitude > terminal.Latitude + options.MaxNorthwardBackhaulDetourLatitude) continue;
+            if (backhaul.Collection.Latitude - backhaul.Delivery.Latitude < options.MinSouthboundLatitudeDelta) continue;
 
             var combinedStops = AppendDistinct(run.Stops, backhaul.Collection, backhaul.Delivery);
             var combined = await routeProvider.GetRouteAsync(combinedStops, ct);
             if (combined is null) continue;
             var increment = Math.Max(combined.Miles - run.Miles.Value, 0m);
-            if (increment > standalone.Miles * MaxBackhaulIncrementFactor + BackhaulIncrementAllowanceMiles) continue;
+            if (increment > standalone.Miles * options.MaxBackhaulIncrementFactor + options.BackhaulIncrementAllowanceMiles) continue;
             if (increment >= bestIncrement) continue;
             bestIndex = index;
             bestCombined = combined;
@@ -377,10 +376,10 @@ public sealed class BetaDayPlanBuilder(IBetaHgvRouteProvider routeProvider)
         return result;
     }
 
-    private static bool IsSouthboundBackhaulCandidate(BetaDayOrderInput order) =>
+    internal static bool IsSouthboundBackhaulCandidate(BetaDayOrderInput order, decimal minSouthboundLatitudeDelta) =>
         NormalisePeriod(order.Period) != "W3" &&
         order.RoutingMapped &&
-        order.Delivery.Latitude < order.Collection.Latitude - SouthboundLatitudeDelta;
+        order.Collection.Latitude - order.Delivery.Latitude >= minSouthboundLatitudeDelta;
 
     private static bool Better(BetaHgvRouteCost candidate, BetaHgvRouteCost current) =>
         candidate.Miles < current.Miles - 0.1m ||

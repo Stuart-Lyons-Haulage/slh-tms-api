@@ -40,7 +40,7 @@ public sealed class EmailOrderIntakeService
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex ReadyForCollectionTimeRegex = new(
-        @"\bready\s+for\s+collection\s+(?:from|at)\s*(?<time>(?:[01]?\d|2[0-3])(?:[:.]\d{2})?\s*(?:am|pm)?)\b",
+        @"\bready(?:\s+for\s+collection)?\s+(?:from|at|about)\s*(?<time>(?:[01]?\d|2[0-3])(?:[:.]\d{2})?\s*(?:am|pm)?)\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly Regex TemperatureRegex = new(
@@ -272,7 +272,7 @@ public sealed class EmailOrderIntakeService
 
         var collectionTime = NormaliseTime(ExtractTime(collectionLabel)
             ?? ExtractMatch(CollectionTimeRegex, body, "time")
-            ?? ExtractMatch(new Regex(@"\bready\s+(?:from|at|about)?\s*(?<time>(?:[01]?\d|2[0-3])(?:[:.]\d{2})?\s*(?:am|pm)?)", RegexOptions.IgnoreCase), body, "time"));
+            ?? ExtractMatch(ReadyForCollectionTimeRegex, body, "time"));
         if (!string.IsNullOrWhiteSpace(collectionTime)) payload["requestedTime"] = collectionTime;
         sources["collectionTime"] = string.IsNullOrWhiteSpace(collectionTime) ? "template-or-fallback" : "body.explicit";
 
@@ -283,8 +283,8 @@ public sealed class EmailOrderIntakeService
         var bodySignal = DetectKnownSignal(body, []);
         var subjectSignal = DetectKnownSignal(request.Subject ?? string.Empty, []);
         var existingCustomer = PayloadText(payload, "customerCode");
-        var senderCustomer = (request.SenderAddress ?? string.Empty).EndsWith("@langmeadherbs.co.uk", StringComparison.OrdinalIgnoreCase) ||
-            (request.SenderAddress ?? string.Empty).EndsWith("@langmeadfarms.co.uk", StringComparison.OrdinalIgnoreCase)
+        var senderCustomer = SenderAddressMatchesDomain(request.SenderAddress, "langmeadherbs.co.uk") ||
+            SenderAddressMatchesDomain(request.SenderAddress, "langmeadfarms.co.uk")
             ? "LANGMEADS" : null;
         var resolvedCustomer = !string.IsNullOrWhiteSpace(explicitCustomer) ? CustomerCode(explicitCustomer)
             : !string.IsNullOrWhiteSpace(masterCustomer) ? masterCustomer
@@ -295,6 +295,7 @@ public sealed class EmailOrderIntakeService
         if (!string.IsNullOrWhiteSpace(resolvedCustomer)) payload["customerCode"] = resolvedCustomer;
         sources["customer"] = !string.IsNullOrWhiteSpace(explicitCustomer) ? "body.explicit"
             : !string.IsNullOrWhiteSpace(masterCustomer) ? "master-data.body-site"
+            : senderCustomer is not null ? "sender.domain"
             : bodySignal is not null ? "template.body-signal"
             : IsTemplateSource(order.SourceKey) ? "template" : subjectSignal is not null ? "subject" : "fallback";
 
@@ -879,6 +880,8 @@ public sealed class EmailOrderIntakeService
             // workbook supplies delivery only, stage collection on the preceding
             // day so the planner can allocate the departure correctly.
             var collectionDate = deliveryDate.Value.AddDays(-1);
+            if (collectionDate.DayOfWeek == DayOfWeek.Sunday)
+                warnings.Add($"Overnight collection inferred as Sunday {collectionDate:dd/MM/yyyy} for Monday delivery {deliveryDate.Value:dd/MM/yyyy}; confirm Sunday PM operation before approval.");
             var baseReference = customerPo ?? StableEmailReference(request.MessageId);
             var orderReference = BuildRowReference(baseReference, "BARFOOTS", customer, deliveryDate.Value, rowIndex + 1);
             var naturalKey = $"barfoots|wholesale|{deliveryDate:yyyy-MM-dd}|{NormaliseKey(collection)}|{NormaliseKey(market)}|{NormaliseKey(customer)}|{NormaliseKey(customerPo)}";
@@ -1559,8 +1562,21 @@ public sealed class EmailOrderIntakeService
     private static string? InferCollectionSiteFromSender(string? senderAddress)
     {
         var domain = SenderDomain(senderAddress);
-        return domain is not null && SenderDomainCollectionSites.TryGetValue(domain, out var site) ? site : null;
+        if (domain is null) return null;
+        foreach (var (rootDomain, site) in SenderDomainCollectionSites)
+            if (DomainMatches(domain, rootDomain)) return site;
+        return null;
     }
+
+    internal static bool SenderAddressMatchesDomain(string? senderAddress, string rootDomain)
+    {
+        var domain = SenderDomain(senderAddress);
+        return domain is not null && DomainMatches(domain, rootDomain);
+    }
+
+    private static bool DomainMatches(string domain, string rootDomain) =>
+        domain.Equals(rootDomain, StringComparison.OrdinalIgnoreCase) ||
+        domain.EndsWith("." + rootDomain, StringComparison.OrdinalIgnoreCase);
 
     private static string? SenderDomain(string? senderAddress)
     {

@@ -11,6 +11,7 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class BetaDayPlanController(
     TmsDbContext db,
     AzureMapsRouteClient maps,
+    IConfiguration configuration,
     ILoggerFactory loggerFactory,
     ILogger<BetaDayPlanController> logger) : ControllerBase
 {
@@ -62,14 +63,22 @@ public sealed class BetaDayPlanController(
 
     private BetaDayPlanService Service()
     {
-        var liveProvider = new AzureMapsHgvRouteProvider(maps, loggerFactory.CreateLogger<AzureMapsHgvRouteProvider>());
+        var options = configuration.GetSection(BetaOptimiserOptions.SectionName)
+            .Get<BetaOptimiserOptions>() ?? new BetaOptimiserOptions();
+        options.Validate();
+
+        var liveProvider = new AzureMapsHgvRouteProvider(
+            maps,
+            loggerFactory.CreateLogger<AzureMapsHgvRouteProvider>(),
+            options);
         // One shared budget covers both the independent Beta build and the uploaded-plan
         // routing within this HTTP request. When exhausted, remaining routes are marked
         // unavailable instead of allowing the gateway to terminate the entire comparison.
         var provider = new BudgetedBetaHgvRouteProvider(
             liveProvider,
-            loggerFactory.CreateLogger<BudgetedBetaHgvRouteProvider>());
-        var builder = new BetaDayPlanBuilder(provider);
+            loggerFactory.CreateLogger<BudgetedBetaHgvRouteProvider>(),
+            options.RequestRoutingBudget);
+        var builder = new BetaDayPlanBuilder(provider, options);
         return new BetaDayPlanService(db, builder, provider, loggerFactory.CreateLogger<BetaDayPlanService>());
     }
 }
