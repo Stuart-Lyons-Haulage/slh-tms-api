@@ -21,12 +21,18 @@ public sealed class DotTrackingClient
     private readonly HttpClient _httpClient;
     private readonly DotTrackingOptions _options;
     private readonly ILogger<DotTrackingClient> _logger;
+    private readonly RoadTechLiveSnapshot? _liveSnapshot;
 
-    public DotTrackingClient(HttpClient httpClient, DotTrackingOptions options, ILogger<DotTrackingClient> logger)
+    public DotTrackingClient(
+        HttpClient httpClient,
+        DotTrackingOptions options,
+        ILogger<DotTrackingClient> logger,
+        RoadTechLiveSnapshot? liveSnapshot = null)
     {
         _httpClient = httpClient;
         _options = options;
         _logger = logger;
+        _liveSnapshot = liveSnapshot;
 
         _httpClient.Timeout = TimeSpan.FromSeconds(30);
 
@@ -37,10 +43,10 @@ public sealed class DotTrackingClient
     }
 
     /// <summary>
-    /// Reads the latest telemetry for the configured RoadTech company.
-    /// RoadTech requires an APIKEY header, a login SID and a POST request to
-    /// /api/Falcon/GetCurrentTelemetry. Current telemetry is deliberately bounded
-    /// so a slow provider cannot hold wallboard/ETA requests open indefinitely.
+    /// Returns the single process-wide RoadTech live snapshot captured by the tracking
+    /// ingestion worker. Request paths must never contact RoadTech independently: this
+    /// keeps wallboards, ETA, dispatch and compliance enrichment on the same read time
+    /// and prevents provider request fan-out.
     /// </summary>
     public async Task<IReadOnlyList<RoadTechTelemetryItem>> GetLatestVehicleEventsAsync(
         CancellationToken cancellationToken = default)
@@ -51,6 +57,40 @@ public sealed class DotTrackingClient
             return [];
         }
 
+        if (_liveSnapshot is not null)
+            return _liveSnapshot.Read().Records;
+
+        // Unit tests and explicitly constructed clients that do not use application DI retain
+        // direct-provider behaviour. Production registers RoadTechLiveSnapshot, so this path is
+        // not used by API request handling.
+        return await FetchLatestVehicleEventsFromProviderAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Refreshes the authoritative live snapshot from RoadTech. This method is intended for the
+    /// background ingestion worker only; all normal API consumers call GetLatestVehicleEventsAsync.
+    /// </summary>
+    public async Task<IReadOnlyList<RoadTechTelemetryItem>> RefreshLatestVehicleEventsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (!_options.Enabled)
+        {
+            _logger.LogDebug("{Provider} tracking is disabled.", ProviderName);
+            return [];
+        }
+
+        if (_liveSnapshot is null)
+            return await FetchLatestVehicleEventsFromProviderAsync(cancellationToken);
+
+        var refreshed = await _liveSnapshot.RefreshAsync(FetchLatestVehicleEventsFromProviderAsync, cancellationToken);
+        return refreshed.Records;
+    }
+
+    public DateTimeOffset? LiveSnapshotCapturedAtUtc => _liveSnapshot?.Read().CapturedAtUtc;
+
+    private async Task<IReadOnlyList<RoadTechTelemetryItem>> FetchLatestVehicleEventsFromProviderAsync(
+        CancellationToken cancellationToken)
+    {
         ValidateConfiguration();
 
         using var currentRequest = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -80,7 +120,7 @@ public sealed class DotTrackingClient
                 offset += response.RecordCount;
             }
 
-            _logger.LogInformation("{Provider} returned {Count} current telemetry records.", ProviderName, results.Count);
+            _logger.LogInformation("{Provider} returned {Count} current telemetry records for the central live snapshot.", ProviderName, results.Count);
             return results;
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
