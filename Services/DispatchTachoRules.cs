@@ -92,6 +92,13 @@ public static class DispatchTachoRules
             .Select(duty => string.IsNullOrWhiteSpace(duty.VehicleCode) ? null : duty.VehicleCode.Trim())
             .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
 
+    public static string? LastCompletedVehicleRegistration(Driver driver, IEnumerable<TachoDriverDutyStatus> source) =>
+        Matching(driver, source)
+            .Where(duty => duty.DutyEndUtc is not null)
+            .OrderByDescending(duty => duty.DutyEndUtc)
+            .Select(duty => string.IsNullOrWhiteSpace(duty.VehicleCode) ? null : duty.VehicleCode.Trim())
+            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+
     public static decimal WeeklyWorkingTimeHours(Driver driver, IEnumerable<TachoDriverDutyStatus> source, DateOnly referenceDate)
     {
         var weekStart = referenceDate.AddDays(-(((int)referenceDate.DayOfWeek + 6) % 7));
