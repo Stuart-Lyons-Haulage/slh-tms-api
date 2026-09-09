@@ -233,9 +233,9 @@ public sealed class CustomerLoadPlansController(TmsDbContext db, ILogger<Custome
         var driverIds = loads.Where(load => load.DriverId is not null).Select(load => load.DriverId!.Value).Distinct().ToList();
         var vehicleIds = loads.Where(load => load.VehicleId is not null).Select(load => load.VehicleId!.Value).Distinct().ToList();
         var trailerIds = loads.Where(load => load.TrailerId is not null).Select(load => load.TrailerId!.Value).Distinct().ToList();
-        var drivers = driverIds.Count == 0 ? [] : await db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id)).ToListAsync(ct);
-        var vehicles = vehicleIds.Count == 0 ? [] : await db.Vehicles.AsNoTracking().Where(vehicle => vehicleIds.Contains(vehicle.Id)).ToListAsync(ct);
-        var trailers = trailerIds.Count == 0 ? [] : await db.Trailers.AsNoTracking().Where(trailer => trailerIds.Contains(trailer.Id)).ToListAsync(ct);
+        List<Driver> drivers = driverIds.Count == 0 ? [] : await db.Drivers.AsNoTracking().Where(driver => driverIds.Contains(driver.Id)).ToListAsync(ct);
+        List<Vehicle> vehicles = vehicleIds.Count == 0 ? [] : await db.Vehicles.AsNoTracking().Where(vehicle => vehicleIds.Contains(vehicle.Id)).ToListAsync(ct);
+        List<Trailer> trailers = trailerIds.Count == 0 ? [] : await db.Trailers.AsNoTracking().Where(trailer => trailerIds.Contains(trailer.Id)).ToListAsync(ct);
 
         var orderById = orders.ToDictionary(order => order.Id);
         var customerNameByCode = customers.ToDictionary(customer => customer.Code, customer => customer.Name, StringComparer.OrdinalIgnoreCase);
