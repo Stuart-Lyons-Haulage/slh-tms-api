@@ -63,14 +63,17 @@ public sealed class TvPlannedRunsController(TmsDbContext db, IConfiguration conf
             // planning-register copies currently retain the route but not the first stop timestamp;
             // in that case use the dispatch-calculated start as a bounded operational fallback so
             // the wallboards do not regress to --:-- while driver/vehicle/ETA data remain live.
-            var firstStop = load.Stops.OrderBy(stop => stop.Sequence).FirstOrDefault();
-            if (firstStop?.PlannedArrivalUtc is null
-                && dispatchStates.TryGetValue(load.Id, out var dispatchState)
-                && dispatchState.PlannedStartUtc is not null)
-            {
-                firstStop.PlannedArrivalUtc = dispatchState.PlannedStartUtc;
-            }
+            WallboardPlannedRunPreparation.ApplyDispatchStartFallback(
+                load,
+                dispatchStates.TryGetValue(load.Id, out var dispatchState)
+                    ? dispatchState.PlannedStartUtc
+                    : null);
         }
+
+        // Sorting before resilient/dispatch enrichment leaves recovered early-start runs at the
+        // bottom of the wallboard. Re-sort only after the authoritative operational timestamps
+        // have been applied.
+        loads = WallboardPlannedRunPreparation.OrderByOperationalStart(loads);
         return Ok(loads);
     }
 

@@ -228,6 +228,9 @@ builder.Services.AddAuthorization(options =>
     options.DefaultPolicy = tmsAccessPolicy;
     options.FallbackPolicy = tmsAccessPolicy;
     options.AddPolicy("TmsAccess", tmsAccessPolicy);
+    // Read/write/approve currently share the company-user assertion. Keeping separate policy
+    // names lets Entra app-role enforcement be introduced deliberately without mislabelling GETs.
+    options.AddPolicy("TmsRead", tmsAccessPolicy);
     options.AddPolicy("TmsWrite", tmsAccessPolicy);
     options.AddPolicy("TmsApprove", tmsAccessPolicy);
 });

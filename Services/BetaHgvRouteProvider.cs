@@ -21,29 +21,24 @@ public interface IBetaHgvRouteProvider
 /// </summary>
 public sealed class AzureMapsHgvRouteProvider(
     AzureMapsRouteClient maps,
-    ILogger<AzureMapsHgvRouteProvider> logger) : IBetaHgvRouteProvider
+    ILogger<AzureMapsHgvRouteProvider> logger,
+    BetaOptimiserOptions? optimiserOptions = null) : IBetaHgvRouteProvider
 {
-    private static readonly TimeSpan RouteDeadline = TimeSpan.FromSeconds(12);
-    private readonly Dictionary<string, Task<BetaHgvRouteCost?>> routeCache = new(StringComparer.Ordinal);
-    private readonly object cacheGate = new();
+    private readonly BetaOptimiserOptions options = (optimiserOptions ?? new BetaOptimiserOptions()).Validate();
+    private readonly BetaRequestRouteCache routeCache = new();
 
     public Task<BetaHgvRouteCost?> GetRouteAsync(IReadOnlyList<BetaRoutePoint> points, CancellationToken ct)
     {
         if (points.Count < 2) return Task.FromResult<BetaHgvRouteCost?>(new BetaHgvRouteCost(0m, 0, "AzureMapsHgv"));
         var key = string.Join(";", points.Select(point => $"{point.Latitude:0.000000},{point.Longitude:0.000000}"));
-        lock (cacheGate)
-        {
-            if (routeCache.TryGetValue(key, out var cached)) return cached;
-            var task = GetRouteCoreAsync(points, ct);
-            routeCache[key] = task;
-            return task;
-        }
+        var snapshot = points.ToArray();
+        return routeCache.GetOrCreateAsync(key, () => GetRouteCoreAsync(snapshot, ct));
     }
 
     private async Task<BetaHgvRouteCost?> GetRouteCoreAsync(IReadOnlyList<BetaRoutePoint> points, CancellationToken ct)
     {
         using var routeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        routeCts.CancelAfter(RouteDeadline);
+        routeCts.CancelAfter(options.RouteDeadline);
         try
         {
             var response = await maps.Directions(points.Select(point => (point.Longitude, point.Latitude)).ToList(), routeCts.Token);
@@ -69,7 +64,7 @@ public sealed class AzureMapsHgvRouteProvider(
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            logger.LogWarning("Azure Maps HGV evidence exceeded the {DeadlineSeconds}s Beta route deadline for {StopCount} stops; the run will be returned as unrouted rather than failing the comparison.", RouteDeadline.TotalSeconds, points.Count);
+            logger.LogWarning("Azure Maps HGV evidence exceeded the {DeadlineSeconds}s Beta route deadline for {StopCount} stops; the run will be returned as unrouted rather than failing the comparison.", options.RouteDeadline.TotalSeconds, points.Count);
             return null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
