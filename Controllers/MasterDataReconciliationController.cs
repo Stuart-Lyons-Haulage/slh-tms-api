@@ -18,18 +18,21 @@ public sealed class MasterDataReconciliationController(TmsDbContext db, StagingS
         "driver", "vehicle", "trailer", "site", "marketcontact", "sitetimingrule"
     };
 
-    [HttpGet]
+    [HttpGet, Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> Current([FromQuery] string entityType, CancellationToken ct)
     {
-        if (!SupportedTypes.Contains(entityType)) return BadRequest(new { error = $"Unsupported master-data type '{entityType}'." });
-        var records = await CurrentRecordsAsync(entityType, ct);
-        return Ok(new { entityType = entityType.ToLowerInvariant(), records });
+        if (!SupportedTypes.Contains(entityType))
+            return BadRequest(new ErrorResponse("unsupported_master_type", $"Unsupported master-data type '{entityType}'.", HttpContext.TraceIdentifier));
+
+        return Ok(new { entityType = entityType.ToLowerInvariant(), records = await CurrentRecordsAsync(entityType, ct) });
     }
 
     [HttpPost("apply"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> Apply(List<StageImportRequest> requests, CancellationToken ct)
     {
-        if (requests.Count == 0 || requests.Count > 10000) return BadRequest(new ErrorResponse("invalid_batch", "Submit between 1 and 10000 master-data records.", HttpContext.TraceIdentifier));
+        if (requests.Count == 0 || requests.Count > 10000)
+            return BadRequest(new ErrorResponse("invalid_batch", "Submit between 1 and 10000 master-data records.", HttpContext.TraceIdentifier));
+
         var results = new List<object>();
         var applied = 0;
         var failed = 0;
@@ -56,6 +59,7 @@ public sealed class MasterDataReconciliationController(TmsDbContext db, StagingS
                     using var document = JsonDocument.Parse(merged.ToJsonString());
                     await staging.PromoteDirect(request.EntityType, document.RootElement.Clone(), ct);
                 }
+
                 applied++;
                 results.Add(new { request.EntityType, request.IdempotencyKey, applied = true });
             }
@@ -67,7 +71,7 @@ public sealed class MasterDataReconciliationController(TmsDbContext db, StagingS
             }
         }
 
-        return Ok(new { received = requests.Count, applied, failed, linked = 0, registered = 0, results });
+        return Ok(new { received = requests.Count, applied, registered = 0, failed, linked = 0, results });
     }
 
     private async Task<List<JsonObject>> CurrentRecordsAsync(string entityType, CancellationToken ct)
@@ -77,11 +81,13 @@ public sealed class MasterDataReconciliationController(TmsDbContext db, StagingS
             case "driver":
             {
                 var rows = await db.Drivers.AsNoTracking().OrderBy(x => x.DisplayName).Take(5000).ToListAsync(ct);
+                await MasterDetailStore.EnrichDriversAsync(db, rows, ct);
                 return rows.Select(x => JsonObjectOf(new
                 {
                     x.Id, x.EmployeeNumber, x.DisplayName, x.TachoName, x.TachoMasterDriverId, x.TachoCardNumber,
                     x.MobileNumber, x.DriverType, x.DriverGroup, x.Skills, x.Coding, x.AgencyName,
-                    x.NorthEligible, x.PreloadEligible, x.Notes, x.DrivingLicenceNumber, x.LicenceExpiry, x.LicenceStatus, x.Active
+                    x.NorthEligible, x.PreloadEligible, x.Notes, x.DrivingLicenceNumber, x.LicenceExpiry,
+                    x.LicenceStatus, x.LastTachoSyncUtc, x.Active
                 })).ToList();
             }
             case "vehicle":
@@ -97,65 +103,72 @@ public sealed class MasterDataReconciliationController(TmsDbContext db, StagingS
             case "trailer":
             {
                 var rows = await db.Trailers.AsNoTracking().OrderBy(x => x.TrailerNumber).Take(5000).ToListAsync(ct);
-                return rows.Select(x => JsonObjectOf(new { x.Id, x.TrailerNumber, x.Type, x.StandardCapacity, x.EuroCapacity, x.Notes, x.Active })).ToList();
+                return rows.Select(x => JsonObjectOf(new
+                {
+                    x.Id, x.TrailerNumber, x.Type, x.StandardCapacity, x.EuroCapacity, x.Notes, x.Active
+                })).ToList();
             }
             case "site":
             {
                 var rows = await db.Sites.AsNoTracking().OrderBy(x => x.Name).Take(10000).ToListAsync(ct);
-                var details = await LoadDetailMapAsync("masterdetail:site", ct);
-                var result = new List<JsonObject>(rows.Count);
-                foreach (var x in rows)
+                await MasterDetailStore.EnrichSitesAsync(db, rows, ct);
+                return rows.Select(x => JsonObjectOf(new
                 {
-                    var record = JsonObjectOf(new
-                    {
-                        x.Id, x.ExternalCode, x.Name, x.DriverTextName, x.CollectionAddress, x.CollectionInstructions,
-                        x.MapLink, x.Aliases, x.CustomField1, x.CustomField2, x.CustomField3, x.OperationalRegion,
-                        x.Latitude, x.Longitude, x.Active
-                    });
-                    if (details.TryGetValue(Normalise(x.ExternalCode), out var detail)) MasterDataReconcileMerge.MergeInto(record, detail);
-                    result.Add(record);
-                }
-                return result;
+                    x.Id, x.ExternalCode, x.Name, x.DriverTextName, x.CollectionAddress, x.CollectionInstructions,
+                    x.MapLink, x.Aliases, x.CustomField1, x.CustomField2, x.CustomField3, x.OperationalRegion,
+                    x.Latitude, x.Longitude, x.Active
+                })).ToList();
             }
             case "marketcontact":
             {
                 var rows = await db.MarketContacts.AsNoTracking().OrderBy(x => x.Market).ThenBy(x => x.Name).Take(10000).ToListAsync(ct);
-                return rows.Select(x => JsonObjectOf(new { x.Id, x.Market, x.Name, x.StandOrLocation, x.Salesman, x.Sender, x.Active })).ToList();
+                return rows.Select(x => JsonObjectOf(new
+                {
+                    x.Id, x.Market, x.Name, x.StandOrLocation, x.Salesman, x.Sender, x.Active
+                })).ToList();
             }
             case "sitetimingrule":
             {
                 var rows = await db.StagedImports.AsNoTracking()
                     .Where(x => x.EntityType == "masterdetail:sitetimingrule" && x.Status == StagingStatus.Promoted)
-                    .OrderByDescending(x => x.ReviewedAtUtc ?? x.ReceivedAtUtc).Take(10000).ToListAsync(ct);
-                return rows.Select(x => JsonNode.Parse(x.PayloadJson) as JsonObject ?? new JsonObject()).ToList();
+                    .OrderByDescending(x => x.ReviewedAtUtc ?? x.ReceivedAtUtc)
+                    .Take(10000)
+                    .ToListAsync(ct);
+
+                var unique = new Dictionary<string, JsonObject>(StringComparer.OrdinalIgnoreCase);
+                foreach (var row in rows)
+                {
+                    var node = JsonNode.Parse(row.PayloadJson) as JsonObject;
+                    var route = node?["routeCombination"]?.ToString();
+                    if (node is null || string.IsNullOrWhiteSpace(route)) continue;
+                    unique.TryAdd(Normalise(route), node);
+                }
+                return unique.Values.ToList();
             }
-            default: return [];
+            default:
+                return [];
         }
     }
 
     private async Task<JsonObject?> FindCurrentRecordAsync(string entityType, JsonElement payload, CancellationToken ct)
     {
         var records = await CurrentRecordsAsync(entityType, ct);
-        return records.FirstOrDefault(record => IdentityMatches(entityType, record, payload));
+        var incoming = JsonNode.Parse(payload.GetRawText()) as JsonObject ?? new JsonObject();
+        return records.FirstOrDefault(record => IdentityMatches(entityType, record, incoming));
     }
 
-    private static bool IdentityMatches(string entityType, JsonObject current, JsonElement incoming)
+    private static bool IdentityMatches(string entityType, JsonObject current, JsonObject incoming)
     {
-        static string? Text(JsonObject item, string name) => item[name]?.ToString();
-        static string? Text(JsonElement item, string name)
-        {
-            foreach (var property in item.EnumerateObject()) if (Normalise(property.Name) == Normalise(name)) return property.Value.ToString();
-            return null;
-        }
         return entityType.ToLowerInvariant() switch
         {
-            "driver" => Same(Text(current, "employeeNumber"), Text(incoming, "employeeNumber")) ||
-                        (string.IsNullOrWhiteSpace(Text(incoming, "employeeNumber")) && Same(Text(current, "displayName"), Text(incoming, "displayName"))),
-            "vehicle" => SameCompact(Text(current, "registration"), Text(incoming, "registration")),
-            "trailer" => Same(Text(current, "trailerNumber"), Text(incoming, "trailerNumber")),
-            "site" => Same(Text(current, "externalCode"), Text(incoming, "externalCode")) ||
-                      (string.IsNullOrWhiteSpace(Text(incoming, "externalCode")) && Same(Text(current, "name"), Text(incoming, "name"))),
-            "marketcontact" => Same(Text(current, "market"), Text(incoming, "market")) && Same(Text(current, "name"), Text(incoming, "name")),
+            "driver" => Same(Value(current, "employeeNumber"), Value(incoming, "employeeNumber")) ||
+                        (string.IsNullOrWhiteSpace(Value(incoming, "employeeNumber")) && Same(Value(current, "displayName"), Value(incoming, "displayName"))),
+            "vehicle" => SameCompact(Value(current, "registration"), Value(incoming, "registration")),
+            "trailer" => Same(Value(current, "trailerNumber"), Value(incoming, "trailerNumber")),
+            "site" => Same(Value(current, "externalCode"), Value(incoming, "externalCode")) ||
+                      (string.IsNullOrWhiteSpace(Value(incoming, "externalCode")) && Same(Value(current, "name"), Value(incoming, "name"))),
+            "marketcontact" => Same(Value(current, "market"), Value(incoming, "market")) &&
+                               Same(Value(current, "name"), Value(incoming, "name")),
             _ => false
         };
     }
@@ -165,15 +178,20 @@ public sealed class MasterDataReconciliationController(TmsDbContext db, StagingS
         var routeCombination = Required(payload, "routeCombination");
         var idempotencyKey = $"masterdetail:sitetimingrule:{Normalise(routeCombination)}";
         var existing = await db.StagedImports.SingleOrDefaultAsync(x => x.IdempotencyKey == idempotencyKey, ct);
-        JsonObject? current = null;
-        if (existing is not null) current = JsonNode.Parse(existing.PayloadJson) as JsonObject;
+        var current = existing is null ? null : JsonNode.Parse(existing.PayloadJson) as JsonObject;
         var merged = MasterDataReconcileMerge.Merge(current, payload);
 
         if (existing is null)
         {
-            existing = new StagedImport { EntityType = "masterdetail:sitetimingrule", IdempotencyKey = idempotencyKey, PayloadJson = "{}" };
+            existing = new StagedImport
+            {
+                EntityType = "masterdetail:sitetimingrule",
+                IdempotencyKey = idempotencyKey,
+                PayloadJson = "{}"
+            };
             db.StagedImports.Add(existing);
         }
+
         existing.PayloadJson = merged.ToJsonString();
         existing.Source = source ?? "SLH site timing master CSV";
         existing.Status = StagingStatus.Promoted;
@@ -182,33 +200,32 @@ public sealed class MasterDataReconciliationController(TmsDbContext db, StagingS
         await db.SaveChangesAsync(ct);
     }
 
-    private async Task<Dictionary<string, JsonObject>> LoadDetailMapAsync(string entityType, CancellationToken ct)
-    {
-        var rows = await db.StagedImports.AsNoTracking().Where(x => x.EntityType == entityType && x.Status == StagingStatus.Promoted)
-            .OrderByDescending(x => x.ReviewedAtUtc ?? x.ReceivedAtUtc).Take(10000).ToListAsync(ct);
-        var result = new Dictionary<string, JsonObject>(StringComparer.OrdinalIgnoreCase);
-        foreach (var row in rows)
-        {
-            var node = JsonNode.Parse(row.PayloadJson) as JsonObject;
-            if (node is null) continue;
-            var key = node["externalCode"]?.ToString() ?? node["siteCode"]?.ToString();
-            if (string.IsNullOrWhiteSpace(key)) continue;
-            result.TryAdd(Normalise(key), node);
-        }
-        return result;
-    }
+    private static JsonObject JsonObjectOf<T>(T value) =>
+        JsonSerializer.SerializeToNode(value, new JsonSerializerOptions(JsonSerializerDefaults.Web)) as JsonObject ?? new JsonObject();
 
-    private static JsonObject JsonObjectOf<T>(T value) => JsonSerializer.SerializeToNode(value, new JsonSerializerOptions(JsonSerializerDefaults.Web)) as JsonObject ?? new JsonObject();
+    private static string? Value(JsonObject item, string name) => item[name]?.ToString();
+
     private static string Required(JsonElement payload, string name)
     {
         foreach (var property in payload.EnumerateObject())
-            if (Normalise(property.Name) == Normalise(name) && property.Value.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(property.Value.GetString()))
+        {
+            if (Normalise(property.Name) == Normalise(name) &&
+                property.Value.ValueKind == JsonValueKind.String &&
+                !string.IsNullOrWhiteSpace(property.Value.GetString()))
                 return property.Value.GetString()!.Trim();
+        }
         throw new JsonException($"Payload requires {name}.");
     }
-    private static bool Same(string? left, string? right) => !string.IsNullOrWhiteSpace(left) && !string.IsNullOrWhiteSpace(right) && string.Equals(left.Trim(), right.Trim(), StringComparison.OrdinalIgnoreCase);
-    private static bool SameCompact(string? left, string? right) => Same(left?.Replace(" ", ""), right?.Replace(" ", ""));
-    private static string Normalise(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+
+    private static bool Same(string? left, string? right) =>
+        !string.IsNullOrWhiteSpace(left) && !string.IsNullOrWhiteSpace(right) &&
+        string.Equals(left.Trim(), right.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    private static bool SameCompact(string? left, string? right) =>
+        Same(left?.Replace(" ", ""), right?.Replace(" ", ""));
+
+    private static string Normalise(string value) =>
+        new(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 }
 
 public static class MasterDataReconcileMerge
