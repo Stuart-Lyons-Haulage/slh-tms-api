@@ -36,12 +36,97 @@ public sealed class PlannerIncidentRegressionTests : IClassFixture<CustomWebFact
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
         Assert.Contains("PLAN_LOCKED:", await response.Content.ReadAsStringAsync());
     }
+
+    [Fact]
+    public async Task Active_subcontractor_is_visible_in_Driver_Dispatch_without_Sage_or_Tacho_identity()
+    {
+        var name = $"Bannisters Test {Guid.NewGuid():N}";
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.Drivers.Add(new Driver
+            {
+                EmployeeNumber = $"SUB-{Guid.NewGuid():N}"[..24],
+                DisplayName = name,
+                DriverType = "Subcontractor",
+                DriverGroup = "Bannisters",
+                Active = true
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
+        var response = await client.GetAsync("/api/v1/driver-dispatch?date=2027-02-03");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var driver = payload.GetProperty("drivers").EnumerateArray().Single(item => item.GetProperty("displayName").GetString() == name);
+        Assert.Equal("Subcontractor", driver.GetProperty("driverType").GetString());
+        Assert.Equal("Bannisters", driver.GetProperty("driverGroup").GetString());
+    }
+
+    [Fact]
+    public async Task Subcontractor_without_SLH_Tacho_identity_can_acknowledge_external_compliance_at_dispatch()
+    {
+        var date = new DateOnly(2027, 2, 4);
+        Guid loadId;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            var driver = new Driver
+            {
+                EmployeeNumber = $"SUB-{Guid.NewGuid():N}"[..24],
+                DisplayName = $"External Haulier {Guid.NewGuid():N}"[..28],
+                DriverType = "Subcontractor",
+                DriverGroup = "Bannisters",
+                Active = true
+            };
+            var vehicle = new Vehicle { Registration = $"SUB{Random.Shared.Next(1000, 9999)}", Active = true };
+            var trailer = new Trailer { TrailerNumber = $"EXT{Random.Shared.Next(1000, 9999)}", Active = true };
+            var load = new Load
+            {
+                Reference = $"SUB-{Guid.NewGuid():N}"[..20],
+                PlanningDate = date,
+                Status = LoadStatus.Planned,
+                DriverId = driver.Id,
+                VehicleId = vehicle.Id,
+                TrailerId = trailer.Id,
+                Stops =
+                [
+                    new LoadStop { Sequence = 1, Name = "Collect · NWF-Runcton", Latitude = 50.80m, Longitude = -0.74m },
+                    new LoadStop { Sequence = 2, Name = "Deliver · Aldi-Darlington", Latitude = 54.52m, Longitude = -1.55m }
+                ]
+            };
+            db.Drivers.Add(driver);
+            db.Vehicles.Add(vehicle);
+            db.Trailers.Add(trailer);
+            db.Loads.Add(load);
+            await db.SaveChangesAsync();
+            await RunOperationalStore.SaveAsync(db, load, new RunOperationalValues(18, 26, "Standard pallets", null, null, null), "test", CancellationToken.None);
+            loadId = load.Id;
+        }
+
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Write");
+        var warningResponse = await client.PostAsJsonAsync($"/api/v1/loads/{loadId}/dispatch-readiness", new { routeDrivingMinutes = 120, acknowledgeUnverified = false });
+        Assert.Equal(HttpStatusCode.OK, warningResponse.StatusCode);
+        var warning = await warningResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.False(warning.GetProperty("canDispatch").GetBoolean());
+        Assert.Equal("Unverified", warning.GetProperty("status").GetString());
+        Assert.Contains("subcontractor", warning.GetProperty("explanation").GetString()!, StringComparison.OrdinalIgnoreCase);
+
+        var acknowledgedResponse = await client.PostAsJsonAsync($"/api/v1/loads/{loadId}/dispatch-readiness", new { routeDrivingMinutes = 120, acknowledgeUnverified = true });
+        Assert.Equal(HttpStatusCode.OK, acknowledgedResponse.StatusCode);
+        var acknowledged = await acknowledgedResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(acknowledged.GetProperty("canDispatch").GetBoolean());
+        Assert.Equal("UnverifiedAcknowledged", acknowledged.GetProperty("status").GetString());
+    }
+
     [Theory]
     [InlineData("Employed", "Office", null, false)]
     [InlineData("Employed", null, null, false)]
     [InlineData("Driver Manager", "Office", null, false)]
     [InlineData("Employed", "Day Drivers", null, true)]
     [InlineData("Agency", null, null, true)]
+    [InlineData("Subcontractor", "Bannisters", null, true)]
     [InlineData("Employed", "Operating Centre", "DRIVER-CARD", true)]
     public void Member_number_does_not_make_an_office_worker_a_driver(string type, string? group, string? card, bool expected)
     {
