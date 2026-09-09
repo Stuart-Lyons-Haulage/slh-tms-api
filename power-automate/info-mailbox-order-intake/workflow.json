@@ -101,7 +101,7 @@
                   "inputs": {
                     "name": "varAttachments",
                     "value": {
-                      "name": "@items('For_Each_Source_Attachment')?['name']",
+                      "name": "@coalesce(items('For_Each_Source_Attachment')?['name'],items('For_Each_Source_Attachment')?['displayName'],items('For_Each_Source_Attachment')?['id'],'unnamed-attachment')",
                       "contentType": "@coalesce(items('For_Each_Source_Attachment')?['contentType'],'application/octet-stream')",
                       "contentBase64": "@outputs('Get_Attachment_Content')?['body/contentBytes']",
                       "isInline": "@coalesce(items('For_Each_Source_Attachment')?['isInline'],false)",
