@@ -266,7 +266,9 @@ public sealed class EmailOrderIntakeService
         if (deliveryDate is not null) payload["deliveryDate"] = deliveryDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         sources["deliveryDate"] = deliveryDate is null ? "template-or-subject" : "body.explicit";
 
-        var collectionTime = NormaliseTime(ExtractTime(collectionLabel) ?? ExtractMatch(CollectionTimeRegex, body, "time"));
+        var collectionTime = NormaliseTime(ExtractTime(collectionLabel)
+            ?? ExtractMatch(CollectionTimeRegex, body, "time")
+            ?? ExtractMatch(new Regex(@"\bready\s+(?:from|at|about)?\s*(?<time>(?:[01]?\d|2[0-3])(?:[:.]\d{2})?\s*(?:am|pm)?)", RegexOptions.IgnoreCase), body, "time"));
         if (!string.IsNullOrWhiteSpace(collectionTime)) payload["requestedTime"] = collectionTime;
         sources["collectionTime"] = string.IsNullOrWhiteSpace(collectionTime) ? "template-or-fallback" : "body.explicit";
 
