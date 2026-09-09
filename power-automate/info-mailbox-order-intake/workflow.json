@@ -37,6 +37,11 @@
               "includeAttachments": true
             }
           },
+          "conditions": [
+            {
+              "expression": "@not(and(endsWith(toLower(coalesce(triggerOutputs()?['body/from'],'')), '@lyonshaulage.com'), or(contains(toLower(coalesce(triggerOutputs()?['body/subject'],'')), 'load plan'), contains(toLower(coalesce(triggerOutputs()?['body/subject'],'')), 'loading plan'), contains(toLower(coalesce(triggerOutputs()?['body/subject'],'')), 'lyons collections'), contains(toLower(coalesce(triggerOutputs()?['body/bodyPreview'],'')), 'please find attached load plan'), contains(toLower(coalesce(triggerOutputs()?['body/bodyPreview'],'')), 'load plan attached'))))"
+            }
+          ],
           "runtimeConfiguration": { "concurrency": { "runs": 4 } }
         }
       },
