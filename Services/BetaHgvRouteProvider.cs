@@ -14,17 +14,38 @@ public interface IBetaHgvRouteProvider
 /// Route evidence for Beta planning. Only a live Azure Maps truck route is accepted;
 /// the resilient approximate route is deliberately rejected so crow-fly/Haversine
 /// evidence can never drive an optimisation recommendation.
+/// A provider instance is created per Beta request, so exact route lookups are cached for
+/// that request and each individual Azure Maps call is bounded to avoid one slow lookup
+/// exhausting the whole comparison request.
 /// </summary>
 public sealed class AzureMapsHgvRouteProvider(
     AzureMapsRouteClient maps,
     ILogger<AzureMapsHgvRouteProvider> logger) : IBetaHgvRouteProvider
 {
-    public async Task<BetaHgvRouteCost?> GetRouteAsync(IReadOnlyList<BetaRoutePoint> points, CancellationToken ct)
+    private static readonly TimeSpan RouteDeadline = TimeSpan.FromSeconds(12);
+    private readonly Dictionary<string, Task<BetaHgvRouteCost?>> routeCache = new(StringComparer.Ordinal);
+    private readonly object cacheGate = new();
+
+    public Task<BetaHgvRouteCost?> GetRouteAsync(IReadOnlyList<BetaRoutePoint> points, CancellationToken ct)
     {
-        if (points.Count < 2) return new BetaHgvRouteCost(0m, 0, "AzureMapsHgv");
+        if (points.Count < 2) return Task.FromResult<BetaHgvRouteCost?>(new BetaHgvRouteCost(0m, 0, "AzureMapsHgv"));
+        var key = string.Join(";", points.Select(point => $"{point.Latitude:0.000000},{point.Longitude:0.000000}"));
+        lock (cacheGate)
+        {
+            if (routeCache.TryGetValue(key, out var cached)) return cached;
+            var task = GetRouteCoreAsync(points, ct);
+            routeCache[key] = task;
+            return task;
+        }
+    }
+
+    private async Task<BetaHgvRouteCost?> GetRouteCoreAsync(IReadOnlyList<BetaRoutePoint> points, CancellationToken ct)
+    {
+        using var routeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        routeCts.CancelAfter(RouteDeadline);
         try
         {
-            var response = await maps.Directions(points.Select(point => (point.Longitude, point.Latitude)).ToList(), ct);
+            var response = await maps.Directions(points.Select(point => (point.Longitude, point.Latitude)).ToList(), routeCts.Token);
             using var document = JsonDocument.Parse(JsonSerializer.Serialize(response));
             var root = document.RootElement;
             if (root.TryGetProperty("approximate", out var approximate) && approximate.ValueKind == JsonValueKind.True)
@@ -44,6 +65,11 @@ public sealed class AzureMapsHgvRouteProvider(
                 Math.Round((decimal)metres.GetDouble() / 1609.344m, 2),
                 (int)Math.Ceiling(seconds.GetDouble() / 60d),
                 "AzureMapsHgv");
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning("Azure Maps HGV evidence exceeded the {DeadlineSeconds}s Beta route deadline for {StopCount} stops; the run will be returned as unrouted rather than failing the comparison.", RouteDeadline.TotalSeconds, points.Count);
+            return null;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
