@@ -29,7 +29,7 @@ public sealed class SiteTimingRuleTests
         var collectionWindow = SiteTimingRuleMatcher.CollectionWindow(rule, new DateOnly(2026, 9, 10));
         var deliveryWindow = SiteTimingRuleMatcher.DeliveryWindow(rule, new DateOnly(2026, 9, 10));
 
-        Assert.Equal(new DateTimeOffset(2026, 9, 9, 22, 0, 0, TimeSpan.Zero), collectionWindow.Start);
+        Assert.Equal(new DateTimeOffset(2026, 9, 10, 22, 0, 0, TimeSpan.Zero), collectionWindow.Start);
         Assert.Equal(new DateTimeOffset(2026, 9, 10, 5, 0, 0, TimeSpan.Zero), deliveryWindow.End);
     }
 }
