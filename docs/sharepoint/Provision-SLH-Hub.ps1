@@ -1,7 +1,11 @@
 # SLH Hub SharePoint provisioning
 # Requires: PnP.PowerShell and permission to manage the Stuart Lyons Haulage Team Portal.
+# This script is intentionally idempotent: re-running it creates only missing lists/fields/views.
 param([Parameter(Mandatory=$true)][string]$SiteUrl)
+
+$ErrorActionPreference = 'Stop'
 Connect-PnPOnline -Url $SiteUrl -Interactive
+
 $lists = @{
  'Hub Customers'=@(
   @{Name='CustomerKey';Type='Text';Required=$true}; @{Name='TradingName';Type='Text'}; @{Name='Active';Type='Boolean'}; @{Name='AccountOwner';Type='Text'}; @{Name='ServiceNotes';Type='Note'}; @{Name='TmsCustomerId';Type='Number'}; @{Name='LastSyncStatus';Type='Choice';Choices=@('Pending','Synced','Warning','Error')}; @{Name='LastSyncUtc';Type='DateTime'}
@@ -28,9 +32,35 @@ $lists = @{
   @{Name='ClaimKey';Type='Text';Required=$true}; @{Name='IncidentDate';Type='DateTime'}; @{Name='CustomerKey';Type='Text'}; @{Name='VehicleKey';Type='Text'}; @{Name='DriverKey';Type='Text'}; @{Name='Status';Type='Choice';Choices=@('Open','Investigation','Submitted','Settled','Closed')}; @{Name='Severity';Type='Choice';Choices=@('Low','Medium','High','Critical')}; @{Name='Description';Type='Note'}; @{Name='TmsIncidentId';Type='Number'}
  )
 }
+
+$descriptions = @{
+ 'Hub Customers'='Governed customer master-data projection. TMS SQL remains operational authority.'
+ 'Hub Sites'='Governed site master-data projection. SiteKey is the identity; postcode is not unique.'
+ 'Hub Site Aliases'='Inbound and legacy site-name aliases mapped to canonical SiteKey values.'
+ 'Hub Drivers'='People-facing driver reference and compliance projection. Operational availability remains in TMS.'
+ 'Hub Vehicles'='People-facing vehicle reference and compliance projection. Operational allocation remains in TMS.'
+ 'Hub Trailers'='People-facing trailer reference. Operational allocation remains in TMS.'
+ 'Hub Integration Log'='Human-readable integration audit projection. Authoritative operational audit remains in TMS SQL.'
+ 'Hub Incidents & Claims'='People-facing incidents and claims register linked back to TMS where applicable.'
+}
+
+$views = @{
+ 'Hub Customers'=@{Title='Hub Customers - Active';Fields=@('CustomerKey','TradingName','Active','AccountOwner','LastSyncStatus','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
+ 'Hub Sites'=@{Title='Hub Sites - Active';Fields=@('SiteKey','CustomerKey','SiteName','BuildingName','Town','Postcode','AccessWindowStart','AccessWindowEnd','GeofenceId','Active','SyncStatus');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
+ 'Hub Site Aliases'=@{Title='Hub Site Aliases - Active';Fields=@('AliasKey','SiteKey','Alias','AliasType','Active');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
+ 'Hub Drivers'=@{Title='Hub Drivers - Active';Fields=@('DriverKey','DriverName','EmployeeNumber','LicenceNumber','Active','ComplianceStatus','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
+ 'Hub Vehicles'=@{Title='Hub Vehicles - Active';Fields=@('VehicleKey','Registration','VehicleType','Capacity','Active','ComplianceStatus','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
+ 'Hub Trailers'=@{Title='Hub Trailers - Active';Fields=@('TrailerKey','Registration','TrailerType','Capacity','Active','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
+ 'Hub Integration Log'=@{Title='Hub Integration Log - Recent';Fields=@('CorrelationId','EntityType','BusinessKey','Direction','Status','Message','OccurredUtc');Query='';RowLimit=100}
+ 'Hub Incidents & Claims'=@{Title='Hub Incidents & Claims - Open';Fields=@('ClaimKey','IncidentDate','CustomerKey','VehicleKey','DriverKey','Status','Severity','Description','TmsIncidentId');Query="<Where><Neq><FieldRef Name='Status'/><Value Type='Choice'>Closed</Value></Neq></Where>"}
+}
+
 foreach($entry in $lists.GetEnumerator()) {
  $list=Get-PnPList -Identity $entry.Key -ErrorAction SilentlyContinue
  if(-not $list){$list=New-PnPList -Title $entry.Key -Template GenericList -OnQuickLaunch}
+ if($descriptions.ContainsKey($entry.Key)){
+  Set-PnPList -Identity $list -Description $descriptions[$entry.Key] -EnableVersioning $true -MajorVersions 20 | Out-Null
+ }
  foreach($field in $entry.Value){
   $internal=$field.Name -replace '[^A-Za-z0-9]',''
   if(-not(Get-PnPField -List $list -Identity $internal -ErrorAction SilentlyContinue)){
@@ -39,4 +69,20 @@ foreach($entry in $lists.GetEnumerator()) {
   }
  }
 }
-Write-Host 'SLH Hub SharePoint lists provisioned.'
+
+foreach($entry in $views.GetEnumerator()) {
+ $list=$entry.Key
+ $view=$entry.Value
+ $existing=Get-PnPView -List $list -Identity $view.Title -ErrorAction SilentlyContinue
+ if(-not $existing){
+  $rowLimit=100
+  if($view.ContainsKey('RowLimit')){$rowLimit=[uint32]$view.RowLimit}
+  $params=@{List=$list;Title=$view.Title;Fields=$view.Fields;SetAsDefault=$true;Paged=$true;RowLimit=$rowLimit}
+  if($view.Query){$params.Query=$view.Query}
+  Add-PnPView @params | Out-Null
+ } else {
+  Set-PnPView -List $list -Identity $view.Title -Fields $view.Fields | Out-Null
+ }
+}
+
+Write-Host 'SLH Hub SharePoint lists, fields, versioning and operational views provisioned.'
