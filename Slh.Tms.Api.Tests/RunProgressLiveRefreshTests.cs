@@ -119,7 +119,7 @@ public sealed class RunProgressLiveRefreshTests
             ControllerContext = new ControllerContext { HttpContext = LyonsContext() }
         };
 
-        var response = Assert.IsType<OkObjectResult>(await controller.Get(planningDate, CancellationToken.None));
+        var response = Assert.IsType<OkObjectResult>(await controller.Get(null, planningDate, CancellationToken.None));
         using var document = JsonDocument.Parse(JsonSerializer.Serialize(response.Value, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
         var root = document.RootElement;
 
@@ -200,7 +200,7 @@ public sealed class RunProgressLiveRefreshTests
             ControllerContext = new ControllerContext { HttpContext = LyonsContext() }
         };
 
-        var response = Assert.IsType<OkObjectResult>(await controller.Get(planningDate, CancellationToken.None));
+        var response = Assert.IsType<OkObjectResult>(await controller.Get(null, planningDate, CancellationToken.None));
         using var document = JsonDocument.Parse(JsonSerializer.Serialize(response.Value, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
         var record = Assert.Single(document.RootElement.GetProperty("records").EnumerateArray());
         var evidence = record.GetProperty("tacho");
