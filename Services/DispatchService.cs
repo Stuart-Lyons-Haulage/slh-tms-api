@@ -22,18 +22,14 @@ public sealed class DispatchService(
         var drivers = await db.Drivers.AsNoTracking().Where(driver => driver.Active).OrderBy(driver => driver.DisplayName).ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
 
-        var profilesTask = ReadDriverMasterProfilesAsync(drivers, ct);
-        var dutiesTask = ReadDutiesAsync(planningDate, ct);
-        var runProfilesTask = ReadRunProfilesAsync(planningDate, ct);
-        var liveTask = ReadLiveStatusesAsync(ct);
-        var historyTask = ReadRecentHistoryAsync(planningDate, ct);
-
-        await Task.WhenAll(profilesTask, dutiesTask, runProfilesTask, liveTask, historyTask);
-        var profiles = profilesTask.Result;
-        var duties = dutiesTask.Result;
-        var runProfiles = runProfilesTask.Result;
-        var liveStatuses = liveTask.Result;
-        var history = historyTask.Result;
+        // TmsDbContext is scoped and must not execute concurrent EF operations.
+        // Keep these reads sequential so Dispatch cannot intermittently fail with
+        // "A second operation was started on this context" under load.
+        var profiles = await ReadDriverMasterProfilesAsync(drivers, ct);
+        var duties = await ReadDutiesAsync(planningDate, ct);
+        var runProfiles = await ReadRunProfilesAsync(planningDate, ct);
+        var liveStatuses = await ReadLiveStatusesAsync(ct);
+        var history = await ReadRecentHistoryAsync(planningDate, ct);
         var signOffTracking = await ReadTachoSignOffTrackingAsync(duties, ct);
         var today = LondonDate(DateTimeOffset.UtcNow);
         var activityReferenceDate = planningDate > today ? today : planningDate;
@@ -142,11 +138,9 @@ public sealed class DispatchService(
 
         var drivers = await db.Drivers.AsNoTracking().Where(driver => driver.Active && ids.Contains(driver.Id)).ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
-        var profilesTask = ReadDriverMasterProfilesAsync(drivers, ct);
-        var dutiesTask = ReadDutiesAsync(request.PlanningDate, ct);
-        await Task.WhenAll(profilesTask, dutiesTask);
-        var profiles = profilesTask.Result;
-        var duties = dutiesTask.Result;
+        // Do not parallelise EF-backed reads on the scoped TmsDbContext.
+        var profiles = await ReadDriverMasterProfilesAsync(drivers, ct);
+        var duties = await ReadDutiesAsync(request.PlanningDate, ct);
         var today = LondonDate(DateTimeOffset.UtcNow);
         var referenceDate = request.PlanningDate > today ? today : request.PlanningDate;
 
@@ -210,18 +204,19 @@ public sealed class DispatchService(
 
         var drivers = await db.Drivers.AsNoTracking().Where(driver => driver.Active && driverIds.Contains(driver.Id)).ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
-        var profilesTask = ReadDriverMasterProfilesAsync(drivers, ct);
-        var dutiesTask = ReadDutiesAsync(request.PlanningDate, ct);
-        var runsTask = ReadRunProfilesAsync(request.PlanningDate, ct);
-        var vehiclesTask = db.Vehicles.AsNoTracking().Where(vehicle => vehicle.Active && vehicleIds.Contains(vehicle.Id)).ToDictionaryAsync(vehicle => vehicle.Id, ct);
-        var trailersTask = db.Trailers.AsNoTracking().Where(trailer => trailer.Active && trailerIds.Contains(trailer.Id)).ToDictionaryAsync(trailer => trailer.Id, ct);
-        await Task.WhenAll(profilesTask, dutiesTask, runsTask, vehiclesTask, trailersTask);
-
-        var profiles = profilesTask.Result;
-        var duties = dutiesTask.Result;
-        var runs = runsTask.Result.ToDictionary(profile => profile.Dto.RunId);
-        var vehicleById = vehiclesTask.Result;
-        var trailerById = trailersTask.Result;
+        // Lock is an operational write path: every EF-backed read must complete before
+        // another query starts on this scoped DbContext. Parallel Task.WhenAll here
+        // caused the live HTTP 500 seen when Dispatch attempted a single-row lock.
+        var profiles = await ReadDriverMasterProfilesAsync(drivers, ct);
+        var duties = await ReadDutiesAsync(request.PlanningDate, ct);
+        var runProfiles = await ReadRunProfilesAsync(request.PlanningDate, ct);
+        var vehicleById = await db.Vehicles.AsNoTracking()
+            .Where(vehicle => vehicle.Active && vehicleIds.Contains(vehicle.Id))
+            .ToDictionaryAsync(vehicle => vehicle.Id, ct);
+        var trailerById = await db.Trailers.AsNoTracking()
+            .Where(trailer => trailer.Active && trailerIds.Contains(trailer.Id))
+            .ToDictionaryAsync(trailer => trailer.Id, ct);
+        var runs = runProfiles.ToDictionary(profile => profile.Dto.RunId);
         var driverById = drivers.ToDictionary(driver => driver.Id);
         var today = LondonDate(DateTimeOffset.UtcNow);
         var referenceDate = request.PlanningDate > today ? today : request.PlanningDate;
