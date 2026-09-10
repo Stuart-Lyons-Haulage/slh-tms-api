@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -30,6 +31,7 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
             .ToListAsync(ct);
 
         var approved = 0;
+        var approvedIds = new List<Guid>();
         var skipped = new List<object>();
         var failed = new List<object>();
 
@@ -47,8 +49,14 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
                 var note = request.AcknowledgeReviewFlags
                     ? $"Explicitly selected and approved from Order Control for {request.Date:yyyy-MM-dd}; any visible review flags were acknowledged by the planner."
                     : $"Approved from Order Control for {request.Date:yyyy-MM-dd}. Clean, planner-ready order.";
-                await stagingService.ReviewAndPromote(item.Id, true, note, User, ct);
+                var promoted = await stagingService.ReviewAndPromote(item.Id, true, note, User, ct);
+                if (promoted.Status != StagingStatus.Promoted)
+                {
+                    failed.Add(new { id = item.Id, reason = $"Approval completed without promotion; final status was {promoted.Status}." });
+                    continue;
+                }
                 approved++;
+                approvedIds.Add(item.Id);
             }
             catch (Exception ex) when (ex is InvalidOperationException or DbUpdateException or JsonException)
             {
@@ -62,6 +70,7 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
             date = request.Date,
             requested = request.Ids.Count,
             approved,
+            approvedIds,
             skipped = skipped.Count,
             failed = failed.Count,
             missing,
@@ -69,7 +78,7 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
             failedItems = failed.Take(100).ToList(),
             message = approved == 0
                 ? "No selected orders were approved. Blocked or incomplete work remains in Order Control."
-                : $"{approved} selected order{(approved == 1 ? "" : "s")} approved into live Orders."
+                : $"{approved} selected order{(approved == 1 ? "" : "s")} approved into live Orders and removed from the review queue."
         });
     }
 
@@ -90,7 +99,8 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
             if (string.IsNullOrWhiteSpace(customerCode)) return "Customer code is missing.";
             if (!DateOnly.TryParse(collectionDateText, CultureInfo.InvariantCulture, DateTimeStyles.None, out var collectionDate))
                 return "Collection date is missing or invalid.";
-            if (collectionDate != requestedDate) return $"Order belongs to {collectionDate:yyyy-MM-dd}, not the selected date.";
+            if (collectionDate != requestedDate && !IsPmOvernightCarryIn(payload, collectionDate, requestedDate))
+                return $"Order belongs to {collectionDate:yyyy-MM-dd}, not the selected planning date.";
 
             var pallets = Int(payload, "pallets", "palletQty", "palletQuantity", "quantity");
             if (!IsBackhaul(payload) && (pallets is null or <= 0)) return "Zero or missing pallet quantity.";
@@ -113,6 +123,25 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
         {
             return "Staged payload is not valid JSON.";
         }
+    }
+
+    private static bool IsPmOvernightCarryIn(JsonElement payload, DateOnly collectionDate, DateOnly requestedDate)
+    {
+        if (collectionDate.AddDays(1) != requestedDate) return false;
+        var deliveryDateText = Text(payload, "deliveryDate");
+        if (!DateOnly.TryParse(deliveryDateText, CultureInfo.InvariantCulture, DateTimeStyles.None, out var deliveryDate) || deliveryDate != requestedDate)
+            return false;
+
+        var requestedTime = Text(payload, "requestedTime");
+        if (string.IsNullOrWhiteSpace(requestedTime)) return false;
+        var match = Regex.Match(requestedTime, @"(?<!\d)(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (!match.Success || !int.TryParse(match.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var hour)) return false;
+        if (hour is < 0 or > 23) return false;
+
+        var meridiem = match.Groups[3].Value;
+        if (meridiem.Equals("pm", StringComparison.OrdinalIgnoreCase) && hour < 12) hour += 12;
+        else if (meridiem.Equals("am", StringComparison.OrdinalIgnoreCase) && hour == 12) hour = 0;
+        return hour >= 12;
     }
 
     private static bool IsBackhaul(JsonElement payload)
