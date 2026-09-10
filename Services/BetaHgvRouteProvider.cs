@@ -4,6 +4,7 @@ using System.Text.Json;
 namespace Slh.Tms.Api.Services;
 
 public sealed record BetaRoutePoint(string Name, decimal Latitude, decimal Longitude);
+
 public sealed record BetaHgvRouteCost(decimal Miles, int DriveMinutes, string Source);
 
 public interface IBetaHgvRouteProvider
@@ -12,43 +13,40 @@ public interface IBetaHgvRouteProvider
 }
 
 /// <summary>
-/// Route evidence for Beta planning. Only a live Azure Maps truck route is accepted;
-/// the resilient approximate route is deliberately rejected so crow-fly/Haversine
-/// evidence can never drive an optimisation recommendation.
-/// A provider instance is created per Beta request, so exact route lookups are cached for
-/// that request and each individual Azure Maps call is bounded to avoid one slow lookup
-/// exhausting the whole comparison request.
+/// Supplies route evidence for the Beta Optimiser. Only a real Azure Maps truck route
+/// is accepted. AzureMapsRouteClient's resilient Haversine fallback is deliberately
+/// rejected here so approximate straight-line evidence can never drive an optimiser
+/// recommendation.
 /// </summary>
 public sealed class AzureMapsHgvRouteProvider(
     AzureMapsRouteClient maps,
     ILogger<AzureMapsHgvRouteProvider> logger,
     BetaOptimiserOptions? optimiserOptions = null) : IBetaHgvRouteProvider
 {
-    private readonly BetaOptimiserOptions options = (optimiserOptions ?? new BetaOptimiserOptions()).Validate();
-    private readonly BetaRequestRouteCache routeCache = new();
-
-    public Task<BetaHgvRouteCost?> GetRouteAsync(IReadOnlyList<BetaRoutePoint> points, CancellationToken ct)
+    public async Task<BetaHgvRouteCost?> GetRouteAsync(
+        IReadOnlyList<BetaRoutePoint> points,
+        CancellationToken ct)
     {
-        if (points.Count < 2) return Task.FromResult<BetaHgvRouteCost?>(new BetaHgvRouteCost(0m, 0, "AzureMapsHgv"));
-        var key = string.Join(";", points.Select(point => $"{point.Latitude:0.000000},{point.Longitude:0.000000}"));
-        var snapshot = points.ToArray();
-        return routeCache.GetOrCreateAsync(key, () => GetRouteCoreAsync(snapshot, ct));
-    }
+        if (points.Count < 2) return new BetaHgvRouteCost(0m, 0, "AzureMapsHgv");
 
-    private async Task<BetaHgvRouteCost?> GetRouteCoreAsync(IReadOnlyList<BetaRoutePoint> points, CancellationToken ct)
-    {
-        using var routeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        routeCts.CancelAfter(options.RouteDeadline);
         try
         {
-            var response = await maps.Directions(points.Select(point => (point.Longitude, point.Latitude)).ToList(), routeCts.Token);
+            var response = await maps.Directions(
+                points.Select(point => (point.Longitude, point.Latitude)).ToList(),
+                ct);
+
             using var document = JsonDocument.Parse(JsonSerializer.Serialize(response));
             var root = document.RootElement;
-            if (root.TryGetProperty("approximate", out var approximate) && approximate.ValueKind == JsonValueKind.True)
+
+            if (root.TryGetProperty("approximate", out var approximate) &&
+                approximate.ValueKind == JsonValueKind.True)
             {
-                logger.LogWarning("Beta Optimiser rejected approximate routing evidence for {StopCount} stops.", points.Count);
+                logger.LogWarning(
+                    "Beta Optimiser rejected approximate routing evidence for {StopCount} stops.",
+                    points.Count);
                 return null;
             }
+
             if (!root.TryGetProperty("routes", out var routes) || routes.GetArrayLength() == 0 ||
                 !routes[0].TryGetProperty("summary", out var summary) ||
                 !summary.TryGetProperty("lengthInMeters", out var metres) ||
@@ -57,10 +55,17 @@ public sealed class AzureMapsHgvRouteProvider(
                 logger.LogWarning("Azure Maps HGV routing did not return a usable route summary.");
                 return null;
             }
+
+            var miles = Math.Round((decimal)metres.GetDouble() / 1609.344m, 2);
+            var minutes = (int)Math.Ceiling(seconds.GetDouble() / 60d);
+            var provider = root.TryGetProperty("source", out var source) && source.ValueKind == JsonValueKind.String
+                ? source.GetString()
+                : null;
+
             return new BetaHgvRouteCost(
-                Math.Round((decimal)metres.GetDouble() / 1609.344m, 2),
-                (int)Math.Ceiling(seconds.GetDouble() / 60d),
-                "AzureMapsHgv");
+                miles,
+                minutes,
+                string.IsNullOrWhiteSpace(provider) ? "AzureMapsHgv" : provider!);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
