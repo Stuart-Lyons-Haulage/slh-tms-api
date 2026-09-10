@@ -596,7 +596,14 @@ public sealed class EmailOrderIntakeService
             @"(?im)^\s*(?:collection\s+point|collection\s+from|collect(?:ion)?(?:\s+point)?|pickup)\s*[:=-]\s*(?<site>[^\r\n.]{2,120})",
             RegexOptions.IgnoreCase);
         if (labelled.Success)
-            return CleanSourceLine(labelled.Groups["site"].Value);
+        {
+            var labelledSite = CleanSourceLine(labelled.Groups["site"].Value);
+            if (Regex.IsMatch(labelledSite, @"\bSefter\b", RegexOptions.IgnoreCase))
+                return "Barfoots Sefter";
+            if (Regex.IsMatch(labelledSite, @"\bLeythorne\b", RegexOptions.IgnoreCase))
+                return "Barfoots Leythorne";
+            return labelledSite;
+        }
 
         if (Regex.IsMatch(body, @"\bSefter\b", RegexOptions.IgnoreCase))
             return "Barfoots Sefter";
