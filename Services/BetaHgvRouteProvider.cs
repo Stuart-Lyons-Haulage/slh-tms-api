@@ -23,6 +23,8 @@ public sealed class AzureMapsHgvRouteProvider(
     ILogger<AzureMapsHgvRouteProvider> logger,
     BetaOptimiserOptions? optimiserOptions = null) : IBetaHgvRouteProvider
 {
+    private readonly BetaOptimiserOptions options = optimiserOptions ?? new BetaOptimiserOptions();
+
     public async Task<BetaHgvRouteCost?> GetRouteAsync(
         IReadOnlyList<BetaRoutePoint> points,
         CancellationToken ct)

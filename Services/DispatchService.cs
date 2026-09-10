@@ -748,7 +748,7 @@ public sealed class DispatchService(
                 .ToArray();
         if (property.Value.ValueKind == JsonValueKind.String)
             return (property.Value.GetString() ?? string.Empty)
-                .Split([',', ';', '|'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                .Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         return [property.Value.ToString()];
     }
 

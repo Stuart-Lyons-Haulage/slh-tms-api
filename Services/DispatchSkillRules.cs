@@ -20,8 +20,8 @@ public static class DispatchSkillRules
         if (string.IsNullOrWhiteSpace(value)) return DispatchSkill.None;
 
         var result = DispatchSkill.None;
-        var chunks = value.Split([',', ';', '/', '|'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Concat(value.Split([' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        var chunks = value.Split(new[] { ',', ';', '/', '|' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Concat(value.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
             .Append(value);
 
         foreach (var chunk in chunks)
