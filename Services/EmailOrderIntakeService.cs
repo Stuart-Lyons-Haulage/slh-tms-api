@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 25617)
-Total output lines: 1933
-
 using ExcelDataReader;
 using System.Globalization;
 using System.Net;
@@ -215,26 +212,13 @@ public sealed class EmailOrderIntakeService
         return rows.Select(row =>
         {
             var warnings = new List<string>();
-            var overnight = row.Wave >= 3 && explicitCollectionDate is null;
-            var plannedCollectionDate = overnight ? deliveryDate.Value.AddDays(-1) : collectionDate;
-            var collectionTime = overnight ? "17:00" : null;
-            if (explicitCollectionDate is null && !overnight)
+            if (explicitCollectionDate is null)
                 warnings.Add("Collection date inferred as the email received date from the Barfoots Waitrose wave template; confirm if collection occurs on a different day.");
-            if (overnight)
-                warnings.Add($"Wave {row.Wave} treated as an overnight route: collect PM on {plannedCollectionDate:dd/MM/yyyy} for delivery during the night into {deliveryDate.Value:dd/MM/yyyy}.");
-
-            var parsed = BuildStructuredOrder(
+            return BuildStructuredOrder(
                 request,
                 $"barfoots-waitrose-{NormaliseKey(row.Depot)}-wave-{row.Wave}-{NormaliseKey(row.Po)}",
-                "WAITROSE", row.Po, plannedCollectionDate, deliveryDate.Value, row.Pallets,
-                row.Collection, row.Depot, $"Waitrose Wave {row.Wave} depot delivery", warnings, collectionTime);
-
-            var payload = JsonSerializer.Deserialize<Dictionary<string, object?>>(parsed.Payload.GetRawText()) ?? [];
-            payload["wave"] = row.Wave;
-            payload["overnightRoute"] = overnight;
-            payload["routeTiming"] = overnight ? "Overnight" : "SameDay";
-            payload["deliveryDateIsOperationalDate"] = true;
-            return parsed with { Payload = JsonSerializer.SerializeToElement(payload) };
+                "WAITROSE", row.Po, collectionDate, deliveryDate.Value, row.Pallets,
+                row.Collection, row.Depot, $"Waitrose Wave {row.Wave} depot delivery", warnings);
         }).ToList();
     }
 
@@ -756,7 +740,406 @@ public sealed class EmailOrderIntakeService
                 if (string.IsNullOrWhiteSpace(depot) || pallets is null or <= 0)
                     continue;
 
-                var collection = Ce…5617 tokens truncated…      !sourceKey.StartsWith("body-", StringComparison.OrdinalIgnoreCase) &&
+                var collection = CellText(row, collectionIndex);
+                var rowDate = CellDate(row, dateIndex) ?? emailDate;
+                if (rowDate is null)
+                    continue;
+
+                var requestedTime = CellTime(row, requestTimeIndex);
+                var availableTime = CellTime(row, availableTimeIndex);
+                var customer = InferCustomerCode(request.Subject, request.SenderAddress, depot);
+                var destination = CleanDestination(depot, customer);
+                var warnings = new List<string>();
+                if (string.IsNullOrWhiteSpace(rawPo))
+                    warnings.Add("No customer PO/reference was found in the email; a stable email reference was generated.");
+                if (string.IsNullOrWhiteSpace(collection))
+                    warnings.Add("Collection site was blank in the source workbook.");
+
+                var baseReference = rawPo ?? StableEmailReference(request.MessageId);
+                var orderReference = BuildRowReference(baseReference, customer, destination, rowDate.Value, rowIndex + 1);
+                var naturalKey = NaturalKey(request, customer, destination, rowDate.Value);
+                var instructions = BuildInstructions(
+                    rawPo,
+                    requestedTime,
+                    availableTime,
+                    ExtractTemperature(body),
+                    request,
+                    attachment.Name,
+                    warnings,
+                    "Delivery");
+
+                var payload = new Dictionary<string, object?>
+                {
+                    ["poNumber"] = orderReference,
+                    ["customerCode"] = customer,
+                    ["collectionDate"] = rowDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                    ["deliveryDate"] = rowDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                    ["pallets"] = pallets.Value,
+                    ["sellerName"] = collection,
+                    ["marketName"] = customer,
+                    ["stallNumber"] = destination,
+                    ["driverInstructions"] = instructions,
+                    ["customerPo"] = rawPo,
+                    ["requestedTime"] = requestedTime,
+                    ["availableTime"] = availableTime,
+                    ["jobType"] = "Delivery",
+                    ["sourceMessageId"] = request.MessageId,
+                    ["sourceInternetMessageId"] = request.InternetMessageId,
+                    ["sourceSender"] = request.SenderAddress,
+                    ["sourceSenderName"] = request.SenderName,
+                    ["sourceSubject"] = request.Subject,
+                    ["sourceReceivedAtUtc"] = request.ReceivedAtUtc,
+                    ["sourceWebLink"] = request.WebLink,
+                    ["sourceAttachmentName"] = attachment.Name,
+                    ["sourceSheet"] = reader.Name,
+                    ["sourceRow"] = rowIndex + 1,
+                    ["intakeNaturalKey"] = naturalKey,
+                    ["intakeConfidence"] = warnings.Count == 0 ? "High" : "Medium",
+                    ["intakeWarnings"] = warnings
+                };
+
+                results.Add(new ParsedEmailOrder(
+                    $"sheet-{sheetIndex}-row-{rowIndex + 1}",
+                    naturalKey,
+                    JsonSerializer.SerializeToElement(payload),
+                    warnings));
+            }
+        }
+        while (reader.NextResult());
+
+        return results;
+    }
+
+    internal static List<ParsedEmailOrder> ParseBarfootsWholesaleMarketRows(
+        MailboxEmailIntakeRequest request,
+        string? attachmentName,
+        string? sheetName,
+        IReadOnlyList<object?[]> rows)
+    {
+        var source = $"{request.Subject}\n{request.SenderAddress}\n{attachmentName}";
+        if (!source.Contains("Wholesale", StringComparison.OrdinalIgnoreCase) ||
+            !source.Contains("Market", StringComparison.OrdinalIgnoreCase) ||
+            (!(request.SenderAddress ?? string.Empty).EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) &&
+             !source.Contains("Barfoots", StringComparison.OrdinalIgnoreCase)))
+            return [];
+
+        var headerIndex = rows.ToList().FindIndex(row =>
+        {
+            var keys = row.Select(value => NormaliseKey(CellText(value))).ToHashSet();
+            return keys.Contains("market") && keys.Contains("customer") &&
+                   keys.Any(key => key is "deliveryaddess" or "deliveryaddress") &&
+                   keys.Any(key => key is "noofpallets" or "pallets");
+        });
+        if (headerIndex < 0) return [];
+
+        var columns = HeaderMap(rows[headerIndex]);
+        var marketIndex = FindColumn(columns, "market");
+        var customerIndex = FindColumn(columns, "customer");
+        var addressIndex = FindColumn(columns, "deliveryaddess", "deliveryaddress");
+        var dateIndex = FindColumn(columns, "deliverydate", "date");
+        var timeIndex = FindColumn(columns, "deliverytime");
+        var temperatureIndex = FindColumn(columns, "temp", "temperature");
+        var palletsIndex = FindColumn(columns, "noofpallets", "pallets");
+        var salesOrderIndex = FindColumn(columns, "so", "salesorder");
+        if (marketIndex < 0 || customerIndex < 0 || addressIndex < 0 || palletsIndex < 0) return [];
+
+        var results = new List<ParsedEmailOrder>();
+        string? collection = null;
+        string? market = null;
+        DateOnly? deliveryDate = null;
+        for (var rowIndex = 0; rowIndex < rows.Count; rowIndex++)
+        {
+            var row = rows[rowIndex];
+            var first = CellText(row, 0);
+            if (first?.StartsWith("COLLECTION ", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                collection = CultureInfo.InvariantCulture.TextInfo.ToTitleCase(CleanSourceLine(first["COLLECTION ".Length..]).ToLowerInvariant());
+                market = null;
+                deliveryDate = null;
+                continue;
+            }
+            if (rowIndex <= headerIndex || string.IsNullOrWhiteSpace(collection)) continue;
+
+            var statedMarket = CellText(row, marketIndex);
+            if (!string.IsNullOrWhiteSpace(statedMarket)) market = CanonicalWholesaleMarket(statedMarket);
+            deliveryDate = CellDate(row, dateIndex) ?? deliveryDate;
+            var customer = CellText(row, customerIndex);
+            var address = CellText(row, addressIndex);
+            var pallets = CellInt(row, palletsIndex);
+            if (string.IsNullOrWhiteSpace(market) || string.IsNullOrWhiteSpace(customer) ||
+                string.IsNullOrWhiteSpace(address) || deliveryDate is null || pallets is null or <= 0)
+                continue;
+
+            var customerPo = CellText(row, salesOrderIndex)?.Replace(".0", string.Empty, StringComparison.Ordinal);
+            var deliveryTime = CellText(row, timeIndex);
+            var temperature = CellText(row, temperatureIndex);
+            var warnings = new List<string>();
+            if (string.IsNullOrWhiteSpace(customerPo))
+                warnings.Add("Wholesale source row has no sales-order reference; a stable message-and-row reference was generated for review.");
+            // Wholesale market work is commonly an overnight PM route. When the
+            // workbook supplies delivery only, stage collection on the preceding
+            // day so the planner can allocate the departure correctly.
+            var collectionDate = deliveryDate.Value.AddDays(-1);
+            if (collectionDate.DayOfWeek == DayOfWeek.Sunday)
+                warnings.Add($"Overnight collection inferred as Sunday {collectionDate:dd/MM/yyyy} for Monday delivery {deliveryDate.Value:dd/MM/yyyy}; confirm Sunday PM operation before approval.");
+            var baseReference = customerPo ?? StableEmailReference(request.MessageId);
+            var orderReference = BuildRowReference(baseReference, "BARFOOTS", customer, deliveryDate.Value, rowIndex + 1);
+            var naturalKey = $"barfoots|wholesale|{deliveryDate:yyyy-MM-dd}|{NormaliseKey(collection)}|{NormaliseKey(market)}|{NormaliseKey(customer)}|{NormaliseKey(customerPo)}";
+            var instructions = string.Join(" · ", new[]
+            {
+                $"Market: {market}", $"Market customer: {customer}", $"Delivery address: {CleanSourceLine(address)}",
+                string.IsNullOrWhiteSpace(deliveryTime) ? null : $"Delivery time: {deliveryTime}",
+                string.IsNullOrWhiteSpace(temperature) ? null : $"Temperature: {temperature}°C",
+                string.IsNullOrWhiteSpace(customerPo) ? null : $"Sales order: {customerPo}"
+            }.Where(value => !string.IsNullOrWhiteSpace(value)));
+            var payload = new Dictionary<string, object?>
+            {
+                ["poNumber"] = orderReference,
+                ["customerCode"] = "BARFOOTS",
+                ["collectionDate"] = collectionDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                ["deliveryDate"] = deliveryDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                ["pallets"] = pallets.Value,
+                ["sellerName"] = collection,
+                ["marketName"] = market,
+                ["stallNumber"] = customer,
+                ["deliveryAddress"] = CleanSourceLine(address),
+                ["driverInstructions"] = instructions,
+                ["customerPo"] = customerPo,
+                ["deliveryRequestedTime"] = deliveryTime,
+                ["temperature"] = temperature,
+                ["jobType"] = "Wholesale market delivery",
+                ["sourceMessageId"] = request.MessageId,
+                ["sourceInternetMessageId"] = request.InternetMessageId,
+                ["sourceSender"] = request.SenderAddress,
+                ["sourceSenderName"] = request.SenderName,
+                ["sourceSubject"] = request.Subject,
+                ["sourceReceivedAtUtc"] = request.ReceivedAtUtc,
+                ["sourceWebLink"] = request.WebLink,
+                ["sourceAttachmentName"] = attachmentName,
+                ["sourceSheet"] = sheetName,
+                ["sourceRow"] = rowIndex + 1,
+                ["intakeNaturalKey"] = naturalKey,
+                ["intakeConfidence"] = warnings.Count == 0 ? "High" : "Medium",
+                ["intakeWarnings"] = warnings
+            };
+            results.Add(new ParsedEmailOrder($"barfoots-wholesale-{NormaliseKey(collection)}-{rowIndex + 1}", naturalKey, JsonSerializer.SerializeToElement(payload), warnings));
+        }
+        return results;
+    }
+
+    private static List<ParsedEmailOrder> ParseAndoverAvonmouthSplit(
+        MailboxEmailIntakeRequest request,
+        string? rawPo,
+        string body,
+        DateTimeOffset receivedAt)
+    {
+        if (!Regex.IsMatch(body, @"\bAndover\b", RegexOptions.IgnoreCase) ||
+            !Regex.IsMatch(body, @"\bAvonmouth\b", RegexOptions.IgnoreCase))
+            return [];
+
+        var date = ExtractDate(body, receivedAt) ?? ExtractDate(request.Subject ?? string.Empty, receivedAt);
+        if (date is null) return [];
+        var rows = Regex.Matches(body, @"(?im)(?:(?<qty>\d{1,3})\s*(?:pallets?|plts?)\s*(?:to\s+)?(?<site>Andover|Avonmouth)|(?<site2>Andover|Avonmouth)[^\r\n]{0,80}?\b(?<qty2>\d{1,3})\s*(?:pallets?|plts?)\b)")
+            .Cast<Match>()
+            .Select(m => (Site: CultureInfo.InvariantCulture.TextInfo.ToTitleCase((m.Groups["site"].Success ? m.Groups["site"].Value : m.Groups["site2"].Value).ToLowerInvariant()),
+                          Pallets: int.Parse(m.Groups["qty"].Success ? m.Groups["qty"].Value : m.Groups["qty2"].Value, CultureInfo.InvariantCulture)))
+            .Where(x => x.Pallets > 0)
+            .GroupBy(x => x.Site, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .ToList();
+        if (rows.Count < 2) return [];
+
+        var customer = sourceTextCustomer(request, body);
+        var warnings = new[] { "Split from one source email into separate depot orders; verify attachment evidence before approval." };
+        return rows.Select((row, index) => BuildStructuredOrder(
+            request, $"depot-split-{NormaliseKey(row.Site)}-{index + 1}", customer, rawPo,
+            date.Value, date.Value, row.Pallets, InferCollectionSiteFromSender(request.SenderAddress),
+            row.Site, "Depot pallet delivery", warnings)).ToList();
+
+        static string sourceTextCustomer(MailboxEmailIntakeRequest request, string body)
+        {
+            if ($"{request.Subject}\n{body}".Contains("Waitrose", StringComparison.OrdinalIgnoreCase)) return "WAITROSE";
+            if ($"{request.Subject}\n{body}".Contains("Barfoots", StringComparison.OrdinalIgnoreCase)) return "BARFOOTS";
+            return CustomerCode(request.SenderName) == "UNKNOWN" ? "EMAIL" : CustomerCode(request.SenderName);
+        }
+    }
+
+    private static string CanonicalWholesaleMarket(string value)
+    {
+        var key = NormaliseKey(value);
+        if (key.Contains("coventgarden", StringComparison.OrdinalIgnoreCase)) return "New Covent Garden";
+        if (key.Contains("spitalfields", StringComparison.OrdinalIgnoreCase) || key.Contains("spitalfieldsmatket", StringComparison.OrdinalIgnoreCase)) return "Spitalfields";
+        if (key.Contains("westerninternational", StringComparison.OrdinalIgnoreCase)) return "Western International";
+        if (key.Contains("brighton", StringComparison.OrdinalIgnoreCase)) return "Brighton Market";
+        return CultureInfo.InvariantCulture.TextInfo.ToTitleCase(CleanSourceLine(value).ToLowerInvariant());
+    }
+
+    private static IReadOnlyList<WaitroseLegacyRow> ParseKnownWaitroseWorkbookRows(
+        MailboxEmailIntakeRequest request,
+        MailboxAttachmentRequest attachment,
+        IReadOnlyList<object?[]> rows)
+    {
+        var name = attachment.Name ?? string.Empty;
+        var source = $"{request.Subject}\n{request.SenderAddress}\n{name}";
+        if (source.Contains("Vitacress", StringComparison.OrdinalIgnoreCase) || name.Contains("Collections WAITROSE", StringComparison.OrdinalIgnoreCase))
+            return WaitroseLegacyWorkbookParser.ParseVitacress(rows);
+        if (source.Contains("WR Week", StringComparison.OrdinalIgnoreCase) || Regex.IsMatch(name, @"^Week-\d+\.xls", RegexOptions.IgnoreCase))
+            return WaitroseLegacyWorkbookParser.ParseApsWeekly(rows, LocalDate(request.ReceivedAtUtc ?? DateTimeOffset.UtcNow));
+        return [];
+    }
+
+    private static string InferLegacyWaitroseCollectionSite(MailboxEmailIntakeRequest request, MailboxAttachmentRequest attachment)
+    {
+        var source = $"{request.Subject}\n{request.SenderAddress}\n{attachment.Name}";
+        if (source.Contains("Vitacress", StringComparison.OrdinalIgnoreCase)) return "Vitacress Runcton";
+        if (source.Contains("apsgroup.uk.com", StringComparison.OrdinalIgnoreCase) || source.Contains("WR Week", StringComparison.OrdinalIgnoreCase)) return "APS Chichester Packhouse";
+        return "Collection site to confirm";
+    }
+
+    private static ParsedEmailOrder? ParseBodyOrder(
+        MailboxEmailIntakeRequest request,
+        DateOnly? sourceDate,
+        string? rawPo,
+        string body,
+        string sourceText,
+        IReadOnlyCollection<string> masterSiteNames,
+        List<string> globalWarnings)
+    {
+        if (sourceDate is null)
+        {
+            globalWarnings.Add("No planning date could be read from the email subject/body.");
+            return null;
+        }
+
+        var signal = DetectKnownSignal(sourceText, masterSiteNames);
+        var customer = signal?.CustomerCode ?? InferCustomerCode(request.Subject, request.SenderAddress, sourceText);
+        var jobType = InferJobType(request.Subject, body);
+        var collection = InferCollectionSite(request.Subject, body, jobType);
+        var destination = InferDestination(request.Subject, body, jobType) ?? signal?.SiteName;
+        var pallets = ExtractInt(TotalPalletsRegex, body, "qty")
+            ?? ExtractInt(LabelledQuantityRegex, sourceText, "qty")
+            ?? ExtractInt(PalletQuantityRegex, sourceText, "qty");
+        var requestedTime = NormaliseTime(ExtractMatch(CollectionTimeRegex, body, "time"))
+            ?? NormaliseTime(ExtractMatch(ReadyForCollectionTimeRegex, body, "time"));
+        var recognisedCustomerOrSite = signal is not null || !string.Equals(customer, "EMAIL", StringComparison.OrdinalIgnoreCase);
+        if (!HasEnoughBodyOrderEvidence(rawPo, collection, destination, pallets, requestedTime, jobType, recognisedCustomerOrSite))
+        {
+            globalWarnings.Add("Email body contained a date but not enough order detail to stage a transport order.");
+            return null;
+        }
+        var warnings = new List<string>();
+        if (string.IsNullOrWhiteSpace(rawPo))
+            warnings.Add("No customer PO/reference was found; a stable email reference was generated and should be checked before approval.");
+        if (string.IsNullOrWhiteSpace(collection))
+            warnings.Add("Collection site was not explicit in the email.");
+        if (string.IsNullOrWhiteSpace(destination))
+            warnings.Add("Delivery/return destination was not explicit in the email.");
+        if (pallets is null && !jobType.Contains("Tray", StringComparison.OrdinalIgnoreCase))
+            warnings.Add("Pallet quantity was not explicit in the email.");
+
+        var baseReference = rawPo ?? StableEmailReference(request.MessageId);
+        var orderReference = BuildRowReference(baseReference, customer, destination ?? collection ?? jobType, sourceDate.Value, 1);
+        var naturalKey = NaturalKey(request, customer, destination ?? collection ?? jobType, sourceDate.Value);
+        var instructions = BuildInstructions(
+            rawPo,
+            requestedTime,
+            null,
+            ExtractTemperature(body),
+            request,
+            null,
+            warnings,
+            jobType);
+
+        var payload = new Dictionary<string, object?>
+        {
+            ["poNumber"] = orderReference,
+            ["customerCode"] = customer,
+            ["collectionDate"] = sourceDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            ["deliveryDate"] = sourceDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            ["pallets"] = pallets,
+            ["sellerName"] = collection,
+            ["marketName"] = customer,
+            ["stallNumber"] = destination,
+            ["driverInstructions"] = instructions,
+            ["customerPo"] = rawPo,
+            ["requestedTime"] = requestedTime,
+            ["jobType"] = jobType,
+            ["sourceMessageId"] = request.MessageId,
+            ["sourceInternetMessageId"] = request.InternetMessageId,
+            ["sourceSender"] = request.SenderAddress,
+            ["sourceSenderName"] = request.SenderName,
+            ["sourceSubject"] = request.Subject,
+            ["sourceReceivedAtUtc"] = request.ReceivedAtUtc,
+            ["sourceWebLink"] = request.WebLink,
+            ["intakeNaturalKey"] = naturalKey,
+            ["intakeConfidence"] = warnings.Count == 0 ? "High" : warnings.Count <= 2 ? "Medium" : "Low",
+            ["intakeWarnings"] = warnings
+        };
+
+        return new ParsedEmailOrder("body-1", naturalKey, JsonSerializer.SerializeToElement(payload), warnings);
+    }
+
+    private static bool HasEnoughBodyOrderEvidence(string? rawPo, string? collection, string? destination, int? pallets, string? requestedTime, string jobType, bool recognisedCustomerOrSite)
+    {
+        var hasReference = !string.IsNullOrWhiteSpace(rawPo);
+        var hasCollection = !string.IsNullOrWhiteSpace(collection);
+        var hasDestination = !string.IsNullOrWhiteSpace(destination);
+        var hasQuantity = pallets is > 0;
+        var hasTime = !string.IsNullOrWhiteSpace(requestedTime);
+        if (jobType.Contains("Tray", StringComparison.OrdinalIgnoreCase))
+            return hasReference && (hasCollection || hasDestination);
+
+        // A customer/supplier name plus a date is only evidence that the email
+        // may need review; it is not enough to create a transport order. Body
+        // fallback orders must carry an actual quantity and at least one route
+        // side before they are staged.
+        return hasQuantity &&
+               (hasCollection || hasDestination) &&
+               (hasReference || hasTime || recognisedCustomerOrSite);
+    }
+
+    private static string? ExtractCollectionSiteFromLabel(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var clean = DateRegex.Replace(value, " ");
+        clean = MonthNameDateRegex.Replace(clean, " ");
+        clean = Regex.Replace(clean, @"\b(?:[01]?\d|2[0-3])(?:[:.]\d{2})?\s*(?:am|pm)?\b", " ", RegexOptions.IgnoreCase);
+        clean = Regex.Replace(clean, @"\b(?:today|tomorrow)\b", " ", RegexOptions.IgnoreCase);
+        clean = Regex.Replace(clean, @"\s+", " ").Trim(' ', '-', '–', '—', ':');
+        return clean.Any(char.IsLetter) && clean.Length >= 3 ? CleanSourceLine(clean) : null;
+    }
+
+    private static string? DeliverySiteName(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var clean = CleanSourceLine(value).Trim(' ', '-', '–', '—');
+        var separator = clean.IndexOf(" - ", StringComparison.Ordinal);
+        if (separator > 0) clean = clean[..separator].Trim();
+        else
+        {
+            var comma = clean.IndexOf(',');
+            if (comma > 0) clean = clean[..comma].Trim();
+        }
+        return string.IsNullOrWhiteSpace(clean) ? null : clean;
+    }
+
+    private static string? FindMasterSiteMention(string body, IReadOnlyCollection<string> masterSiteNames) =>
+        masterSiteNames
+            .Where(site => !string.IsNullOrWhiteSpace(site) && site.Trim().Length >= 3)
+            .OrderByDescending(site => site.Length)
+            .FirstOrDefault(site => body.Contains(site.Trim(), StringComparison.OrdinalIgnoreCase))
+            ?.Trim();
+
+    private static string? PayloadText(Dictionary<string, object?> payload, string key)
+    {
+        if (!payload.TryGetValue(key, out var value) || value is null) return null;
+        if (value is JsonElement element)
+            return element.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined ? null : element.ToString();
+        return Convert.ToString(value, CultureInfo.InvariantCulture);
+    }
+
+    private static bool IsTemplateSource(string sourceKey) =>
+        !sourceKey.StartsWith("body-", StringComparison.OrdinalIgnoreCase) &&
         !sourceKey.StartsWith("labelled-body-", StringComparison.OrdinalIgnoreCase);
 
     private static string PrecedenceConfidence(IReadOnlyList<string> warnings)
