@@ -161,9 +161,28 @@
                 "secureData": { "properties": ["inputs", "outputs"] }
               }
             },
+            "Apply_TMS_Category_To_Source_Email": {
+              "type": "OpenApiConnection",
+              "runAfter": { "POST_To_TMS_Staging": ["Succeeded"] },
+              "inputs": {
+                "host": {
+                  "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365",
+                  "connectionName": "shared_office365",
+                  "operationId": "AssignCategory_V2"
+                },
+                "parameters": {
+                  "messageId": "@triggerOutputs()?['body/id']",
+                  "mailboxAddress": "@parameters('SLH_InfoMailboxUPN')",
+                  "categories": "@createArray(coalesce(body('POST_To_TMS_Staging')?['outlookCategory'],'TMS Review'))"
+                }
+              },
+              "runtimeConfiguration": {
+                "retryPolicy": { "type": "exponential", "count": 3, "interval": "PT10S", "minimumInterval": "PT10S", "maximumInterval": "PT2M" }
+              }
+            },
             "Record_Import_Result": {
               "type": "Compose",
-              "runAfter": { "POST_To_TMS_Staging": ["Succeeded"] },
+              "runAfter": { "Apply_TMS_Category_To_Source_Email": ["Succeeded"] },
               "inputs": {
                 "correlationId": "@variables('varCorrelationId')",
                 "messageId": "@triggerOutputs()?['body/id']",
