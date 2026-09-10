@@ -132,7 +132,16 @@ Add-PnPPageTextPart -Page $page -Section 2 -Column 2 -Text @"
 </ul>
 "@ | Out-Null
 
-Add-PnPPageSection -Page $page -SectionTemplate ThreeColumn -Order 3 | Out-Null
+Add-PnPPageTextPart -Page $page -Section 2 -Column 1 -Text @"
+<h2>Master-data actions</h2>
+<p>Submit governed additions for review. These forms write to SharePoint master-data lists; they do not create live TMS transactions.</p>
+<p><a href='$root/Lists/Hub%20Customers/NewForm.aspx'>+ Add customer</a><br/>
+<a href='$root/Lists/Hub%20Sites/NewForm.aspx'>+ Add site</a><br/>
+<a href='$root/Lists/Hub%20Site%20Aliases/NewForm.aspx'>+ Add site alias</a><br/>
+<a href='$root/Lists/Hub%20Drivers/NewForm.aspx'>+ Add driver</a><br/>
+<a href='$root/Lists/Hub%20Vehicles/NewForm.aspx'>+ Add vehicle</a><br/>
+<a href='$root/Lists/Hub%20Trailers/NewForm.aspx'>+ Add trailer</a></p>
+"@ | Out-NullAdd-PnPPageSection -Page $page -SectionTemplate ThreeColumn -Order 3 | Out-Null
 Add-PnPPageTextPart -Page $page -Section 3 -Column 1 -Text "<h3>Customers & Sites</h3><p><a href='$root/Lists/Hub%20Customers'>Customers</a><br/><a href='$root/Lists/Hub%20Sites'>Sites</a><br/><a href='$root/Lists/Hub%20Site%20Aliases'>Aliases</a></p>" | Out-Null
 Add-PnPPageTextPart -Page $page -Section 3 -Column 2 -Text "<h3>Fleet & People</h3><p><a href='$root/Lists/Hub%20Drivers'>Drivers</a><br/><a href='$root/Lists/Hub%20Vehicles'>Vehicles</a><br/><a href='$root/Lists/Hub%20Trailers'>Trailers</a></p>" | Out-Null
 Add-PnPPageTextPart -Page $page -Section 3 -Column 3 -Text "<h3>Business Records</h3><p><a href='$root/Shared%20Documents/SLH%20Hub/Forms%20%26%20Records'>Forms & Records</a><br/><a href='$root/Company%20Policies'>Policies & Compliance</a><br/><a href='$root/Staffing'>Staffing</a></p>" | Out-Null
