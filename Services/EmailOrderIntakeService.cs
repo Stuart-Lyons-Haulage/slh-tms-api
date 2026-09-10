@@ -593,7 +593,10 @@ public sealed class EmailOrderIntakeService
     {
         var labelled = Regex.Match(
             body,
-            @"(?im)^\s*(?:collection\s+point|collection\s+from|collect(?:ion)?(?:\s+point)?|pickup)\s*[:=-]\s*(?<site>[^\r\n.]{2,120})",
+            // Only route-specific labels identify a collection site. A bare
+            // "Collection:" line commonly carries a date/time (or a template
+            // heading), and must not override a parser-derived site.
+            @"(?im)^\s*(?:collection\s+point|collection\s+from|collect\s+from|pickup)\s*[:=-]\s*(?<site>[^\r\n.]{2,120})",
             RegexOptions.IgnoreCase);
         if (labelled.Success)
         {
@@ -605,12 +608,10 @@ public sealed class EmailOrderIntakeService
             return labelledSite;
         }
 
-        if (Regex.IsMatch(body, @"\bSefter\b", RegexOptions.IgnoreCase))
-            return "Barfoots Sefter";
-        if (Regex.IsMatch(body, @"\bLeythorne\b", RegexOptions.IgnoreCase))
-            return "Barfoots Leythorne";
-        if (Regex.IsMatch(body, @"\bBarfoots\b", RegexOptions.IgnoreCase))
-            return "Barfoots";
+        // Do not infer an explicit collection site from an incidental site
+        // mention. Template parsers and master-data matching own that
+        // fallback; otherwise chained waves can be silently rewritten to a
+        // different canonical site.
         return null;
     }
 
