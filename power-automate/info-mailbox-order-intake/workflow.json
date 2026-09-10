@@ -32,7 +32,7 @@
             },
             "parameters": {
               "mailboxAddress": "@parameters('SLH_InfoMailboxUPN')",
-              "folderId": "Inbox",
+              "folderId": "TMS Intake",
               "importance": "Any",
               "includeAttachments": true
             }
