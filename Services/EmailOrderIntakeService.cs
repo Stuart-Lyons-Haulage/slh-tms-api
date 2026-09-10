@@ -251,9 +251,8 @@ public sealed class EmailOrderIntakeService
 
         var collectionLabel = ExtractLabelValue(body, "collection", "collect", "pickup");
         var collectFrom = ExtractMatch(CollectFromRegex, body, "site");
-        var explicitCollection = !string.IsNullOrWhiteSpace(collectFrom)
-            ? CleanSourceLine(collectFrom)
-            : ExtractCollectionSiteFromLabel(collectionLabel);
+        var explicitCollection = ExtractBodyCollectionPoint(body)
+            ?? (!string.IsNullOrWhiteSpace(collectFrom) ? CleanSourceLine(collectFrom) : ExtractCollectionSiteFromLabel(collectionLabel));
         if (!string.IsNullOrWhiteSpace(explicitCollection))
         {
             payload["sellerName"] = explicitCollection;
@@ -524,6 +523,106 @@ public sealed class EmailOrderIntakeService
             .ToList();
     }
 
+    private static List<ParsedEmailOrder> ParseAttachmentDrivenRows(
+        MailboxEmailIntakeRequest request,
+        MailboxAttachmentRequest attachment,
+        List<object?[]> rows,
+        string body)
+    {
+        var source = string.Join("\n", request.Subject, request.SenderAddress, attachment.Name, body);
+        var isNisa = source.Contains("NISA", StringComparison.OrdinalIgnoreCase) &&
+                     (source.Contains("pallet booking", StringComparison.OrdinalIgnoreCase) ||
+                      source.Contains("pallet bookings", StringComparison.OrdinalIgnoreCase) ||
+                      source.Contains("Nissa", StringComparison.OrdinalIgnoreCase));
+        var isCoop = source.Contains("Co-op", StringComparison.OrdinalIgnoreCase) ||
+                     source.Contains("Coop", StringComparison.OrdinalIgnoreCase) ||
+                     source.Contains("CO OP", StringComparison.OrdinalIgnoreCase);
+        if (!isNisa && !isCoop) return [];
+
+        var headerIndex = rows.FindIndex(row =>
+        {
+            var keys = row.Select(value => NormaliseKey(CellText(value))).Where(value => value.Length > 0).ToHashSet();
+            return (keys.Contains("pallets") || keys.Contains("palletcount") || keys.Contains("quantity")) &&
+                   (keys.Contains("location") || keys.Contains("deliverylocation") || keys.Contains("depot") ||
+                    keys.Contains("destination") || keys.Contains("deliverysite"));
+        });
+        if (headerIndex < 0) return [];
+
+        var columns = HeaderMap(rows[headerIndex]);
+        var dateIndex = FindColumn(columns, "deliverydate", "date", "bookingdate", "depotdate");
+        var destinationIndex = FindColumn(columns, "deliverylocation", "location", "depotdescription", "depot", "destination", "deliverysite");
+        var attachmentPalletsIndex = FindColumn(columns, "pallets", "palletcount", "quantity", "qty");
+        if (dateIndex < 0 || destinationIndex < 0) return [];
+
+        var bodyPallets = ExtractInt(TotalPalletsRegex, body, "qty")
+                          ?? ExtractInt(LabelledQuantityRegex, body, "qty")
+                          ?? ExtractInt(PalletQuantityRegex, body, "qty");
+        if (isNisa && bodyPallets is not > 0)
+            return [];
+
+        var collectionSite = ExtractBodyCollectionPoint(body)
+                             ?? InferCollectionSiteFromSender(request.SenderAddress)
+                             ?? InferCollectionSite(request.Subject, body, "Collection");
+        var results = new List<ParsedEmailOrder>();
+        for (var rowIndex = headerIndex + 1; rowIndex < rows.Count; rowIndex++)
+        {
+            var row = rows[rowIndex];
+            var destination = CleanSourceLine(CellText(row, destinationIndex));
+            if (string.IsNullOrWhiteSpace(destination)) continue;
+
+            var deliveryDate = ParseDateText(CellText(row, dateIndex), request.ReceivedAtUtc ?? DateTimeOffset.UtcNow);
+            if (deliveryDate is null) continue;
+
+            var pallets = isNisa
+                ? bodyPallets!.Value
+                : attachmentPalletsIndex >= 0 ? CellInt(row, attachmentPalletsIndex) : null;
+            if (pallets is not > 0) continue;
+
+            var warnings = new List<string>
+            {
+                isNisa
+                    ? "NISA booking locations and delivery dates were read from the attachment; pallet quantity was taken from the email body by rule."
+                    : "Co-op delivery date, location and pallet quantity were read from the attachment; collection point was taken from the email body by rule."
+            };
+            if (isNisa && attachmentPalletsIndex >= 0 && CellInt(row, attachmentPalletsIndex) != bodyPallets)
+                warnings.Add("The NISA attachment pallet quantity differed from the email body; the email body quantity was used.");
+            if (string.IsNullOrWhiteSpace(collectionSite))
+                warnings.Add("Collection site was not explicit in the email body and needs review.");
+
+            results.Add(BuildStructuredOrder(
+                request,
+                $"attachment-driven-{(isNisa ? "nisa" : "coop")}-{NormaliseKey(destination)}-{rowIndex}",
+                isNisa ? "BARFOOTS" : "COOP",
+                ExtractPo($"{request.Subject}\n{body}"),
+                deliveryDate.Value,
+                deliveryDate.Value,
+                pallets,
+                collectionSite,
+                destination,
+                isNisa ? "NISA pallet booking" : "Co-op attachment booking",
+                warnings));
+        }
+        return results;
+    }
+
+    private static string? ExtractBodyCollectionPoint(string body)
+    {
+        var labelled = Regex.Match(
+            body,
+            @"(?im)^\s*(?:collection\s+point|collection\s+from|collect(?:ion)?(?:\s+point)?|pickup)\s*[:=-]\s*(?<site>[^\r\n.]{2,120})",
+            RegexOptions.IgnoreCase);
+        if (labelled.Success)
+            return CleanSourceLine(labelled.Groups["site"].Value);
+
+        if (Regex.IsMatch(body, @"\bSefter\b", RegexOptions.IgnoreCase))
+            return "Barfoots Sefter";
+        if (Regex.IsMatch(body, @"\bLeythorne\b", RegexOptions.IgnoreCase))
+            return "Barfoots Leythorne";
+        if (Regex.IsMatch(body, @"\bBarfoots\b", RegexOptions.IgnoreCase))
+            return "Barfoots";
+        return null;
+    }
+
     private static List<ParsedEmailOrder> ParseInternalMorrisonsCollections(
         MailboxEmailIntakeRequest request,
         string? rawPo,
@@ -699,6 +798,13 @@ public sealed class EmailOrderIntakeService
                 for (var i = 0; i < reader.FieldCount; i++)
                     values[i] = reader.GetValue(i);
                 rows.Add(values);
+            }
+
+            var attachmentDrivenRows = ParseAttachmentDrivenRows(request, attachment, rows, body);
+            if (attachmentDrivenRows.Count > 0)
+            {
+                results.AddRange(attachmentDrivenRows);
+                continue;
             }
 
             var legacyRows = ParseKnownWaitroseWorkbookRows(request, attachment, rows);
