@@ -17,6 +17,14 @@ public sealed class DependencyHealthService(
     SageHrClient sage,
     ILogger<DependencyHealthService> logger)
 {
+    public static readonly IReadOnlyDictionary<string, string> CanonicalCadences = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["RoadTech"] = "live every minute · history every 5 minutes",
+        ["TachoMaster"] = "every 5 minutes",
+        ["Fleetio"] = "every hour",
+        ["Sage HR"] = "05:30 Europe/London daily"
+    };
+
     public async Task<DependencyHealthSnapshot> GetSnapshotAsync(CancellationToken ct)
     {
         var now = DateTimeOffset.UtcNow;
@@ -41,6 +49,9 @@ public sealed class DependencyHealthService(
             return new(now, "Unavailable", unavailable);
         }
 
+        // These are the canonical persisted receipts used everywhere in the TMS. Reading health
+        // must never call RoadTech, TachoMaster, Fleetio or Sage directly and therefore cannot
+        // make an old provider snapshot appear newer just because a page was refreshed.
         var roadTechUtc = await SafeTimestamp(async () => await db.VehicleLiveStatuses.AsNoTracking()
             .MaxAsync(item => (DateTimeOffset?)item.LastEventTimeUtc, ct), "RoadTech", ct);
         var fleetioUtc = await SafeTimestamp(async () => await db.IntegrationMappings.AsNoTracking()
@@ -58,8 +69,8 @@ public sealed class DependencyHealthService(
         {
             ["SQL"] = new("Healthy", now, 0),
             ["RoadTech"] = Evaluate(dot.IsConfigured, roadTechUtc, now, TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(15)),
-            ["Fleetio"] = Evaluate(fleetio.IsConfigured, fleetioUtc, now, TimeSpan.FromMinutes(90), TimeSpan.FromHours(3)),
-            ["TachoMaster"] = Evaluate(tacho.IsConfigured, tachoUtc, now, TimeSpan.FromMinutes(15), TimeSpan.FromHours(1)),
+            ["TachoMaster"] = Evaluate(tacho.IsConfigured, tachoUtc, now, TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(30)),
+            ["Fleetio"] = Evaluate(fleetio.IsConfigured, fleetioUtc, now, TimeSpan.FromMinutes(75), TimeSpan.FromHours(3)),
             ["Sage HR"] = Evaluate(sage.IsConfigured, sageUtc, now, TimeSpan.FromHours(30), TimeSpan.FromHours(48))
         };
 
