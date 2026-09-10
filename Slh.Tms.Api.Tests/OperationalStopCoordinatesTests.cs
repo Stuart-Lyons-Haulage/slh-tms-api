@@ -32,18 +32,63 @@ public sealed class OperationalStopCoordinatesTests
     }
 
     [Fact]
-    public void Site_master_coordinates_remain_authoritative()
+    public void Imported_coordinates_remain_a_fallback_without_canonical_master_data()
     {
         var stop = new LoadStop
         {
             Id = Guid.NewGuid(),
             Sequence = 1,
-            Name = "NWF-Selsey",
+            Name = "One-off customer",
             Longitude = -0.12345m,
             Latitude = 50.98765m
         };
 
         Assert.Equal((-0.12345m, 50.98765m), OperationalStopCoordinates.Resolve(stop));
+    }
+
+    [Fact]
+    public async Task Canonical_site_master_coordinates_override_stale_imported_order_coordinates()
+    {
+        var options = new DbContextOptionsBuilder<TmsDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using var db = new TmsDbContext(options);
+        var site = new Site
+        {
+            ExternalCode = "ALDI-GOLDTHORPE",
+            Name = "Aldi Goldthorpe",
+            DriverTextName = "Aldi-Goldthorpe",
+            Active = true
+        };
+        db.Sites.Add(site);
+        await db.SaveChangesAsync();
+        await MasterDetailStore.SaveAsync(
+            db,
+            "site",
+            site.ExternalCode,
+            JsonSerializer.Serialize(new
+            {
+                externalCode = site.ExternalCode,
+                aliases = "Aldi-Goldthorpe;Goldthorpe Aldi",
+                latitude = 53.5330m,
+                longitude = -1.3070m
+            }),
+            "test",
+            "test",
+            CancellationToken.None);
+
+        var resolver = await PlannerSourceMasterDataResolver.CreateAsync(db, CancellationToken.None);
+        var stop = new LoadStop
+        {
+            Id = Guid.NewGuid(),
+            Sequence = 5,
+            Name = "Deliver · Aldi-Goldthorpe",
+            // Simulate stale imported coordinates near Chichester/Leythorne.
+            Longitude = -0.78m,
+            Latitude = 50.84m
+        };
+
+        Assert.Equal((-1.3070m, 53.5330m), OperationalStopCoordinates.Resolve(stop, resolver));
     }
 
     [Fact]
@@ -140,7 +185,7 @@ public sealed class OperationalStopCoordinatesTests
     }
 
     [Fact]
-    public void Unknown_unmapped_stop_fails_closed()
+    public void Unknown_unmapped_stop_fails_closed_and_requests_physical_address()
     {
         var stop = new LoadStop
         {
@@ -150,5 +195,21 @@ public sealed class OperationalStopCoordinatesTests
         };
 
         Assert.Null(OperationalStopCoordinates.Resolve(stop));
+        Assert.Contains("Physical address/postcode required", OperationalStopCoordinates.MissingLocationReason(stop));
+    }
+
+    [Fact]
+    public void Address_without_coordinates_requests_geofence_or_master_data_geocoding()
+    {
+        var stop = new LoadStop
+        {
+            Id = Guid.NewGuid(),
+            Sequence = 1,
+            Name = "Unknown delivery site 123456",
+            Address = "S63 9BL"
+        };
+
+        Assert.Null(OperationalStopCoordinates.Resolve(stop));
+        Assert.Contains("Link the approved geofence or geocode the site in Master Data", OperationalStopCoordinates.MissingLocationReason(stop));
     }
 }
