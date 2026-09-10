@@ -28,6 +28,8 @@ public sealed class RunTimingController(
         [FromQuery] DateOnly? date,
         CancellationToken ct)
     {
+        if (string.IsNullOrWhiteSpace(displayKey) && Request.Query.TryGetValue("key", out var queryKey))
+            displayKey = queryKey.FirstOrDefault();
         var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct);
         if (!pairedKeyAllowed && !TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
 

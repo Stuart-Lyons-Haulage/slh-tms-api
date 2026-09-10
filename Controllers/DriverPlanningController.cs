@@ -20,6 +20,10 @@ public sealed class DriverPlanningController(TmsDbContext db, IConfiguration con
         CancellationToken ct)
     {
         var signedInAllowed = User.Identity?.IsAuthenticated == true;
+        // Older Hisense/Vewd browsers can drop custom headers. The paired key is
+        // read-only and is validated against the same SQL-backed display key.
+        if (string.IsNullOrWhiteSpace(displayKey) && Request.Query.TryGetValue("key", out var queryKey))
+            displayKey = queryKey.FirstOrDefault();
         var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct);
         if (!signedInAllowed && !pairedKeyAllowed && !TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
 

@@ -25,6 +25,8 @@ public sealed class TvDwellController(
         [FromQuery] DateOnly? date,
         CancellationToken ct)
     {
+        if (string.IsNullOrWhiteSpace(displayKey) && Request.Query.TryGetValue("key", out var queryKey))
+            displayKey = queryKey.FirstOrDefault();
         var pairedKeyAllowed = await TvDisplayKeyStore.ValidateAsync(db, displayKey, ct);
         var legacyKeyAllowed = TvWallboardAccess.IsAllowed(HttpContext, configuration);
         if (!pairedKeyAllowed && !legacyKeyAllowed)
