@@ -31,7 +31,8 @@ public sealed record DispatchTachoDataDto(
     int ReducedDailyRestsUsed,
     int? DailyDrivingLimitMinutes,
     int? DriveAvailablePlanningDayMinutes,
-    int? WorkAvailableWeekMinutes);
+    int? WorkAvailableWeekMinutes,
+    bool ReducedDailyRestAvailable = false);
 
 public sealed record DispatchTrackingDataDto(
     DispatchGeoPointDto? LastKnownPosition,
@@ -73,7 +74,8 @@ public sealed record DispatchRunDto(
 
 public sealed record DispatchAvailableTimesRequest(
     DateOnly PlanningDate,
-    IReadOnlyList<Guid> DriverIds);
+    IReadOnlyList<Guid> DriverIds,
+    IReadOnlyList<Guid>? ReducedRestDriverIds = null);
 
 public sealed record DispatchAvailableTimeDto(
     Guid DriverId,
@@ -89,7 +91,8 @@ public sealed record DispatchAllocationRequest(
     Guid VehicleId,
     Guid? TrailerId,
     Guid RunId,
-    DateTimeOffset PlannedStartTime);
+    DateTimeOffset PlannedStartTime,
+    bool UseReducedDailyRest = false);
 
 public sealed record DispatchLockRequest(
     DateOnly PlanningDate,

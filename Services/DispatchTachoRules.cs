@@ -12,10 +12,12 @@ public static class DispatchTachoRules
     private const int StandardDailyDrivingMinutes = 9 * 60;
     private const int ExtendedDailyDrivingMinutes = 10 * 60;
     private const decimal AbsoluteWeeklyWorkingHours = 60m;
+    private const int MaximumReducedDailyRestsBetweenWeeklyRests = 3;
 
     public static DispatchRestRequirement DeriveRequiredRestPeriod(
         Driver driver,
-        IEnumerable<TachoDriverDutyStatus> source)
+        IEnumerable<TachoDriverDutyStatus> source,
+        bool useReducedDailyRest = false)
     {
         var duties = Matching(driver, source)
             .Where(duty => duty.DutyEndUtc is not null)
@@ -23,7 +25,7 @@ public static class DispatchTachoRules
             .ToList();
 
         if (duties.Count == 0)
-            return new DispatchRestRequirement(11, 0, "No completed Tacho duty was available; regular daily rest is required conservatively.");
+            return new DispatchRestRequirement(11, 0, "No completed Tacho duty was available; regular 11h daily rest is required conservatively.");
 
         var reducedSinceWeeklyRest = 0;
         for (var index = 1; index < duties.Count; index++)
@@ -45,12 +47,34 @@ public static class DispatchTachoRules
             .Select(duty => duty.ShortDailyRestTakenThisWeek)
             .FirstOrDefault(value => value is not null) ?? 0;
 
-        var reducedUsed = Math.Clamp(Math.Max(reducedSinceWeeklyRest, latestMetricCount), 0, 3);
-        if (reducedUsed >= 3)
-            return new DispatchRestRequirement(11, reducedUsed, "Tacho evidence shows all three reduced daily rests have been used since the weekly-rest reset.");
+        var reducedUsed = Math.Clamp(
+            Math.Max(reducedSinceWeeklyRest, latestMetricCount),
+            0,
+            MaximumReducedDailyRestsBetweenWeeklyRests);
 
-        return new DispatchRestRequirement(9, reducedUsed, $"Tacho evidence shows {reducedUsed} of 3 reduced daily rests used since the weekly-rest reset.");
+        // Dispatch is deliberately conservative: never consume a reduced daily rest
+        // automatically just because Tacho evidence says one is still available. The
+        // planner must make an explicit per-driver decision to use the 9h concession.
+        if (!useReducedDailyRest)
+            return new DispatchRestRequirement(
+                11,
+                reducedUsed,
+                $"Regular 11h daily rest selected by default; {reducedUsed} of {MaximumReducedDailyRestsBetweenWeeklyRests} reduced daily rests used since the weekly-rest reset.");
+
+        if (reducedUsed >= MaximumReducedDailyRestsBetweenWeeklyRests)
+            return new DispatchRestRequirement(
+                11,
+                reducedUsed,
+                "Reduced daily rest was requested, but Tacho evidence shows all three reduced daily rests have already been used since the weekly-rest reset.");
+
+        return new DispatchRestRequirement(
+            9,
+            reducedUsed,
+            $"Planner explicitly selected reduced 9h daily rest; {reducedUsed} of {MaximumReducedDailyRestsBetweenWeeklyRests} reduced daily rests already used since the weekly-rest reset.");
     }
+
+    public static bool ReducedDailyRestAvailable(Driver driver, IEnumerable<TachoDriverDutyStatus> source) =>
+        DeriveRequiredRestPeriod(driver, source, useReducedDailyRest: true).Hours == 9;
 
     public static DateTimeOffset? AvailableFrom(DateTimeOffset? shiftEndTimeUtc, DispatchRestRequirement requirement) =>
         shiftEndTimeUtc?.AddHours(requirement.Hours);
@@ -65,6 +89,13 @@ public static class DispatchTachoRules
     public static string? LastVehicleRegistration(Driver driver, IEnumerable<TachoDriverDutyStatus> source) =>
         Matching(driver, source)
             .OrderByDescending(duty => duty.DutyEndUtc ?? duty.DutyStartUtc)
+            .Select(duty => string.IsNullOrWhiteSpace(duty.VehicleCode) ? null : duty.VehicleCode.Trim())
+            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+
+    public static string? LastCompletedVehicleRegistration(Driver driver, IEnumerable<TachoDriverDutyStatus> source) =>
+        Matching(driver, source)
+            .Where(duty => duty.DutyEndUtc is not null)
+            .OrderByDescending(duty => duty.DutyEndUtc)
             .Select(duty => string.IsNullOrWhiteSpace(duty.VehicleCode) ? null : duty.VehicleCode.Trim())
             .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
 

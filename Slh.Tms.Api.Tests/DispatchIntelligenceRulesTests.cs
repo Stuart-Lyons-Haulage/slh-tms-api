@@ -57,7 +57,7 @@ public sealed class DispatchIntelligenceRulesTests
     }
 
     [Fact]
-    public void Required_rest_is_nine_hours_when_reduced_rest_allowance_remains()
+    public void Required_rest_defaults_to_eleven_hours_even_when_reduced_rest_allowance_remains()
     {
         var driver = TestDriver();
         var duties = new[]
@@ -68,12 +68,28 @@ public sealed class DispatchIntelligenceRulesTests
 
         var result = DispatchTachoRules.DeriveRequiredRestPeriod(driver, duties);
 
+        Assert.Equal(11, result.Hours);
+        Assert.Equal(1, result.ReducedDailyRestsUsed);
+    }
+
+    [Fact]
+    public void Required_rest_is_nine_hours_only_when_planner_explicitly_selects_reduced_rest()
+    {
+        var driver = TestDriver();
+        var duties = new[]
+        {
+            Duty("2026-09-06T05:00:00Z", "2026-09-06T17:00:00Z"),
+            Duty("2026-09-07T02:30:00Z", "2026-09-07T15:00:00Z", shortDailyRestsUsed: 1)
+        };
+
+        var result = DispatchTachoRules.DeriveRequiredRestPeriod(driver, duties, useReducedDailyRest: true);
+
         Assert.Equal(9, result.Hours);
         Assert.Equal(1, result.ReducedDailyRestsUsed);
     }
 
     [Fact]
-    public void Required_rest_is_eleven_hours_after_three_reduced_rests()
+    public void Required_rest_stays_eleven_hours_when_reduced_rest_allowance_is_exhausted()
     {
         var driver = TestDriver();
         var duties = new[]
@@ -84,7 +100,7 @@ public sealed class DispatchIntelligenceRulesTests
             Duty("2026-09-06T20:00:00Z", "2026-09-07T08:00:00Z", shortDailyRestsUsed: 3)
         };
 
-        var result = DispatchTachoRules.DeriveRequiredRestPeriod(driver, duties);
+        var result = DispatchTachoRules.DeriveRequiredRestPeriod(driver, duties, useReducedDailyRest: true);
 
         Assert.Equal(11, result.Hours);
         Assert.Equal(3, result.ReducedDailyRestsUsed);
@@ -120,7 +136,7 @@ public sealed class DispatchIntelligenceRulesTests
     public void Available_from_adds_the_rest_period_to_tacho_shift_end()
     {
         var shiftEnd = DateTimeOffset.Parse("2026-09-09T18:00:00Z");
-        var requirement = new DispatchRestRequirement(9, 1, "Tacho reduced rest allowance remains");
+        var requirement = new DispatchRestRequirement(9, 1, "Planner selected reduced daily rest");
 
         var result = DispatchTachoRules.AvailableFrom(shiftEnd, requirement);
 
