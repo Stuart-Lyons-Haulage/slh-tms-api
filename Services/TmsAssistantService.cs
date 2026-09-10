@@ -43,7 +43,7 @@ public sealed class TmsAssistantService(
 
         var noMapPoints = loads.Where(x => x.Stops.Count == 0 || x.Stops.Any(stop => stop.Latitude is null || stop.Longitude is null)).ToList();
         if (noMapPoints.Count > 0)
-            suggestions.Add(new("loads-unmapped", "medium", "Finish route points", $"{noMapPoints.Count} run{(noMapPoints.Count == 1 ? " has" : "s have")} missing stop coordinates, so routing and ETA checks are incomplete.", "Planner", false));
+            suggestions.Add(new("loads-unmapped", "medium", "Finish route points", $"{noMapPoints.Count} run{(noMapPoints.Count == 1 ? " has" : "s have")} missing stop coordinates, so routing and ETA checks are incomplete. Use the linked geofence/Site Master location first; if neither exists, add a physical address or postcode so the site can be geocoded.", "Sites", false));
 
         var emptyMiles = loads.Sum(x => x.EmptyMiles ?? 0);
         var distance = loads.Sum(x => x.EstimatedDistanceMiles ?? 0);
@@ -70,17 +70,23 @@ public sealed class TmsAssistantService(
         if (vehicleRisk > 0)
             suggestions.Add(new("fleet-compliance", "high", "Protect fleet availability", $"{vehicleRisk} vehicle{(vehicleRisk == 1 ? " needs" : "s need")} Fleetio/compliance review before allocation.", "Vehicles", false));
 
+        var missingPhysicalAddresses = sites.Count(x =>
+            string.IsNullOrWhiteSpace(x.CollectionAddress) &&
+            (x.Latitude is null || x.Longitude is null));
+        if (missingPhysicalAddresses > 0)
+            suggestions.Add(new("sites-physical-address", "high", "Add physical address or postcode", $"{missingPhysicalAddresses} active site{(missingPhysicalAddresses == 1 ? " has" : "s have")} neither a usable physical address/postcode nor complete coordinates. Link an approved geofence where one exists; otherwise add the real address/postcode in Site Master so Azure Maps can create a routable location and ETA.", "Sites", false));
+
         var missingMapLinks = sites.Count(x => !string.IsNullOrWhiteSpace(x.CollectionAddress) && string.IsNullOrWhiteSpace(x.MapLink));
         if (missingMapLinks > 0)
             suggestions.Add(new("sites-map-link", "low", "Create missing site map links", $"{missingMapLinks} site{(missingMapLinks == 1 ? " has" : "s have")} an address but no driver map link. This can be fixed safely.", "Sites", true));
 
         var missingMapPoints = sites.Count(x => !string.IsNullOrWhiteSpace(x.CollectionAddress) && (x.Latitude is null || x.Longitude is null));
         if (missingMapPoints > 0)
-            suggestions.Add(new("sites-map-point", "medium", "Add missing map points", $"{missingMapPoints} site{(missingMapPoints == 1 ? " has" : "s have")} an address but no latitude/longitude. The Assistant can use Azure Maps to add these coordinates safely.", "Sites", true));
+            suggestions.Add(new("sites-map-point", "medium", "Geocode site addresses", $"{missingMapPoints} site{(missingMapPoints == 1 ? " has" : "s have")} a physical address/postcode but no latitude/longitude. The Assistant can use Azure Maps to add these coordinates safely after checking for a linked geofence first.", "Sites", true));
 
         var geofenceLinkGaps = await GeofenceLinkGaps(ct);
         if (geofenceLinkGaps.SitesMissingGeofence > 0)
-            suggestions.Add(new("geofences-sites-sync", geofenceLinkGaps.AutoFixAvailable ? "high" : "medium", "Sync geofences with sites", $"{geofenceLinkGaps.SitesMissingGeofence} active site{(geofenceLinkGaps.SitesMissingGeofence == 1 ? " is" : "s are")} missing a confirmed geofence link. The Assistant can safely apply unique name-confirmed matches; ambiguous links remain review-only.", "Sites", geofenceLinkGaps.AutoFixAvailable));
+            suggestions.Add(new("geofences-sites-sync", geofenceLinkGaps.AutoFixAvailable ? "high" : "medium", "Sync geofences with sites", $"{geofenceLinkGaps.SitesMissingGeofence} active site{(geofenceLinkGaps.SitesMissingGeofence == 1 ? " is" : "s are")} missing a confirmed geofence link. The Assistant can safely apply unique name-confirmed matches; ambiguous links remain review-only. A linked geofence is the preferred operational location for ETA/routing.", "Sites", geofenceLinkGaps.AutoFixAvailable));
 
         var duplicateSiteGroups = FindDuplicateSiteGroups(sites);
         if (duplicateSiteGroups.Count > 0)
@@ -96,7 +102,6 @@ public sealed class TmsAssistantService(
         if (suggestions.Count == 0)
             suggestions.Add(new("ready", "info", "Plan looks ready", "No blocking planning or master-data validation issue was found by the current safety rules.", "Planner", false));
 
-        // Costing/margin metrics remain in the DTO as zero-value compatibility fields for older portal bundles.
         return new AssistantSnapshot(
             planningDate,
             DateTimeOffset.UtcNow,
@@ -135,7 +140,7 @@ public sealed class TmsAssistantService(
                 safety_identifier = SafetyIdentifier(userKey),
                 reasoning = new { effort = "low" },
                 text = new { verbosity = "low" },
-                instructions = "You are the SLH transport planning assistant. Give concise, practical UK road-haulage advice using only the supplied operational snapshot. Never claim to change data. Never recommend bypassing legal driver-hours, vehicle compliance, staging review, or human approval. Do not discuss rates, margins or costings. Put safety and compliance first. If data is missing, say exactly what a planner should verify.",
+                instructions = "You are the SLH transport planning assistant. Give concise, practical UK road-haulage advice using only the supplied operational snapshot. Never claim to change data. Never recommend bypassing legal driver-hours, vehicle compliance, staging review, or human approval. Do not discuss rates, margins or costings. Put safety and compliance first. For routing/ETA location quality, prefer an approved linked geofence or canonical Site Master coordinates over imported order coordinates. Where neither is available, explicitly tell the planner which site needs a physical address or postcode in Site Master so Azure Maps can geocode it. If a geofence link is ambiguous, require human review rather than guessing.",
                 input = $"Planner question: {message.Trim()}\nOperational snapshot JSON: {JsonSerializer.Serialize(snapshot)}"
             });
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
