@@ -47,10 +47,6 @@ public sealed record BetaOptimiserDayDto(
     IReadOnlyList<BetaOptimiserRouteDto> Routes,
     IReadOnlyList<string> Warnings);
 
-public sealed record BetaPlannerStopRequest(string Name, string? OrderKey);
-public sealed record BetaPlannerRouteRequest(string Reference, IReadOnlyList<BetaPlannerStopRequest> Stops);
-public sealed record BetaPlannerComparisonRequest(DateOnly PlanningDate, IReadOnlyList<BetaPlannerRouteRequest> Routes);
-
 public sealed record BetaPlannerRouteComparisonDto(
     string Reference,
     int StopCount,
@@ -388,7 +384,7 @@ public sealed class BetaOptimiserService(
     private static IReadOnlyList<string> AliasKeys(string? aliases) =>
         string.IsNullOrWhiteSpace(aliases)
             ? []
-            : aliases.Split([',', ';', '|', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            : aliases.Split(new[] { ',', ';', '|', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Select(Normalise)
                 .Where(value => !string.IsNullOrWhiteSpace(value))
                 .ToList();

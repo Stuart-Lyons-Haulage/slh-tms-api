@@ -268,7 +268,7 @@ public sealed class BackloadOperationsService(
         if (!string.IsNullOrWhiteSpace(site.DriverTextName)) yield return site.DriverTextName;
         if (!string.IsNullOrWhiteSpace(site.ExternalCode)) yield return site.ExternalCode;
         if (!string.IsNullOrWhiteSpace(site.Aliases))
-            foreach (var alias in site.Aliases.Split([',', ';', '|', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            foreach (var alias in site.Aliases.Split(new[] { ',', ';', '|', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
                 yield return alias;
     }
 
