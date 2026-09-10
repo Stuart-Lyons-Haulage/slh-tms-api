@@ -43,11 +43,10 @@ public sealed class TachoMasterRetryHandlerTests
     }
 
     [Fact]
-    public async Task Retries_rate_limit_and_gateway_failures()
+    public async Task Does_not_retry_rate_limit_response()
     {
         var upstream = new SequencedHandler(
             HttpStatusCode.TooManyRequests,
-            HttpStatusCode.BadGateway,
             HttpStatusCode.OK);
         var retry = new TachoMasterRetryHandler(NullLogger<TachoMasterRetryHandler>.Instance)
         {
@@ -55,10 +54,11 @@ public sealed class TachoMasterRetryHandlerTests
         };
         using var client = new HttpClient(retry) { BaseAddress = new Uri("https://api-v1-alpha.roadtech.co.uk") };
 
-        using var response = await client.PostAsync("/api/Duty/GetDutyTransactions", new StringContent("{}"));
+        var exception = await Assert.ThrowsAsync<TachoMasterRateLimitException>(() =>
+            client.PostAsync("/api/Duty/GetDutyTransactions", new StringContent("{}")));
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal(3, upstream.CallCount);
+        Assert.Contains("429", exception.Message);
+        Assert.Equal(1, upstream.CallCount);
     }
 
     private sealed class SequencedHandler(params HttpStatusCode[] statuses) : HttpMessageHandler

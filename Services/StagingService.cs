@@ -6,7 +6,7 @@ using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 
 namespace Slh.Tms.Api.Services;
-public sealed class StagingService(TmsDbContext db)
+public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingRuleStore = null)
 {
     private static readonly HashSet<string> Types = new(StringComparer.OrdinalIgnoreCase) { "customer", "customercontact", "vehicle", "driver", "trailer", "site", "marketcontact", "fuelprice", "order", "communication" };
     public StagedImport Create(StageImportRequest r)
@@ -302,6 +302,13 @@ public sealed class StagingService(TmsDbContext db)
         var (movement, plannerReady) = await RecordOrderRevision(item, payload, reference, customerCode, ct);
         if (!plannerReady) return;
         var siteAlignment = await OrderSiteMasterAlignment.ResolveAsync(db, payload, ct);
+        var timingSites = await db.Sites.AsNoTracking().Where(site => site.Active).Take(5000).ToListAsync(ct);
+        await MasterDetailStore.EnrichSitesAsync(db, timingSites, ct);
+        IReadOnlyList<SiteTimingRule> timingRules = timingRuleStore is null ? [] : await timingRuleStore.ReadAsync(ct);
+        var masterRule = timingRules.FirstOrDefault(rule => SiteTimingRuleMatcher.Match(rule, siteAlignment.CollectionName, siteAlignment.DeliveryName, Text(payload, "palletType"), timingSites));
+        var masterDeliveryWindow = masterRule is null || !DateOnly.TryParse(Text(payload, "deliveryDate"), out var masterDeliveryDate)
+            ? new SiteTimingWindow(null, null)
+            : SiteTimingRuleMatcher.DeliveryWindow(masterRule, masterDeliveryDate);
         TransportOrder? existing;
         try { existing = await db.TransportOrders.SingleOrDefaultAsync(order => order.Reference == reference, ct); }
         catch (Exception ex) when (ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase))
@@ -316,8 +323,10 @@ public sealed class StagingService(TmsDbContext db)
             if (DateOnly.TryParse(Text(payload, "deliveryDate"), out var parsedDelivery)) deliveryDate = parsedDelivery;
             DateTimeOffset? deliveryWindowStartUtc = null;
             if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowStartUtc"), out var parsedWindowStart)) deliveryWindowStartUtc = parsedWindowStart;
+            else deliveryWindowStartUtc = masterDeliveryWindow.Start;
             DateTimeOffset? deliveryWindowEndUtc = null;
             if (DateTimeOffset.TryParse(Text(payload, "deliveryWindowEndUtc"), out var parsedWindowEnd)) deliveryWindowEndUtc = parsedWindowEnd;
+            else deliveryWindowEndUtc = masterDeliveryWindow.End;
             Guid? sourceStagedImportId = db.Entry(item).State == EntityState.Detached ? null : item.Id;
             db.TransportOrders.Add(new TransportOrder { SourceStagedImportId = sourceStagedImportId, SourceMovementId = movement.Id, Reference = ClipRequired(reference, 80), CustomerCode = ClipRequired(customerCode, 40), CollectionDate = collectionDate, DeliveryDate = deliveryDate, DeliveryWindowStartUtc = deliveryWindowStartUtc, DeliveryWindowEndUtc = deliveryWindowEndUtc, Pallets = IntOrNull(payload, "pallets"), SellerName = Clip(siteAlignment.CollectionName ?? Text(payload, "sellerName"), 200), MarketName = Clip(Text(payload, "marketName"), 80), StallNumber = Clip(siteAlignment.DeliveryName ?? Text(payload, "stallNumber"), 200), DriverInstructions = Clip(siteAlignment.DriverInstructions ?? Text(payload, "driverInstructions"), 1000), MapLink = Clip(siteAlignment.DeliveryMapLink ?? Text(payload, "mapLink"), 1000) });
         }
@@ -433,6 +442,7 @@ public sealed class StagingService(TmsDbContext db)
     }
 
     private static string Required(JsonElement payload, string name) => Text(payload, name) ?? throw new JsonException($"Payload requires {name}.");
+    private static TimeOnly? ParseTimingTime(string? value) => TimeOnly.TryParse(value, out var time) ? time : null;
     private static string? Text(JsonElement payload, string name)
     {
         if (!TryGetProperty(payload, name, out var value)) return null;

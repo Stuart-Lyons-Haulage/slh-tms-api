@@ -29,6 +29,19 @@ public sealed class TachoMasterRetryHandler(ILogger<TachoMasterRetryHandler> log
                 continue;
             }
 
+            // HTTP 429 is an explicit provider back-pressure signal. Throw a dedicated
+            // non-HttpRequestException so the client-level retry loop cannot multiply it.
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+            {
+                var retryAfter = response.Headers.RetryAfter?.Delta;
+                response.Dispose();
+                logger.LogWarning(
+                    "TachoMaster upstream returned HTTP 429 for {Method} {Path}; immediate retries suppressed.",
+                    request.Method,
+                    request.RequestUri?.AbsolutePath);
+                throw new TachoMasterRateLimitException(request.RequestUri?.AbsolutePath, retryAfter);
+            }
+
             if (!ShouldRetry(request.RequestUri?.AbsolutePath, response.StatusCode))
                 return response;
 
@@ -53,7 +66,7 @@ public sealed class TachoMasterRetryHandler(ILogger<TachoMasterRetryHandler> log
 
     private static bool ShouldRetry(string? path, HttpStatusCode statusCode)
     {
-        if (statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests or HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout)
+        if (statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout)
             return true;
 
         // TachoMaster historically uses HTTP 500 during one of its login password-format checks.
@@ -111,4 +124,10 @@ public sealed class TachoMasterRetryHandler(ILogger<TachoMasterRetryHandler> log
             return clone;
         }
     }
+}
+
+public sealed class TachoMasterRateLimitException(string? path, TimeSpan? retryAfter)
+    : Exception($"TachoMaster upstream {path ?? "request"} returned HTTP 429 (TooManyRequests). Immediate retries were suppressed{(retryAfter is null ? "." : $"; provider retry-after is {retryAfter.Value.TotalSeconds:0} seconds.")}")
+{
+    public TimeSpan? RetryAfter { get; } = retryAfter;
 }

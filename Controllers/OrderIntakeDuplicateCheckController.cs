@@ -14,6 +14,60 @@ public sealed class OrderIntakeDuplicateCheckController(
     TmsDbContext db,
     ILogger<OrderIntakeDuplicateCheckController> logger) : ControllerBase
 {
+    [HttpGet("staging/{stagingId:guid}/comparison")]
+    [Authorize(Policy = "TmsRead")]
+    public async Task<IActionResult> CompareStagedOrder(Guid stagingId, CancellationToken ct)
+    {
+        var staged = await db.StagedImports.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.Id == stagingId && x.EntityType == "order", ct);
+        if (staged is null) return NotFound(new { message = "Staged order not found." });
+
+        try
+        {
+            using var document = JsonDocument.Parse(staged.PayloadJson);
+            var incoming = OrderSnapshot.FromPayload(document.RootElement);
+            var reference = incoming.OrderReference ?? incoming.Po;
+            if (string.IsNullOrWhiteSpace(reference))
+                return Ok(new { classification = "New order", reference, changes = Array.Empty<object>(), current = (object?)null, incoming });
+
+            TransportOrder? current;
+            try
+            {
+                current = await db.TransportOrders.AsNoTracking()
+                    .Where(x => x.Reference == reference && x.Status != OrderStatus.Cancelled)
+                    .OrderByDescending(x => x.CreatedAtUtc)
+                    .FirstOrDefaultAsync(ct);
+            }
+            catch (Exception ex) when (IsSchemaUnavailable(ex))
+            {
+                logger.LogWarning(ex,
+                    "Staged-order comparison could not read live TransportOrders for staging item {StagingId}; comparison is unavailable and will not be reported as a new order.",
+                    stagingId);
+                return LiveOrderComparisonUnavailable();
+            }
+
+            if (current is null)
+                return Ok(new { classification = "New order", reference, changes = Array.Empty<object>(), current = (object?)null, incoming });
+
+            var existing = OrderSnapshot.FromLive(current);
+            var changes = BuildChanges(existing, incoming);
+            var classification = changes.Count == 0 ? "Exact duplicate" : "Amendment/update";
+            return Ok(new
+            {
+                classification,
+                reference,
+                liveOrderId = current.Id,
+                changes,
+                current = existing,
+                incoming
+            });
+        }
+        catch (JsonException)
+        {
+            return UnprocessableEntity(new { message = "Staged order payload is not valid JSON." });
+        }
+    }
+
     [HttpPost]
     [Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> Check([FromBody] OrderIntakeDuplicateCheckRequest request, CancellationToken ct)
@@ -122,6 +176,43 @@ public sealed class OrderIntakeDuplicateCheckController(
             matches = ordered,
             rule = "PO/purchase-order is the primary cross-message identity when available; otherwise customer/date/location/reference signatures are used conservatively. No record is deleted, promoted or amended by this endpoint."
         });
+    }
+
+    internal static bool IsSchemaUnavailable(Exception exception)
+    {
+        var message = exception.GetBaseException().Message;
+        return message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase) ||
+               message.Contains("no such table", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static ObjectResult LiveOrderComparisonUnavailable() => new(new
+    {
+        code = "LiveOrderComparisonUnavailable",
+        message = "The live order register could not be checked. Do not treat this staged order as new until comparison is available."
+    })
+    {
+        StatusCode = StatusCodes.Status503ServiceUnavailable
+    };
+
+    private static List<object> BuildChanges(OrderSnapshot current, OrderSnapshot incoming)
+    {
+        var changes = new List<object>();
+        AddChange(changes, "Customer", current.Customer, incoming.Customer);
+        AddChange(changes, "Collection date", current.CollectionDate?.ToString("yyyy-MM-dd"), incoming.CollectionDate?.ToString("yyyy-MM-dd"));
+        AddChange(changes, "Delivery date", current.DeliveryDate?.ToString("yyyy-MM-dd"), incoming.DeliveryDate?.ToString("yyyy-MM-dd"));
+        AddChange(changes, "Collection site", current.CollectionLocation, incoming.CollectionLocation);
+        AddChange(changes, "Delivery site", current.DeliveryLocation, incoming.DeliveryLocation);
+        AddChange(changes, "Pallets", current.Pallets?.ToString(), incoming.Pallets?.ToString());
+        return changes;
+    }
+
+    private static void AddChange(List<object> changes, string field, string? from, string? to)
+    {
+        if (string.IsNullOrWhiteSpace(to)) return;
+        if (Normalise(from) == Normalise(to)) return;
+        changes.Add(new { field, from = string.IsNullOrWhiteSpace(from) ? "—" : from, to });
     }
 
     internal static string? Classify(OrderSnapshot candidate, OrderSnapshot existing)

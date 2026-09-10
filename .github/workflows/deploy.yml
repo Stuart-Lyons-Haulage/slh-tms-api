@@ -345,6 +345,7 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --revision-weight "$PREVIOUS_REVISION=90" "$TARGET_REVISION=10"
 
+          echo "TRAFFIC_SHIFTED=true" >> "$GITHUB_ENV"
           echo "CANARY_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
           echo "Candidate $TARGET_REVISION is receiving 10% production traffic for 120 seconds."
           sleep 120
@@ -434,6 +435,7 @@ jobs:
           test "$auth_status" = "401" -o "$auth_status" = "403"
 
       - name: Roll back traffic on deployment failure
+        id: rollback
         if: ${{ failure() && env.PREVIOUS_REVISION != '' && env.TARGET_REVISION != '' }}
         run: |
           set -euo pipefail
@@ -454,3 +456,70 @@ jobs:
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --output table
+
+      - name: Capture failed revision diagnostics
+        if: ${{ failure() && env.TARGET_REVISION != '' }}
+        run: |
+          set +e
+          echo "## Failed revision diagnostics" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Revision state" >> "$GITHUB_STEP_SUMMARY"
+          az containerapp revision show \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision "$TARGET_REVISION" \
+            --output json | tee /tmp/failed-revision.json >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Replica state" >> "$GITHUB_STEP_SUMMARY"
+          az containerapp replica list \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision "$TARGET_REVISION" \
+            --output json | tee /tmp/failed-revision-replicas.json >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Recent system logs" >> "$GITHUB_STEP_SUMMARY"
+          az containerapp logs show \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --revision "$TARGET_REVISION" \
+            --type system \
+            --tail 100 | tee /tmp/failed-revision-system.log >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish deployment summary
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+
+          revision_name="${TARGET_REVISION:-${PREVIOUS_REVISION:-}}"
+          revision_json='{}'
+          if test -n "$revision_name"; then
+            revision_json="$(az containerapp revision show \
+              --name "$AZURE_CONTAINER_APP_NAME" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --revision "$revision_name" \
+              --output json 2>/dev/null || echo '{}')"
+          fi
+          image_digest="$(jq -r '.properties.template.containers[0].image // "unknown"' <<<"$revision_json")"
+          health_state="$(jq -r '.properties.healthState // "unknown"' <<<"$revision_json")"
+          rollback_status="not-required"
+          if [[ "${{ job.status }}" != "success" ]]; then
+            if [[ "${TRAFFIC_SHIFTED:-false}" != "true" ]]; then
+              rollback_status="not-required-pre-traffic-shift"
+            elif [[ "${{ steps.rollback.outcome }}" == "success" ]]; then
+              rollback_status="completed-after-traffic-shift"
+            elif [[ "${{ steps.rollback.outcome }}" == "failure" ]]; then
+              rollback_status="failed-after-traffic-shift"
+            else
+              rollback_status="required-but-not-run"
+            fi
+          fi
+
+          {
+            echo "## Production deployment summary"
+            echo "- Tested revision: `${DEPLOY_SHA}`"
+            echo "- Candidate revision: `${TARGET_REVISION:-unknown}`"
+            echo "- Previous revision: `${PREVIOUS_REVISION:-unknown}`"
+            echo "- Image: `${image_digest}`"
+            echo "- Candidate health: `${health_state}`"
+            echo "- Workflow result: `${{ job.status }}`"
+            echo "- Rollback status: `${rollback_status}`"
+          } >> "$GITHUB_STEP_SUMMARY"

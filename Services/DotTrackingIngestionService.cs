@@ -27,8 +27,10 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
                 var operatingDays = RecoveryDays(now);
                 var projectionDays = new HashSet<DateOnly> { operatingDays[0] };
 
+                // This is the only production path permitted to refresh Falcon current telemetry.
+                // Every wallboard/API/dispatch consumer reads the same immutable snapshot captured here.
                 var records = NormaliseCurrentEventTimes(
-                    (await client.GetLatestVehicleEventsAsync(stoppingToken))
+                    (await client.RefreshLatestVehicleEventsAsync(stoppingToken))
                         .Select(DotTelemetryRecord.FromProvider),
                     DateTimeOffset.UtcNow);
                 await store.PersistAsync(records, stoppingToken, markAsLiveReceipt: true);

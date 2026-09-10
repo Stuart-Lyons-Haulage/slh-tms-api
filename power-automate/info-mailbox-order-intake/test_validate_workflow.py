@@ -45,6 +45,13 @@ class WorkflowValidationTests(unittest.TestCase):
         errors = validate(workflow)
         self.assertTrue(any("attachment presence" in item for item in errors))
 
+    def test_rejects_missing_internal_outbound_load_plan_guard(self):
+        workflow = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
+        trigger = workflow["properties"]["definition"]["triggers"]["When_New_Email_Arrives_Info_Shared_Mailbox"]
+        trigger.pop("conditions", None)
+        errors = validate(workflow)
+        self.assertTrue(any("internal outbound Lyons load-plan" in item for item in errors))
+
     def test_rejects_trigger_attachment_string_loop(self):
         workflow = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
         workflow["properties"]["definition"]["actions"]["Scope_Receive_Source"]["actions"]["For_Each_Source_Attachment"]["foreach"] = "@triggerOutputs()?['body/attachments']"

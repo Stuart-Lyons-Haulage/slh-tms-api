@@ -65,7 +65,13 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 await EnsureSourceEmailEvidence(request, ct);
                 return await StageMappingException(request, parsed, ct);
             }
-            return Ok(new { ignored = true, reason = parsed.IgnoredReason, staged = 0, existing = 0, superseded = 0, warnings = parsed.Warnings, outlookCategory = (string?)null });
+            var linked = 0;
+            if (parsed.IgnoredReason.Contains("Operational request", StringComparison.OrdinalIgnoreCase))
+            {
+                await EnsureSourceEmailEvidence(request, ct);
+                linked = await LinkOperationalUpdateToPendingOrders(request, ct);
+            }
+            return Ok(new { ignored = true, reason = parsed.IgnoredReason, staged = 0, existing = 0, superseded = 0, linked, warnings = parsed.Warnings, outlookCategory = (string?)null });
         }
 
         await EnsureSourceEmailEvidence(request, ct);
@@ -700,6 +706,57 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             OccurredAtUtc = now
         });
         await db.SaveChangesAsync(ct);
+    }
+
+    private async Task<int> LinkOperationalUpdateToPendingOrders(MailboxEmailIntakeRequest request, CancellationToken ct)
+    {
+        var text = $"{request.Subject}\n{request.BodyText}";
+        var customer = text.Contains("Waitrose", StringComparison.OrdinalIgnoreCase) ? "WAITROSE" : null;
+        var siteMatch = Regex.Match(text, @"\b(?:collected|collect(?:ion)?)\s+from\s+(?<site>[A-Za-z][A-Za-z0-9 &'()/-]{1,80})", RegexOptions.IgnoreCase);
+        var site = siteMatch.Success ? siteMatch.Groups["site"].Value.Trim().TrimEnd('.', ',', ';', ':') : null;
+        if (customer is null || string.IsNullOrWhiteSpace(site)) return 0;
+
+        var receivedDate = DateOnly.FromDateTime((request.ReceivedAtUtc ?? DateTimeOffset.UtcNow).Date).ToString("yyyy-MM-dd");
+        var candidates = await db.StagedImports
+            .Where(item => item.EntityType == "order" && item.Status == StagingStatus.PendingReview)
+            .ToListAsync(ct);
+        var actor = $"Mailbox status {CompactKey(request.MessageId)}";
+        var linked = 0;
+        foreach (var candidate in candidates)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(candidate.PayloadJson);
+                var payload = document.RootElement;
+                if (!string.Equals(ReadText(payload, "customerCode"), customer, StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(ReadText(payload, "sellerName"), site, StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(ReadText(payload, "collectionDate"), receivedDate, StringComparison.Ordinal))
+                    continue;
+                if (await db.StagedImportEvents.AnyAsync(item => item.StagedImportId == candidate.Id && item.Actor == actor, ct))
+                    continue;
+
+                db.StagedImportEvents.Add(new StagedImportEvent
+                {
+                    StagedImportId = candidate.Id,
+                    EventType = "OperationalUpdateLinked",
+                    NewStatus = candidate.Status,
+                    PayloadJson = JsonSerializer.Serialize(new
+                    {
+                        request.MessageId,
+                        request.Subject,
+                        request.ReceivedAtUtc,
+                        sourceEvidenceKey = SourceEvidenceKey(request.MessageId),
+                        update = request.BodyText
+                    }),
+                    Note = $"Operational mailbox update linked: {request.Subject}",
+                    Actor = actor
+                });
+                linked++;
+            }
+            catch (JsonException) { }
+        }
+        if (linked > 0) await db.SaveChangesAsync(ct);
+        return linked;
     }
 
     private static string? Clip(string? value, int limit)

@@ -20,6 +20,7 @@ public sealed class CustomerEtaEvidenceController(
     TmsDbContext db,
     AzureMapsRouteClient maps,
     TachoMasterClient tachoMaster,
+    SiteTimingRuleStore timingRuleStore,
     ILogger<CustomerEtaEvidenceController> logger) : ControllerBase
 {
     [HttpGet]
@@ -72,6 +73,9 @@ public sealed class CustomerEtaEvidenceController(
             .OrderBy(load => load.Reference)
             .Take(500)
             .ToList();
+        var timingSites = await db.Sites.AsNoTracking().Where(site => site.Active).Take(5000).ToListAsync(ct);
+        await MasterDetailStore.EnrichSitesAsync(db, timingSites, ct);
+        var timingRules = await timingRuleStore.ReadAsync(ct);
 
         var orderIds = loads.SelectMany(load => load.Stops)
             .Where(stop => stop.OrderId is not null)
@@ -200,8 +204,10 @@ public sealed class CustomerEtaEvidenceController(
                     }
                 }
 
-                var windowStart = order?.DeliveryWindowStartUtc;
-                var windowEnd = order?.DeliveryWindowEndUtc;
+                var timingRule = SiteTimingRuleMatcher.MatchForLoad(load, stop, timingRules, timingSites);
+                var masterWindow = timingRule is null ? new SiteTimingWindow(null, null) : SiteTimingRuleMatcher.DeliveryWindow(timingRule, order?.DeliveryDate ?? planningDate);
+                var windowStart = order?.DeliveryWindowStartUtc ?? masterWindow.Start;
+                var windowEnd = order?.DeliveryWindowEndUtc ?? masterWindow.End;
                 var tachoAssessment = driverEvidence.CardDutyStatus == "Mismatch"
                     ? (Status: "IdentityMismatch", Explanation: "Falcon card identity and TachoMaster duty identity disagree, so legal-hours and break calculations are not trusted for this ETA.")
                     : etaSource == "Live"

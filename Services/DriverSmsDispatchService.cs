@@ -14,9 +14,21 @@ public sealed class DriverSmsDispatchService(TextBeeOptions textBee, AzureSmsDis
 
     public async Task<SmsDispatchResult> SendAsync(string destination, string message, CancellationToken ct)
     {
-        if (!E164.IsMatch(destination)) throw new InvalidOperationException("The assigned driver mobile number must use E.164 format, for example +447700900123.");
-        if (IsTextBeeConfigured) return await SendTextBee(destination, message, ct);
-        return await azureSms.SendAsync(destination, message, ct);
+        var normalisedDestination = NormaliseDestination(destination);
+        if (!E164.IsMatch(normalisedDestination))
+            throw new InvalidOperationException("The assigned driver mobile number is not valid. Use a UK mobile such as 07700900123 or +447700900123.");
+
+        if (IsTextBeeConfigured) return await SendTextBee(normalisedDestination, message, ct);
+        return await azureSms.SendAsync(normalisedDestination, message, ct);
+    }
+
+    internal static string NormaliseDestination(string destination)
+    {
+        var value = Regex.Replace(destination ?? string.Empty, @"[\s()\-.]", string.Empty).Trim();
+        if (value.StartsWith("00", StringComparison.Ordinal)) value = "+" + value[2..];
+        if (value.StartsWith("0", StringComparison.Ordinal) && value.Length >= 10)
+            value = "+44" + value[1..];
+        return value;
     }
 
     private async Task<SmsDispatchResult> SendTextBee(string destination, string message, CancellationToken ct)

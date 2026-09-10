@@ -13,9 +13,14 @@ public static class DriverPopulationRules
         Regex.IsMatch(value, @"\bdrivers?\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) &&
         !Regex.IsMatch(value, @"\b(non[- ]?driver|office|administrator|admin|manager|management|workshop)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
+    public static bool IsSubcontractor(Driver driver) =>
+        string.Equals(driver.DriverType?.Trim(), "Subcontractor", StringComparison.OrdinalIgnoreCase) ||
+        driver.EmployeeNumber?.Trim().StartsWith("SUB-", StringComparison.OrdinalIgnoreCase) == true;
+
     public static bool IsDriver(Driver driver) =>
         !IsOfficeReference(driver.EmployeeNumber) &&
-        (!string.IsNullOrWhiteSpace(driver.TachoCardNumber) ||
+        (IsSubcontractor(driver) ||
+         !string.IsNullOrWhiteSpace(driver.TachoCardNumber) ||
          HasDriverRole(driver.DriverType) || HasDriverRole(driver.DriverGroup) ||
          string.Equals(driver.DriverType?.Trim(), "Agency", StringComparison.OrdinalIgnoreCase) ||
          !string.IsNullOrWhiteSpace(driver.AgencyName));
@@ -23,6 +28,7 @@ public static class DriverPopulationRules
     public static bool IsDriver(TachoLiveWorker worker) =>
         !string.IsNullOrWhiteSpace(worker.CardNumber) || HasDriverRole(worker.WorkerType) ||
         string.Equals(worker.WorkerType?.Trim(), "Agency", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(worker.WorkerType?.Trim(), "Subcontractor", StringComparison.OrdinalIgnoreCase) ||
         !string.IsNullOrWhiteSpace(worker.AgencyName);
 
     public static bool IsSageDriver(SageHrEmployee employee, string? driverTeam, string? positionKeyword) =>

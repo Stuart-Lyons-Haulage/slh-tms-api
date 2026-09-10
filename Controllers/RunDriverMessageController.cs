@@ -35,6 +35,16 @@ public sealed class RunDriverMessageController(
             return Ok(Blocked(request.RouteDrivingMinutes, 0, "Pre-dispatch evidence is incomplete. Review the warnings and explicitly acknowledge them before dispatch.", structural: structural));
 
         var readiness = await AssessReadiness(load, driver, vehicle, request.RouteDrivingMinutes, actualDispatch: false, ct);
+        if (!readiness.CanDispatch && readiness.Status == "Unverified")
+        {
+            var warningStructural = WithUnverifiedWarning(structural, readiness.Explanation);
+            if (!request.AcknowledgeUnverified)
+                return Ok(readiness with { StructuralReadiness = warningStructural });
+
+            readiness = Acknowledged(readiness);
+            return Ok(readiness with { StructuralReadiness = warningStructural });
+        }
+
         return Ok(readiness with { StructuralReadiness = structural });
     }
 
@@ -91,7 +101,9 @@ public sealed class RunDriverMessageController(
                 return BadRequest(new { message = "Pre-dispatch evidence is incomplete. Review and acknowledge the warnings before dispatch.", structural });
 
             var readiness = await AssessReadiness(load, driver, vehicle, routeDrivingMinutes, actualDispatch: true, ct);
-            readiness = readiness with { StructuralReadiness = structural };
+            if (!readiness.CanDispatch && readiness.Status == "Unverified" && request.AcknowledgeUnverified)
+                readiness = Acknowledged(readiness);
+            readiness = readiness with { StructuralReadiness = readiness.Status.StartsWith("Unverified", StringComparison.OrdinalIgnoreCase) ? WithUnverifiedWarning(structural, readiness.Explanation) : structural };
             if (!readiness.CanDispatch) return BadRequest(new { message = readiness.Explanation, readiness });
         }
 
@@ -158,7 +170,11 @@ public sealed class RunDriverMessageController(
 
         await MasterDetailStore.EnrichDriversAsync(db, [driver], ct);
         if (string.IsNullOrWhiteSpace(driver.TachoMasterDriverId) && string.IsNullOrWhiteSpace(driver.TachoCardNumber))
+        {
+            if (DriverPopulationRules.IsSubcontractor(driver))
+                return Unverified(minutes, 0, "This is an external subcontractor and no SLH TachoMaster identity is available. Confirm the subcontractor has independently verified the driver's legal hours, fitness and compliance for this route, then acknowledge this warning to dispatch. The acknowledgement is retained as unverified external-compliance evidence.");
             return Blocked(minutes, 0, "The allocated Driver Master record has no TachoMaster member number or driver card identity. Sync the Driver Master from TachoMaster before dispatch.");
+        }
 
         var nowUtc = DateTimeOffset.UtcNow;
         var ukNow = TimeZoneInfo.ConvertTime(nowUtc, London);
@@ -219,7 +235,7 @@ public sealed class RunDriverMessageController(
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            return Blocked(minutes, 0, "TachoMaster could not be read live, so dispatch has been stopped until the driver's available hours can be confirmed.");
+            return Unverified(minutes, 0, "TachoMaster could not be read live. If you have independently confirmed the driver is fit and legal to start this duty, acknowledge this warning to dispatch; the TMS will retain the warning as unverified evidence.");
         }
 
         var aliases = await ExecutionIdentityResolver.VehicleAliasesAsync(db, [vehicle], ct);
@@ -228,13 +244,13 @@ public sealed class RunDriverMessageController(
             : ExecutionIdentityResolver.VehicleAliasVariants(vehicle.Registration).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var tacho = ExecutionIdentityResolver.MatchLiveDriverIdentityForVehicle(vehicleAliases, driver, statuses);
         if (tacho is null)
-            return Blocked(minutes, 0, "The Driver Master identity is present, but no live driver card, Falcon identity or TachoMaster duty is currently attached to this vehicle. Confirm the driver has signed on in this vehicle before dispatch.");
+            return Unverified(minutes, 0, "The Driver Master identity is present, but no live driver card, Falcon identity or TachoMaster duty is currently attached to this vehicle. If you have confirmed the driver has signed on and is fit and legal to drive, acknowledge this warning to dispatch.");
         if (!ExecutionIdentityResolver.DriverMatches(driver, tacho))
             return Blocked(minutes, 0, $"Live card/driver evidence is present for {tacho.DriverName}, but it does not match the planned driver. Correct the allocation before dispatch.", tacho);
 
         var breakMinutes = RequiredBreakMinutes(tacho, minutes);
         if (tacho.DriveAvailableTodayMinutes is not int driveAvailable)
-            return Blocked(minutes, breakMinutes, $"{IdentitySource(tacho)} confirms {tacho.DriverName}, but remaining drive time is not currently available. Dispatch has been stopped until hours are visible.");
+            return Unverified(minutes, breakMinutes, $"{IdentitySource(tacho)} confirms {tacho.DriverName}, but remaining drive time is not currently available. If you have independently confirmed sufficient legal hours for this route, acknowledge this warning to dispatch.", tacho);
 
         if (minutes > driveAvailable)
             return Blocked(minutes, breakMinutes, $"This run needs about {minutes} minutes driving, but TachoMaster shows {driveAvailable} minutes available today for {tacho.DriverName}. Re-plan before dispatch.", tacho);
@@ -289,6 +305,31 @@ public sealed class RunDriverMessageController(
             ? "Pre-dispatch validation did not pass."
             : string.Join(" ", failures);
     }
+
+    private static PreDispatchReadinessResult WithUnverifiedWarning(PreDispatchReadinessResult structural, string warning)
+    {
+        var checks = structural.Checks
+            .Concat([new PreDispatchCheck("LiveTachoEvidence", false, "Warning", warning)])
+            .ToList();
+        return structural with
+        {
+            Classification = "Unverified",
+            CanDispatch = true,
+            RequiresAcknowledgement = true,
+            Checks = checks
+        };
+    }
+
+    private static RunDispatchReadinessResponse Acknowledged(RunDispatchReadinessResponse readiness)
+        => readiness with
+        {
+            CanDispatch = true,
+            Status = "UnverifiedAcknowledged",
+            Explanation = $"Planner acknowledged incomplete live Tacho/Falcon evidence. {readiness.Explanation}"
+        };
+
+    private static RunDispatchReadinessResponse Unverified(int routeDrivingMinutes, int breakMinutes, string explanation, TachoVehicleDriverStatus? tacho = null)
+        => new(false, "Unverified", explanation, routeDrivingMinutes, breakMinutes, tacho?.DriverName, tacho?.VehicleCode, tacho?.DutyStartUtc, tacho?.DriveAvailableTodayMinutes, tacho?.WorkAvailableWeekMinutes);
 
     private static RunDispatchReadinessResponse Blocked(int routeDrivingMinutes, int breakMinutes, string explanation, TachoVehicleDriverStatus? tacho = null, PreDispatchReadinessResult? structural = null)
         => new(false, "Blocked", explanation, routeDrivingMinutes, breakMinutes, tacho?.DriverName, tacho?.VehicleCode, tacho?.DutyStartUtc, tacho?.DriveAvailableTodayMinutes, tacho?.WorkAvailableWeekMinutes, structural);

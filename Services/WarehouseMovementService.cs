@@ -89,7 +89,7 @@ public sealed class WarehouseMovementService(TmsDbContext db)
         var names = new[] { canonical.Name, canonical.ExternalCode, canonical.DriverTextName, canonical.Aliases, "Barnham Coldstore", "Stuart Lyons Distribution", "Stuart Lions Distribution" }
             .Concat(mappings.SelectMany(x => new[] { x.ExternalKey, x.ExternalLabel, x.NormalizedExternalValue }));
         return names.Where(x => !string.IsNullOrWhiteSpace(x))
-            .SelectMany(x => x!.Split([',', ';', '|', '\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            .SelectMany(x => x!.Split(new char[] { ',', ';', '|', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
             .Select(Normalize).Where(x => x.Length > 2).ToHashSet(StringComparer.Ordinal);
     }
     private static bool MatchesWarehouse(string? value, IReadOnlySet<string> warehouseNames)

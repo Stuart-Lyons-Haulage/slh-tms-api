@@ -14,6 +14,7 @@ public sealed class TmsMetrics
     private readonly Meter _meter = new(MeterName, "1.0.0");
     private readonly Histogram<double> _apiEndpointLatency;
     private readonly Histogram<double> _sqlQueryLatency;
+    private readonly Histogram<double> _dependencyLatency;
     private readonly Counter<long> _emailOrderIntakeSuccess;
     private readonly Counter<long> _emailOrderIntakeFailure;
     private readonly Counter<long> _importsProcessed;
@@ -30,6 +31,7 @@ public sealed class TmsMetrics
     {
         _apiEndpointLatency = _meter.CreateHistogram<double>("api_endpoint_latency_ms", "ms", "SLH TMS API endpoint latency.");
         _sqlQueryLatency = _meter.CreateHistogram<double>("sql_query_latency_ms", "ms", "EF Core SQL command latency.");
+        _dependencyLatency = _meter.CreateHistogram<double>("dependency_request_latency_ms", "ms", "Outbound provider request latency.");
         _emailOrderIntakeSuccess = _meter.CreateCounter<long>("email_order_intake_success_total", "requests", "Successful mailbox order intake requests.");
         _emailOrderIntakeFailure = _meter.CreateCounter<long>("email_order_intake_failure_total", "requests", "Failed mailbox order intake requests.");
         _importsProcessed = _meter.CreateCounter<long>("import_processed_total", "records", "Validated import records evaluated for staging.");
@@ -51,6 +53,12 @@ public sealed class TmsMetrics
 
     public void RecordSqlQueryLatency(double milliseconds, string operation) =>
         _sqlQueryLatency.Record(milliseconds, new KeyValuePair<string, object?>("db.operation.name", operation));
+
+    public void RecordDependencyLatency(double milliseconds, string dependency, string method, int statusCode) =>
+        _dependencyLatency.Record(milliseconds,
+            new KeyValuePair<string, object?>("dependency.name", dependency),
+            new KeyValuePair<string, object?>("http.request.method", method),
+            new KeyValuePair<string, object?>("http.response.status_code", statusCode));
 
     public void RecordEmailOrderIntake(bool success)
     {

@@ -34,9 +34,14 @@
               "mailboxAddress": "@parameters('SLH_InfoMailboxUPN')",
               "folderId": "Inbox",
               "importance": "Any",
-              "includeAttachments": false
+              "includeAttachments": true
             }
           },
+          "conditions": [
+            {
+              "expression": "@not(and(endsWith(toLower(coalesce(triggerOutputs()?['body/from'],'')), '@lyonshaulage.com'), or(contains(toLower(coalesce(triggerOutputs()?['body/subject'],'')), 'load plan'), contains(toLower(coalesce(triggerOutputs()?['body/subject'],'')), 'loading plan'), contains(toLower(coalesce(triggerOutputs()?['body/subject'],'')), 'lyons collections'), contains(toLower(coalesce(triggerOutputs()?['body/bodyPreview'],'')), 'please find attached load plan'), contains(toLower(coalesce(triggerOutputs()?['body/bodyPreview'],'')), 'load plan attached'))))"
+            }
+          ],
           "runtimeConfiguration": { "concurrency": { "runs": 4 } }
         }
       },
@@ -101,7 +106,7 @@
                   "inputs": {
                     "name": "varAttachments",
                     "value": {
-                      "name": "@items('For_Each_Source_Attachment')?['name']",
+                      "name": "@coalesce(items('For_Each_Source_Attachment')?['name'],items('For_Each_Source_Attachment')?['displayName'],items('For_Each_Source_Attachment')?['id'],'unnamed-attachment')",
                       "contentType": "@coalesce(items('For_Each_Source_Attachment')?['contentType'],'application/octet-stream')",
                       "contentBase64": "@outputs('Get_Attachment_Content')?['body/contentBytes']",
                       "isInline": "@coalesce(items('For_Each_Source_Attachment')?['isInline'],false)",

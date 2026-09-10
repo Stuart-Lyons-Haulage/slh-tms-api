@@ -26,9 +26,6 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
             db.ChangeTracker.Clear();
         }
 
-        // A planning-register copy exists when a resilient write had to bypass an
-        // unavailable core planning schema. It is therefore the authoritative
-        // version for that run and must replace, not lose to, an older core row.
         foreach (var load in await PlanningRegisterStore.ReadLoadsAsync(db, date, ct))
             merged[load.Id] = load;
 
@@ -159,6 +156,10 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
         var vehicle = load.VehicleId is null ? null : await db.Vehicles.AsNoTracking().SingleOrDefaultAsync(x => x.Id == load.VehicleId, ct);
         var trailer = load.TrailerId is null ? null : await db.Trailers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == load.TrailerId, ct);
         var orderedStops = OperationalStopOrdering.Order(load.Stops);
+        var deliveryByOrder = orderedStops
+            .Where(stop => stop.OrderId is not null && stop.Name.StartsWith("Deliver", StringComparison.OrdinalIgnoreCase))
+            .GroupBy(stop => stop.OrderId!.Value)
+            .ToDictionary(group => group.Key, group => group.OrderBy(stop => stop.Sequence).Last().Name);
 
         return Ok(new
         {
@@ -167,7 +168,17 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
             load.PlanningDate,
             load.Status,
             driver = driver is null ? null : new { driver.DisplayName, driver.EmployeeNumber, driver.MobileNumber },
-            vehicle = vehicle is null ? null : new { vehicle.Registration, vehicle.FleetNumber },
+            vehicle = vehicle is null ? null : new
+            {
+                vehicle.Registration,
+                vehicle.FleetNumber,
+                vehicle.FuelProvider,
+                vehicle.FuelPin,
+                vehicle.ShellCard,
+                vehicle.BpRedCard,
+                vehicle.BpPlainCard,
+                vehicle.FuelCardLastFour
+            },
             trailer = trailer is null ? null : new { trailer.TrailerNumber, trailer.Type },
             stops = orderedStops.Select((stop, index) => new
             {
@@ -182,11 +193,15 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
                 {
                     order.Reference,
                     order.CustomerCode,
+                    order.Pallets,
+                    order.CollectionDate,
+                    order.DeliveryDate,
                     order.SellerName,
                     order.MarketName,
                     order.StallNumber,
                     order.DriverInstructions,
-                    order.MapLink
+                    order.MapLink,
+                    deliveryName = deliveryByOrder.GetValueOrDefault(orderId)
                 } : null
             })
         });
@@ -213,9 +228,6 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
 
     private async Task<(Load? Load, bool Register)> FindLoadAsync(Guid id, bool includeStops, bool tracking, CancellationToken ct)
     {
-        // Once a run has a planning-register copy, that copy contains the latest
-        // resilient allocation / stop edits. Prefer it consistently for reads and
-        // subsequent writes so a stale core row cannot overwrite the saved state.
         var registered = await PlanningRegisterStore.GetLoadAsync(db, id, ct);
         if (registered is not null)
         {

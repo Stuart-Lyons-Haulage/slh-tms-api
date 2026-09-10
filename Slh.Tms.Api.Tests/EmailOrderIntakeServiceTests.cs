@@ -21,6 +21,18 @@ public sealed class EmailOrderIntakeServiceTests
     }
 
     [Fact]
+    public void BarfootsReadyForCollectionStatus_DoesNotCreateAnotherOrder()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-waitrose-ready", null, "info@lyonshaulage.com", "Goods.INNV@barfoots.co.uk", "Goods IN NV",
+            "Waitrose", DateTimeOffset.Parse("2026-09-08T11:59:40Z"),
+            "Waitrose is ready to be collected from Leythorne.", null, "https://outlook.example/status", null));
+
+        Assert.Empty(result.Orders);
+        Assert.Contains("Operational request", result.IgnoredReason);
+    }
+
+    [Fact]
     public void TrayCollectionBody_CreatesPendingOrderShape()
     {
         var result = service.Parse(new MailboxEmailIntakeRequest(
@@ -121,6 +133,37 @@ public sealed class EmailOrderIntakeServiceTests
     }
 
     [Fact]
+    public void LangmeadHamFarmBooking_IsStagedAsLangmeadsOrder()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "langmead-ham-09092026", null, "info@lyonshaulage.com", "AndrejsLupins@langmeadherbs.co.uk", "Andrejs Lupins",
+            "Ham Farm to NISA Transport WED 09/09/2026 depot", DateTimeOffset.Parse("2026-09-08T13:02:00Z"),
+            "Good afternoon, Please find attached Ham Farm Langmead Herbs booking form for NISA transport WED 09/09/2026 depot. Product will be ready for collection at 16:30. 2 pallets. Collection from Ham Farm.", null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("LANGMEADS", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("Ham Farm", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal(2, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.Equal("2026-09-09", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Contains("16:30", order.Payload.GetProperty("driverInstructions").GetString());
+    }
+
+    [Fact]
+    public void WaltonFarmAldiBooking_IsStagedAsLangmeadsOrder()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "walton-aldi-09092026", null, "info@lyonshaulage.com", "ewa@langmeadherbs.co.uk", "Ewa Kuszczak",
+            "Aldi Order 09/09/2026", DateTimeOffset.Parse("2026-09-08T12:41:00Z"),
+            "Please find attached the Walton Farm booking forms for Aldi transport 09/09/2026 depot day. 2 pallets from Walton Farm.", null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("LANGMEADS", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("Walton Farm", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Aldi", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal(2, order.Payload.GetProperty("pallets").GetInt32());
+    }
+
+    [Fact]
     public void HallHunterDirectDepotDelivery_UsesSeparateCollectionAndDeliveryDates()
     {
         var result = service.Parse(new MailboxEmailIntakeRequest(
@@ -177,6 +220,83 @@ public sealed class EmailOrderIntakeServiceTests
             Assert.Equal("2026-08-26", order.Payload.GetProperty("collectionDate").GetString());
             Assert.Equal("2026-08-27", order.Payload.GetProperty("deliveryDate").GetString());
         });
+    }
+
+    [Fact]
+    public void BarfootsWaitroseChainedWaves_StageEachWaveWithInheritedCollectionSite()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-barfoots-waitrose-0909", null, "info@lyonshaulage.com", "Agnieszka.Zawislan@barfoots.co.uk", "Agnieszka Zawislan",
+            "Waitrose from Sefter & Leythorne for depot 09/09/26", DateTimeOffset.Parse("2026-09-08T09:49:54Z"),
+            """
+            Please see attached Waitrose confirmed pallet booking:
+            Aylesford WAVE 1 from Sefter 2 pallets PO O78442 & Aylesford Wave 3 6 pallets PO O78431.
+            Leyland WAVE 1 from Sefter 1 pallet PO B78737 & Leyland Wave 3 2 pallets PO B78749.
+            """, null, "https://outlook.example/waitrose", null),
+            ["Sefter", "Leythorne", "Aylesford", "Leyland"]);
+
+        Assert.Equal(4, result.Orders.Count);
+        Assert.Equal(new[] { "B78737", "B78749", "O78431", "O78442" },
+            result.Orders.Select(order => order.Payload.GetProperty("customerPo").GetString()).Order().ToArray());
+        Assert.All(result.Orders, order =>
+        {
+            Assert.Equal("WAITROSE", order.Payload.GetProperty("customerCode").GetString());
+            Assert.Equal("Sefter", order.Payload.GetProperty("sellerName").GetString());
+            Assert.Equal("2026-09-08", order.Payload.GetProperty("collectionDate").GetString());
+            Assert.Equal("2026-09-09", order.Payload.GetProperty("deliveryDate").GetString());
+            Assert.Equal("message-barfoots-waitrose-0909", order.Payload.GetProperty("sourceMessageId").GetString());
+        });
+    }
+
+    [Fact]
+    public void BarfootsWaitroseAmendment_KeepsStableIdentityWhenPalletsChange()
+    {
+        EmailIntakeParseResult Parse(string messageId, int pallets) => service.Parse(new MailboxEmailIntakeRequest(
+            messageId, null, "info@lyonshaulage.com", "Agnieszka.Zawislan@barfoots.co.uk", "Agnieszka Zawislan",
+            "Waitrose from Sefter for depot 09/09/26", DateTimeOffset.Parse("2026-09-08T09:49:54Z"),
+            $"Aylesford WAVE 1 from Sefter {pallets} pallets PO O78442.", null, null, null),
+            ["Sefter", "Aylesford"]);
+
+        var original = Assert.Single(Parse("message-original", 2).Orders);
+        var amended = Assert.Single(Parse("message-amended", 3).Orders);
+
+        Assert.Equal("WAITROSE", amended.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal(original.NaturalKey, amended.NaturalKey);
+        Assert.NotEqual(original.Payload.GetProperty("pallets").GetInt32(), amended.Payload.GetProperty("pallets").GetInt32());
+    }
+
+    [Fact]
+    public void BarfootsWholesaleWorkbook_KeepsPhysicalMarketSeparateFromMarketCustomer()
+    {
+        var request = new MailboxEmailIntakeRequest(
+            "message-wholesale-0909", null, "info@lyonshaulage.com", "Mariela.Popova@barfoots.co.uk", "Mariela Popova",
+            "Wholesale Market Pallet Bookings for delivery on 09/09/26", DateTimeOffset.Parse("2026-09-08T10:28:35Z"),
+            "Please find attached the Wholesale Market pallet bookings for delivery 09/09/26.", null,
+            "https://outlook.example/markets", null);
+        var rows = new List<object?[]>
+        {
+            new object?[] { "COLLECTION SEFTER", null, null, null, null, null, null, null },
+            new object?[] { "Market", "Customer", "Delivery addess", "Delivery Date", "Delivery Time", "Temp.", "No. of Pallets", "SO" },
+            new object?[] { "NEW COVENT GARDEN", "Premier Foods Exotics Dept. (PFW01)", "Units 417-418 New Covent Garden Market SW8 5EQ", new DateTime(2026, 9, 9), "by 1-3am.", "+3", 2d, 3550871d },
+            new object?[] { null, "Premier Foods Veg & Salad Dept. (PFW02)", "Units 301-313 New Covent Garden Market SW8 5EQ", null, "by 1-3am.", "+3", 8d, "3549110/ 3550872" },
+            new object?[] { "NEW SPITALFIELDS MATKET", "Canim Fruit & Veg Ltd(CANIM)", "Stand 64-65 New Spitalfields Market E10 5SH", null, "by 1-3am.", "+3", 3d, null },
+            new object?[] { "COLLECTION LEYTHORNE", null, null, null, null, null, null, null },
+            new object?[] { "NEW SPITALFIELDS MATKET", "Canim Fruit & Veg Ltd(CANIM)", "Stand 64-65 New Spitalfields Market E10 5SH", new DateTime(2026, 9, 9), "by 1-3am.", "+3", 3d, null }
+        };
+
+        var orders = EmailOrderIntakeService.ParseBarfootsWholesaleMarketRows(request, "LYONS - Wholesale Booking Spreadsheet 09.09.xlsx", "Sheet1", rows);
+
+        Assert.Equal(4, orders.Count);
+        var covent = Assert.Single(orders, order => order.Payload.GetProperty("customerPo").GetString() == "3550871");
+        Assert.Equal("BARFOOTS", covent.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("Sefter", covent.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("New Covent Garden", covent.Payload.GetProperty("marketName").GetString());
+        Assert.Equal("Premier Foods Exotics Dept. (PFW01)", covent.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal("Units 417-418 New Covent Garden Market SW8 5EQ", covent.Payload.GetProperty("deliveryAddress").GetString());
+        Assert.Equal("Sheet1", covent.Payload.GetProperty("sourceSheet").GetString());
+        Assert.Equal(3, covent.Payload.GetProperty("sourceRow").GetInt32());
+        Assert.Equal(2, orders.Count(order => order.Payload.GetProperty("sellerName").GetString() == "Sefter" && order.Payload.GetProperty("marketName").GetString() == "New Covent Garden"));
+        Assert.Single(orders, order => order.Payload.GetProperty("sellerName").GetString() == "Leythorne");
     }
 
     [Fact]
@@ -400,5 +520,38 @@ public sealed class EmailOrderIntakeServiceTests
 
         Assert.Empty(result.Orders);
         Assert.Contains("Operational request", result.IgnoredReason);
+    }
+
+    [Fact]
+    public void AndoverAndAvonmouthAttachmentStyle_IsSplitIntoTwoOrders()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-depot-split", null, "info@lyonshaulage.com", "loads@example.com", "Leythorne",
+            "Waitrose depot collections 09/09/26", DateTimeOffset.Parse("2026-09-08T09:00:00Z"),
+            "Please arrange 1 pallet to Andover and 2 pallets to Avonmouth for 09/09/26.",
+            null, null, null));
+
+        Assert.Equal(2, result.Orders.Count);
+        Assert.Equal(new[] { "Andover", "Avonmouth" }, result.Orders.Select(x => x.Payload.GetProperty("stallNumber").GetString()).OrderBy(x => x));
+        Assert.Equal(new[] { 1, 2 }, result.Orders.Select(x => x.Payload.GetProperty("pallets").GetInt32()).OrderBy(x => x));
+    }
+
+    [Fact]
+    public void WholesaleMarketWithoutCollectionDate_StagesOvernightDepartureOnPreviousDay()
+    {
+        var rows = new List<object?[]>
+        {
+            new[] { "COLLECTION Sefter", "", "", "", "" },
+            new[] { "Market", "Customer", "Delivery addess", "Pallets", "Delivery Date" },
+            new[] { "New Covent Garden", "Premier Foods", "PFW01", "2", "10/09/2026" }
+        };
+        var request = new MailboxEmailIntakeRequest(
+            "message-market-overnight", null, "info@lyonshaulage.com", "mariela.popova@barfoots.co.uk", "Mariela Popova",
+            "Wholesale Market Pallet Bookings for delivery on 10/09/26", DateTimeOffset.Parse("2026-09-09T10:00:00Z"),
+            "Wholesale Market Pallet Bookings", null, null, null);
+
+        var order = Assert.Single(EmailOrderIntakeService.ParseBarfootsWholesaleMarketRows(request, "Wholesale Market Pallet Bookings.xlsx", "Sheet1", rows));
+        Assert.Equal("2026-09-09", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("2026-09-10", order.Payload.GetProperty("deliveryDate").GetString());
     }
 }

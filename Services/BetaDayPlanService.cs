@@ -85,21 +85,17 @@ public sealed record BetaDayPlanComparisonResult(
     BetaPlannerPlanResult Lyons,
     BetaDayPlanReconciliation Reconciliation);
 
-/// <summary>
-/// Read-only Beta planning facade. It builds a fresh day from current PlannerReady order
-/// revisions and promoted/live TransportOrders, routes with Azure Maps HGV evidence, and can
-/// compare that independent plan with a Lyons Collections Plan without mutating Planner/Dispatch.
-/// </summary>
 public sealed class BetaDayPlanService(
     TmsDbContext db,
     BetaDayPlanBuilder builder,
     IBetaHgvRouteProvider routeProvider,
-    ILogger<BetaDayPlanService> logger)
+    ILogger<BetaDayPlanService> logger,
+    SiteTimingRuleStore timingRuleStore)
 {
     private static readonly string[] ReferenceKeys = ["reference", "orderReference", "po", "poNumber", "purchaseOrder", "loadReference"];
     private static readonly string[] CollectionKeys = ["collectionSite", "collectionLocation", "collection", "collectionAddress", "from"];
     private static readonly string[] DeliveryKeys = ["deliverySite", "deliveryLocation", "destination", "delivery", "deliveryAddress", "to"];
-    private static readonly string[] PalletTypeKeys = ["palletType", "pallet_type", "handlingUnitType"];
+    private static readonly string[] PalletTypeKeys = ["palletType", "pallet_type", "handlingUnitType", "unitType", "handlingUnit"];
     private static readonly string[] CollectionTimeKeys = ["collectionTimeFrom", "collectionTime", "collectFrom", "collectionFrom"];
 
     public async Task<BetaDayPlanResult> BuildDayAsync(DateOnly planningDate, CancellationToken ct)
@@ -125,8 +121,11 @@ public sealed class BetaDayPlanService(
         var routingComplete = resultRuns.Count > 0 && resultRuns.All(run => run.RoutingAvailable);
         var warnings = new List<string>();
         var unmapped = inputs.Count(order => !order.RoutingMapped);
+        var unquantified = inputs.Count(order => order.Pallets <= 0);
         if (unmapped > 0)
             warnings.Add($"{unmapped} order line(s) are included in the day but need Site Master coordinates before a complete HGV mileage comparison is possible.");
+        if (unquantified > 0)
+            warnings.Add($"{unquantified} movement(s) have no numeric pallet quantity. They remain in routing and reconciliation but are excluded from pallet-capacity utilisation.");
         if (!routingComplete && resultRuns.Count > 0)
             warnings.Add("Whole-day mileage is partial because at least one run has no live Azure Maps HGV route. No Haversine/crow-fly replacement is used.");
         if (inputs.Count == 0)
@@ -141,7 +140,7 @@ public sealed class BetaDayPlanService(
         return new BetaDayPlanResult(
             planningDate,
             DateTimeOffset.UtcNow,
-            "Live Azure Maps fastest commercial truck route with traffic. Approximate/Haversine evidence is excluded from optimisation decisions.",
+            "Live Azure Maps fastest commercial HGV route with traffic, plus configured dwell and traffic-buffer assumptions. Approximate/Haversine evidence is excluded from optimisation decisions.",
             inputs.Select(input => input.SourceLineId).Distinct().Count(),
             plannedSourceLines,
             inputs.Where(input => !input.RoutingMapped).Select(input => input.SourceLineId).Distinct().Count(),
@@ -248,8 +247,7 @@ public sealed class BetaDayPlanService(
             ? []
             : await db.OrderSourceLines.AsNoTracking()
                 .Where(line => revisionIds.Contains(line.RevisionId) &&
-                    (line.CollectionDate == planningDate || (line.CollectionDate == null && line.DeliveryDate == planningDate)) &&
-                    line.Pallets > 0)
+                    (line.CollectionDate == planningDate || (line.CollectionDate == null && line.DeliveryDate == planningDate)))
                 .OrderBy(line => line.CollectionTimeFrom).ThenBy(line => line.SourceRowKey)
                 .ToListAsync(ct);
 
@@ -263,6 +261,7 @@ public sealed class BetaDayPlanService(
             .GroupBy(order => order.SourceMovementId!.Value)
             .ToDictionary(group => group.Key, group => group.OrderByDescending(order => order.CreatedAtUtc).First());
         var sites = await SitesAsync(ct);
+        var timingRules = await timingRuleStore.ReadAsync(ct);
         var inputs = new List<BetaDayOrderInput>();
         var representedMovementIds = new HashSet<Guid>();
 
@@ -274,7 +273,7 @@ public sealed class BetaDayPlanService(
             var collectionName = First(line.CollectionSite, live?.SellerName);
             var deliveryName = First(live?.MarketName, line.DeliverySite);
             var reference = First(live?.Reference, JsonString(line.PayloadJson, ReferenceKeys), line.LoadReference, line.SourceRowKey) ?? line.SourceRowKey;
-            inputs.Add(ToInput(
+            inputs.Add(ApplyTiming(ToInput(
                 live?.Id ?? line.Id,
                 line.Id,
                 reference,
@@ -284,12 +283,9 @@ public sealed class BetaDayPlanService(
                 line.CollectionTimeFrom,
                 collectionName,
                 deliveryName,
-                sites));
+                sites), line.CollectionDate ?? planningDate, timingRules, sites));
         }
 
-        // Live promoted orders are included as a safety net when an older/alternate intake path
-        // did not materialise OrderSourceLines. This is important for proving that the Beta day
-        // did not quietly omit work before comparing it with the human Lyons sheet.
         var fallbackOrders = liveOrders
             .Where(order => order.SourceMovementId is null || !representedMovementIds.Contains(order.SourceMovementId.Value))
             .ToList();
@@ -304,7 +300,7 @@ public sealed class BetaDayPlanService(
             var collectionName = First(JsonString(payload, CollectionKeys), order.SellerName);
             var deliveryName = First(order.MarketName, JsonString(payload, DeliveryKeys));
             var collectionTime = ParseTime(JsonString(payload, CollectionTimeKeys));
-            inputs.Add(ToInput(
+            inputs.Add(ApplyTiming(ToInput(
                 order.Id,
                 order.Id,
                 order.Reference,
@@ -314,10 +310,10 @@ public sealed class BetaDayPlanService(
                 collectionTime,
                 collectionName,
                 deliveryName,
-                sites));
+                sites), order.CollectionDate, timingRules, sites));
         }
 
-        return inputs.Where(input => input.Pallets > 0).ToList();
+        return inputs;
     }
 
     private static BetaDayOrderInput ToInput(
@@ -347,12 +343,15 @@ public sealed class BetaDayPlanService(
         var delivery = deliveryMapped
             ? new BetaRoutePoint(deliverySite!.DriverTextName ?? deliverySite.Name, deliverySite.Latitude!.Value, deliverySite.Longitude!.Value)
             : new BetaRoutePoint(deliveryName ?? "Delivery unmapped", 0m, 0m);
+        var period = IsWave3(customerCode, palletType, collectionName, deliveryName, collectionTime)
+            ? "W3"
+            : collectionTime is { } time && time >= new TimeOnly(17, 0) ? "PM" : "AM";
         return new BetaDayOrderInput(
             orderId,
             sourceLineId,
             reference,
             customerCode,
-            collectionTime is { } time && time >= new TimeOnly(17, 0) ? "PM" : "AM",
+            period,
             palletType,
             pallets,
             collectionTime,
@@ -360,6 +359,30 @@ public sealed class BetaDayPlanService(
             delivery,
             mapped,
             warning);
+    }
+
+    private static BetaDayOrderInput ApplyTiming(BetaDayOrderInput input, DateOnly date, IReadOnlyList<SiteTimingRule> rules, IReadOnlyList<Site> sites)
+    {
+        var rule = rules.FirstOrDefault(candidate => SiteTimingRuleMatcher.Match(candidate, input.Collection.Name, input.Delivery.Name, input.PalletType, sites));
+        if (rule is null) return input;
+        var collection = SiteTimingRuleMatcher.CollectionWindow(rule, date);
+        var deadline = SiteTimingRuleMatcher.DeliveryWindow(rule, date).End;
+        var zone = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+        static TimeOnly? Local(DateTimeOffset? value, TimeZoneInfo zone) => value is null ? null : TimeOnly.FromDateTime(TimeZoneInfo.ConvertTime(value.Value, zone).DateTime);
+        return input with
+        {
+            CollectionTimeFrom = Local(collection.Start, zone) ?? input.CollectionTimeFrom,
+            CollectionTimeTo = Local(collection.End, zone),
+            DeliveryDeadline = Local(deadline, zone),
+            TimingRule = rule.RouteCombination
+        };
+    }
+
+    private static bool IsWave3(string? customerCode, string? unit, string? collection, string? delivery, TimeOnly? collectionTime)
+    {
+        var text = string.Join(" ", new[] { customerCode, unit, collection, delivery }.Where(value => !string.IsNullOrWhiteSpace(value))).ToUpperInvariant();
+        if (text.Contains("MARKET") || text.Contains("WAVE 3") || text.Contains("WAVE3")) return true;
+        return text.Contains("WAITROSE") && collectionTime is { } time && time >= new TimeOnly(17, 0);
     }
 
     private async Task<List<Site>> SitesAsync(CancellationToken ct)

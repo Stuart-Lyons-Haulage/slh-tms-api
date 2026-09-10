@@ -16,6 +16,7 @@ public sealed class OperationsController(
     TachoMasterClient tachoMaster,
     DotTrackingClient trackingClient,
     DotTrackingTelemetryStore telemetryStore,
+    SiteTimingRuleStore timingRuleStore,
     ILogger<OperationsController> logger,
     IConfiguration configuration) : ControllerBase
 {
@@ -95,6 +96,9 @@ public sealed class OperationsController(
         }
  
         var now = DateTimeOffset.UtcNow;
+        var timingSites = await db.Sites.AsNoTracking().Where(site => site.Active).Take(5000).ToListAsync(ct);
+        await MasterDetailStore.EnrichSitesAsync(db, timingSites, ct);
+        var timingRules = await timingRuleStore.ReadAsync(ct);
         var records = new List<DeliveryEtaResponse>();
  
         foreach (var load in loads)
@@ -153,8 +157,10 @@ public sealed class OperationsController(
                         source = eta is null ? "Unavailable" : "Planned";
                     }
                 }
-                var windowStart = order?.DeliveryWindowStartUtc;
-                var windowEnd = order?.DeliveryWindowEndUtc;
+                var timingRule = SiteTimingRuleMatcher.MatchForLoad(load, stop, timingRules, timingSites);
+                var masterWindow = timingRule is null ? new SiteTimingWindow(null, null) : SiteTimingRuleMatcher.DeliveryWindow(timingRule, order?.DeliveryDate ?? planningDate);
+                var windowStart = order?.DeliveryWindowStartUtc ?? masterWindow.Start;
+                var windowEnd = order?.DeliveryWindowEndUtc ?? masterWindow.End;
                 var tachoAssessment = source == "Live"
                     ? TachoAssessment(tacho, cumulativeDrivingMinutes, breakDelayMinutes)
                     : source == "Estimated"

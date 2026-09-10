@@ -99,6 +99,7 @@ public sealed class DriverDispatchController(
             // Sage HR still supplies leave/availability, but a roster mismatch must never hide
             // a driver who is already allocated to today's plan.
             if (currentDayDriverIds.Contains(driver.Id)) return true;
+            if (DriverPopulationRules.IsSubcontractor(driver)) return true;
             if (persistedAgency) return operationallyRelevant;
             if (sage.Available) return sageDriver;
             return persistedCasual || PersistedEmployee(driver) || operationallyRelevant;
@@ -115,6 +116,7 @@ public sealed class DriverDispatchController(
             var operationallyRelevant = roster.ContainsKey(driver.Id) || currentDayDriverIds.Contains(driver.Id) ||
                                         previousWeekDriverIds.Contains(driver.Id) || regularRecentDriverIds.Contains(driver.Id);
             if (currentDayDriverIds.Contains(driver.Id)) return true;
+            if (DriverPopulationRules.IsSubcontractor(driver)) return true;
             if (IsAgency(driver)) return operationallyRelevant;
             if (sage.Available) return sageDriver;
 
@@ -191,6 +193,10 @@ public sealed class DriverDispatchController(
                 assistantScore = assisted.Score;
                 suggestion = assisted.Reason;
             }
+            else if (DriverPopulationRules.IsSubcontractor(driver))
+            {
+                suggestion = $"Subcontractor · {driver.DriverGroup ?? driver.DisplayName} · allocate when external cover is required.";
+            }
             else if (string.Equals(driver.Coding?.Trim(), "3", StringComparison.OrdinalIgnoreCase))
             {
                 suggestion = $"Day {dayNumber} · Code 3 · keep to straightforward work.";
@@ -249,12 +255,15 @@ public sealed class DriverDispatchController(
             weekEnd,
             generatedAtUtc = DateTimeOffset.UtcNow,
             leaveSource = sage.Available ? "Sage HR" : "Unavailable",
-            driverPopulationSource = sage.Available ? "Sage HR driver roles + relevant Agency" : "Canonical driver evidence + relevant Agency fallback",
+            driverPopulationSource = sage.Available ? "Sage HR driver roles + relevant Agency + active Subcontractors" : "Canonical driver evidence + relevant Agency + active Subcontractors",
             dayNumberSource = tachoDays.Available
                 ? "TachoMaster duty history / weekly-rest cycle; TMS executed-run history only where no usable Tacho identity is available"
                 : "TachoMaster unavailable; TMS executed-run history fallback",
             assistantSource = "Explainable matching using live/last Falcon position, work-day continuity, Driver skills/coding, route direction and learned regular vehicle preference",
-            drivers = rows.OrderBy(row => TypeOrder(row.DriverType)).ThenBy(row => row.DisplayName),
+            drivers = rows
+                .OrderByDescending(row => row.AssignedLoadId is not null)
+                .ThenBy(row => TypeOrder(row.DriverType))
+                .ThenBy(row => row.DisplayName),
             vehicles,
             trailers,
             loads = loads.Select(load => new
@@ -588,14 +597,14 @@ public sealed class DriverDispatchController(
             if (clean.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return clean[prefix.Length..].Trim();
         return clean;
     }
-    private static string CanonicalType(Driver driver) => IsAgency(driver) ? "Agency" : driver.DriverType?.Contains("casual", StringComparison.OrdinalIgnoreCase) == true || driver.DriverType?.Contains("zero", StringComparison.OrdinalIgnoreCase) == true ? "Casual" : "Employed";
+    private static string CanonicalType(Driver driver) => DriverPopulationRules.IsSubcontractor(driver) ? "Subcontractor" : IsAgency(driver) ? "Agency" : driver.DriverType?.Contains("casual", StringComparison.OrdinalIgnoreCase) == true || driver.DriverType?.Contains("zero", StringComparison.OrdinalIgnoreCase) == true ? "Casual" : "Employed";
     private static bool IsAgency(Driver driver) => new[] { driver.DriverType, driver.DriverGroup, driver.AgencyName }.Any(value => value?.Contains("agency", StringComparison.OrdinalIgnoreCase) == true) || string.Equals(driver.Coding?.Trim(), "4", StringComparison.OrdinalIgnoreCase);
     private static bool PersistedAgency(Driver driver) => new[] { driver.DriverType, driver.DriverGroup }.Any(value => value?.Contains("agency", StringComparison.OrdinalIgnoreCase) == true);
     private static bool PersistedEmployee(Driver driver) => driver.DriverType?.Contains("employ", StringComparison.OrdinalIgnoreCase) == true || driver.DriverType?.Contains("casual", StringComparison.OrdinalIgnoreCase) == true || driver.DriverType?.Contains("zero", StringComparison.OrdinalIgnoreCase) == true;
     private static bool IsOperationalDriverGroup(string? value) =>
         value?.Contains("driver", StringComparison.OrdinalIgnoreCase) == true ||
         value?.Contains("tramp", StringComparison.OrdinalIgnoreCase) == true;
-    private static int TypeOrder(string type) => type == "Employed" ? 0 : type == "Casual" ? 1 : 2;
+    private static int TypeOrder(string type) => type == "Employed" ? 0 : type == "Casual" ? 1 : type == "Agency" ? 2 : type == "Subcontractor" ? 3 : 4;
     private static string? CanonicalRequestedType(string? value)
     {
         if (string.Equals(value?.Trim(), "Agency", StringComparison.OrdinalIgnoreCase)) return "Agency";

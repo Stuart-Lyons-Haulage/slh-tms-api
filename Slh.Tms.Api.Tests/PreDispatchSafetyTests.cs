@@ -34,7 +34,7 @@ public sealed class PreDispatchSafetyTests
     }
 
     [Fact]
-    public async Task Capacity_overrun_is_blocked_without_mutating_run_status()
+    public async Task Capacity_overrun_requires_planner_acknowledgement_instead_of_hard_blocking_dispatch()
     {
         var options = new DbContextOptionsBuilder<TmsDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
         await using var db = new TmsDbContext(options);
@@ -52,9 +52,33 @@ public sealed class PreDispatchSafetyTests
         var readiness = await new PreDispatchSafetyService(db, new FixedTimeProvider(EvidenceAt))
             .EvaluateAsync(load.Id, CancellationToken.None);
 
+        Assert.Equal("Unverified", readiness.Classification);
+        Assert.True(readiness.RequiresAcknowledgement);
+        Assert.Contains(readiness.Checks, item => item.Code == "CapacityWithinLimit" && !item.Passed && item.Severity == "Warning");
+        Assert.Equal(LoadStatus.Planned, (await db.Loads.SingleAsync()).Status);
+    }
+
+    [Fact]
+    public async Task Positive_load_against_zero_recorded_capacity_remains_blocked()
+    {
+        var options = new DbContextOptionsBuilder<TmsDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
+        await using var db = new TmsDbContext(options);
+        var driver = Driver("D2-ZERO");
+        var vehicle = Vehicle("SLH2Z");
+        var trailer = new Trailer { TrailerNumber = "SLH20Z", Active = true };
+        var load = LoadFor(new DateOnly(2026, 8, 28), driver.Id, vehicle.Id, trailer.Id);
+        db.Drivers.Add(driver);
+        db.Vehicles.Add(vehicle);
+        db.Trailers.Add(trailer);
+        db.Loads.Add(load);
+        await db.SaveChangesAsync();
+        await SaveCapacity(db, load, 1, 0);
+
+        var readiness = await new PreDispatchSafetyService(db, new FixedTimeProvider(EvidenceAt))
+            .EvaluateAsync(load.Id, CancellationToken.None);
+
         Assert.Equal("Blocked", readiness.Classification);
         Assert.Contains(readiness.Checks, item => item.Code == "CapacityWithinLimit" && !item.Passed && item.Severity == "Critical");
-        Assert.Equal(LoadStatus.Planned, (await db.Loads.SingleAsync()).Status);
     }
 
     [Fact]
