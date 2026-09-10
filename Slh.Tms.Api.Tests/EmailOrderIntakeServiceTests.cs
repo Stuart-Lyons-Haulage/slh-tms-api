@@ -49,6 +49,22 @@ public sealed class EmailOrderIntakeServiceTests
     }
 
     [Fact]
+    public void NisaBodyCollectionPoint_OverridesAttachmentOrTemplateFallback()
+    {
+        var result = service.Parse(new MailboxEmailIntakeRequest(
+            "message-nisa-body-precedence", null, "info@lyonshaulage.com",
+            "orders@barfoots.co.uk", "Barfoots",
+            "NISA pallet booking 12/09/2026", DateTimeOffset.Parse("2026-09-10T09:00:00Z"),
+            "Collection point: Leythorne\nPlease book 4 pallets to Aylesford for delivery on 12/09/2026.",
+            null, null, null));
+
+        var order = Assert.Single(result.Orders);
+        Assert.Equal("BARFOOTS LEYTHORNE", order.Payload.GetProperty("sellerName").GetString()?.ToUpperInvariant());
+        Assert.Equal(4, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.Contains("body.explicit", order.Payload.GetProperty("intakeFieldSources").GetProperty("collectionSite").GetString());
+    }
+
+    [Fact]
     public void SummerBerryCoopBody_ExtractsPalletsTimeTemperatureAndDate()
     {
         var result = service.Parse(new MailboxEmailIntakeRequest(
