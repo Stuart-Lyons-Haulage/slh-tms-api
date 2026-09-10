@@ -132,6 +132,9 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
         if (!DateOnly.TryParse(deliveryDateText, CultureInfo.InvariantCulture, DateTimeStyles.None, out var deliveryDate) || deliveryDate != requestedDate)
             return false;
 
+        if (Bool(payload, "overnightRoute") == true)
+            return true;
+
         var requestedTime = Text(payload, "requestedTime");
         if (string.IsNullOrWhiteSpace(requestedTime)) return false;
         var match = Regex.Match(requestedTime, @"(?<!\d)(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
