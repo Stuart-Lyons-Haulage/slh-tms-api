@@ -48,6 +48,15 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
         if (request.TrailerId is Guid trailerId && !await db.Trailers.AsNoTracking().AnyAsync(x => x.Id == trailerId && x.Active, ct))
             return BadRequest(new { message = "Trailer is not active." });
 
+        if (request.VehicleId is Guid selectedVehicleId && IsVehicleUnavailable(await db.Vehicles.AsNoTracking().SingleAsync(x => x.Id == selectedVehicleId, ct)))
+            return Conflict(new { code = "vehicle_unavailable", message = "The selected vehicle is VOR, out of service or otherwise unavailable." });
+
+        var plannedStart = request.PlannedStartUtc ?? (await DriverDispatchStateStore.ReadAsync(db, [load.Id], ct)).GetValueOrDefault(load.Id)?.PlannedStartUtc;
+        if (request.VehicleId is Guid requestedVehicleId && await HasResourceOverlap(requestedVehicleId, null, load, plannedStart, ct))
+            return Conflict(new { code = "vehicle_in_use", message = "The selected vehicle is already committed to an overlapping run. Choose another vehicle or a start time after the previous run ends." });
+        if (request.TrailerId is Guid requestedTrailerId && await HasResourceOverlap(null, requestedTrailerId, load, plannedStart, ct))
+            return Conflict(new { code = "trailer_in_use", message = "The selected trailer is already committed to an overlapping run. Choose another trailer or a start time after the previous run ends." });
+
         load.VehicleId = request.VehicleId;
         load.DriverId = request.DriverId;
         load.TrailerId = request.TrailerId;
@@ -56,6 +65,30 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
         await RunOperationalStore.EnrichAsync(db, [load], ct);
         return Ok(load);
     }
+
+    private async Task<bool> HasResourceOverlap(Guid? vehicleId, Guid? trailerId, Load target, DateTimeOffset? targetStart, CancellationToken ct)
+    {
+        if (targetStart is null) return false;
+        var candidates = await db.Loads.AsNoTracking().Include(x => x.Stops)
+            .Where(x => x.Id != target.Id && x.PlanningDate <= target.PlanningDate && x.Status != LoadStatus.Cancelled &&
+                ((vehicleId != null && x.VehicleId == vehicleId) || (trailerId != null && x.TrailerId == trailerId)))
+            .ToListAsync(ct);
+        var states = await DriverDispatchStateStore.ReadAsync(db, candidates.Select(x => x.Id), ct);
+        return candidates.Any(candidate =>
+        {
+            var start = states.GetValueOrDefault(candidate.Id)?.PlannedStartUtc ?? candidate.Stops.OrderBy(x => x.Sequence).Select(x => x.PlannedArrivalUtc).FirstOrDefault(x => x is not null);
+            var end = candidate.Stops.OrderByDescending(x => x.Sequence).Select(x => x.PlannedArrivalUtc).FirstOrDefault(x => x is not null);
+            if (start is null || end is null) return true;
+            return targetStart < end && start < targetStart;
+        });
+    }
+
+    private static bool IsVehicleUnavailable(Vehicle vehicle) =>
+        !vehicle.Active || (vehicle.FleetioStatus?.Contains("VOR", StringComparison.OrdinalIgnoreCase) == true) ||
+        (vehicle.FleetioStatus?.Contains("out of service", StringComparison.OrdinalIgnoreCase) == true) ||
+        (vehicle.FleetioStatus?.Contains("off road", StringComparison.OrdinalIgnoreCase) == true) ||
+        (vehicle.FleetioStatus?.Contains("inactive", StringComparison.OrdinalIgnoreCase) == true) ||
+        (vehicle.FleetioStatus?.Contains("maintenance", StringComparison.OrdinalIgnoreCase) == true);
 
     [HttpPut("{id:guid}/operational"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> UpdateOperational(Guid id, RunOperationalRequest request, CancellationToken ct)
@@ -294,7 +327,7 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
     };
 }
 
-public sealed record RunAllocationRequest(Guid? VehicleId, Guid? DriverId, Guid? TrailerId);
+public sealed record RunAllocationRequest(Guid? VehicleId, Guid? DriverId, Guid? TrailerId, DateTimeOffset? PlannedStartUtc = null);
 public sealed record RunOperationalRequest(decimal? PalletSpacesUsed, decimal? TotalPalletSpaces, string? CapacityType, string? DepotSplits, decimal? TemperatureC, string? PlannerNotes);
 public sealed record RunStopRequest(Guid? OrderId, string Name, string? Address, decimal? Latitude, decimal? Longitude, DateTimeOffset? PlannedArrivalUtc, string? PlannerNote);
 public sealed record RunStatusRequest(string Status);
