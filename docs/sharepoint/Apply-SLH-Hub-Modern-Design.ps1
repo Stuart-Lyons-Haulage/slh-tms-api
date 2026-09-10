@@ -78,7 +78,7 @@ Ensure-NavNode 'Staffing' "$root/Staffing"
 Ensure-NavNode 'Accounts - Restricted' "$root/Shared%20Documents/SLH%20Hub/Accounts%20-%20Restricted"
 Ensure-NavNode 'Archive' "$root/Shared%20Documents/SLH%20Hub/Archive"
 
-$pageName = 'SLH-Hub-Home.aspx'
+$pageName = 'STUART-LYONS-HAULAGE-HUB.aspx'
 $page = Get-PnPPage -Identity $pageName -ErrorAction SilentlyContinue
 if(-not $page){
   $page = Add-PnPPage -Name $pageName -LayoutType Home
