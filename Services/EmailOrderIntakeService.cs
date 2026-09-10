@@ -580,7 +580,7 @@ public sealed class EmailOrderIntakeService
                 ExtractPo($"{request.Subject}\n{body}"),
                 deliveryDate.Value,
                 deliveryDate.Value,
-                pallets,
+                pallets!.Value,
                 collectionSite,
                 destination,
                 isNisa ? "NISA pallet booking" : "Co-op attachment booking",
