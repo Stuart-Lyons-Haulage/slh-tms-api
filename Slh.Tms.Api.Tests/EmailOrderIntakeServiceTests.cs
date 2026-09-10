@@ -242,9 +242,26 @@ public sealed class EmailOrderIntakeServiceTests
         {
             Assert.Equal("WAITROSE", order.Payload.GetProperty("customerCode").GetString());
             Assert.Equal("Sefter", order.Payload.GetProperty("sellerName").GetString());
-            Assert.Equal("2026-09-08", order.Payload.GetProperty("collectionDate").GetString());
             Assert.Equal("2026-09-09", order.Payload.GetProperty("deliveryDate").GetString());
             Assert.Equal("message-barfoots-waitrose-0909", order.Payload.GetProperty("sourceMessageId").GetString());
+        });
+
+        var waveOne = result.Orders.Where(order => order.Payload.GetProperty("wave").GetInt32() == 1).ToList();
+        var waveThree = result.Orders.Where(order => order.Payload.GetProperty("wave").GetInt32() == 3).ToList();
+        Assert.Equal(2, waveOne.Count);
+        Assert.Equal(2, waveThree.Count);
+        Assert.All(waveOne, order =>
+        {
+            Assert.Equal("2026-09-08", order.Payload.GetProperty("collectionDate").GetString());
+            Assert.False(order.Payload.GetProperty("overnightRoute").GetBoolean());
+            Assert.Equal("SameDay", order.Payload.GetProperty("routeTiming").GetString());
+        });
+        Assert.All(waveThree, order =>
+        {
+            Assert.Equal("2026-09-08", order.Payload.GetProperty("collectionDate").GetString());
+            Assert.True(order.Payload.GetProperty("overnightRoute").GetBoolean());
+            Assert.Equal("17:00", order.Payload.GetProperty("requestedTime").GetString());
+            Assert.Equal("Overnight", order.Payload.GetProperty("routeTiming").GetString());
         });
     }
 
