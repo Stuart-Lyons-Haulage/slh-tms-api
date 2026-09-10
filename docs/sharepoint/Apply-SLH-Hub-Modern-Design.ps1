@@ -141,7 +141,9 @@ Add-PnPPageTextPart -Page $page -Section 2 -Column 1 -Text @"
 <a href='$root/Lists/Hub%20Drivers/NewForm.aspx'>+ Add driver</a><br/>
 <a href='$root/Lists/Hub%20Vehicles/NewForm.aspx'>+ Add vehicle</a><br/>
 <a href='$root/Lists/Hub%20Trailers/NewForm.aspx'>+ Add trailer</a></p>
-"@ | Out-NullAdd-PnPPageSection -Page $page -SectionTemplate ThreeColumn -Order 3 | Out-Null
+"@ | Out-Null
+
+Add-PnPPageSection -Page $page -SectionTemplate ThreeColumn -Order 3 | Out-Null
 Add-PnPPageTextPart -Page $page -Section 3 -Column 1 -Text "<h3>Customers & Sites</h3><p><a href='$root/Lists/Hub%20Customers'>Customers</a><br/><a href='$root/Lists/Hub%20Sites'>Sites</a><br/><a href='$root/Lists/Hub%20Site%20Aliases'>Aliases</a></p>" | Out-Null
 Add-PnPPageTextPart -Page $page -Section 3 -Column 2 -Text "<h3>Fleet & People</h3><p><a href='$root/Lists/Hub%20Drivers'>Drivers</a><br/><a href='$root/Lists/Hub%20Vehicles'>Vehicles</a><br/><a href='$root/Lists/Hub%20Trailers'>Trailers</a></p>" | Out-Null
 Add-PnPPageTextPart -Page $page -Section 3 -Column 3 -Text "<h3>Business Records</h3><p><a href='$root/Shared%20Documents/SLH%20Hub/Forms%20%26%20Records'>Forms & Records</a><br/><a href='$root/Company%20Policies'>Policies & Compliance</a><br/><a href='$root/Staffing'>Staffing</a></p>" | Out-Null
