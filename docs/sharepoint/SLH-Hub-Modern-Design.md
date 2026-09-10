@@ -40,6 +40,19 @@ The home page should be a dashboard rather than a document landing page.
 - Live Operations
 - Driver Dispatch
 
+#### Governed master-data actions
+
+The home page should also provide clear, role-appropriate actions:
+
+- Add customer
+- Add site
+- Add site alias
+- Add driver
+- Add vehicle
+- Add trailer
+
+Each action opens the matching SharePoint List NewForm and creates a governed SharePoint master-data projection for review/synchronisation. It must not create a live order, run, dispatch record or other TMS transaction. The site form must require CustomerKey and SiteKey; postcode remains descriptive and non-unique.
+
 #### Operations shortcuts
 
 - Operational Live Documents
