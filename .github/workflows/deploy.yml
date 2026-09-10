@@ -216,6 +216,7 @@ jobs:
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --image "$AZURE_CONTAINER_REGISTRY.azurecr.io/slh-tms-api:$DEPLOY_SHA" \
             --revision-suffix "$revision_suffix" \
+            --min-replicas 1 \
             --set-env-vars "${env_vars[@]}" \
             --output none
 
