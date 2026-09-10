@@ -6,7 +6,7 @@ The SLH digital estate uses a three-layer architecture. The layers have clear ow
 
 ### 1. SharePoint Hub — people-facing business information
 
-SharePoint is the governed home for business-maintained master data, documents, forms, policies and source evidence. Examples include customer/site reference information, driver and vehicle supporting documents, incident/claims documents, planning source files and original inbound order attachments.
+SharePoint is the governed home for business-maintained master data, documents, forms, policies and source evidence. Examples include customer/site reference information, driver and vehicle supporting documents, incident/claims documents and planning source files.
 
 SharePoint records must carry stable business keys and, where applicable, the TMS SQL identifier. SharePoint is not the live run/stop/ETA/optimiser store.
 
@@ -20,11 +20,11 @@ The React TMS is the operational interface and intelligence layer. It presents S
 
 ## Data ownership
 
-| Domain | Human source | Runtime authority |
+| Domain | Human/source system | Runtime authority |
 |---|---|---|
 | Customers/sites/master references | SharePoint Hub | SQL synchronised projection |
 | Supporting documents | SharePoint | SharePoint original + SQL reference |
-| Inbound email/source attachments | Outlook/Power Automate → SharePoint | SQL staging metadata + extracted payload |
+| Inbound email/source attachments | Outlook/Power Automate | SQL staging metadata + extracted payload; original remains in mailbox |
 | Orders | TMS/API | SQL |
 | Loads/runs/stops/allocations | TMS planner | SQL |
 | Tracking/geofence/ETA | RoadTech/Falcon + TMS | SQL |
@@ -34,27 +34,26 @@ The React TMS is the operational interface and intelligence layer. It presents S
 
 ## Inbound order contract
 
-Power Automate remains the mailbox boundary. Every inbound message is classified and staged before it can become live operational work.
+Power Automate remains the mailbox boundary and is deliberately unchanged. Every inbound message is classified and staged before it can become live operational work. The production flow does **not** use Microsoft Lists/SharePoint as its approval store and does not call the live-order endpoint directly.
 
-The flow should preserve:
+The flow/API preserve:
 
 - source mailbox;
-- Outlook message ID and internet/message identifiers where available;
+- Outlook message ID and message/internet identifiers where available;
 - sender and subject;
 - received timestamp;
-- attachment name, content type and source identifier;
-- SharePoint source-document URL/item ID after archival;
+- attachment name/content type/source identifiers;
 - extracted PO/SO/load reference;
 - customer/site candidate;
 - extracted order lines;
 - parser/version metadata; and
 - processing status/error information.
 
-The API treats the source message/attachment identity as an idempotency key. Retries update the existing staged evidence rather than silently creating a second order. Amendments remain linked to the same source lineage.
+The API treats source message/attachment identity as an idempotency key. Retries update existing staged evidence rather than silently creating a second order. Amendments remain linked to source lineage. Original mailbox messages and attachments remain the source evidence under the mailbox retention policy.
 
 ## Review-first lifecycle
 
-`Inbound email → Power Automate → SharePoint source archive → API staging → Pending Review → Planner Review/approval → Live Order → Load/Run → Dispatch → Tracking/ETA → Complete`
+`Inbound email → Power Automate → API staging → Pending Review → Planner Review/approval → Live Order → Load/Run → Dispatch → Tracking/ETA → Complete`
 
 Power Automate must never promote an email directly to live work.
 
@@ -72,6 +71,10 @@ SharePoint is the human-maintained source for governed master-data fields. A sch
 6. explicit about conflicts.
 
 For sites, postcode alone is never a unique identity. Distinct buildings/geofences sharing a postcode must remain distinct records. Aliases may resolve to a canonical site but must not overwrite another building.
+
+## SharePoint Hub structure
+
+The production Team Portal now contains the SLH Hub document structure beneath `Planning/Transport Operations System/00 SLH Hub`, covering Customers, Sites, Site Aliases, Drivers, Vehicles, Trailers, Orders/Inbound, Orders/Amendments, Planning Source, Compliance, Incidents & Claims and Integration Logs. A provisioning script and machine-readable list schema are stored with the Hub build pack.
 
 ## Branding/design system
 
