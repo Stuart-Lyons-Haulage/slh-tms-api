@@ -2,7 +2,7 @@
 param(
   [Parameter(Mandatory=$true)][string]$SiteUrl,
   [string]$ExpectedTheme = 'SLH Modern',
-  [string]$ExpectedHomePage = 'SitePages/SLH-Hub-Home.aspx'
+  [string]$ExpectedHomePage = 'SitePages/STUART-LYONS-HAULAGE-HUB.aspx'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,7 +22,7 @@ Add-Check 'Site reachable' ($null -ne $web) $web.Url
 $theme = Get-PnPTenantTheme | Where-Object Name -eq $ExpectedTheme
 Add-Check 'SLH theme exists' ($null -ne $theme) $ExpectedTheme
 
-$page = Get-PnPPage -Identity 'SLH-Hub-Home.aspx' -ErrorAction SilentlyContinue
+$page = Get-PnPPage -Identity 'STUART-LYONS-HAULAGE-HUB.aspx' -ErrorAction SilentlyContinue
 Add-Check 'Modern Hub page exists' ($null -ne $page) 'SLH-Hub-Home.aspx'
 if($page){
   Add-Check 'Hub page published' ($page.PageId -ne $null) 'Page is addressable in Site Pages'
