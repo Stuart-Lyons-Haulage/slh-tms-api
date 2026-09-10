@@ -6,7 +6,7 @@ namespace Slh.Tms.Api.Services;
 
 public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactory, DotTrackingOptions options, ILogger<DotTrackingIngestionService> logger) : BackgroundService
 {
-    private const int MaximumHistoryRecoveryMinutes = 10;
+    private const int MaximumHistoryRecoveryMinutes = 5;
     private static readonly TimeSpan MaximumFutureSkew = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan MaximumHistoricalClockCorrection = TimeSpan.FromHours(48);
 
@@ -66,8 +66,8 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
                             // Historical Falcon pages can use provider vehicle keys that differ
                             // in formatting from the latest/live key. Teach the canonical identity
                             // resolver every uniquely matchable exact key before geofence replay,
-                            // so the indexed VehicleTrackingEvents query can retrieve the same
-                            // multi-sample trail that the bounded health diagnostic sees in memory.
+                            // so a newly recognised registration can inherit earlier retained
+                            // tracking/geofence evidence instead of starting only from "now".
                             await TryRepairProviderVehicleMappingsAsync(
                                 db,
                                 recovered.Select(record => record.VehicleIdentifier),
