@@ -3,11 +3,11 @@ using Slh.Tms.Api.Models;
 namespace Slh.Tms.Api.Services;
 
 /// <summary>
-/// Resolves a routable operational coordinate for a planned stop. Coordinates already
-/// carried by the plan remain authoritative. When they are absent, canonical Site Master
-/// identity (including aliases and manually linked geofences) is preferred before the
-/// embedded DOT/Falcon fence-name fallback. This keeps journey/ETA routing on the same
-/// master-data identity used by planning rather than inventing a second matcher.
+/// Resolves a routable operational coordinate for a planned stop.
+/// Canonical Site Master identity and approved/linked geofences are authoritative for
+/// operational routing. Coordinates copied onto an imported order are only a fallback;
+/// this prevents stale or incorrectly geocoded order coordinates from producing impossible
+/// ETAs when a trusted Site Master/geofence location is already known.
 /// </summary>
 public static class OperationalStopCoordinates
 {
@@ -15,9 +15,10 @@ public static class OperationalStopCoordinates
         LoadStop stop,
         PlannerSourceMasterDataResolver? masterData = null)
     {
-        if (stop.Longitude is not null && stop.Latitude is not null)
-            return (stop.Longitude.Value, stop.Latitude.Value);
-
+        // 1. Prefer canonical Site Master / linked geofence evidence. Resolve by the
+        // planner-facing stop name first and then its physical address. The resolver itself
+        // prefers Site Master coordinates, then linked geofence centre, then approved
+        // embedded DOT/Falcon fence coordinates.
         if (masterData is not null)
         {
             var resolved = masterData.Resolve(stop.Name);
@@ -32,6 +33,8 @@ public static class OperationalStopCoordinates
             }
         }
 
+        // 2. Approved embedded geofences are the next authoritative physical-location
+        // source. This also covers sites that have not yet been fully enriched in Site Master.
         var canonical = GeofencePlanningMatch.MatchText(stop.Name);
         var exact = EmbeddedGeofenceEngine.ApprovedFences
             .Where(fence => Normalize(fence.Name) == Normalize(canonical))
@@ -42,7 +45,28 @@ public static class OperationalStopCoordinates
         var physical = EmbeddedGeofenceEngine.ApprovedFences
             .Where(fence => GeofencePlanningMatch.SamePhysicalSite(stop, fence))
             .ToList();
-        return physical.Count == 1 ? OperationalRunOrigin.FenceCentre(physical[0]) : null;
+        if (physical.Count == 1)
+            return OperationalRunOrigin.FenceCentre(physical[0]);
+
+        // 3. Imported/order-level coordinates are deliberately last. They are useful for
+        // one-off sites but must never override a known canonical location.
+        if (stop.Longitude is not null && stop.Latitude is not null)
+            return (stop.Longitude.Value, stop.Latitude.Value);
+
+        return null;
+    }
+
+    public static string MissingLocationReason(
+        LoadStop stop,
+        PlannerSourceMasterDataResolver? masterData = null)
+    {
+        if (Resolve(stop, masterData) is not null) return string.Empty;
+
+        var hasAddress = !string.IsNullOrWhiteSpace(stop.Address);
+        if (!hasAddress)
+            return "Physical address/postcode required and no linked geofence could be resolved.";
+
+        return "Physical address/postcode is present but has no routable Site Master/geofence coordinates. Link the approved geofence or geocode the site in Master Data.";
     }
 
     private static string Normalize(string? value) =>
