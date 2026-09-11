@@ -13,8 +13,8 @@ public sealed class MasterDataSyncOrchestrator(
     public async Task<SyncSummaryEnvelope> RunAsync(string? requestedList, CancellationToken ct)
     {
         var selected = string.IsNullOrWhiteSpace(requestedList)
-            ? MasterListDefinitions.All.Values
-            : MasterListDefinitions.All.TryGetValue(requestedList, out var definition)
+            ? MasterListDefinition.All.Values
+            : MasterListDefinition.All.TryGetValue(requestedList, out var definition)
                 ? [definition]
                 : throw new ArgumentException($"Unknown master list '{requestedList}'.");
 

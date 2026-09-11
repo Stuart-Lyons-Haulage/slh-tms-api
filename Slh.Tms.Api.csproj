@@ -22,6 +22,8 @@
   <ItemGroup>
     <Compile Remove="Slh.Tms.Api.Tests/**/*.cs" />
     <Compile Remove="Slh.Tms.Jobs/**/*.cs" />
+    <Compile Remove="Slh.Tms.MasterDataSync/**/*.cs" />
     <EmbeddedResource Include="Database/*.sql" />
+    <EmbeddedResource Remove="Database/040_SharePoint_Master_Projection.sql" />
   </ItemGroup>
 </Project>

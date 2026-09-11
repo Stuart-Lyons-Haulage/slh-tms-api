@@ -1,12 +1,12 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Slh.Tms.MasterDataSync;
 
 var host = new HostBuilder()
     .ConfigureFunctionsWorkerDefaults()
     .ConfigureServices((context, services) =>
     {
         services.AddApplicationInsightsTelemetryWorkerService();
-        services.ConfigureFunctionsApplicationInsights();
         services.AddOptions<SyncOptions>()
             .Bind(context.Configuration.GetSection("MasterDataSync"))
             .PostConfigure(options => options.ApplyDefaults());
