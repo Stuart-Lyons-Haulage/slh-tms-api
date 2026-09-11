@@ -21,10 +21,15 @@ public sealed class MasterAssignmentComplianceService(TmsDbContext db)
             var driver = await db.Drivers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == selectedDriverId, ct);
             if (driver is not null)
             {
-                var master = await db.MasterDrivers.AsNoTracking().FirstOrDefaultAsync(x =>
+                var masterQuery = db.MasterDrivers.AsNoTracking().Where(x =>
                     x.DriverId == driver.EmployeeNumber ||
-                    x.TachoMasterDriverId == driver.TachoMasterDriverId ||
-                    x.FullName == driver.DisplayName, ct);
+                    x.FullName == driver.DisplayName);
+                if (!string.IsNullOrWhiteSpace(driver.TachoMasterDriverId))
+                    masterQuery = masterQuery.Where(x =>
+                        x.DriverId == driver.EmployeeNumber ||
+                        x.FullName == driver.DisplayName ||
+                        x.TachoMasterDriverId == driver.TachoMasterDriverId);
+                var master = await masterQuery.FirstOrDefaultAsync(ct);
                 if (master is not null)
                 {
                     CheckDate(master.LicenceExpiry, "driver licence", today, errors, warnings);
