@@ -61,6 +61,7 @@ public sealed class SqlMasterDataRepository(IOptions<SyncOptions> options, ILogg
 
         if (values[definition.AnchorColumn] is not string anchor || string.IsNullOrWhiteSpace(anchor))
             throw new FormatException($"{definition.ListName} item {item.Id} has no {definition.AnchorColumn}.");
+        if (values["IsActive"] is null) values["IsActive"] = true;
         values["SharePointItemId"] = item.Id;
         values["LastSyncedAt"] = DateTime.UtcNow;
         return values;
@@ -75,15 +76,15 @@ public sealed class SqlMasterDataRepository(IOptions<SyncOptions> options, ILogg
 
     private static async Task UpsertAsync(SqlConnection connection, SqlTransaction tx, MasterListDefinition definition, Dictionary<string, object?> values, CancellationToken ct)
     {
-        var columns = definition.Fields.Select(x => x.SqlColumn).ToArray();
+        var columns = definition.Fields.Select(x => x.SqlColumn).Where(x => x != "IsActive").ToArray();
         var assignments = columns.Where(x => x != definition.AnchorColumn)
             .Select(x => $"[{x}] = @{x}")
-            .Append("[IsActive] = 1")
+            .Append("[IsActive] = @IsActive")
             .Append("[SharePointItemId] = @SharePointItemId")
             .Append("[LastSyncedAt] = @LastSyncedAt")
             .Append("[UpdatedAt] = SYSUTCDATETIME()");
         var insertColumns = columns.Append("SharePointItemId").Append("LastSyncedAt").Append("IsActive");
-        var insertValues = columns.Select(x => "@" + x).Append("@SharePointItemId").Append("@LastSyncedAt").Append("1");
+        var insertValues = columns.Select(x => "@" + x).Append("@SharePointItemId").Append("@LastSyncedAt").Append("@IsActive");
         var sql = $@"
 IF EXISTS (SELECT 1 FROM dbo.[{definition.TableName}] WHERE [{definition.AnchorColumn}] = @{definition.AnchorColumn})
 BEGIN
