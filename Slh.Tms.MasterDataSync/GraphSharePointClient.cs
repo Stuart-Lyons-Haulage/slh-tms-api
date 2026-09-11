@@ -15,8 +15,8 @@ public sealed class GraphSharePointClient(HttpClient http, IOptions<SyncOptions>
         var siteSelector = string.IsNullOrWhiteSpace(settings.SitePath)
             ? settings.Hostname
             : $"{settings.Hostname}:/{settings.SitePath.Trim('/')}:";
-        var listSelector = Uri.EscapeDataString(definition.ListName);
-        var uri = $"https://graph.microsoft.com/v1.0/sites/{siteSelector}/lists/{listSelector}/items?expand=fields&$top=999";
+        var listId = await ResolveListIdAsync(siteSelector, definition.ListName, token, ct);
+        var uri = $"https://graph.microsoft.com/v1.0/sites/{siteSelector}/lists/{Uri.EscapeDataString(listId)}/items?expand=fields&$top=999";
         var rows = new List<SharePointItem>();
 
         while (!string.IsNullOrWhiteSpace(uri))
@@ -24,14 +24,12 @@ public sealed class GraphSharePointClient(HttpClient http, IOptions<SyncOptions>
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             using var response = await http.SendAsync(request, ct);
-            var body = await response.Content.ReadAsStringAsync(ct);
             if (!response.IsSuccessStatusCode)
                 throw new InvalidOperationException($"Graph read failed for {definition.ListName}: {(int)response.StatusCode}.");
-
-            using var document = JsonDocument.Parse(body);
+            await using var stream = await response.Content.ReadAsStreamAsync(ct);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
             foreach (var item in document.RootElement.GetProperty("value").EnumerateArray())
                 rows.Add(SharePointItem.FromGraph(item));
-
             uri = document.RootElement.TryGetProperty("@odata.nextLink", out var next)
                 ? next.GetString()
                 : null;
@@ -39,6 +37,23 @@ public sealed class GraphSharePointClient(HttpClient http, IOptions<SyncOptions>
 
         logger.LogInformation("Graph returned {Count} items for {ListName}.", rows.Count, definition.ListName);
         return rows;
+    }
+
+    private async Task<string> ResolveListIdAsync(string siteSelector, string listName, string token, CancellationToken ct)
+    {
+        var filter = Uri.EscapeDataString($"displayName eq '{listName.Replace("'", "''")}'");
+        var uri = $"https://graph.microsoft.com/v1.0/sites/{siteSelector}/lists?$filter={filter}&$select=id,displayName";
+        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var response = await http.SendAsync(request, ct);
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException($"Graph list lookup failed for {listName}: {(int)response.StatusCode}.");
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+        var match = document.RootElement.GetProperty("value").EnumerateArray().FirstOrDefault();
+        if (match.ValueKind == JsonValueKind.Undefined)
+            throw new InvalidOperationException($"SharePoint list '{listName}' was not found.");
+        return match.GetProperty("id").GetString()
+            ?? throw new InvalidOperationException($"SharePoint list '{listName}' returned no ID.");
     }
 
     private async Task<string> GetTokenAsync(CancellationToken ct)
@@ -55,10 +70,9 @@ public sealed class GraphSharePointClient(HttpClient http, IOptions<SyncOptions>
             })
         };
         using var response = await http.SendAsync(request, ct);
-        var body = await response.Content.ReadAsStringAsync(ct);
         if (!response.IsSuccessStatusCode)
             throw new InvalidOperationException("Microsoft Graph authentication failed.");
-        using var json = JsonDocument.Parse(body);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
         return json.RootElement.GetProperty("access_token").GetString()
             ?? throw new InvalidOperationException("Microsoft Graph returned no access token.");
     }
@@ -79,10 +93,8 @@ public sealed record SharePointItem(int Id, string? ETag, IReadOnlyDictionary<st
     {
         var fields = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         if (item.TryGetProperty("fields", out var fieldsElement))
-        {
             foreach (var property in fieldsElement.EnumerateObject())
                 fields[property.Name] = Scalar(property.Value);
-        }
 
         var etag = item.TryGetProperty("eTag", out var tag) ? tag.GetString() : null;
         return new SharePointItem(item.GetProperty("id").GetInt32(), etag, fields);
