@@ -39,7 +39,16 @@ public static class SchemaMigrationRunner
 {
     private const string ResourcePrefix = "Slh.Tms.Api.Database.";
     private const string MigrationLockResource = "SLH.TMS.SchemaMigration";
-    // These migrations are additive CRM/read-model maintenance. They must not prevent\n    // the API from starting when SQL permissions or lock duration make the change\n    // unsuitable for the deployment readiness window. They remain registered and\n    // checksum-protected, but are applied by the maintenance runner.\n    private static readonly IReadOnlySet<string> DeferredStartupMigrations = new HashSet<string>(StringComparer.Ordinal)\n    {\n        "042_Operational_Read_Performance_Indexes.sql",\n        "043_Customer_Site_Crm_Links.sql",\n        "044_Market_Read_Only_Map.sql"\n    };
+    // These migrations are additive CRM/read-model maintenance. They must not prevent
+    // the API from starting when SQL permissions or lock duration make the change
+    // unsuitable for the deployment readiness window. They remain registered and
+    // checksum-protected, but are applied by the maintenance runner.
+    private static readonly IReadOnlySet<string> DeferredStartupMigrations = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "042_Operational_Read_Performance_Indexes.sql",
+        "043_Customer_Site_Crm_Links.sql",
+        "044_Market_Read_Only_Map.sql"
+    };
 
     private static readonly string[] OrderedMigrationFiles =
     [
