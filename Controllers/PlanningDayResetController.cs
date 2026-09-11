@@ -110,7 +110,8 @@ public sealed class PlanningDayResetController(
                     item.EntityType == "order" ||
                     item.EntityType == "register:order" ||
                     item.EntityType == "planningload" ||
-                    item.EntityType == "plannerplanrun")
+                    item.EntityType == "plannerplanrun" ||
+                    item.EntityType == "plannerplansourcerun")
                 .ToListAsync(ct);
 
             var matching = staged.Where(item => PayloadMatchesDate(item, date)).ToList();
@@ -121,6 +122,8 @@ public sealed class PlanningDayResetController(
                     ? "archived:planningload"
                     : item.EntityType == "plannerplanrun"
                         ? "archived:plannerplanrun"
+                        : item.EntityType == "plannerplansourcerun"
+                            ? "archived:plannerplansourcerun"
                         : "archived:order";
                 item.IdempotencyKey = $"reset:{date:yyyyMMdd}:{item.Id:N}:{Guid.NewGuid():N}";
                 item.Status = StagingStatus.Rejected;
@@ -187,7 +190,8 @@ public sealed class PlanningDayResetController(
                     item.EntityType == "order" ||
                     item.EntityType == "register:order" ||
                     item.EntityType == "planningload" ||
-                    item.EntityType == "plannerplanrun")
+                    item.EntityType == "plannerplanrun" ||
+                    item.EntityType == "plannerplansourcerun")
                 .ToListAsync(ct);
             return staged.Count(item => PayloadMatchesDate(item, date));
         }
