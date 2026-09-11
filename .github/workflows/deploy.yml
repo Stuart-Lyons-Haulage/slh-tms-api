@@ -306,6 +306,27 @@ jobs:
               break
             fi
 
+            # An unhealthy revision cannot recover by repeating HTTP probes. Surface
+            # the replica and application diagnostics immediately so a deployment
+            # failure is actionable rather than spending another ~30 minutes polling.
+            if test "$health_state" = "Unhealthy"; then
+              echo "::error::Candidate revision became unhealthy before readiness."
+              echo "Candidate replica state:"
+              az containerapp replica list \
+                --name "$AZURE_CONTAINER_APP_NAME" \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --revision "$TARGET_REVISION" \
+                --output json || true
+              echo "Candidate container logs:"
+              az containerapp logs show \
+                --name "$AZURE_CONTAINER_APP_NAME" \
+                --resource-group "$AZURE_RESOURCE_GROUP" \
+                --revision "$TARGET_REVISION" \
+                --type console \
+                --tail 100 || true
+              exit 1
+            fi
+
             echo "Candidate migration/readiness gate: health=${health_state:-unknown}, HTTP=$ready_status; waiting ($attempt/72)..."
             sleep 10
           done
