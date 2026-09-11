@@ -46,11 +46,11 @@ public sealed class SchemaResourceTests
             resources,
             migrations.Select(migration => migration.ResourceName).OrderBy(name => name, StringComparer.Ordinal));
         Assert.All(migrations, migration => Assert.Matches("^[0-9A-F]{64}$", migration.Checksum));
-        Assert.Equal("037_Driver_Tacho_Identity.sql", migrations[^6].Name);
-        Assert.Equal("038_Driver_Tacho_Identity_Repair.sql", migrations[^5].Name);
-        Assert.Equal("039_Canonical_Relational_Planning.sql", migrations[^4].Name);
-        Assert.Equal("040_Audit_Outbox.sql", migrations[^3].Name);
-        Assert.Equal("041_Distributed_Integration_Lease.sql", migrations[^2].Name);
+        Assert.Equal("037_Driver_Tacho_Identity.sql", migrations[^7].Name);
+        Assert.Equal("038_Driver_Tacho_Identity_Repair.sql", migrations[^6].Name);
+        Assert.Equal("039_Canonical_Relational_Planning.sql", migrations[^5].Name);
+        Assert.Equal("040_Audit_Outbox.sql", migrations[^4].Name);
+        Assert.Equal("041_Distributed_Integration_Lease.sql", migrations[^3].Name);
         Assert.Equal("042_Operational_Read_Performance_Indexes.sql", migrations[^2].Name);
         Assert.Equal("043_Customer_Site_Crm_Links.sql", migrations[^1].Name);
     }
