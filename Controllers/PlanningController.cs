@@ -9,7 +9,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1")]
 [Authorize]
-public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient maps, DriverSmsDispatchService sms, IConfiguration configuration) : ControllerBase
+public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient maps, DriverSmsDispatchService sms, IConfiguration configuration, MasterAssignmentComplianceService compliance) : ControllerBase
 {
     [HttpGet("orders")]
     public async Task<IActionResult> Orders([FromQuery] DateOnly? from, [FromQuery] DateOnly? to, CancellationToken ct)
@@ -111,6 +111,8 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         if (request.VehicleId is not null && !await db.Vehicles.AnyAsync(vehicle => vehicle.Id == request.VehicleId && vehicle.Active, ct)) return BadRequest("Vehicle is not active.");
         if (request.DriverId is not null && !await db.Drivers.AnyAsync(driver => driver.Id == request.DriverId && driver.Active, ct)) return BadRequest("Driver is not active.");
         if (request.TrailerId is not null && !await db.Trailers.AnyAsync(trailer => trailer.Id == request.TrailerId && trailer.Active, ct)) return BadRequest("Trailer is not active.");
+        var masterCompliance = await compliance.CheckAsync(request.DriverId, request.VehicleId, ct);
+        if (!masterCompliance.Allowed) return Conflict(new { code = "master_compliance_blocked", errors = masterCompliance.Errors, warnings = masterCompliance.Warnings });
 
         load.VehicleId = request.VehicleId;
         load.DriverId = request.DriverId;
