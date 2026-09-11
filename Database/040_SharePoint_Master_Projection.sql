@@ -256,12 +256,18 @@ BEGIN
     );
 END;
 
-CREATE UNIQUE INDEX UX_master_customers_AccountCode ON dbo.master_customers(AccountCode) WHERE AccountCode IS NOT NULL;
-CREATE UNIQUE INDEX UX_master_vehicles_Registration ON dbo.master_vehicles(Registration);
-CREATE UNIQUE INDEX UX_master_drivers_TachoMasterDriverId ON dbo.master_drivers(TachoMasterDriverId) WHERE TachoMasterDriverId IS NOT NULL;
-CREATE UNIQUE INDEX UX_master_trailers_Registration ON dbo.master_trailers(Registration) WHERE Registration IS NOT NULL;
-CREATE UNIQUE INDEX UX_master_markets_Market_Name ON dbo.master_markets(Market, [Name]);
-CREATE UNIQUE INDEX UX_master_fuel_prices_Week_Provider ON dbo.master_fuel_prices(WeekCommencing, Provider);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_customers_AccountCode' AND object_id = OBJECT_ID(N'dbo.master_customers'))
+    CREATE UNIQUE INDEX UX_master_customers_AccountCode ON dbo.master_customers(AccountCode) WHERE AccountCode IS NOT NULL;
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_vehicles_Registration' AND object_id = OBJECT_ID(N'dbo.master_vehicles'))
+    CREATE UNIQUE INDEX UX_master_vehicles_Registration ON dbo.master_vehicles(Registration);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_drivers_TachoMasterDriverId' AND object_id = OBJECT_ID(N'dbo.master_drivers'))
+    CREATE UNIQUE INDEX UX_master_drivers_TachoMasterDriverId ON dbo.master_drivers(TachoMasterDriverId) WHERE TachoMasterDriverId IS NOT NULL;
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_trailers_Registration' AND object_id = OBJECT_ID(N'dbo.master_trailers'))
+    CREATE UNIQUE INDEX UX_master_trailers_Registration ON dbo.master_trailers(Registration) WHERE Registration IS NOT NULL;
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_markets_Market_Name' AND object_id = OBJECT_ID(N'dbo.master_markets'))
+    CREATE UNIQUE INDEX UX_master_markets_Market_Name ON dbo.master_markets(Market, [Name]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_fuel_prices_Week_Provider' AND object_id = OBJECT_ID(N'dbo.master_fuel_prices'))
+    CREATE UNIQUE INDEX UX_master_fuel_prices_Week_Provider ON dbo.master_fuel_prices(WeekCommencing, Provider);
 
 COMMIT TRANSACTION;
 GO
