@@ -40,30 +40,16 @@ public sealed class MasterDataService(TmsDbContext db, IMemoryCache cache)
         GetAsync("master:fuel-prices", () => db.MasterFuelPrices.AsNoTracking().OrderByDescending(x => x.WeekCommencing).ThenBy(x => x.Provider).ToListAsync(ct));
 
     public Task<MasterSite?> GetSiteByIdAsync(string siteId, CancellationToken ct = default) =>
-        cache.GetOrCreateAsync($"master:site:{siteId}", entry =>
-        {
-            entry.AbsoluteExpirationRelativeToNow = CacheDuration;
-            return db.MasterSites.AsNoTracking().SingleOrDefaultAsync(x => x.SiteId == siteId, ct);
-        });
+        db.MasterSites.AsNoTracking().SingleOrDefaultAsync(x => x.SiteId == siteId, ct);
 
     public Task<MasterDriver?> GetDriverByIdAsync(string driverId, CancellationToken ct = default) =>
-        cache.GetOrCreateAsync($"master:driver:{driverId}", entry =>
-        {
-            entry.AbsoluteExpirationRelativeToNow = CacheDuration;
-            return db.MasterDrivers.AsNoTracking().SingleOrDefaultAsync(x => x.DriverId == driverId, ct);
-        });
+        db.MasterDrivers.AsNoTracking().SingleOrDefaultAsync(x => x.DriverId == driverId, ct);
 
     public void Invalidate()
     {
         foreach (var key in CacheKeys)
             cache.Remove(key);
-        // Single-record lookups use the same two-minute policy. Removing by prefix
-        // keeps invalidation deterministic without requiring a distributed cache.
-        foreach (var key in cacheKeysForIndividualRows)
-            cache.Remove(key);
     }
-
-    private static readonly string[] cacheKeysForIndividualRows = [];
 
     private static readonly string[] CacheKeys =
     [
