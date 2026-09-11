@@ -39,7 +39,7 @@ public static class SchemaMigrationRunner
 {
     private const string ResourcePrefix = "Slh.Tms.Api.Database.";
     private const string MigrationLockResource = "SLH.TMS.SchemaMigration";
-    private const string DeferredOnlineMaintenanceMigration = "042_Operational_Read_Performance_Indexes.sql";
+    // These migrations are additive CRM/read-model maintenance. They must not prevent\n    // the API from starting when SQL permissions or lock duration make the change\n    // unsuitable for the deployment readiness window. They remain registered and\n    // checksum-protected, but are applied by the maintenance runner.\n    private static readonly IReadOnlySet<string> DeferredStartupMigrations = new HashSet<string>(StringComparer.Ordinal)\n    {\n        "042_Operational_Read_Performance_Indexes.sql",\n        "043_Customer_Site_Crm_Links.sql",\n        "044_Market_Read_Only_Map.sql"\n    };
 
     private static readonly string[] OrderedMigrationFiles =
     [
@@ -188,10 +188,10 @@ public static class SchemaMigrationRunner
                     // startup can keep a zero-traffic candidate revision unhealthy until Azure rolls it
                     // back. Preserve the immutable catalogue/checksum so environments where it already
                     // completed still validate, but defer a pending copy to a maintenance window/job.
-                    if (string.Equals(migration.Name, DeferredOnlineMaintenanceMigration, StringComparison.Ordinal))
+                    if (DeferredStartupMigrations.Contains(migration.Name))
                     {
                         logger.LogWarning(
-                            "Deferring schema migration {Version} {MigrationName} during API startup. It contains non-essential operational indexes and must be applied by maintenance without blocking availability.",
+                            "Deferring schema migration {Version} {MigrationName} during API startup. It is registered and checksum-protected, but must be applied by the maintenance runner without blocking availability.",
                             migration.Version, migration.Name);
                         continue;
                     }
@@ -205,7 +205,7 @@ public static class SchemaMigrationRunner
                 }
 
                 logger.LogInformation(
-                    "Schema migration check complete. {AppliedMigrationCount} of {MigrationCount} registered migration(s) are applied; deferred online-maintenance migrations do not block API startup.",
+                    "Schema migration check complete. {AppliedMigrationCount} of {MigrationCount} registered migration(s) are applied; deferred maintenance migrations do not block API startup.",
                     appliedCount, migrations.Count);
             }
             finally
