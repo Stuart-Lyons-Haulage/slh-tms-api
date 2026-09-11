@@ -107,8 +107,23 @@ jobs:
         run: |
           set -euo pipefail
 
+          # The Container Apps control plane can briefly rate-limit requests while
+          # revisions are being retired or a new build has just completed. Retry
+          # those transient responses rather than abandoning a safe deployment.
+          az_retry() {
+            local attempt=1
+            local status=0
+            until "$@"; do
+              status=$?
+              if (( attempt >= 8 )); then return "$status"; fi
+              echo "Azure control plane request failed; retrying in $((attempt * 10)) seconds ($attempt/8)." >&2
+              sleep $((attempt * 10))
+              ((attempt++))
+            done
+          }
+
           for attempt in {1..60}; do
-            state="$(timeout 20s az containerapp show \
+            state="$(az_retry az containerapp show \
               --name "$AZURE_CONTAINER_APP_NAME" \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --query properties.provisioningState \
@@ -119,7 +134,7 @@ jobs:
           done
           test "$state" = "Succeeded"
 
-          revisions="$(az containerapp revision list \
+          revisions="$(az_retry az containerapp revision list \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --all \
@@ -146,13 +161,13 @@ jobs:
             exit 1
           fi
 
-          resource_id="$(az containerapp show \
+          resource_id="$(az_retry az containerapp show \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --query id \
             --output tsv)"
 
-          az containerapp revision set-mode \
+          az_retry az containerapp revision set-mode \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --mode multiple
@@ -162,7 +177,7 @@ jobs:
             <<<"$revisions")"
 
           if test "$previous_active" != "true"; then
-            az containerapp revision activate \
+            az_retry az containerapp revision activate \
               --name "$AZURE_CONTAINER_APP_NAME" \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --revision "$previous_revision"
@@ -172,7 +187,7 @@ jobs:
 
           # Replace any latest-revision traffic rule with an explicit production revision.
           # This guarantees that creating the candidate revision cannot receive user traffic.
-          az containerapp ingress traffic set \
+          az_retry az containerapp ingress traffic set \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --revision-weight "$previous_revision=100"
