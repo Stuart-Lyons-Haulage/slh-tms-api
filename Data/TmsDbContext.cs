@@ -46,6 +46,16 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<SiteGeofence> SiteGeofences => Set<SiteGeofence>();
     public DbSet<GeofenceVisit> GeofenceVisits => Set<GeofenceVisit>();
     public DbSet<EtaSnapshot> EtaSnapshots => Set<EtaSnapshot>();
+    public DbSet<MasterDepot> MasterDepots => Set<MasterDepot>();
+    public DbSet<MasterCustomer> MasterCustomers => Set<MasterCustomer>();
+    public DbSet<MasterDriver> MasterDrivers => Set<MasterDriver>();
+    public DbSet<MasterVehicle> MasterVehicles => Set<MasterVehicle>();
+    public DbSet<MasterTrailer> MasterTrailers => Set<MasterTrailer>();
+    public DbSet<MasterSite> MasterSites => Set<MasterSite>();
+    public DbSet<MasterSubcontractor> MasterSubcontractors => Set<MasterSubcontractor>();
+    public DbSet<MasterMarket> MasterMarkets => Set<MasterMarket>();
+    public DbSet<MasterFuelCard> MasterFuelCards => Set<MasterFuelCard>();
+    public DbSet<MasterFuelPrice> MasterFuelPrices => Set<MasterFuelPrice>();
 
     public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
     {
@@ -124,6 +134,17 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
 
     protected override void OnModelCreating(ModelBuilder b)
     {
+        b.Entity<MasterDepot>().HasNoKey().ToView("vw_ActiveDepots", "dbo");
+        b.Entity<MasterCustomer>().HasNoKey().ToView("vw_ActiveCustomers", "dbo");
+        b.Entity<MasterDriver>().HasNoKey().ToView("vw_ActiveDrivers", "dbo");
+        b.Entity<MasterVehicle>().HasNoKey().ToView("vw_ActiveVehicles", "dbo");
+        b.Entity<MasterTrailer>().HasNoKey().ToView("vw_ActiveTrailers", "dbo");
+        b.Entity<MasterSite>().HasNoKey().ToView("vw_ActiveSites", "dbo");
+        b.Entity<MasterSubcontractor>().HasNoKey().ToView("vw_ActiveSubcontractors", "dbo");
+        b.Entity<MasterMarket>().HasNoKey().ToView("vw_ActiveMarkets", "dbo");
+        b.Entity<MasterFuelCard>().HasNoKey().ToView("vw_ActiveFuelCards", "dbo");
+        b.Entity<MasterFuelPrice>().HasNoKey().ToView("vw_ActiveFuelPrices", "dbo");
+
         b.Entity<Customer>().HasIndex(x => x.Code).IsUnique();
         b.Entity<CustomerContact>().HasIndex(x => new { x.CustomerCode, x.Name }).IsUnique();
         b.Entity<Vehicle>().HasIndex(x => x.Registration).IsUnique();
