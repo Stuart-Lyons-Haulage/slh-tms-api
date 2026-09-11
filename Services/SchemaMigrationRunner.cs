@@ -90,6 +90,7 @@ public static class SchemaMigrationRunner
         "040_Audit_Outbox.sql",
         "041_Distributed_Integration_Lease.sql",
         "042_Operational_Read_Performance_Indexes.sql"
+        ,"043_Customer_Site_Crm_Links.sql"
     ];
 
     internal const string HistoryTableSql = """
