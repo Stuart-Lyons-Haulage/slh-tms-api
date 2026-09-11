@@ -234,6 +234,13 @@ builder.Services.AddHttpClient("AzureMapsMatrix", client =>
 builder.Services.AddHttpClient<FleetioClient>()
     .AddHttpMessageHandler<DependencyTelemetryHandler>()
     .AddPolicyHandler((services, _) => services.GetRequiredService<OutboundHttpPolicyRegistry>().Get("Fleetio"));
+
+// Provider polling and derived-data maintenance must never take the operational
+// API down. Each worker already records and retries its own failures; this is a
+// final host-level guard for an unexpected worker termination.
+builder.Services.Configure<HostOptions>(options =>
+    options.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
+
 builder.Services.AddHostedService<DotTrackingIngestionService>();
 builder.Services.AddHostedService<TachoDriverMasterSyncJobWorker>();
 builder.Services.AddHostedService<DriverMasterClassificationBackgroundService>();
