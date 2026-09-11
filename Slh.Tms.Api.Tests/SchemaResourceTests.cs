@@ -40,7 +40,7 @@ public sealed class SchemaResourceTests
         var migrations = SchemaMigrationRunner.GetMigrations();
 
         Assert.Equal(resources.Length, migrations.Count);
-        Assert.Equal(47, migrations.Count);
+        Assert.Equal(48, migrations.Count);
         Assert.Equal(Enumerable.Range(1, migrations.Count), migrations.Select(migration => migration.Version));
         Assert.Equal(
             resources,
@@ -51,7 +51,8 @@ public sealed class SchemaResourceTests
         Assert.Equal("039_Canonical_Relational_Planning.sql", migrations[^4].Name);
         Assert.Equal("040_Audit_Outbox.sql", migrations[^3].Name);
         Assert.Equal("041_Distributed_Integration_Lease.sql", migrations[^2].Name);
-        Assert.Equal("042_Operational_Read_Performance_Indexes.sql", migrations[^1].Name);
+        Assert.Equal("042_Operational_Read_Performance_Indexes.sql", migrations[^2].Name);
+        Assert.Equal("043_Customer_Site_Crm_Links.sql", migrations[^1].Name);
     }
 
     [Fact]
