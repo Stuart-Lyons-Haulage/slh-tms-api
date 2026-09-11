@@ -1,7 +1,10 @@
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Contracts;
+using Slh.Tms.Api.Data;
 
 namespace Slh.Tms.Api.Services;
 
@@ -27,6 +30,7 @@ public sealed class SharePointMasterDataOptions
 }
 
 public sealed record SharePointMasterDataSyncResult(int ListsRead, int RowsRead, IReadOnlyList<StageImportRequest> Requests);
+public sealed record SharePointMasterDataPublishResult(int ListsWritten, int RowsWritten, IReadOnlyDictionary<string, int> RowsByList);
 
 public sealed class SharePointMasterDataSyncService(
     HttpClient http,
@@ -34,6 +38,48 @@ public sealed class SharePointMasterDataSyncService(
     ILogger<SharePointMasterDataSyncService> logger)
 {
     private readonly SharePointMasterDataOptions settings = options;
+
+    public async Task<SharePointMasterDataPublishResult> PublishFromSqlAsync(TmsDbContext db, CancellationToken ct)
+    {
+        ValidateConfiguration();
+        var token = await GetTokenAsync(ct);
+        var rows = new Dictionary<string, IReadOnlyList<Dictionary<string, object?>>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["customer"] = (await db.Customers.AsNoTracking().OrderBy(x => x.Code).ToListAsync(ct)).Select(x => Fields(
+                ("Title", x.Code), ("CustomerKey", x.Code), ("TradingName", x.TradingName ?? x.Name), ("AccountOwner", x.AccountOwner), ("ServiceNotes", x.ServiceNotes), ("Active", x.Active))).ToArray(),
+            ["site"] = (await db.Sites.AsNoTracking().OrderBy(x => x.ExternalCode).ToListAsync(ct)).Select(x => Fields(
+                ("Title", x.ExternalCode), ("SiteKey", x.ExternalCode), ("CustomerKey", x.CustomerCode), ("SiteName", x.Name), ("BuildingName", x.DriverTextName ?? x.Name), ("Address1", x.CollectionAddress), ("GeofenceId", db.SiteGeofences.AsNoTracking().Where(g => g.SiteId == x.Id && g.Active).Select(g => g.Id.ToString()).FirstOrDefault()), ("Active", x.Active), ("SyncStatus", "Synced"))).ToArray(),
+            ["driver"] = (await db.Drivers.AsNoTracking().OrderBy(x => x.EmployeeNumber).ToListAsync(ct)).Select(x => Fields(
+                ("Title", x.EmployeeNumber), ("DriverKey", x.EmployeeNumber), ("DriverName", x.DisplayName), ("EmployeeNumber", x.EmployeeNumber), ("LicenceNumber", x.DrivingLicenceNumber), ("Active", x.Active), ("ComplianceStatus", string.IsNullOrWhiteSpace(x.LicenceStatus) ? "Unknown" : x.LicenceStatus))).ToArray(),
+            ["vehicle"] = (await db.Vehicles.AsNoTracking().OrderBy(x => x.Registration).ToListAsync(ct)).Select(x => Fields(
+                ("Title", x.Registration), ("VehicleKey", x.FleetNumber ?? x.Registration), ("Registration", x.Registration), ("Active", x.Active), ("ComplianceStatus", "Unknown"))).ToArray(),
+            ["trailer"] = (await db.Trailers.AsNoTracking().OrderBy(x => x.TrailerNumber).ToListAsync(ct)).Select(x => Fields(
+                ("Title", x.TrailerNumber), ("TrailerKey", x.TrailerNumber), ("Registration", x.TrailerNumber), ("TrailerType", x.Type), ("Capacity", x.StandardCapacity), ("Active", x.Active))).ToArray()
+        };
+
+        var rowsByList = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var mapping in settings.Lists)
+        {
+            if (!rows.TryGetValue(mapping.Key, out var sourceRows) || string.IsNullOrWhiteSpace(mapping.Value)) continue;
+            var listId = await ResolveListIdAsync(mapping.Value, token, ct);
+            var existing = await ReadListAsync(mapping.Key, listId, token, ct);
+            var keyField = mapping.Key switch { "customer" => "CustomerKey", "site" => "SiteKey", "driver" => "DriverKey", "vehicle" => "VehicleKey", "trailer" => "TrailerKey", _ => "Title" };
+            var existingByKey = existing
+                .Where(item => item.TryGetProperty("fields", out var field) && field.TryGetProperty(keyField, out var key) && !string.IsNullOrWhiteSpace(key.ToString()))
+                .ToDictionary(item => item.GetProperty("fields").GetProperty(keyField).ToString(), StringComparer.OrdinalIgnoreCase);
+            foreach (var source in sourceRows)
+            {
+                var key = source[keyField]?.ToString();
+                if (string.IsNullOrWhiteSpace(key)) continue;
+                if (existingByKey.TryGetValue(key, out var current))
+                    await UpdateListItemAsync(listId, current.GetProperty("id").ToString(), source, token, ct);
+                else
+                    await CreateListItemAsync(listId, source, token, ct);
+            }
+            rowsByList[mapping.Key] = sourceRows.Count;
+        }
+        return new SharePointMasterDataPublishResult(rowsByList.Count, rowsByList.Values.Sum(), rowsByList);
+    }
 
     public async Task<SharePointMasterDataSyncResult> ReadAsync(CancellationToken ct)
     {
@@ -82,6 +128,54 @@ public sealed class SharePointMasterDataSyncService(
         }
         return rows.ToArray();
     }
+
+    private async Task<string> ResolveListIdAsync(string listName, string token, CancellationToken ct)
+    {
+        var sitePath = settings.SitePath.Trim('/');
+        var siteSelector = string.IsNullOrWhiteSpace(sitePath) ? settings.Hostname : $"{settings.Hostname}:/{sitePath}:";
+        var filter = Uri.EscapeDataString($"displayName eq '{listName.Replace("'", "''")}'");
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"https://graph.microsoft.com/v1.0/sites/{siteSelector}/lists?$filter={filter}&$select=id,displayName");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var response = await http.SendAsync(request, ct);
+        var body = await response.Content.ReadAsStringAsync(ct);
+        if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"Microsoft List '{listName}' could not be resolved ({(int)response.StatusCode}).");
+        using var document = JsonDocument.Parse(body);
+        var match = document.RootElement.GetProperty("value").EnumerateArray().FirstOrDefault();
+        return match.ValueKind == JsonValueKind.Undefined ? throw new InvalidOperationException($"Microsoft List '{listName}' was not found.") : match.GetProperty("id").GetString()!;
+    }
+
+    private async Task CreateListItemAsync(string listId, IReadOnlyDictionary<string, object?> fields, string token, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, BuildListUrl(listId, "items"))
+        {
+            Content = JsonContent.Create(new { fields })
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var response = await http.SendAsync(request, ct);
+        if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"Microsoft List item creation failed ({(int)response.StatusCode}).");
+    }
+
+    private async Task UpdateListItemAsync(string listId, string itemId, IReadOnlyDictionary<string, object?> fields, string token, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(new HttpMethod("PATCH"), BuildListUrl(listId, $"items/{Uri.EscapeDataString(itemId)}/fields"))
+        {
+            Content = JsonContent.Create(fields)
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var response = await http.SendAsync(request, ct);
+        if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"Microsoft List item update failed ({(int)response.StatusCode}).");
+    }
+
+    private string BuildListUrl(string listId, string suffix)
+    {
+        var sitePath = settings.SitePath.Trim('/');
+        var siteSelector = string.IsNullOrWhiteSpace(sitePath) ? settings.Hostname : $"{settings.Hostname}:/{sitePath}:";
+        return $"https://graph.microsoft.com/v1.0/sites/{siteSelector}/lists/{Uri.EscapeDataString(listId)}/{suffix}";
+    }
+
+    private static Dictionary<string, object?> Fields(params (string Name, object? Value)[] values) => values
+        .Where(pair => pair.Value is not null)
+        .ToDictionary(pair => pair.Name, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
 
     private static JsonElement NormalizeFields(string entityType, JsonElement fields)
     {

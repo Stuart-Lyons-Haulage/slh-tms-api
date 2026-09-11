@@ -1,12 +1,20 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/sharepoint/master-data"), Authorize(Policy = "TmsApprove")]
-public sealed class SharePointMasterDataController(SharePointMasterDataSyncService sync, StagingService staging) : ControllerBase
+public sealed class SharePointMasterDataController(SharePointMasterDataSyncService sync, StagingService staging, TmsDbContext db) : ControllerBase
 {
+    [HttpPost("publish"), RequestSizeLimit(2_000_000)]
+    public async Task<IActionResult> Publish(CancellationToken ct)
+    {
+        var result = await sync.PublishFromSqlAsync(db, ct);
+        return Ok(new { result.ListsWritten, result.RowsWritten, result.RowsByList, message = "SQL master data was mirrored to the governed SharePoint Lists without deleting the source projection." });
+    }
+
     [HttpPost("sync")]
     public async Task<IActionResult> Sync(CancellationToken ct)
     {
