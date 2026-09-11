@@ -28,7 +28,7 @@ public partial class CustomerSiteCrmLinks : Migration
                 Active = table.Column<bool>(nullable: false)
             },
             constraints: table => table.PrimaryKey("PK_CustomerEmailRoutes", x => x.Id));
-        migrationBuilder.CreateIndex(name: "IX_Customers_Code", table: "Customers", column: "Code", unique: true);
+        migrationBuilder.CreateIndex(name: "IX_Customers_Code", table: "Customers", column: "Code", unique: false);
         migrationBuilder.CreateIndex(name: "IX_Sites_CustomerCode_ExternalCode", table: "Sites", columns: new[] { "CustomerCode", "ExternalCode" });
         migrationBuilder.CreateIndex(name: "IX_CustomerEmailRoutes_CustomerCode_SenderEmail_SenderDomain", table: "CustomerEmailRoutes", columns: new[] { "CustomerCode", "SenderEmail", "SenderDomain" });
     }

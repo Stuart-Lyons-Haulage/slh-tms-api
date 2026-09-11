@@ -145,7 +145,7 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<MasterFuelCard>().HasNoKey().ToView("vw_ActiveFuelCards", "dbo");
         b.Entity<MasterFuelPrice>().HasNoKey().ToView("vw_ActiveFuelPrices", "dbo");
 
-        b.Entity<Customer>().HasIndex(x => x.Code).IsUnique();
+        b.Entity<Customer>().HasIndex(x => x.Code).IsUnique(false);
         b.Entity<CustomerContact>().HasIndex(x => new { x.CustomerCode, x.Name }).IsUnique();
         b.Entity<Vehicle>().HasIndex(x => x.Registration).IsUnique();
         b.Entity<Driver>().HasIndex(x => x.EmployeeNumber).IsUnique();
@@ -245,7 +245,7 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
 
         b.Entity<SiteGeofence>().HasIndex(x => x.NormalizedName).IsUnique();
         b.Entity<SiteGeofence>().HasIndex(x => x.SiteId);
-        b.Entity<Customer>().HasIndex(x => x.Code).IsUnique();
+        b.Entity<Customer>().HasIndex(x => x.Code).IsUnique(false);
         b.Entity<CustomerEmailRoute>().HasIndex(x => new { x.CustomerCode, x.SenderEmail, x.SenderDomain });
         b.Entity<Site>().HasIndex(x => new { x.CustomerCode, x.ExternalCode });
         b.Entity<GeofenceVisit>().HasIndex(x => new { x.VehicleIdentifier, x.ExitedAtUtc });
