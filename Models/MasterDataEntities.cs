@@ -4,7 +4,7 @@ namespace Slh.Tms.Api.Models;
 
 public abstract class ActiveMasterRow
 {
-    public string? SharePointItemId { get; set; }
+    public int SharePointItemId { get; set; }
     public DateTime LastSyncedAt { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
