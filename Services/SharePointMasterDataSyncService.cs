@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Slh.Tms.Api.Contracts;
 
 namespace Slh.Tms.Api.Services;
@@ -15,12 +16,13 @@ public sealed class SharePointMasterDataOptions
 
     public SharePointMasterDataOptions()
     {
-        Lists["customer"] = "Customers";
-        Lists["site"] = "Sites";
-        Lists["driver"] = "Drivers";
-        Lists["vehicle"] = "Vehicles";
-        Lists["sitetimingrule"] = "Run Timings";
-        Lists["sitegeofence"] = "Geofences";
+        // These are the governed Lists provisioned in the SLH Hub.  Keep the
+        // operational entity name on the left: it is the contract used by SQL.
+        Lists["customer"] = "Hub Customers";
+        Lists["site"] = "Hub Sites";
+        Lists["driver"] = "Hub Drivers";
+        Lists["vehicle"] = "Hub Vehicles";
+        Lists["trailer"] = "Hub Trailers";
     }
 }
 
@@ -48,7 +50,12 @@ public sealed class SharePointMasterDataSyncService(
             {
                 var itemId = row.TryGetProperty("id", out var id) ? id.ToString() : Guid.NewGuid().ToString("N");
                 var fields = row.TryGetProperty("fields", out var f) ? f : row;
-                requests.Add(new StageImportRequest(mapping.Key, $"sharepoint:{mapping.Key}:{itemId}", fields, "Microsoft Lists / SharePoint"));
+                var sourceVersion = row.TryGetProperty("eTag", out var eTag) ? eTag.GetString() : null;
+                requests.Add(new StageImportRequest(
+                    mapping.Key,
+                    $"sharepoint:{mapping.Key}:{itemId}:{sourceVersion ?? "unversioned"}",
+                    NormalizeFields(mapping.Key, fields),
+                    "Microsoft Lists / SharePoint"));
             }
         }
         logger.LogInformation("Read {RowsRead} master-data rows from {ListsRead} Microsoft Lists.", requests.Count, listsRead);
@@ -60,14 +67,69 @@ public sealed class SharePointMasterDataSyncService(
         var sitePath = settings.SitePath.Trim('/');
         var siteSelector = string.IsNullOrWhiteSpace(sitePath) ? settings.Hostname : $"{settings.Hostname}:/{sitePath}:";
         var listSelector = Uri.EscapeDataString(listId);
-        var uri = $"https://graph.microsoft.com/v1.0/sites/{siteSelector}/lists/{listSelector}/items?expand=fields&$top=999";
-        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        using var response = await http.SendAsync(request, ct);
-        var body = await response.Content.ReadAsStringAsync(ct);
-        if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"Microsoft List '{entityType}' could not be read ({(int)response.StatusCode}).");
-        using var document = JsonDocument.Parse(body);
-        return document.RootElement.TryGetProperty("value", out var value) ? value.EnumerateArray().Select(x => x.Clone()).ToArray() : [];
+        string? uri = $"https://graph.microsoft.com/v1.0/sites/{siteSelector}/lists/{listSelector}/items?expand=fields&$top=999";
+        var rows = new List<JsonElement>();
+        while (!string.IsNullOrWhiteSpace(uri))
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            using var response = await http.SendAsync(request, ct);
+            var body = await response.Content.ReadAsStringAsync(ct);
+            if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"Microsoft List '{entityType}' could not be read ({(int)response.StatusCode}).");
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.TryGetProperty("value", out var value)) rows.AddRange(value.EnumerateArray().Select(x => x.Clone()));
+            uri = document.RootElement.TryGetProperty("@odata.nextLink", out var nextLink) ? nextLink.GetString() : null;
+        }
+        return rows.ToArray();
+    }
+
+    private static JsonElement NormalizeFields(string entityType, JsonElement fields)
+    {
+        var values = JsonNode.Parse(fields.GetRawText())?.AsObject() ?? new JsonObject();
+        string? Text(string name)
+        {
+            var value = values[name];
+            if (value is null) return null;
+            var raw = value.ToJsonString();
+            return raw == "null" ? null : raw.StartsWith('"') ? JsonSerializer.Deserialize<string>(raw) : raw;
+        }
+        void Set(string name, string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value)) values[name] = value;
+        }
+
+        switch (entityType.ToLowerInvariant())
+        {
+            case "customer":
+                Set("code", Text("CustomerKey"));
+                Set("name", Text("TradingName") ?? Text("CustomerKey"));
+                Set("tradingName", Text("TradingName"));
+                break;
+            case "site":
+                Set("externalCode", Text("SiteKey"));
+                Set("customerCode", Text("CustomerKey"));
+                Set("name", Text("SiteName") ?? Text("BuildingName") ?? Text("SiteKey"));
+                Set("driverTextName", Text("BuildingName") ?? Text("SiteName"));
+                Set("collectionAddress", string.Join(", ", new[] { Text("Address1"), Text("Address2"), Text("Town"), Text("County"), Text("Postcode") }.Where(value => !string.IsNullOrWhiteSpace(value))));
+                break;
+            case "driver":
+                Set("employeeNumber", Text("EmployeeNumber") ?? Text("DriverKey"));
+                Set("displayName", Text("DriverName") ?? Text("DriverKey"));
+                Set("drivingLicenceNumber", Text("LicenceNumber"));
+                break;
+            case "vehicle":
+                Set("registration", Text("Registration") ?? Text("VehicleKey"));
+                Set("fleetNumber", Text("VehicleKey"));
+                break;
+            case "trailer":
+                Set("trailerNumber", Text("Registration") ?? Text("TrailerKey"));
+                Set("type", Text("TrailerType"));
+                Set("standardCapacity", Text("Capacity"));
+                break;
+        }
+
+        using var document = JsonDocument.Parse(values.ToJsonString());
+        return document.RootElement.Clone();
     }
 
     private async Task<string> GetTokenAsync(CancellationToken ct)
