@@ -49,6 +49,31 @@ Aliases resolve inbound text to a canonical site without changing the canonical 
 ### Drivers / Vehicles / Trailers
 Use immutable business keys and TMS IDs, with SharePoint holding people-facing reference fields and supporting-document links. Operational allocation, availability and live state remain in SQL.
 
+### Markets
+- MarketKey (required, immutable)
+- MarketName
+- ContactName
+- StandOrLocation
+- Salesman
+- Sender
+- Active
+- TmsMarketContactId
+- SyncStatus
+- LastSyncUtc
+
+### Fuel cards
+- FuelCardKey (required, immutable)
+- VehicleRegistration (required, indexed)
+- TmsVehicleId
+- FuelProvider
+- CardReference / LastFour
+- PinReference or approved protected secret reference
+- Active
+- SyncStatus
+- LastSyncUtc
+
+Fuel-card rows are always linked to a vehicle. Full card numbers and PINs are restricted fields and must not appear in general exports, audit messages or user-facing comments.
+
 ## Hub document structure
 
 The production Team Portal contains the following Hub folders beneath `Planning/Transport Operations System/00 SLH Hub`:
