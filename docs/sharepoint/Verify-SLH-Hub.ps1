@@ -6,12 +6,15 @@ $ErrorActionPreference = 'Stop'
 Connect-PnPOnline -Url $SiteUrl -Interactive
 
 $expected = @{
- 'Hub Customers'=@('CustomerKey','TradingName','Active','AccountOwner','ServiceNotes','TmsCustomerId','LastSyncStatus','LastSyncUtc')
+ 'Hub Customers'=@('CustomerKey','TradingName','Active','AccountOwner','ServiceNotes','DefaultSiteCode','TmsCustomerId','LastSyncStatus','LastSyncUtc')
  'Hub Sites'=@('SiteKey','CustomerKey','SiteName','BuildingName','Address1','Address2','Town','County','Postcode','Latitude','Longitude','AccessWindowStart','AccessWindowEnd','GeofenceId','Active','TmsSiteId','SyncStatus')
  'Hub Site Aliases'=@('AliasKey','SiteKey','Alias','AliasType','Active')
- 'Hub Drivers'=@('DriverKey','DriverName','EmployeeNumber','LicenceNumber','Active','TmsDriverId','ComplianceStatus','LastSyncUtc')
- 'Hub Vehicles'=@('VehicleKey','Registration','VehicleType','Capacity','Active','TmsVehicleId','ComplianceStatus','LastSyncUtc')
- 'Hub Trailers'=@('TrailerKey','Registration','TrailerType','Capacity','Active','TmsTrailerId','LastSyncUtc')
+ 'Hub Drivers'=@('DriverKey','DriverName','EmployeeNumber','TachoName','MobileNumber','DriverType','DriverGroup','Skills','AgencyName','Coding','Notes','LicenceNumber','LicenceExpiry','CPCExpiry','DigitalTachoCardExpiry','MedicalExpiry','TachoCardNumber','TachoMasterDriverId','Active','TmsDriverId','ComplianceStatus','LastSyncUtc','LastTachoSyncUtc')
+ 'Hub Vehicles'=@('VehicleKey','Registration','FleetNumber','VehicleType','Abbreviation','Transmission','DvsCompliant','FuelProvider','CabMobile','FuelPin','ShellCard','BpRedCard','BpPlainCard','FuelPinSecretName','FuelCardLastFour','Notes','FleetioId','FleetioName','FleetioStatus','MOTExpiry','TachoCalibrationExpiry','VehicleTestExpiry','SamsaraAssetId','Capacity','Active','TmsVehicleId','ComplianceStatus','LastSyncUtc')
+ 'Hub Trailers'=@('TrailerKey','Registration','TrailerType','StandardCapacity','EuroCapacity','MOTExpiry','TestExpiry','Active','TmsTrailerId','LastSyncUtc')
+ 'Fuel Cards'=@('VehicleKey','Registration','FuelProvider','FuelPinSecretName','FuelCardLastFour','ShellCard','BpRedCard','BpPlainCard','Active','LastSyncUtc')
+ 'Fuel Pricing'=@('WeekCommencing','Provider','PricePencePerLitre','IsPricingMaximum','Source','Notes','Active','LastSyncUtc')
+ 'TMS Markets'=@('Market','Name','StandOrLocation','Salesman','Sender','Active','LastSyncUtc')
  'Hub Integration Log'=@('CorrelationId','EntityType','BusinessKey','Direction','Status','Message','OccurredUtc')
  'Hub Incidents & Claims'=@('ClaimKey','IncidentDate','CustomerKey','VehicleKey','DriverKey','Status','Severity','Description','TmsIncidentId')
 }
