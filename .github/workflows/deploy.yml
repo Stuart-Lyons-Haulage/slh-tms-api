@@ -477,12 +477,12 @@ jobs:
             --revision "$TARGET_REVISION" \
             --output json | tee /tmp/failed-revision-replicas.json >> "$GITHUB_STEP_SUMMARY"
 
-          echo "### Recent system logs" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Recent candidate container logs" >> "$GITHUB_STEP_SUMMARY"
           az containerapp logs show \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --revision "$TARGET_REVISION" \
-            --type system \
+            --type console \
             --tail 100 | tee /tmp/failed-revision-system.log >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish deployment summary
@@ -516,11 +516,11 @@ jobs:
 
           {
             echo "## Production deployment summary"
-            echo "- Tested revision: `${DEPLOY_SHA}`"
-            echo "- Candidate revision: `${TARGET_REVISION:-unknown}`"
-            echo "- Previous revision: `${PREVIOUS_REVISION:-unknown}`"
-            echo "- Image: `${image_digest}`"
-            echo "- Candidate health: `${health_state}`"
-            echo "- Workflow result: `${{ job.status }}`"
-            echo "- Rollback status: `${rollback_status}`"
+            echo "- Tested revision: ${DEPLOY_SHA}"
+            echo "- Candidate revision: ${TARGET_REVISION:-unknown}"
+            echo "- Previous revision: ${PREVIOUS_REVISION:-unknown}"
+            echo "- Image: ${image_digest}"
+            echo "- Candidate health: ${health_state}"
+            echo "- Workflow result: ${{ job.status }}"
+            echo "- Rollback status: ${rollback_status}"
           } >> "$GITHUB_STEP_SUMMARY"
