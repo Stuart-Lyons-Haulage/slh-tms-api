@@ -24,8 +24,3 @@ BEGIN
         Active bit NOT NULL CONSTRAINT DF_CustomerEmailRoutes_Active DEFAULT(1)
     );
 END;
-
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Sites_CustomerCode_ExternalCode' AND object_id = OBJECT_ID(N'dbo.Sites'))
-    CREATE INDEX IX_Sites_CustomerCode_ExternalCode ON dbo.Sites(CustomerCode, ExternalCode);
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_CustomerEmailRoutes_CustomerCode_SenderEmail_SenderDomain' AND object_id = OBJECT_ID(N'dbo.CustomerEmailRoutes'))
-    CREATE INDEX IX_CustomerEmailRoutes_CustomerCode_SenderEmail_SenderDomain ON dbo.CustomerEmailRoutes(CustomerCode, SenderEmail, SenderDomain);
