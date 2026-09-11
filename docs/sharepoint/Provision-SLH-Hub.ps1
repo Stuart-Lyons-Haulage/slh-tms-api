@@ -8,7 +8,7 @@ Connect-PnPOnline -Url $SiteUrl -Interactive
 
 $lists = @{
  'Hub Customers'=@(
-  @{Name='CustomerKey';Type='Text';Required=$true}; @{Name='TradingName';Type='Text'}; @{Name='Active';Type='Boolean'}; @{Name='AccountOwner';Type='Text'}; @{Name='ServiceNotes';Type='Note'}; @{Name='TmsCustomerId';Type='Number'}; @{Name='LastSyncStatus';Type='Choice';Choices=@('Pending','Synced','Warning','Error')}; @{Name='LastSyncUtc';Type='DateTime'}
+  @{Name='CustomerKey';Type='Text';Required=$true}; @{Name='TradingName';Type='Text'}; @{Name='Active';Type='Boolean'}; @{Name='AccountOwner';Type='Text'}; @{Name='ServiceNotes';Type='Note'}; @{Name='DefaultSiteCode';Type='Text'}; @{Name='TmsCustomerId';Type='Number'}; @{Name='LastSyncStatus';Type='Choice';Choices=@('Pending','Synced','Warning','Error')}; @{Name='LastSyncUtc';Type='DateTime'}
  )
  'Hub Sites'=@(
   @{Name='SiteKey';Type='Text';Required=$true}; @{Name='CustomerKey';Type='Text'}; @{Name='SiteName';Type='Text'}; @{Name='BuildingName';Type='Text'}; @{Name='Address1';Type='Text'}; @{Name='Address2';Type='Text'}; @{Name='Town';Type='Text'}; @{Name='County';Type='Text'}; @{Name='Postcode';Type='Text'}; @{Name='Latitude';Type='Number'}; @{Name='Longitude';Type='Number'}; @{Name='AccessWindowStart';Type='DateTime'}; @{Name='AccessWindowEnd';Type='DateTime'}; @{Name='GeofenceId';Type='Text'}; @{Name='Active';Type='Boolean'}; @{Name='TmsSiteId';Type='Number'}; @{Name='SyncStatus';Type='Choice';Choices=@('Pending','Synced','Warning','Error')}
@@ -17,13 +17,24 @@ $lists = @{
   @{Name='AliasKey';Type='Text';Required=$true}; @{Name='SiteKey';Type='Text'}; @{Name='Alias';Type='Text'}; @{Name='AliasType';Type='Choice';Choices=@('Customer','Site','Building','Legacy')}; @{Name='Active';Type='Boolean'}
  )
  'Hub Drivers'=@(
-  @{Name='DriverKey';Type='Text';Required=$true}; @{Name='DriverName';Type='Text'}; @{Name='EmployeeNumber';Type='Text'}; @{Name='LicenceNumber';Type='Text'}; @{Name='Active';Type='Boolean'}; @{Name='TmsDriverId';Type='Number'}; @{Name='ComplianceStatus';Type='Choice';Choices=@('OK','Warning','Expired','Unknown')}; @{Name='LastSyncUtc';Type='DateTime'}
+  @{Name='DriverKey';Type='Text';Required=$true}; @{Name='DriverName';Type='Text'}; @{Name='EmployeeNumber';Type='Text'}; @{Name='TachoName';Type='Text'}; @{Name='MobileNumber';Type='Text'}; @{Name='DriverType';Type='Text'}; @{Name='DriverGroup';Type='Text'}; @{Name='Skills';Type='Text'}; @{Name='AgencyName';Type='Text'}; @{Name='Coding';Type='Text'}; @{Name='Notes';Type='Note'}; @{Name='LicenceNumber';Type='Text'}; @{Name='LicenceExpiry';Type='DateTime'}; @{Name='CPCExpiry';Type='DateTime'}; @{Name='DigitalTachoCardExpiry';Type='DateTime'}; @{Name='MedicalExpiry';Type='DateTime'}; @{Name='TachoCardNumber';Type='Text'}; @{Name='TachoMasterDriverId';Type='Text'}; @{Name='Active';Type='Boolean'}; @{Name='TmsDriverId';Type='Number'}; @{Name='ComplianceStatus';Type='Choice';Choices=@('OK','Warning','Expired','Unknown')}; @{Name='LastSyncUtc';Type='DateTime'}; @{Name='LastTachoSyncUtc';Type='DateTime'}
  )
  'Hub Vehicles'=@(
+  @{Name='VehicleKey';Type='Text';Required=$true}; @{Name='Registration';Type='Text'}; @{Name='FleetNumber';Type='Text'}; @{Name='VehicleType';Type='Text'}; @{Name='Abbreviation';Type='Text'}; @{Name='Transmission';Type='Text'}; @{Name='DvsCompliant';Type='Boolean'}; @{Name='FuelProvider';Type='Text'}; @{Name='CabMobile';Type='Text'}; @{Name='FuelPin';Type='Text'}; @{Name='ShellCard';Type='Text'}; @{Name='BpRedCard';Type='Text'}; @{Name='BpPlainCard';Type='Text'}; @{Name='FuelPinSecretName';Type='Text'}; @{Name='FuelCardLastFour';Type='Text'}; @{Name='Notes';Type='Note'}; @{Name='FleetioId';Type='Text'}; @{Name='FleetioName';Type='Text'}; @{Name='FleetioStatus';Type='Text'}; @{Name='MOTExpiry';Type='DateTime'}; @{Name='TachoCalibrationExpiry';Type='DateTime'}; @{Name='VehicleTestExpiry';Type='DateTime'}; @{Name='SamsaraAssetId';Type='Text'}; @{Name='Capacity';Type='Number'}; @{Name='Active';Type='Boolean'}; @{Name='TmsVehicleId';Type='Number'}; @{Name='ComplianceStatus';Type='Choice';Choices=@('OK','Warning','Expired','Unknown')}; @{Name='LastSyncUtc';Type='DateTime'}
+ )=@(
   @{Name='VehicleKey';Type='Text';Required=$true}; @{Name='Registration';Type='Text'}; @{Name='VehicleType';Type='Text'}; @{Name='Capacity';Type='Number'}; @{Name='Active';Type='Boolean'}; @{Name='TmsVehicleId';Type='Number'}; @{Name='ComplianceStatus';Type='Choice';Choices=@('OK','Warning','Expired','Unknown')}; @{Name='LastSyncUtc';Type='DateTime'}
  )
  'Hub Trailers'=@(
-  @{Name='TrailerKey';Type='Text';Required=$true}; @{Name='Registration';Type='Text'}; @{Name='TrailerType';Type='Text'}; @{Name='Capacity';Type='Number'}; @{Name='Active';Type='Boolean'}; @{Name='TmsTrailerId';Type='Number'}; @{Name='LastSyncUtc';Type='DateTime'}
+  @{Name='TrailerKey';Type='Text';Required=$true}; @{Name='Registration';Type='Text'}; @{Name='TrailerType';Type='Text'}; @{Name='StandardCapacity';Type='Number'}; @{Name='EuroCapacity';Type='Number'}; @{Name='MOTExpiry';Type='DateTime'}; @{Name='TestExpiry';Type='DateTime'}; @{Name='Active';Type='Boolean'}; @{Name='TmsTrailerId';Type='Number'}; @{Name='LastSyncUtc';Type='DateTime'}
+ )
+ 'Fuel Cards'=@(
+  @{Name='VehicleKey';Type='Text';Required=$true}; @{Name='Registration';Type='Text'}; @{Name='FuelProvider';Type='Text'}; @{Name='FuelPinSecretName';Type='Text'}; @{Name='FuelCardLastFour';Type='Text'}; @{Name='ShellCard';Type='Text'}; @{Name='BpRedCard';Type='Text'}; @{Name='BpPlainCard';Type='Text'}; @{Name='Active';Type='Boolean'}; @{Name='LastSyncUtc';Type='DateTime'}
+ )
+ 'Fuel Pricing'=@(
+  @{Name='WeekCommencing';Type='DateTime';Required=$true}; @{Name='Provider';Type='Text';Required=$true}; @{Name='PricePencePerLitre';Type='Number';Required=$true}; @{Name='IsPricingMaximum';Type='Boolean'}; @{Name='Source';Type='Text'}; @{Name='Notes';Type='Note'}; @{Name='Active';Type='Boolean'}; @{Name='LastSyncUtc';Type='DateTime'}
+ )
+ 'TMS Markets'=@(
+  @{Name='Market';Type='Text';Required=$true}; @{Name='Name';Type='Text';Required=$true}; @{Name='StandOrLocation';Type='Text'}; @{Name='Salesman';Type='Text'}; @{Name='Sender';Type='Text'}; @{Name='Active';Type='Boolean'}; @{Name='LastSyncUtc';Type='DateTime'}
  )
  'Hub Integration Log'=@(
   @{Name='CorrelationId';Type='Text';Required=$true}; @{Name='EntityType';Type='Choice';Choices=@('Customer','Site','Alias','Driver','Vehicle','Trailer','Order','Document')}; @{Name='BusinessKey';Type='Text'}; @{Name='Direction';Type='Choice';Choices=@('SharePointToTms','TmsToSharePoint','Inbound')}; @{Name='Status';Type='Choice';Choices=@('Started','Succeeded','Warning','Failed','Retrying')}; @{Name='Message';Type='Note'}; @{Name='OccurredUtc';Type='DateTime'}
@@ -45,13 +56,16 @@ $descriptions = @{
 }
 
 $views = @{
- 'Hub Customers'=@{Title='Hub Customers - Active';Fields=@('CustomerKey','TradingName','Active','AccountOwner','LastSyncStatus','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
+ 'Hub Customers'=@{Title='Hub Customers - Active';Fields=@('CustomerKey','TradingName','Active','AccountOwner','DefaultSiteCode','LastSyncStatus','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
  'Hub Sites'=@{Title='Hub Sites - Active';Fields=@('SiteKey','CustomerKey','SiteName','BuildingName','Town','Postcode','AccessWindowStart','AccessWindowEnd','GeofenceId','Active','SyncStatus');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
  'Hub Site Aliases'=@{Title='Hub Site Aliases - Active';Fields=@('AliasKey','SiteKey','Alias','AliasType','Active');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
- 'Hub Drivers'=@{Title='Hub Drivers - Active';Fields=@('DriverKey','DriverName','EmployeeNumber','LicenceNumber','Active','ComplianceStatus','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
- 'Hub Vehicles'=@{Title='Hub Vehicles - Active';Fields=@('VehicleKey','Registration','VehicleType','Capacity','Active','ComplianceStatus','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
- 'Hub Trailers'=@{Title='Hub Trailers - Active';Fields=@('TrailerKey','Registration','TrailerType','Capacity','Active','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
+ 'Hub Drivers'=@{Title='Hub Drivers - Active';Fields=@('DriverKey','DriverName','EmployeeNumber','LicenceNumber','LicenceExpiry','CPCExpiry','DigitalTachoCardExpiry','MedicalExpiry','Active','ComplianceStatus','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
+ 'Hub Vehicles'=@{Title='Hub Vehicles - Active';Fields=@('VehicleKey','Registration','VehicleType','Capacity','MOTExpiry','TachoCalibrationExpiry','Active','ComplianceStatus','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
+ 'Hub Trailers'=@{Title='Hub Trailers - Active';Fields=@('TrailerKey','Registration','TrailerType','StandardCapacity','EuroCapacity','MOTExpiry','TestExpiry','Active','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
  'Hub Integration Log'=@{Title='Hub Integration Log - Recent';Fields=@('CorrelationId','EntityType','BusinessKey','Direction','Status','Message','OccurredUtc');Query='';RowLimit=100}
+ 'Fuel Cards'=@{Title='Fuel Cards - Active';Fields=@('VehicleKey','Registration','FuelProvider','FuelCardLastFour','Active','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
+ 'Fuel Pricing'=@{Title='Fuel Pricing - Active';Fields=@('WeekCommencing','Provider','PricePencePerLitre','IsPricingMaximum','Source','Active','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
+ 'TMS Markets'=@{Title='TMS Markets - Active';Fields=@('Market','Name','StandOrLocation','Salesman','Sender','Active','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
  'Hub Incidents & Claims'=@{Title='Hub Incidents & Claims - Open';Fields=@('ClaimKey','IncidentDate','CustomerKey','VehicleKey','DriverKey','Status','Severity','Description','TmsIncidentId');Query="<Where><Neq><FieldRef Name='Status'/><Value Type='Choice'>Closed</Value></Neq></Where>"}
 }
 
