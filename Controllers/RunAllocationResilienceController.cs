@@ -8,7 +8,7 @@ using Slh.Tms.Api.Services;
 namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/runs"), Authorize]
-public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMapsRouteClient maps) : ControllerBase
+public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMapsRouteClient maps, MasterAssignmentComplianceService compliance) : ControllerBase
 {
     [HttpGet]
     public async Task<IActionResult> Runs([FromQuery] DateOnly? date, CancellationToken ct)
@@ -47,6 +47,9 @@ public sealed class RunAllocationResilienceController(TmsDbContext db, AzureMaps
             return BadRequest(new { message = "Driver is not active." });
         if (request.TrailerId is Guid trailerId && !await db.Trailers.AsNoTracking().AnyAsync(x => x.Id == trailerId && x.Active, ct))
             return BadRequest(new { message = "Trailer is not active." });
+        var masterCompliance = await compliance.CheckAsync(request.DriverId, request.VehicleId, ct);
+        if (!masterCompliance.Allowed)
+            return Conflict(new { code = "master_compliance_blocked", errors = masterCompliance.Errors, warnings = masterCompliance.Warnings });
 
         if (request.VehicleId is Guid selectedVehicleId && IsVehicleUnavailable(await db.Vehicles.AsNoTracking().SingleAsync(x => x.Id == selectedVehicleId, ct)))
             return Conflict(new { code = "vehicle_unavailable", message = "The selected vehicle is VOR, out of service or otherwise unavailable." });
