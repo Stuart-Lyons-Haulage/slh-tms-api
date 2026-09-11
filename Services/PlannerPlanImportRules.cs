@@ -1,4 +1,5 @@
 using Slh.Tms.Api.Contracts;
+using System.Text.RegularExpressions;
 
 namespace Slh.Tms.Api.Services;
 
@@ -17,12 +18,14 @@ public static class PlannerPlanImportRules
     {
         var source = string.IsNullOrWhiteSpace(run.PlannerRun) ? run.RunRef : run.PlannerRun;
         var period = PlannerPeriod(run);
-        var clean = source.Trim();
+        var clean = Regex.Replace(source.Trim(), @"\bWAVE\s*[13]\b", string.Empty, RegexOptions.IgnoreCase).Trim(' ', '-', '_', ':');
         var digits = new string(clean.Where(char.IsDigit).ToArray());
         var simpleSource = clean.All(ch => char.IsLetterOrDigit(ch) || char.IsWhiteSpace(ch));
         var label = digits.Length > 0 && simpleSource ? $"Run {int.Parse(digits)}" : clean;
         if (!label.StartsWith("Run ", StringComparison.OrdinalIgnoreCase)) label = $"Run {label}";
-        return string.IsNullOrWhiteSpace(period) || label.Contains(period, StringComparison.OrdinalIgnoreCase) ? label : $"{label} {period}";
+        var overnight = IsOvernight(run);
+        var withPeriod = string.IsNullOrWhiteSpace(period) || label.Contains(period, StringComparison.OrdinalIgnoreCase) ? label : $"{label} {period}";
+        return overnight && !withPeriod.Contains("O/N", StringComparison.OrdinalIgnoreCase) ? $"{withPeriod} O/N" : withPeriod;
     }
 
     public static string? PlannerPeriod(PlannerPlanRunRequest run)
@@ -36,6 +39,14 @@ public static class PlannerPlanImportRules
             .Select(stop => stop.CollectFrom)
             .FirstOrDefault();
         return TimeOnly.TryParse(first, out var time) ? time.Hour >= 12 ? "PM" : "AM" : null;
+    }
+
+    public static bool IsOvernight(PlannerPlanRunRequest run)
+    {
+        if ($"{run.PlannerNote} {run.PlannerRun} {run.RunType}".Contains("O/N", StringComparison.OrdinalIgnoreCase) ||
+            Regex.IsMatch($"{run.PlannerNote} {run.PlannerRun} {run.RunType}", @"\bovernight\b|\bnight[ -]?out\b", RegexOptions.IgnoreCase)) return true;
+
+        return (run.Stops ?? []).Any(stop => DateDiffers(run.PlanningDate, stop.CollectionSiteArrDate) || DateDiffers(run.PlanningDate, stop.DeliveredDate));
     }
 
     public static PalletCapacityResult Capacity(PlannerPlanRunRequest run)
@@ -97,9 +108,11 @@ public static class PlannerPlanImportRules
         var parts = new[]
         {
             run.PlannerNote,
-            string.IsNullOrWhiteSpace(run.RunType) ? null : $"Run type: {run.RunType}",
+            string.IsNullOrWhiteSpace(run.RunType) ? null : $"Run type: {NormalizeRunType(run.RunType)}",
             $"Planner run: {PlannerRunLabel(run)}",
             PlannerPeriod(run) is { } period ? $"Planner period: {period}" : null,
+            IsOvernight(run) ? "O/N: Yes" : null,
+            IsOvernight(run) ? "Night out: Yes" : null,
             string.IsNullOrWhiteSpace(run.ReconciliationStatus) ? null : $"Reconciliation: {run.ReconciliationStatus}",
             string.IsNullOrWhiteSpace(source) ? null : $"Source: {source}",
             $"Capacity: {capacity.StandardPallets:0.##} Standard + {capacity.EuroPallets:0.##} Euro + {capacity.UnknownPallets:0.##} unknown = {capacity.UtilisationPercent:0.0}% ({capacity.Status})"
@@ -112,4 +125,19 @@ public static class PlannerPlanImportRules
         .Where(char.IsLetterOrDigit)
         .Select(char.ToUpperInvariant)
         .ToArray());
+
+    private static string NormalizeRunType(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        if (Regex.IsMatch(value, @"\bWAVE\s*1\b", RegexOptions.IgnoreCase)) return "AM";
+        if (Regex.IsMatch(value, @"\bWAVE\s*3\b", RegexOptions.IgnoreCase)) return "PM";
+        return value.Trim();
+    }
+
+    private static bool DateDiffers(DateOnly planningDate, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        var normalized = value.Trim();
+        return DateOnly.TryParse(normalized, out var parsed) && parsed != planningDate;
+    }
 }

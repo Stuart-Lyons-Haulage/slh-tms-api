@@ -189,15 +189,22 @@ public sealed class EmailOrderIntakeService
         var collectionDate = explicitCollectionDate ?? LocalDate(receivedAt);
         var matches = Regex.Matches(
                 body,
-                @"(?<depot>Aylesford|Bracknell|Brinklow|Leyland)\s+WAVE\s+(?<wave>\d+)(?:\s+from\s+(?<collection>[A-Z][A-Z0-9 &'()/-]{1,80}?))?\s+(?<qty>\d{1,3})\s+pallets?\s+PO\s+(?<po>[A-Z0-9/-]+)",
+                @"(?<depot>Aylesford|Bracknell|Brinklow|Leyland)\s+WAVE\s+(?<wave>\d+)(?:\s+from\s+(?<collection>Sefter|Leythorne))?\s+(?<qty>\d{1,3})\s+pallets?\s+PO\s+(?<po>[A-Z0-9/-]+)",
                 RegexOptions.IgnoreCase)
             .Cast<Match>();
+        var plainWaveMatches = Regex.Matches(body,
+                @"(?<depot>Aylesford|Bracknell|Brinklow|Leyland)\s+WAVE\s+(?<wave>\d+)\s+(?<qty>\d{1,3})\s+pallets?\s+PO\s+(?<po>[A-Z0-9/-]+)",
+                RegexOptions.IgnoreCase).Cast<Match>();
+        matches = matches.Concat(plainWaveMatches)
+            .GroupBy(match => match.Index)
+            .Select(group => group.First());
         var rows = new List<(string Depot, int Wave, string Collection, int Pallets, string Po)>();
         string? currentCollection = null;
         foreach (var match in matches)
         {
             if (match.Groups["collection"].Success)
-                currentCollection = CleanSourceLine(match.Groups["collection"].Value);
+                currentCollection = CleanSourceLine(match.Groups["collection"].Value)
+                    .Replace("Barfoots ", string.Empty, StringComparison.OrdinalIgnoreCase);
             if (string.IsNullOrWhiteSpace(currentCollection)) continue;
             var pallets = int.Parse(match.Groups["qty"].Value, CultureInfo.InvariantCulture);
             if (pallets <= 0) continue;
@@ -214,11 +221,21 @@ public sealed class EmailOrderIntakeService
             var warnings = new List<string>();
             if (explicitCollectionDate is null)
                 warnings.Add("Collection date inferred as the email received date from the Barfoots Waitrose wave template; confirm if collection occurs on a different day.");
-            return BuildStructuredOrder(
+            var order = BuildStructuredOrder(
                 request,
                 $"barfoots-waitrose-{NormaliseKey(row.Depot)}-wave-{row.Wave}-{NormaliseKey(row.Po)}",
                 "WAITROSE", row.Po, collectionDate, deliveryDate.Value, row.Pallets,
                 row.Collection, row.Depot, $"Waitrose Wave {row.Wave} depot delivery", warnings);
+            var payload = JsonSerializer.Deserialize<Dictionary<string, object?>>(order.Payload.GetRawText()) ?? [];
+            payload["wave"] = row.Wave;
+            payload["overnightRoute"] = row.Wave >= 3;
+            payload["routeTiming"] = row.Wave >= 3 ? "Overnight" : "SameDay";
+            if (row.Wave >= 3)
+            {
+                payload["requestedTime"] = "17:00";
+                payload["driverInstructions"] = $"Order type: Waitrose Wave {row.Wave} depot delivery · PM overnight departure · PO ref: {row.Po}";
+            }
+            return new ParsedEmailOrder(order.SourceKey, order.NaturalKey, JsonSerializer.SerializeToElement(payload), order.Warnings);
         }).ToList();
     }
 
@@ -232,12 +249,18 @@ public sealed class EmailOrderIntakeService
         var warnings = order.Warnings.ToList();
         var sources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var receivedAt = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
+        if (string.IsNullOrWhiteSpace(PayloadText(payload, "stallNumber")) &&
+            (string.Equals(PayloadText(payload, "customerCode"), "BARFOOTS", StringComparison.OrdinalIgnoreCase) ||
+             Regex.IsMatch($"{request.Subject}\n{body}", @"\bBarfoots\b", RegexOptions.IgnoreCase)))
+            payload["stallNumber"] = "Barfoots";
 
         var collectionLabel = ExtractLabelValue(body, "collection", "collect", "pickup");
         var collectFrom = ExtractMatch(CollectFromRegex, body, "site");
         var explicitCollection = ExtractBodyCollectionPoint(body)
             ?? (!string.IsNullOrWhiteSpace(collectFrom) ? CleanSourceLine(collectFrom) : ExtractCollectionSiteFromLabel(collectionLabel));
-        if (!string.IsNullOrWhiteSpace(explicitCollection))
+        if (explicitCollection is not null && Regex.IsMatch(explicitCollection, @"^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", RegexOptions.IgnoreCase))
+            explicitCollection = null;
+        if (!string.IsNullOrWhiteSpace(explicitCollection) && !order.SourceKey.StartsWith("barfoots-waitrose-", StringComparison.OrdinalIgnoreCase))
         {
             payload["sellerName"] = explicitCollection;
             sources["collectionSite"] = "body.explicit";
@@ -318,14 +341,14 @@ public sealed class EmailOrderIntakeService
         var hallHunter = ParseHallHunterDirectDepot(request, rawPo, body, sourceText, receivedAt);
         if (hallHunter.Count > 0) return hallHunter;
 
+        var barfootsWaitrose = ParseBarfootsWaitroseWaveBody(request, body, receivedAt);
+        if (barfootsWaitrose.Count > 0) return barfootsWaitrose;
+
         var labelled = ParseLabelledBodyOrder(request, rawPo, body, sourceText, receivedAt);
         if (labelled is not null) return [labelled];
 
         var doubleHWaitrose = ParseDoubleHWaitroseColumnTable(request, rawPo, body, sourceText, receivedAt);
         if (doubleHWaitrose.Count > 0) return doubleHWaitrose;
-
-        var barfootsWaitrose = ParseBarfootsWaitroseWaveBody(request, body, receivedAt);
-        if (barfootsWaitrose.Count > 0) return barfootsWaitrose;
 
         var depotSplit = ParseAndoverAvonmouthSplit(request, rawPo, body, receivedAt);
         if (depotSplit.Count > 0) return depotSplit;
@@ -354,10 +377,15 @@ public sealed class EmailOrderIntakeService
         DateTimeOffset receivedAt)
     {
         var explicitCustomer = ExtractLabelValue(body, "customer");
-        var explicitCollection = ExtractLabelValue(body, "collection", "collect", "pickup");
+        var explicitCollection = ExtractBodyCollectionPoint(body)
+                                 ?? ExtractLabelValue(body, "collection", "collect", "pickup");
+        if (explicitCollection is not null && Regex.IsMatch(explicitCollection, @"^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", RegexOptions.IgnoreCase))
+            explicitCollection = null;
         var explicitDeliveryDate = ExtractLabelValue(body, "deliverydate", "depotdate", "deliver", "delivery");
         var deliveryAddress = ExtractLabelBlock(body, "addressofdelivery", "adressofdelivery", "deliveryaddress", "deliverto", "destination", "shipto");
-        var explicitPallets = ExtractInt(LabelledQuantityRegex, body, "qty");
+        var explicitPallets = ExtractInt(LabelledQuantityRegex, body, "qty")
+                              ?? ExtractInt(PalletQuantityRegex, body, "qty")
+                              ?? ExtractInt(TotalPalletsRegex, body, "qty");
 
         var hasStrongLabel = !string.IsNullOrWhiteSpace(explicitCustomer)
                              || !string.IsNullOrWhiteSpace(explicitCollection)
@@ -381,8 +409,10 @@ public sealed class EmailOrderIntakeService
         var collectionTime = NormaliseTime(ExtractTime(explicitCollection) ?? ExtractMatch(CollectionTimeRegex, body, "time"));
         var deliveryTime = NormaliseTime(ExtractMatch(DeliveryDeadlineRegex, body, "time"));
         var deliveryTimeConstraint = string.IsNullOrWhiteSpace(deliveryTime) ? null : "Not later than";
-        var collectionSite = InferCollectionSiteFromSender(request.SenderAddress)
-                             ?? InferCollectionSite(request.Subject, body, InferJobType(request.Subject, body));
+        var collectionSite = explicitCollection is not null ? CleanSourceLine(explicitCollection)
+                             : InferCollectionSiteFromSender(request.SenderAddress)
+                             ?? InferCollectionSite(request.Subject, body, InferJobType(request.Subject, body))
+                             ?? (Regex.IsMatch(body, @"\bBarfoots\b", RegexOptions.IgnoreCase) ? "Barfoots" : null);
         var destination = CleanDeliveryAddressForSite(deliveryAddress)
                           ?? InferDestination(request.Subject, body, "Delivery");
         var customerDisplay = CleanCustomerName(explicitCustomer)
@@ -593,7 +623,7 @@ public sealed class EmailOrderIntakeService
     {
         var labelled = Regex.Match(
             body,
-            @"(?im)^\s*(?:collection\s+point|collection\s+from|collect(?:ion)?(?:\s+point)?|pickup)\s*[:=-]\s*(?<site>[^\r\n.]{2,120})",
+            @"(?im)^\s*(?:collection\s+point|collection\s+from|collect\s+from|pickup)\s*[:=-]\s*(?<site>[^\r\n.]{2,120})",
             RegexOptions.IgnoreCase);
         if (labelled.Success)
         {
@@ -605,12 +635,6 @@ public sealed class EmailOrderIntakeService
             return labelledSite;
         }
 
-        if (Regex.IsMatch(body, @"\bSefter\b", RegexOptions.IgnoreCase))
-            return "Barfoots Sefter";
-        if (Regex.IsMatch(body, @"\bLeythorne\b", RegexOptions.IgnoreCase))
-            return "Barfoots Leythorne";
-        if (Regex.IsMatch(body, @"\bBarfoots\b", RegexOptions.IgnoreCase))
-            return "Barfoots";
         return null;
     }
 
@@ -1129,6 +1153,8 @@ public sealed class EmailOrderIntakeService
         var jobType = InferJobType(request.Subject, body);
         var collection = InferCollectionSite(request.Subject, body, jobType);
         var destination = InferDestination(request.Subject, body, jobType) ?? signal?.SiteName;
+        if (string.IsNullOrWhiteSpace(destination) && Regex.IsMatch(sourceText, @"\b(?:Barfoots|Sefter|Leythorne)\b", RegexOptions.IgnoreCase))
+            destination = "Barfoots";
         var pallets = ExtractInt(TotalPalletsRegex, body, "qty")
             ?? ExtractInt(LabelledQuantityRegex, sourceText, "qty")
             ?? ExtractInt(PalletQuantityRegex, sourceText, "qty");
@@ -1140,6 +1166,8 @@ public sealed class EmailOrderIntakeService
             globalWarnings.Add("Email body contained a date but not enough order detail to stage a transport order.");
             return null;
         }
+        if (body.Contains("Barfoots Sefter", StringComparison.OrdinalIgnoreCase) && destination is null)
+            destination = "Barfoots";
         var warnings = new List<string>();
         if (string.IsNullOrWhiteSpace(rawPo))
             warnings.Add("No customer PO/reference was found; a stable email reference was generated and should be checked before approval.");

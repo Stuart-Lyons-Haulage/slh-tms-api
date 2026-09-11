@@ -147,7 +147,7 @@ internal sealed class PlannerPlanStopRequestConverter : JsonConverter<PlannerPla
             PlannerImportJson.Text(root, "collectTo", "collectionTo", "collectEnd", "collectionEnd", "collectionTimeTo"),
             PlannerImportJson.Text(root, "deadline", "deliverBy", "deliveryBy", "deliveryDeadline"),
             PlannerImportJson.Int(root, "sourceRow", "row", "rowNumber"),
-            PlannerImportJson.Text(root, "collectionSiteArrDate", "collectionArrivalDate"),
+            PlannerImportJson.Text(root, "collectionSiteArrDate", "collectionArrivalDate", "collectionDate"),
             PlannerImportJson.Text(root, "collectionSiteArrTime", "collectionArrivalTime"),
             PlannerImportJson.Text(root, "despatchedDate", "dispatchedDate"),
             PlannerImportJson.Text(root, "despatchedTime", "dispatchedTime"),

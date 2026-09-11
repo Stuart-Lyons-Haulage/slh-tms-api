@@ -91,6 +91,15 @@ builder.Services.Configure<AzureMapsMatrixOptions>(builder.Configuration.GetSect
 builder.Services.Configure<BackloadMatchingOptions>(builder.Configuration.GetSection("Optimisation:Backload"));
 builder.Services.Configure<LiveEtaOptions>(builder.Configuration.GetSection("Eta:Live"));
 builder.Services.Configure<FuelCostOptions>(builder.Configuration.GetSection("Fuel:Costing"));
+var sharePointMasterDataOptions = new SharePointMasterDataOptions();
+builder.Configuration.GetSection("Integrations:SharePointMasterData").Bind(sharePointMasterDataOptions);
+sharePointMasterDataOptions.TenantId = ReadSetting(builder.Configuration, sharePointMasterDataOptions.TenantId, "Integrations:SharePointMasterData:TenantId", "sharepoint-master-data-tenant-id");
+sharePointMasterDataOptions.ClientId = ReadSetting(builder.Configuration, sharePointMasterDataOptions.ClientId, "Integrations:SharePointMasterData:ClientId", "sharepoint-master-data-client-id");
+sharePointMasterDataOptions.ClientSecret = ReadSetting(builder.Configuration, sharePointMasterDataOptions.ClientSecret, "Integrations:SharePointMasterData:ClientSecret", "sharepoint-master-data-client-secret");
+sharePointMasterDataOptions.Hostname = ReadSetting(builder.Configuration, sharePointMasterDataOptions.Hostname, "Integrations:SharePointMasterData:Hostname", "sharepoint-master-data-hostname");
+sharePointMasterDataOptions.SitePath = ReadSetting(builder.Configuration, sharePointMasterDataOptions.SitePath, "Integrations:SharePointMasterData:SitePath", "sharepoint-master-data-site-path");
+builder.Services.AddSingleton(sharePointMasterDataOptions);
+builder.Services.AddHttpClient<SharePointMasterDataSyncService>();
 
 var configuredOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()?
     .Where(origin => !string.IsNullOrWhiteSpace(origin))
