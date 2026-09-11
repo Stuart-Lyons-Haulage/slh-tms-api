@@ -15,7 +15,7 @@ public sealed class MasterDataReconciliationController(TmsDbContext db, StagingS
 {
     private static readonly HashSet<string> SupportedTypes = new(StringComparer.OrdinalIgnoreCase)
     {
-        "driver", "vehicle", "trailer", "site", "marketcontact", "sitetimingrule"
+        "driver", "vehicle", "trailer", "fuelcard", "site", "marketcontact", "sitetimingrule"
     };
 
     [HttpGet, Authorize(Policy = "TmsApprove")]
@@ -25,6 +25,23 @@ public sealed class MasterDataReconciliationController(TmsDbContext db, StagingS
             return BadRequest(new ErrorResponse("unsupported_master_type", $"Unsupported master-data type '{entityType}'.", HttpContext.TraceIdentifier));
 
         return Ok(new { entityType = entityType.ToLowerInvariant(), records = await CurrentRecordsAsync(entityType, ct) });
+    }
+
+    [HttpGet("export"), Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> Export(CancellationToken ct)
+    {
+        var entityTypes = new[] { "driver", "vehicle", "trailer", "fuelcard", "site", "marketcontact", "sitetimingrule" };
+        var records = new Dictionary<string, List<JsonObject>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entityType in entityTypes)
+            records[entityType] = await CurrentRecordsAsync(entityType, ct);
+
+        return Ok(new
+        {
+            generatedAtUtc = DateTimeOffset.UtcNow,
+            source = "TMS SQL operational projection",
+            entityTypes,
+            records
+        });
     }
 
     [HttpPost("apply"), Authorize(Policy = "TmsApprove")]
@@ -106,6 +123,19 @@ public sealed class MasterDataReconciliationController(TmsDbContext db, StagingS
                 return rows.Select(x => JsonObjectOf(new
                 {
                     x.Id, x.TrailerNumber, x.Type, x.StandardCapacity, x.EuroCapacity, x.Notes, x.Active
+                })).ToList();
+            }
+            case "fuelcard":
+            {
+                var rows = await db.Vehicles.AsNoTracking()
+                    .Where(x => x.FuelProvider != null || x.FuelPin != null || x.ShellCard != null ||
+                                x.BpRedCard != null || x.BpPlainCard != null || x.FuelCardLastFour != null)
+                    .OrderBy(x => x.Registration).Take(5000).ToListAsync(ct);
+                return rows.Select(x => JsonObjectOf(new
+                {
+                    vehicleRegistration = x.Registration,
+                    x.FuelProvider, x.FuelPin, x.ShellCard, x.BpRedCard, x.BpPlainCard,
+                    x.FuelPinSecretName, x.FuelCardLastFour
                 })).ToList();
             }
             case "site":
