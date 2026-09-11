@@ -119,6 +119,7 @@ builder.Services.AddDbContext<TmsDbContext>((services, options) =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("TmsDb"))
         .AddInterceptors(services.GetRequiredService<SqlLatencyInterceptor>()));
 builder.Services.AddScoped<StagingService>();
+builder.Services.AddScoped<MasterDataService>();
 builder.Services.AddSingleton<CustomerCommunicationExtractionService>();
 builder.Services.AddScoped<OrderIntakeLedgerService>();
 builder.Services.AddScoped<IntakeMappingService>();
@@ -295,6 +296,12 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("TmsRead", tmsAccessPolicy);
     options.AddPolicy("TmsWrite", tmsAccessPolicy);
     options.AddPolicy("TmsApprove", tmsAccessPolicy);
+    options.AddPolicy("TmsReadMaster", policy => policy
+        .RequireAuthenticatedUser()
+        .RequireAssertion(context => TmsMasterRolePolicy.CanReadMaster(context.User, allowedTmsDomains)));
+    options.AddPolicy("TmsAdmin", policy => policy
+        .RequireAuthenticatedUser()
+        .RequireAssertion(context => TmsMasterRolePolicy.IsAdmin(context.User, allowedTmsDomains)));
 });
 
 static string ReadSetting(IConfiguration configuration, string fallback, params string[] keys) =>
