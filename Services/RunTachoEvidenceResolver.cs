@@ -31,6 +31,8 @@ public sealed record RunTachoEvidenceResult(
 
 public static class RunTachoEvidenceResolver
 {
+    private static readonly TimeSpan RequestPathBudget = TimeSpan.FromSeconds(4);
+
     public static async Task<RunTachoEvidenceResult> ResolveAsync(
         TmsDbContext db,
         TachoMasterClient tachoMaster,
@@ -59,7 +61,18 @@ public static class RunTachoEvidenceResolver
         {
             try
             {
-                allStatuses = await tachoMaster.GetAllDriverStatusesByVehicleAsync(planningDate, ct);
+                // TachoMaster is enrichment, not a prerequisite for rendering the
+                // operations wallboard. Keep provider latency bounded so the page
+                // can use the latest local evidence when the provider is slow.
+                using var providerBudget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                providerBudget.CancelAfter(RequestPathBudget);
+                allStatuses = await tachoMaster.GetAllDriverStatusesByVehicleAsync(planningDate, providerBudget.Token);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                available = false;
+                warning = $"TachoMaster sign-on evidence exceeded the {RequestPathBudget.TotalSeconds:0}-second refresh budget; using stored evidence.";
+                logger.LogWarning("TachoMaster sign-on lookup exceeded the {Seconds}-second request budget for run evidence on {PlanningDate}.", RequestPathBudget.TotalSeconds, planningDate);
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
