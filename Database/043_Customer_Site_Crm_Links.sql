@@ -25,8 +25,6 @@ BEGIN
     );
 END;
 
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Customers_Code' AND object_id = OBJECT_ID(N'dbo.Customers'))
-    CREATE UNIQUE INDEX IX_Customers_Code ON dbo.Customers(Code);
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Sites_CustomerCode_ExternalCode' AND object_id = OBJECT_ID(N'dbo.Sites'))
     CREATE INDEX IX_Sites_CustomerCode_ExternalCode ON dbo.Sites(CustomerCode, ExternalCode);
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_CustomerEmailRoutes_CustomerCode_SenderEmail_SenderDomain' AND object_id = OBJECT_ID(N'dbo.CustomerEmailRoutes'))
