@@ -1,0 +1,17 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+    "MasterDataSyncSchedule": "0 */5 * * * *",
+    "MasterDataSync__TenantId": "5aec48a1-c3c7-4cfd-a073-b38ae50041b1",
+    "MasterDataSync__ClientId": "e52218ab-0a5a-459a-84b2-423a83152582",
+    "MasterDataSync__ClientSecret": "",
+    "MasterDataSync__Hostname": "stuartlyonshaulage.sharepoint.com",
+    "MasterDataSync__SitePath": "",
+    "MasterDataSync__SqlConnectionString": "",
+    "MasterDataSync__DeadLetterQueueName": "master-data-sync-dead-letter",
+    "MasterDataSync__TmsCacheInvalidateUrl": "https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io/api/master/cache/invalidate",
+    "MasterDataSync__TmsCacheInvalidateToken": ""
+  }
+}
