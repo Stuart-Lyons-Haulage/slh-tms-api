@@ -86,10 +86,10 @@ internal static partial class RunDisplayLabel
             source = PeriodRegex().Replace(source, string.Empty).Trim();
 
         var period = plannedPeriod ?? ExplicitPeriod(source) ?? ExplicitPeriod(runType);
-        return Format(source, period);
+        return Format(source, period, OvernightRunContinuity.IsCarryIn(load) || ExplicitOvernight(load.PlannerNotes));
     }
 
-    private static string Format(string source, string? period)
+    private static string Format(string source, string? period, bool overnight)
     {
         var clean = source.Trim();
         var numeric = NumericRunRegex().Match(clean);
@@ -97,7 +97,7 @@ internal static partial class RunDisplayLabel
         {
             var number = int.TryParse(numeric.Groups[1].Value, out var parsed) ? parsed.ToString() : numeric.Groups[1].Value;
             var resolvedPeriod = period ?? ExplicitPeriod(numeric.Groups[2].Value);
-            return $"Run {number}{(resolvedPeriod is null ? string.Empty : $" {resolvedPeriod}")}";
+            return $"Run {number}{(resolvedPeriod is null ? string.Empty : $" {resolvedPeriod}")}{(overnight ? " O/N" : string.Empty)}";
         }
 
         clean = Regex.Replace(clean, @"^RUN[\s:_-]*", string.Empty, RegexOptions.IgnoreCase).Trim();
@@ -108,11 +108,15 @@ internal static partial class RunDisplayLabel
         if (existing is not null)
         {
             clean = PeriodRegex().Replace(clean, string.Empty).Trim();
-            return $"Run {clean} {period ?? existing}";
+            return $"Run {clean} {period ?? existing}{(overnight ? " O/N" : string.Empty)}";
         }
 
-        return $"Run {clean}{(period is null ? string.Empty : $" {period}")}";
+        return $"Run {clean}{(period is null ? string.Empty : $" {period}")}{(overnight ? " O/N" : string.Empty)}";
     }
+
+    private static bool ExplicitOvernight(string? value) => !string.IsNullOrWhiteSpace(value) &&
+        Regex.IsMatch(value, @"\b(?:O/N|overnight|night[ -]?out)\b", RegexOptions.IgnoreCase) &&
+        !Regex.IsMatch(value, @"\bnight[ -]?out:\s*(?:no|false)\b", RegexOptions.IgnoreCase);
 
     private static string StripInternalReference(string reference)
     {
