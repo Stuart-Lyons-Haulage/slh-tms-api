@@ -19,7 +19,10 @@ permissions:
 
 concurrency:
   group: slh-tms-api-production
-  cancel-in-progress: false
+  # A newer CI-validated revision supersedes an older candidate that has not
+  # reached production traffic. Keeping a stalled startup probe in this lane
+  # blocks every subsequent correction for its full timeout.
+  cancel-in-progress: true
 
 jobs:
   deploy:
