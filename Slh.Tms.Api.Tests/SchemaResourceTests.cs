@@ -98,6 +98,20 @@ public sealed class SchemaResourceTests
     }
 
     [Fact]
+    public void Deferred_online_index_migration_may_remain_pending_after_later_required_migrations()
+    {
+        var migrations = SchemaMigrationRunner.GetMigrations();
+        var deferred = migrations.Single(migration => migration.Name == "042_Operational_Read_Performance_Indexes.sql");
+        var history = migrations
+            .Where(migration => migration.Version != deferred.Version)
+            .ToDictionary(
+                migration => migration.Version,
+                migration => new AppliedSchemaMigration(migration.Version, migration.Name, migration.Checksum));
+
+        SchemaMigrationRunner.ValidateAppliedHistory(migrations, history);
+    }
+
+    [Fact]
     public void Runtime_integration_mapping_repair_covers_partial_tables()
     {
         Assert.Contains("Provider", IntegrationMappingSchemaRepair.RepairSql);

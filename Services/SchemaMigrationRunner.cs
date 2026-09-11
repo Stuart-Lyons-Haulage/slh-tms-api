@@ -304,8 +304,18 @@ public static class SchemaMigrationRunner
         for (var version = 1; version <= highestAppliedVersion; version++)
         {
             if (!applied.ContainsKey(version))
+            {
+                // Migration 042 is deliberately deferred from API startup: it
+                // builds non-essential indexes on live operational tables. A
+                // later, required migration may therefore be registered while
+                // this maintenance item remains pending. That is an intentional
+                // and auditable gap, not out-of-order schema application.
+                if (migrationByVersion.TryGetValue(version, out var missingMigration) &&
+                    string.Equals(missingMigration.Name, DeferredOnlineMaintenanceMigration, StringComparison.Ordinal))
+                    continue;
                 throw new InvalidOperationException(
                     $"SchemaMigration history has a gap at version {version}. Refusing to apply migrations out of order.");
+            }
         }
 
         foreach (var history in applied.Values.OrderBy(item => item.Version))
