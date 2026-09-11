@@ -2,7 +2,30 @@ using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 
 namespace Slh.Tms.Api.Models;
-public sealed class Customer { public Guid Id { get; set; } = Guid.NewGuid(); [MaxLength(40)] public required string Code { get; set; } [MaxLength(200)] public required string Name { get; set; } public bool Active { get; set; } = true; }
+public sealed class Customer
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    [MaxLength(40)] public required string Code { get; set; }
+    [MaxLength(200)] public required string Name { get; set; }
+    [MaxLength(200)] public string? TradingName { get; set; }
+    [MaxLength(200)] public string? AccountOwner { get; set; }
+    [MaxLength(1000)] public string? ServiceNotes { get; set; }
+    [MaxLength(80)] public string? DefaultSiteCode { get; set; }
+    public bool Active { get; set; } = true;
+}
+
+public sealed class CustomerEmailRoute
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    [MaxLength(40)] public required string CustomerCode { get; set; }
+    [EmailAddress, MaxLength(320)] public string? SenderEmail { get; set; }
+    [MaxLength(320)] public string? SenderDomain { get; set; }
+    [MaxLength(200)] public string? SubjectContains { get; set; }
+    [MaxLength(120)] public string? ParserType { get; set; }
+    [MaxLength(80)] public string? DefaultSiteCode { get; set; }
+    public bool RequiresReview { get; set; } = true;
+    public bool Active { get; set; } = true;
+}
 public sealed class CustomerContact
 {
     public Guid Id { get; set; } = Guid.NewGuid();
@@ -80,6 +103,7 @@ public sealed class Site
 {
     public Guid Id { get; set; } = Guid.NewGuid();
     [MaxLength(40)] public required string ExternalCode { get; set; }
+    [MaxLength(40)] public string? CustomerCode { get; set; }
     [MaxLength(200)] public required string Name { get; set; }
     [MaxLength(200)] public string? DriverTextName { get; set; }
     [MaxLength(500)] public string? CollectionAddress { get; set; }

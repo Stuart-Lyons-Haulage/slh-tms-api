@@ -36,6 +36,8 @@ Deployment is performed by GitHub Actions using Azure OIDC. Do not use publish p
 
 ## Operational Architecture
 
+The performance and integration reduction plan is documented in [docs/performance-integration-roadmap.md](docs/performance-integration-roadmap.md). It defines which data must remain synchronous, which integrations belong in background jobs, and the acceptance tests required before removing legacy paths.
+
 The production path is deliberately resilient:
 
 1. Planner and order data is validated by the API.

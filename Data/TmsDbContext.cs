@@ -10,6 +10,7 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
 {
     public DbSet<Customer> Customers => Set<Customer>();
     public DbSet<CustomerContact> CustomerContacts => Set<CustomerContact>();
+    public DbSet<CustomerEmailRoute> CustomerEmailRoutes => Set<CustomerEmailRoute>();
     public DbSet<Vehicle> Vehicles => Set<Vehicle>();
     public DbSet<Driver> Drivers => Set<Driver>();
     public DbSet<Trailer> Trailers => Set<Trailer>();
@@ -223,6 +224,9 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
 
         b.Entity<SiteGeofence>().HasIndex(x => x.NormalizedName).IsUnique();
         b.Entity<SiteGeofence>().HasIndex(x => x.SiteId);
+        b.Entity<Customer>().HasIndex(x => x.Code).IsUnique();
+        b.Entity<CustomerEmailRoute>().HasIndex(x => new { x.CustomerCode, x.SenderEmail, x.SenderDomain });
+        b.Entity<Site>().HasIndex(x => new { x.CustomerCode, x.ExternalCode });
         b.Entity<GeofenceVisit>().HasIndex(x => new { x.VehicleIdentifier, x.ExitedAtUtc });
         b.Entity<GeofenceVisit>().HasIndex(x => new { x.LoadId, x.LoadStopId });
         b.Entity<GeofenceVisit>().HasIndex(x => x.EnteredAtUtc);

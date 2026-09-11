@@ -157,8 +157,19 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
     {
         var code = ClipRequired(Required(payload, "code"), 40); var name = ClipRequired(Required(payload, "name"), 200);
         var customer = await db.Customers.SingleOrDefaultAsync(item => item.Code == code, ct);
-        if (customer is null) db.Customers.Add(new Customer { Code = code, Name = name, Active = Bool(payload, "active", true) });
+        if (customer is null)
+        {
+            customer = new Customer { Code = code, Name = name, Active = Bool(payload, "active", true) };
+            db.Customers.Add(customer);
+        }
         else { customer.Name = name; customer.Active = Bool(payload, "active", true); }
+        if (customer is not null)
+        {
+            customer.TradingName = Clip(Text(payload, "tradingName"), 200);
+            customer.AccountOwner = Clip(Text(payload, "accountOwner"), 200);
+            customer.ServiceNotes = Clip(Text(payload, "serviceNotes"), 1000);
+            customer.DefaultSiteCode = Clip(Text(payload, "defaultSiteCode"), 80);
+        }
     }
 
     private async Task PromoteCustomerContact(JsonElement payload, CancellationToken ct)
@@ -267,9 +278,13 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
     private async Task PromoteSite(JsonElement payload, CancellationToken ct)
     {
         var externalCode = ClipRequired(Required(payload, "externalCode"), 40); var name = ClipRequired(Required(payload, "name"), 200);
+        var customerCode = Clip(Text(payload, "customerCode"), 40);
         var site = await db.Sites.SingleOrDefaultAsync(item => item.ExternalCode == externalCode, ct);
-        if (site is null) db.Sites.Add(new Site { ExternalCode = externalCode, Name = name, DriverTextName = Clip(Text(payload, "driverTextName"), 200), CollectionAddress = Clip(Text(payload, "collectionAddress"), 500), CollectionInstructions = Clip(Text(payload, "collectionInstructions"), 1000), MapLink = Clip(Text(payload, "mapLink"), 1000), Aliases = Clip(Text(payload, "aliases"), 500), CustomField1 = Clip(Text(payload, "customField1"), 200), CustomField2 = Clip(Text(payload, "customField2"), 200), CustomField3 = Clip(Text(payload, "customField3"), 200), OperationalRegion = Clip(Text(payload, "operationalRegion") ?? Text(payload, "region"), 80), Active = Bool(payload, "active", true) });
-        else { site.Name = name; site.DriverTextName = Clip(Text(payload, "driverTextName"), 200); site.CollectionAddress = Clip(Text(payload, "collectionAddress"), 500); site.CollectionInstructions = Clip(Text(payload, "collectionInstructions"), 1000); site.MapLink = Clip(Text(payload, "mapLink"), 1000); site.Aliases = Clip(Text(payload, "aliases"), 500); site.CustomField1 = Clip(Text(payload, "customField1"), 200); site.CustomField2 = Clip(Text(payload, "customField2"), 200); site.CustomField3 = Clip(Text(payload, "customField3"), 200); site.OperationalRegion = Clip(Text(payload, "operationalRegion") ?? Text(payload, "region"), 80); site.Active = Bool(payload, "active", true); }
+        if (site is null)
+        {
+            db.Sites.Add(new Site { ExternalCode = externalCode, CustomerCode = customerCode, Name = name, DriverTextName = Clip(Text(payload, "driverTextName"), 200), CollectionAddress = Clip(Text(payload, "collectionAddress"), 500), CollectionInstructions = Clip(Text(payload, "collectionInstructions"), 1000), MapLink = Clip(Text(payload, "mapLink"), 1000), Aliases = Clip(Text(payload, "aliases"), 500), CustomField1 = Clip(Text(payload, "customField1"), 200), CustomField2 = Clip(Text(payload, "customField2"), 200), CustomField3 = Clip(Text(payload, "customField3"), 200), OperationalRegion = Clip(Text(payload, "operationalRegion") ?? Text(payload, "region"), 80), Active = Bool(payload, "active", true) });
+        }
+        else { site.CustomerCode = customerCode; site.Name = name; site.DriverTextName = Clip(Text(payload, "driverTextName"), 200); site.CollectionAddress = Clip(Text(payload, "collectionAddress"), 500); site.CollectionInstructions = Clip(Text(payload, "collectionInstructions"), 1000); site.MapLink = Clip(Text(payload, "mapLink"), 1000); site.Aliases = Clip(Text(payload, "aliases"), 500); site.CustomField1 = Clip(Text(payload, "customField1"), 200); site.CustomField2 = Clip(Text(payload, "customField2"), 200); site.CustomField3 = Clip(Text(payload, "customField3"), 200); site.OperationalRegion = Clip(Text(payload, "operationalRegion") ?? Text(payload, "region"), 80); site.Active = Bool(payload, "active", true); }
     }
 
     private async Task PromoteMarketContact(JsonElement payload, CancellationToken ct)
