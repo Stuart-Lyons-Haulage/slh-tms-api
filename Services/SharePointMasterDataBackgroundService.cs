@@ -11,7 +11,9 @@ public sealed class SharePointMasterDataBackgroundService(
     SharePointMasterDataOptions options,
     ILogger<SharePointMasterDataBackgroundService> logger) : BackgroundService
 {
-    private static readonly TimeSpan PollInterval = TimeSpan.FromMinutes(2);
+    // Lists is the CRM authority; the TMS keeps a fast, read-only operational copy.
+    // Hourly is sufficient for master records and avoids unnecessary Graph traffic.
+    private static readonly TimeSpan PollInterval = TimeSpan.FromHours(1);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
