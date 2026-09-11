@@ -4,7 +4,7 @@ using Microsoft.Extensions.Options;
 
 namespace Slh.Tms.MasterDataSync;
 
-public sealed class SqlMasterDataRepository(IOptions<SyncOptions> options)
+public sealed class SqlMasterDataRepository(IOptions<SyncOptions> options, ILogger<SqlMasterDataRepository> logger)
 {
     private readonly string connectionString = options.Value.SqlConnectionString;
 
@@ -30,7 +30,14 @@ public sealed class SqlMasterDataRepository(IOptions<SyncOptions> options)
             catch (Exception ex)
             {
                 summary.Failed++;
-                await deadLetter(item, ex);
+                try
+                {
+                    await deadLetter(item, ex);
+                }
+                catch (Exception deadLetterException)
+                {
+                    logger.LogError(deadLetterException, "Could not dead-letter {ListName} item {ItemId}.", definition.ListName, item.Id);
+                }
             }
         }
 
