@@ -20,7 +20,8 @@ public sealed class AuditOutboxBackgroundService(
                 await using var scope = scopeFactory.CreateAsyncScope();
                 var processor = new AuditOutboxProcessor(
                     scope.ServiceProvider.GetRequiredService<TmsDbContext>(),
-                    scope.ServiceProvider.GetRequiredService<ILogger<AuditOutboxProcessor>>());
+                    scope.ServiceProvider.GetRequiredService<ILogger<AuditOutboxProcessor>>(),
+                    scope.ServiceProvider.GetRequiredService<SharePointMasterDataSyncService>());
                 await processor.ProcessPendingAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -46,7 +47,8 @@ public sealed class AuditOutboxBackgroundService(
 
 public sealed class AuditOutboxProcessor(
     TmsDbContext db,
-    ILogger<AuditOutboxProcessor> logger)
+    ILogger<AuditOutboxProcessor> logger,
+    SharePointMasterDataSyncService? sharePoint = null)
 {
     internal const int MaximumRetries = 5;
     internal const int BatchSize = 50;
@@ -101,6 +103,18 @@ public sealed class AuditOutboxProcessor(
 
         try
         {
+            if (string.Equals(item.EventType, AuditOutboxEventTypes.SharePointSiteAliasSync, StringComparison.Ordinal))
+            {
+                if (sharePoint is null) throw new InvalidOperationException("SharePoint alias sync processor was not configured.");
+                using var document = JsonDocument.Parse(item.Payload);
+                var siteKey = document.RootElement.GetProperty("ExternalCode").GetString();
+                var aliases = document.RootElement.TryGetProperty("Aliases", out var aliasesValue) ? aliasesValue.GetString() : null;
+                if (string.IsNullOrWhiteSpace(siteKey)) throw new InvalidOperationException("Alias sync event has no site key.");
+                await sharePoint.PublishSiteAliasesAsync(siteKey, aliases, ct);
+                item.ProcessedAt = DateTimeOffset.UtcNow;
+                await db.SaveAuditReplayChangesAsync(ct);
+                return true;
+            }
             if (!string.Equals(item.EventType, AuditOutboxEventTypes.MasterDataAudit, StringComparison.Ordinal))
                 throw new InvalidOperationException($"Unsupported audit outbox event type '{item.EventType}'.");
 
@@ -143,7 +157,9 @@ public sealed class AuditOutboxProcessor(
                 return false;
 
             failed.RetryCount++;
-            if (failed.RetryCount >= MaximumRetries)
+            // Learned aliases must not be discarded because SharePoint is temporarily unavailable.
+            // They remain pending and are retried by the outbox worker until the CRM accepts them.
+            if (failed.RetryCount >= MaximumRetries && !string.Equals(failed.EventType, AuditOutboxEventTypes.SharePointSiteAliasSync, StringComparison.Ordinal))
             {
                 failed.FailedAt = DateTimeOffset.UtcNow;
                 logger.LogError(

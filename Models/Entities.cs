@@ -126,6 +126,7 @@ public sealed class MarketContact
     [MaxLength(200)] public string? StandOrLocation { get; set; }
     [MaxLength(200)] public string? Salesman { get; set; }
     [MaxLength(200)] public string? Sender { get; set; }
+    [MaxLength(1000)] public string? ReadOnlyMapPdfUrl { get; set; }
     public bool Active { get; set; } = true;
 }
 public sealed class FuelPrice

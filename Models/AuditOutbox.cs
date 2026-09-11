@@ -5,6 +5,7 @@ namespace Slh.Tms.Api.Models;
 public static class AuditOutboxEventTypes
 {
     public const string MasterDataAudit = nameof(MasterDataAudit);
+    public const string SharePointSiteAliasSync = nameof(SharePointSiteAliasSync);
 }
 
 public sealed class AuditOutbox

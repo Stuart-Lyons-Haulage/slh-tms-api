@@ -52,7 +52,7 @@ public sealed class SchemaResourceTests
         Assert.Equal("040_Audit_Outbox.sql", migrations[^4].Name);
         Assert.Equal("041_Distributed_Integration_Lease.sql", migrations[^3].Name);
         Assert.Equal("042_Operational_Read_Performance_Indexes.sql", migrations[^2].Name);
-        Assert.Equal("043_Customer_Site_Crm_Links.sql", migrations[^1].Name);
+        Assert.Equal("044_Market_Read_Only_Map.sql", migrations[^1].Name);
     }
 
     [Fact]

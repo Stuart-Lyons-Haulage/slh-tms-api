@@ -295,6 +295,7 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         if (string.IsNullOrWhiteSpace(driver.MobileNumber)) return BadRequest("The assigned driver has no approved mobile number.");
 
         var orders = await LoadOrdersAsync(load, register, ct);
+        var marketMapLinks = await ResolveMarketMapLinksAsync(orders.Values, ct);
         var temperature = await SitePlanningProfileStore.ResolveRunTemperaturesAsync(db, orders.Values, ct);
         if (temperature.HasConflict)
         {
@@ -316,7 +317,9 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
                 order?.SellerName is null ? null : $"Seller: {order.SellerName}",
                 string.IsNullOrWhiteSpace(stop.Address) ? null : $"Address: {stop.Address}",
                 string.IsNullOrWhiteSpace(order?.DriverInstructions) ? null : $"Notes: {order!.DriverInstructions}",
-                string.IsNullOrWhiteSpace(order?.MapLink) ? null : $"Map: {order!.MapLink}"
+                string.IsNullOrWhiteSpace(order?.MapLink) ?
+                    (order?.MarketName is not null && marketMapLinks.TryGetValue(MarketKey(order.MarketName), out var marketMap) ? $"Market map (read-only PDF): {marketMap}" : null) :
+                    $"Map: {order.MapLink}"
             }.Where(line => line is not null));
         });
         var message = string.Join("\n\n", new[]
@@ -333,6 +336,28 @@ public sealed class PlanningController(TmsDbContext db, AzureMapsRouteClient map
         await SaveLoadAsync(load, register, ct);
         return Accepted(new { receipt.MessageId, receipt.MobileSuffix, receipt.Provider, load.Status, loadTemperatureC = temperature.LoadTemperatureC });
     }
+
+    private async Task<Dictionary<string, string>> ResolveMarketMapLinksAsync(IEnumerable<TransportOrder> orders, CancellationToken ct)
+    {
+        var marketKeys = orders
+            .Select(order => order.MarketName)
+            .Where(market => !string.IsNullOrWhiteSpace(market))
+            .Select(market => MarketKey(market!))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (marketKeys.Count == 0) return new(StringComparer.OrdinalIgnoreCase);
+
+        var maps = await db.MarketContacts.AsNoTracking()
+            .Where(contact => contact.Active && contact.ReadOnlyMapPdfUrl != null && contact.ReadOnlyMapPdfUrl != "")
+            .Select(contact => new { contact.Market, contact.ReadOnlyMapPdfUrl })
+            .ToListAsync(ct);
+        return maps
+            .Where(contact => marketKeys.Contains(MarketKey(contact.Market)))
+            .GroupBy(contact => MarketKey(contact.Market), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Select(contact => contact.ReadOnlyMapPdfUrl!).First(), StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static string MarketKey(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
 
     [HttpGet("maps/geocode")]
     public async Task<IActionResult> Geocode([FromQuery] string address, CancellationToken ct)

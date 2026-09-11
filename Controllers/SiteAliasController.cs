@@ -39,6 +39,12 @@ public sealed class SiteAliasController(TmsDbContext db) : ControllerBase
             ChangedBy = actor ?? "unknown",
             ChangesJson = JsonSerializer.Serialize(new { before, after = site.Aliases })
         });
+        db.AuditOutboxes.Add(new AuditOutbox
+        {
+            EventType = AuditOutboxEventTypes.SharePointSiteAliasSync,
+            Payload = JsonSerializer.Serialize(new { site.ExternalCode, site.Aliases }),
+            CreatedAt = DateTimeOffset.UtcNow
+        });
         await db.SaveChangesAsync(ct);
 
         // Alias changes are operational Master Data. Apply any unique exact alias match to
@@ -51,7 +57,8 @@ public sealed class SiteAliasController(TmsDbContext db) : ControllerBase
             site.ExternalCode,
             site.Name,
             site.Aliases,
-            geofenceLinksRepaired
+            geofenceLinksRepaired,
+            sharePointSync = "queued"
         });
     }
 
