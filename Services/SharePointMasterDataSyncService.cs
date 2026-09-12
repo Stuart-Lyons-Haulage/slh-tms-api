@@ -77,7 +77,10 @@ public sealed class SharePointMasterDataSyncService(
                 .Where(item => item.TryGetProperty("fields", out var field) && field.TryGetProperty(keyField, out var key) && !string.IsNullOrWhiteSpace(key.ToString()))
                 .GroupBy(item => item.GetProperty("fields").GetProperty(keyField).ToString(), StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
-            foreach (var source in sourceRows)
+            foreach (var source in sourceRows
+                .Where(row => !string.IsNullOrWhiteSpace(row.GetValueOrDefault(keyField)?.ToString()))
+                .GroupBy(row => row[keyField]!.ToString()!, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First()))
             {
                 var key = source[keyField]?.ToString();
                 if (string.IsNullOrWhiteSpace(key)) continue;
