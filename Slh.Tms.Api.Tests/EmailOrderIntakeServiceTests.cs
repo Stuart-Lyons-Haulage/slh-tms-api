@@ -70,12 +70,14 @@ public sealed class EmailOrderIntakeServiceTests
         var result = service.Parse(new MailboxEmailIntakeRequest(
             "message-coop", null, "info@lyonshaulage.com", "Ioana-Andreea.Pascalau@summerberry.co.uk", "Ioana",
             "TSBC COOP - 18.08.2026", DateTimeOffset.Parse("2026-08-17T09:53:57Z"),
-            "Please find attached pallet requirements. Total Pallets : 2 Collection time: 17:00 Transport at +3 degrees Collect from: Groves Farm", null, null, null));
+            "Please find attached pallet requirements. Total Pallets : 2 Collection time: 17:00 Transport at +3 degrees Collect from: TSBC, Chichester", null, null, null),
+            ["TSBC CO-OP"]);
 
         var order = Assert.Single(result.Orders);
         Assert.Equal("COOP", order.Payload.GetProperty("customerCode").GetString());
         Assert.Equal(2, order.Payload.GetProperty("pallets").GetInt32());
-        Assert.Equal("Groves Farm", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Summer Berry", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("TSBC CO-OP", order.Payload.GetProperty("stallNumber").GetString());
         Assert.Contains("Requested time: 17:00", order.Payload.GetProperty("driverInstructions").GetString());
         Assert.Contains("Temperature: +3°C", order.Payload.GetProperty("driverInstructions").GetString());
     }
