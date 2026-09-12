@@ -25,6 +25,11 @@ public sealed class SharePointMasterDataController(
             logger.LogWarning(ex, "SharePoint master-data publish failed with code {Code}.", ex.Code);
             return StatusCode(StatusCodes.Status502BadGateway, new { code = ex.Code, message = ex.Message });
         }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "SharePoint master-data publish failed unexpectedly.");
+            return StatusCode(StatusCodes.Status500InternalServerError, new { code = "MasterDataPublishUnhandled", message = ex.GetBaseException().Message });
+        }
     }
 
     [HttpPost("sync")]
