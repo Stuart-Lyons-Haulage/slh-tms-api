@@ -266,7 +266,10 @@ public sealed class EmailOrderIntakeService
         var isSummerBerryTsbcCoop = string.Equals(senderCollectionSite, "Summer Berry", StringComparison.OrdinalIgnoreCase)
             && Regex.IsMatch($"{request.Subject}\n{body}", @"\bTSBC\s*[- ]?\s*CO[- ]?OP\b", RegexOptions.IgnoreCase);
         if (isSummerBerryTsbcCoop)
+        {
             explicitCollection = senderCollectionSite;
+            payload["stallNumber"] = "TSBC CO-OP";
+        }
         if (explicitCollection is not null && Regex.IsMatch(explicitCollection, @"^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", RegexOptions.IgnoreCase))
             explicitCollection = null;
         if (!string.IsNullOrWhiteSpace(explicitCollection) && !order.SourceKey.StartsWith("barfoots-waitrose-", StringComparison.OrdinalIgnoreCase))
