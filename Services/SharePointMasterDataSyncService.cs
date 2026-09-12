@@ -40,6 +40,7 @@ public sealed class SharePointMasterDataException(string code, string message, E
     public string Code { get; } = code;
 }
 
+// CI trigger: master-data publish duplicate-key handling is deployment-critical.
 public sealed class SharePointMasterDataSyncService(
     HttpClient http,
     SharePointMasterDataOptions options,
