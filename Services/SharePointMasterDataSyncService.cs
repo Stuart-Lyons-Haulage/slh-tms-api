@@ -144,7 +144,9 @@ public sealed class SharePointMasterDataSyncService(
     {
         var sites = await db.Sites.AsNoTracking().OrderBy(x => x.ExternalCode).ToListAsync(ct);
         await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
-        var geofences = await db.SiteGeofences.AsNoTracking().Where(g => g.Active && g.SiteId != null).ToDictionaryAsync(g => g.SiteId!.Value, g => g.Id.ToString(), ct);
+        var geofences = await db.SiteGeofences.AsNoTracking().Where(g => g.Active && g.SiteId != null)
+            .GroupBy(g => g.SiteId!.Value)
+            .ToDictionaryAsync(group => group.Key, group => group.OrderBy(g => g.Id).First().Id.ToString(), ct);
         return sites.Select(x => Fields(
             ("Title", x.ExternalCode), ("SiteKey", x.ExternalCode), ("CustomerKey", x.CustomerCode), ("SiteName", x.Name), ("BuildingName", x.DriverTextName ?? x.Name), ("Address1", x.CollectionAddress), ("MapLink", x.MapLink), ("Aliases", x.Aliases), ("GeofenceId", geofences.GetValueOrDefault(x.Id)), ("Active", x.Active), ("SyncStatus", "Synced"))).ToArray();
     }
