@@ -321,7 +321,7 @@ public static class SchemaMigrationRunner
                 // this maintenance item remains pending. That is an intentional
                 // and auditable gap, not out-of-order schema application.
                 if (migrationByVersion.TryGetValue(version, out var missingMigration) &&
-                    string.Equals(missingMigration.Name, DeferredOnlineMaintenanceMigration, StringComparison.Ordinal))
+                    DeferredStartupMigrations.Contains(missingMigration.Name))
                     continue;
                 throw new InvalidOperationException(
                     $"SchemaMigration history has a gap at version {version}. Refusing to apply migrations out of order.");
