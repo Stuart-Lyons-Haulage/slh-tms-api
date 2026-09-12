@@ -189,13 +189,30 @@ public sealed class SharePointMasterDataSyncService(
 
     private async Task CreateListItemAsync(string listId, IReadOnlyDictionary<string, object?> fields, string token, CancellationToken ct)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, BuildListUrl(listId, "items"))
+        var payload = new Dictionary<string, object?>(fields, StringComparer.OrdinalIgnoreCase);
+        for (var attempt = 0; attempt < 3; attempt++)
         {
-            Content = JsonContent.Create(new { fields })
-        };
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        using var response = await http.SendAsync(request, ct);
-        if (!response.IsSuccessStatusCode) throw Failure("ListCreateFailed", "A Microsoft List item could not be created", response.StatusCode, await response.Content.ReadAsStringAsync(ct));
+            using var request = new HttpRequestMessage(HttpMethod.Post, BuildListUrl(listId, "items"))
+            {
+                Content = JsonContent.Create(new { fields = payload })
+            };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            using var response = await http.SendAsync(request, ct);
+            if (response.IsSuccessStatusCode) return;
+            var body = await response.Content.ReadAsStringAsync(ct);
+            if (response.StatusCode != System.Net.HttpStatusCode.BadRequest || attempt == 2)
+                throw Failure("ListCreateFailed", "A Microsoft List item could not be created", response.StatusCode, body);
+            // Graph identifies invalid SharePoint columns in the error text. Remove only that
+            // column and retry, so one mis-provisioned optional field cannot block the master row.
+            var invalid = System.Text.RegularExpressions.Regex.Match(body, @"(?:column|field)[^A-Za-z0-9]+['\"]?([A-Za-z][A-Za-z0-9_]*)['\"]?", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Groups[1].Value;
+            if (string.IsNullOrWhiteSpace(invalid) || !payload.Remove(invalid))
+            {
+                var fallback = payload.Keys.Where(k => !string.Equals(k, "Title", StringComparison.OrdinalIgnoreCase) && !k.EndsWith("Key", StringComparison.OrdinalIgnoreCase)).ToList();
+                if (fallback.Count == 0) throw Failure("ListCreateFailed", "A Microsoft List item could not be created", response.StatusCode, body);
+                payload.Remove(fallback[^1]);
+            }
+            logger.LogWarning("SharePoint create rejected a field; retrying without {Field}. GraphBody={GraphBody}", invalid, body);
+        }
     }
 
     private async Task UpdateListItemAsync(string listId, string itemId, IReadOnlyDictionary<string, object?> fields, string token, CancellationToken ct)
