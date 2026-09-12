@@ -153,6 +153,30 @@ Stuart Lyons,19/08/2026,Drayton,Aldi,ALD20,Aldi SAWLEY Distribution Centre,DE72 
             warning => warning is not null && warning.Contains("PO REF is missing", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public void NonNwfCustomerCsv_IsNotClassifiedAsNwf()
+    {
+        const string csv = """
+Haulier Name,Requested Ship Date,04. Collection Site,Customer Name,DepotID,Depot Description,Delivery Address,Sales Order ID,CustomerRef,Pallet Name,PalletQty,PO REF
+Stuart Lyons,14/09/2026,Sefter,NISA,NISA01,NISA depot,UK,SO123,REF1,IPP STD,1,PO123
+""";
+
+        var request = new MailboxEmailIntakeRequest(
+            "message-barfoots-nisa", null, "info@lyonshaulage.com",
+            "Gosia.Mydlak@barfoots.co.uk", "Gosia Mydlak",
+            "NISA pallet booking for depot 14/09/26.",
+            DateTimeOffset.Parse("2026-09-12T12:25:19Z"),
+            "Please be advised that a total of 1 pallet space will be required to accommodate all three destinations.",
+            null, null,
+            [new MailboxAttachmentRequest(
+                "NISA pallet booking.csv",
+                "text/csv",
+                Convert.ToBase64String(Encoding.UTF8.GetBytes(csv)),
+                false)]);
+
+        Assert.Null(parser.TryParse(request));
+    }
+
     private static MailboxEmailIntakeRequest Request(string csv, string messageId) =>
         new(
             messageId,
