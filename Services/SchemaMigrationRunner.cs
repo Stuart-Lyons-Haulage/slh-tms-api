@@ -46,8 +46,7 @@ public static class SchemaMigrationRunner
     private static readonly IReadOnlySet<string> DeferredStartupMigrations = new HashSet<string>(StringComparer.Ordinal)
     {
         "042_Operational_Read_Performance_Indexes.sql",
-        "043_Customer_Site_Crm_Links.sql",
-        "044_Market_Read_Only_Map.sql"
+        "043_Customer_Site_Crm_Links.sql"
     };
 
     private static readonly string[] OrderedMigrationFiles =
