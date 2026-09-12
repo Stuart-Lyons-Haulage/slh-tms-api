@@ -64,7 +64,7 @@ public sealed class SharePointMasterDataSyncService(
             ["trailer"] = (await db.Trailers.AsNoTracking().OrderBy(x => x.TrailerNumber).ToListAsync(ct)).Select(x => Fields(
                 ("Title", x.TrailerNumber), ("TrailerKey", x.TrailerNumber), ("Registration", x.TrailerNumber), ("TrailerType", x.Type), ("StandardCapacity", x.StandardCapacity), ("EuroCapacity", x.EuroCapacity), ("Active", x.Active))).ToArray(),
             ["marketcontact"] = (await db.MarketContacts.AsNoTracking().OrderBy(x => x.Market).ThenBy(x => x.Name).ToListAsync(ct)).Select(x => Fields(
-                ("Title", $"{x.Market} · {x.Name}"), ("MarketKey", $"{x.Market}|{x.Name}"), ("Market", x.Market), ("Name", x.Name), ("StandOrLocation", x.StandOrLocation), ("Salesman", x.Salesman), ("Sender", x.Sender), ("ReadOnlyMapPdfUrl", x.ReadOnlyMapPdfUrl), ("Active", x.Active))).ToArray()
+                ("Title", $"{x.Market} · {x.Name}"), ("MarketKey", $"{x.Market}|{x.Name}"), ("Market", x.Market), ("Name", x.Name), ("StandOrLocation", x.StandOrLocation), ("Salesman", x.Salesman), ("Sender", x.Sender), ("Active", x.Active))).ToArray()
         };
 
         var rowsByList = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
