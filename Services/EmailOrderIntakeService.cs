@@ -258,6 +258,15 @@ public sealed class EmailOrderIntakeService
         var collectFrom = ExtractMatch(CollectFromRegex, body, "site");
         var explicitCollection = ExtractBodyCollectionPoint(body)
             ?? (!string.IsNullOrWhiteSpace(collectFrom) ? CleanSourceLine(collectFrom) : ExtractCollectionSiteFromLabel(collectionLabel));
+
+        // Summer Berry TSBC/CO-OP emails sometimes repeat the destination as
+        // “Collect from” in the body. The sender/master-data mapping is authoritative:
+        // Summer Berry is the collection site and TSBC CO-OP is the destination.
+        var senderCollectionSite = InferCollectionSiteFromSender(request.SenderAddress);
+        var isSummerBerryTsbcCoop = string.Equals(senderCollectionSite, "Summer Berry", StringComparison.OrdinalIgnoreCase)
+            && Regex.IsMatch($"{request.Subject}\n{body}", @"\bTSBC\s*[- ]?\s*CO[- ]?OP\b", RegexOptions.IgnoreCase);
+        if (isSummerBerryTsbcCoop)
+            explicitCollection = senderCollectionSite;
         if (explicitCollection is not null && Regex.IsMatch(explicitCollection, @"^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}", RegexOptions.IgnoreCase))
             explicitCollection = null;
         if (!string.IsNullOrWhiteSpace(explicitCollection) && !order.SourceKey.StartsWith("barfoots-waitrose-", StringComparison.OrdinalIgnoreCase))
