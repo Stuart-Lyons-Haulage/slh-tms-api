@@ -148,7 +148,7 @@ public sealed class SharePointMasterDataSyncService(
             .GroupBy(g => g.SiteId!.Value)
             .ToDictionaryAsync(group => group.Key, group => group.OrderBy(g => g.Id).First().Id.ToString(), ct);
         return sites.Select(x => Fields(
-            ("Title", x.ExternalCode), ("SiteKey", x.ExternalCode), ("CustomerKey", x.CustomerCode), ("SiteName", x.Name), ("BuildingName", x.DriverTextName ?? x.Name), ("Address1", x.CollectionAddress), ("MapLink", x.MapLink), ("Aliases", x.Aliases), ("GeofenceId", geofences.GetValueOrDefault(x.Id)), ("Active", x.Active), ("SyncStatus", "Synced"))).ToArray();
+            ("Title", x.ExternalCode), ("SiteKey", x.ExternalCode), ("CustomerKey", x.CustomerCode), ("SiteName", x.Name), ("BuildingName", x.DriverTextName ?? x.Name), ("Address1", x.CollectionAddress), ("Aliases", x.Aliases), ("GeofenceId", geofences.GetValueOrDefault(x.Id)), ("Active", x.Active), ("SyncStatus", "Synced"))).ToArray();
     }
 
     private async Task<JsonElement[]> ReadListAsync(string entityType, string listId, string token, CancellationToken ct)
