@@ -25,8 +25,9 @@ BEGIN
     );
 END;
 
--- These lookup indexes are deliberately deferred from the blocking startup
--- migration. The customer/site register is a live production dataset and an
--- online index build can keep the API from opening its port long enough for
--- Container Apps to terminate the revision. The CRM queries remain correct
--- without them; add them later through the online-maintenance process.
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Customers_Code' AND object_id = OBJECT_ID(N'dbo.Customers'))
+    CREATE UNIQUE INDEX IX_Customers_Code ON dbo.Customers(Code);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Sites_CustomerCode_ExternalCode' AND object_id = OBJECT_ID(N'dbo.Sites'))
+    CREATE INDEX IX_Sites_CustomerCode_ExternalCode ON dbo.Sites(CustomerCode, ExternalCode);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_CustomerEmailRoutes_CustomerCode_SenderEmail_SenderDomain' AND object_id = OBJECT_ID(N'dbo.CustomerEmailRoutes'))
+    CREATE INDEX IX_CustomerEmailRoutes_CustomerCode_SenderEmail_SenderDomain ON dbo.CustomerEmailRoutes(CustomerCode, SenderEmail, SenderDomain);
