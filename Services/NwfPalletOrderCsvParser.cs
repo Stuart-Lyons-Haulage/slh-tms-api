@@ -28,7 +28,11 @@ public sealed class NwfPalletOrderCsvParser
         var candidates = (request.Attachments ?? [])
             .Where(item => item.IsInline != true
                 && !string.IsNullOrWhiteSpace(item.EffectiveContentBase64)
-                && string.Equals(Path.GetExtension(item.Name ?? string.Empty), ".csv", StringComparison.OrdinalIgnoreCase))
+                && string.Equals(Path.GetExtension(item.Name ?? string.Empty), ".csv", StringComparison.OrdinalIgnoreCase)
+                // Do not classify an arbitrary customer CSV as NWF solely because
+                // it happens to use similar column headings. The source email or
+                // attachment must carry an NWF/NWAY/Natures Way signal.
+                && IsNwfSource(request, item.Name))
             .ToList();
 
         foreach (var attachment in candidates)
@@ -301,6 +305,23 @@ public sealed class NwfPalletOrderCsvParser
                (value.Contains("NWAY", StringComparison.OrdinalIgnoreCase) || value.Contains("NWF", StringComparison.OrdinalIgnoreCase)) &&
                value.Contains("pallet", StringComparison.OrdinalIgnoreCase) &&
                value.Contains("order", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsNwfSource(MailboxEmailIntakeRequest request, string? attachmentName)
+    {
+        var source = string.Join("\n", new[]
+        {
+            request.Subject,
+            request.SenderAddress,
+            attachmentName,
+            request.BodyText,
+            request.BodyHtml
+        }.Where(value => !string.IsNullOrWhiteSpace(value)));
+
+        return source.Contains("NWF", StringComparison.OrdinalIgnoreCase)
+            || source.Contains("NWAY", StringComparison.OrdinalIgnoreCase)
+            || source.Contains("Natures Way", StringComparison.OrdinalIgnoreCase)
+            || source.Contains("Nature's Way", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string DecodeText(string base64)
