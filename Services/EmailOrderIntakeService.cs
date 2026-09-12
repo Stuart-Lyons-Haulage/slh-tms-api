@@ -278,7 +278,10 @@ public sealed class EmailOrderIntakeService
         else sources["collectionSite"] = "template-or-fallback";
 
         var address = ExtractLabelBlock(body, "addressofdelivery", "adressofdelivery", "deliveryaddress", "deliverto", "destination", "shipto");
-        var explicitDestination = CleanDeliveryAddressForSite(address) ?? DeliverySiteName(ExtractMatch(DeliveryToRegex, body, "site"));
+        var masterSiteMention = FindMasterSiteMention($"{request.Subject}\n{body}", masterSiteNames);
+        var explicitDestination = CleanDeliveryAddressForSite(address)
+            ?? DeliverySiteName(ExtractMatch(DeliveryToRegex, body, "site"))
+            ?? masterSiteMention;
         if (!string.IsNullOrWhiteSpace(explicitDestination))
         {
             payload["stallNumber"] = explicitDestination;
@@ -308,7 +311,7 @@ public sealed class EmailOrderIntakeService
         sources["collectionTime"] = string.IsNullOrWhiteSpace(collectionTime) ? "template-or-fallback" : "body.explicit";
 
         var explicitCustomer = CleanCustomerName(ExtractLabelValue(body, "customer"));
-        var masterSite = FindMasterSiteMention(body, masterSiteNames);
+        var masterSite = masterSiteMention;
         var masterCustomer = string.IsNullOrWhiteSpace(masterSite) ? null : InferCustomerCode(masterSite, null, masterSite);
         if (string.Equals(masterCustomer, "EMAIL", StringComparison.OrdinalIgnoreCase)) masterCustomer = null;
         var bodySignal = DetectKnownSignal(body, []);
