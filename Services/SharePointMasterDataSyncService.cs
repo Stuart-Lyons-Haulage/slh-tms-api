@@ -361,6 +361,6 @@ public sealed class SharePointMasterDataSyncService(
             _ => "Check the SLH SharePoint integration log for the Graph response."
         };
         logger.LogError("{Action} failed. GraphStatus={GraphStatus}; GraphBody={GraphBody}", action, (int)status, body);
-        return new SharePointMasterDataException(code, $"{action} (Microsoft Graph {(int)status}). {guidance}");
+        var graphDetail = body.Length > 800 ? body[..800] : body;\n        return new SharePointMasterDataException(code, $"{action} (Microsoft Graph {(int)status}). {guidance} Graph detail: {graphDetail}");
     }
 }
