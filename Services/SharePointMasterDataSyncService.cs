@@ -142,7 +142,10 @@ public sealed class SharePointMasterDataSyncService(
 
             await Parallel.ForEachAsync(
                 distinctRows.Skip(1),
-                new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct },
+                // SharePoint applies tenant-wide activity quotas. A small degree of
+                // parallelism keeps a full master-data publish moving without turning
+                // a routine refresh into a burst of thousands of Graph requests.
+                new ParallelOptions { MaxDegreeOfParallelism = 2, CancellationToken = ct },
                 async (source, itemCt) =>
                 {
                     var key = source[keyField]?.ToString();
@@ -346,7 +349,9 @@ public sealed class SharePointMasterDataSyncService(
             .Reverse()
             .ToList();
 
-        for (var attempt = 0; ; attempt++)
+        var fieldAttempt = 0;
+        var throttleAttempt = 0;
+        for (;;)
         {
             using var request = new HttpRequestMessage(HttpMethod.Post, BuildListUrl(listId, "items"))
             {
@@ -357,10 +362,17 @@ public sealed class SharePointMasterDataSyncService(
             if (response.IsSuccessStatusCode) return payload.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             var body = await response.Content.ReadAsStringAsync(ct);
-            if (response.StatusCode != System.Net.HttpStatusCode.BadRequest || attempt >= optionalFields.Count)
+            if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests && throttleAttempt < 8)
+            {
+                await DelayForThrottleAsync(response, throttleAttempt++, ct);
+                continue;
+            }
+
+            throttleAttempt = 0;
+            if (response.StatusCode != System.Net.HttpStatusCode.BadRequest || fieldAttempt >= optionalFields.Count)
                 throw Failure("ListCreateFailed", "A Microsoft List item could not be created", response.StatusCode, body);
 
-            var removedField = optionalFields[attempt];
+            var removedField = optionalFields[fieldAttempt++];
             payload.Remove(removedField);
             logger.LogWarning(
                 "SharePoint create returned 400; retrying without optional field {Field}. GraphBody={GraphBody}",
@@ -378,7 +390,9 @@ public sealed class SharePointMasterDataSyncService(
             .Reverse()
             .ToList();
 
-        for (var attempt = 0; ; attempt++)
+        var fieldAttempt = 0;
+        var throttleAttempt = 0;
+        for (;;)
         {
             using var request = new HttpRequestMessage(new HttpMethod("PATCH"), BuildListUrl(listId, $"items/{Uri.EscapeDataString(itemId)}/fields"))
             {
@@ -389,16 +403,37 @@ public sealed class SharePointMasterDataSyncService(
             if (response.IsSuccessStatusCode) return payload.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             var body = await response.Content.ReadAsStringAsync(ct);
-            if (response.StatusCode != System.Net.HttpStatusCode.BadRequest || attempt >= optionalFields.Count)
+            if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests && throttleAttempt < 8)
+            {
+                await DelayForThrottleAsync(response, throttleAttempt++, ct);
+                continue;
+            }
+
+            throttleAttempt = 0;
+            if (response.StatusCode != System.Net.HttpStatusCode.BadRequest || fieldAttempt >= optionalFields.Count)
                 throw Failure("ListUpdateFailed", "A Microsoft List item could not be updated", response.StatusCode, body);
 
-            var removedField = optionalFields[attempt];
+            var removedField = optionalFields[fieldAttempt++];
             payload.Remove(removedField);
             logger.LogWarning(
                 "SharePoint update returned 400; retrying without optional field {Field}. GraphBody={GraphBody}",
                 removedField,
                 body);
         }
+    }
+
+    private async Task DelayForThrottleAsync(HttpResponseMessage response, int attempt, CancellationToken ct)
+    {
+        var retryAfter = response.Headers.RetryAfter?.Delta;
+        if (retryAfter is null && response.Headers.RetryAfter?.Date is { } retryDate)
+            retryAfter = retryDate - DateTimeOffset.UtcNow;
+        var fallbackSeconds = Math.Min(30, Math.Pow(2, attempt + 1));
+        var delay = retryAfter is { } requested && requested > TimeSpan.Zero
+            ? requested
+            : TimeSpan.FromSeconds(fallbackSeconds);
+        if (delay > TimeSpan.FromSeconds(60)) delay = TimeSpan.FromSeconds(60);
+        logger.LogWarning("Microsoft Graph throttled the SharePoint publish; retrying in {DelaySeconds:n0}s (attempt {Attempt}/8).", delay.TotalSeconds, attempt + 1);
+        await Task.Delay(delay, ct);
     }
 
     private string BuildListUrl(string listId, string suffix)
