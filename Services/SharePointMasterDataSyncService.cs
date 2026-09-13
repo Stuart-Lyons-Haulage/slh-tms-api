@@ -226,13 +226,34 @@ public sealed class SharePointMasterDataSyncService(
 
     private async Task UpdateListItemAsync(string listId, string itemId, IReadOnlyDictionary<string, object?> fields, string token, CancellationToken ct)
     {
-        using var request = new HttpRequestMessage(new HttpMethod("PATCH"), BuildListUrl(listId, $"items/{Uri.EscapeDataString(itemId)}/fields"))
+        var payload = new Dictionary<string, object?>(fields, StringComparer.OrdinalIgnoreCase);
+        var optionalFields = payload.Keys
+            .Where(key => !string.Equals(key, "Title", StringComparison.OrdinalIgnoreCase)
+                && !key.EndsWith("Key", StringComparison.OrdinalIgnoreCase))
+            .Reverse()
+            .ToList();
+
+        for (var attempt = 0; ; attempt++)
         {
-            Content = JsonContent.Create(fields)
-        };
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        using var response = await http.SendAsync(request, ct);
-        if (!response.IsSuccessStatusCode) throw Failure("ListUpdateFailed", "A Microsoft List item could not be updated", response.StatusCode, await response.Content.ReadAsStringAsync(ct));
+            using var request = new HttpRequestMessage(new HttpMethod("PATCH"), BuildListUrl(listId, $"items/{Uri.EscapeDataString(itemId)}/fields"))
+            {
+                Content = JsonContent.Create(payload)
+            };
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            using var response = await http.SendAsync(request, ct);
+            if (response.IsSuccessStatusCode) return;
+
+            var body = await response.Content.ReadAsStringAsync(ct);
+            if (response.StatusCode != System.Net.HttpStatusCode.BadRequest || attempt >= optionalFields.Count)
+                throw Failure("ListUpdateFailed", "A Microsoft List item could not be updated", response.StatusCode, body);
+
+            var removedField = optionalFields[attempt];
+            payload.Remove(removedField);
+            logger.LogWarning(
+                "SharePoint update returned 400; retrying without optional field {Field}. GraphBody={GraphBody}",
+                removedField,
+                body);
+        }
     }
 
     private string BuildListUrl(string listId, string suffix)
