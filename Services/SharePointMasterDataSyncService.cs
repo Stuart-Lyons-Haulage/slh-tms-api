@@ -65,7 +65,7 @@ public sealed class SharePointMasterDataSyncService(
             ["trailer"] = (await db.Trailers.AsNoTracking().OrderBy(x => x.TrailerNumber).ToListAsync(ct)).Select(x => Fields(
                 ("Title", x.TrailerNumber), ("TrailerKey", x.TrailerNumber), ("Registration", x.TrailerNumber), ("TrailerType", x.Type), ("StandardCapacity", x.StandardCapacity), ("EuroCapacity", x.EuroCapacity), ("Active", x.Active))).ToArray(),
             ["marketcontact"] = (await db.MarketContacts.AsNoTracking().OrderBy(x => x.Market).ThenBy(x => x.Name).ToListAsync(ct)).Select(x => Fields(
-                ("Title", $"{x.Market} · {x.Name}"), ("MarketKey", $"{x.Market}|{x.Name}"), ("Market", x.Market), ("Name", x.Name), ("StandOrLocation", x.StandOrLocation), ("Salesman", x.Salesman), ("Sender", x.Sender), ("Active", x.Active))).ToArray()
+                ("Title", $"{x.Market} · {x.Name}"), ("Market", x.Market), ("Name", x.Name), ("StandOrLocation", x.StandOrLocation), ("Salesman", x.Salesman), ("Sender", x.Sender), ("Active", x.Active))).ToArray()
         };
 
         var rowsByList = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -74,7 +74,7 @@ public sealed class SharePointMasterDataSyncService(
             if (!rows.TryGetValue(mapping.Key, out var sourceRows) || string.IsNullOrWhiteSpace(mapping.Value)) continue;
             var listId = await ResolveListIdAsync(mapping.Value, token, ct);
             var existing = await ReadListAsync(mapping.Key, listId, token, ct);
-            var keyField = mapping.Key switch { "customer" => "CustomerKey", "site" => "SiteKey", "driver" => "DriverKey", "vehicle" => "VehicleKey", "trailer" => "TrailerKey", "marketcontact" => "MarketKey", _ => "Title" };
+            var keyField = mapping.Key switch { "customer" => "CustomerKey", "site" => "SiteKey", "driver" => "DriverKey", "vehicle" => "VehicleKey", "trailer" => "TrailerKey", "marketcontact" => "Title", _ => "Title" };
             var existingByKey = existing
                 .Where(item => item.TryGetProperty("fields", out var field) && field.TryGetProperty(keyField, out var key) && !string.IsNullOrWhiteSpace(key.ToString()))
                 .GroupBy(item => item.GetProperty("fields").GetProperty(keyField).ToString(), StringComparer.OrdinalIgnoreCase)
