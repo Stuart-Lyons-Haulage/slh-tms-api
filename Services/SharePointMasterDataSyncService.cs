@@ -84,17 +84,31 @@ public sealed class SharePointMasterDataSyncService(
                 .GroupBy(row => row[keyField]!.ToString()!, StringComparer.OrdinalIgnoreCase)
                 .Select(group => group.First())
                 .ToArray();
+            IReadOnlySet<string>? acceptedFields = null;
+            if (distinctRows.Length > 0)
+            {
+                var probe = distinctRows[0];
+                var probeKey = probe[keyField]!.ToString()!;
+                acceptedFields = existingByKey.TryGetValue(probeKey, out var probeCurrent)
+                    ? await UpdateListItemAsync(listId, probeCurrent.GetProperty("id").ToString(), probe, token, ct)
+                    : await CreateListItemAsync(listId, probe, token, ct);
+            }
+
             await Parallel.ForEachAsync(
-                distinctRows,
+                distinctRows.Skip(1),
                 new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct },
                 async (source, itemCt) =>
                 {
                     var key = source[keyField]?.ToString();
                     if (string.IsNullOrWhiteSpace(key)) return;
+                    var filtered = acceptedFields is null
+                        ? source
+                        : source.Where(pair => acceptedFields.Contains(pair.Key))
+                            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
                     if (existingByKey.TryGetValue(key, out var current))
-                        await UpdateListItemAsync(listId, current.GetProperty("id").ToString(), source, token, itemCt);
+                        await UpdateListItemAsync(listId, current.GetProperty("id").ToString(), filtered, token, itemCt);
                     else
-                        await CreateListItemAsync(listId, source, token, itemCt);
+                        await CreateListItemAsync(listId, filtered, token, itemCt);
                 });
             rowsByList[mapping.Key] = sourceRows.Count;
         }
@@ -193,7 +207,7 @@ public sealed class SharePointMasterDataSyncService(
         return match.ValueKind == JsonValueKind.Undefined ? throw new SharePointMasterDataException("ListNotFound", $"The required Microsoft List '{listName}' was not found on the SLH Hub site. Run the SLH Hub List provisioning script, then try again.") : match.GetProperty("id").GetString()!;
     }
 
-    private async Task CreateListItemAsync(string listId, IReadOnlyDictionary<string, object?> fields, string token, CancellationToken ct)
+    private async Task<IReadOnlySet<string>> CreateListItemAsync(string listId, IReadOnlyDictionary<string, object?> fields, string token, CancellationToken ct)
     {
         var payload = new Dictionary<string, object?>(fields, StringComparer.OrdinalIgnoreCase);
         var optionalFields = payload.Keys
@@ -210,7 +224,7 @@ public sealed class SharePointMasterDataSyncService(
             };
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             using var response = await http.SendAsync(request, ct);
-            if (response.IsSuccessStatusCode) return;
+            if (response.IsSuccessStatusCode) return payload.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             var body = await response.Content.ReadAsStringAsync(ct);
             if (response.StatusCode != System.Net.HttpStatusCode.BadRequest || attempt >= optionalFields.Count)
@@ -225,7 +239,7 @@ public sealed class SharePointMasterDataSyncService(
         }
     }
 
-    private async Task UpdateListItemAsync(string listId, string itemId, IReadOnlyDictionary<string, object?> fields, string token, CancellationToken ct)
+    private async Task<IReadOnlySet<string>> UpdateListItemAsync(string listId, string itemId, IReadOnlyDictionary<string, object?> fields, string token, CancellationToken ct)
     {
         var payload = new Dictionary<string, object?>(fields, StringComparer.OrdinalIgnoreCase);
         var optionalFields = payload.Keys
@@ -242,7 +256,7 @@ public sealed class SharePointMasterDataSyncService(
             };
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             using var response = await http.SendAsync(request, ct);
-            if (response.IsSuccessStatusCode) return;
+            if (response.IsSuccessStatusCode) return payload.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             var body = await response.Content.ReadAsStringAsync(ct);
             if (response.StatusCode != System.Net.HttpStatusCode.BadRequest || attempt >= optionalFields.Count)
