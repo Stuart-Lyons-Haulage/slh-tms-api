@@ -59,6 +59,7 @@ builder.Services.AddHttpClient<FleetioClient>();
 builder.Services.AddHttpClient("eta-job");
 builder.Services.AddScoped<DistributedLeaseManager>();
 builder.Services.AddScoped<IntegrationSyncCoordinator>();
+builder.Services.AddScoped<TachoObservedDriverSyncService>();
 builder.Services.AddScoped<TachoDriverMasterSyncService>();
 builder.Services.AddScoped<DriverMasterClassificationService>();
 builder.Services.AddScoped<TachoCanonicalDriverMasterOrchestrator>();
