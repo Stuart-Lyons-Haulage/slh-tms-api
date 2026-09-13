@@ -7,12 +7,12 @@ public sealed class TachoMasterHealthFreshnessTests
 {
     [Theory]
     [InlineData(null, "unknown")]
-    [InlineData(0, "live")]
-    [InlineData(15, "live")]
-    [InlineData(15.1, "delayed")]
-    [InlineData(30, "delayed")]
-    [InlineData(30.1, "stale")]
-    [InlineData(1320, "stale")]
+    [InlineData(0d, "live")]
+    [InlineData(15d, "live")]
+    [InlineData(15.1d, "delayed")]
+    [InlineData(30d, "delayed")]
+    [InlineData(30.1d, "stale")]
+    [InlineData(1320d, "stale")]
     public void JobFreshness_ClassifiesFiveMinuteSchedulerLag(double? ageMinutes, string expected)
     {
         Assert.Equal(expected, TachoMasterHealthController.JobFreshness(ageMinutes));
