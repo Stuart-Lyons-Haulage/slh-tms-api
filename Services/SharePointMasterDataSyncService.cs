@@ -78,18 +78,23 @@ public sealed class SharePointMasterDataSyncService(
                 .Where(item => item.TryGetProperty("fields", out var field) && field.TryGetProperty(keyField, out var key) && !string.IsNullOrWhiteSpace(key.ToString()))
                 .GroupBy(item => item.GetProperty("fields").GetProperty(keyField).ToString(), StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
-            foreach (var source in sourceRows
+            var distinctRows = sourceRows
                 .Where(row => !string.IsNullOrWhiteSpace(row.GetValueOrDefault(keyField)?.ToString()))
                 .GroupBy(row => row[keyField]!.ToString()!, StringComparer.OrdinalIgnoreCase)
-                .Select(group => group.First()))
-            {
-                var key = source[keyField]?.ToString();
-                if (string.IsNullOrWhiteSpace(key)) continue;
-                if (existingByKey.TryGetValue(key, out var current))
-                    await UpdateListItemAsync(listId, current.GetProperty("id").ToString(), source, token, ct);
-                else
-                    await CreateListItemAsync(listId, source, token, ct);
-            }
+                .Select(group => group.First())
+                .ToArray();
+            await Parallel.ForEachAsync(
+                distinctRows,
+                new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct },
+                async (source, itemCt) =>
+                {
+                    var key = source[keyField]?.ToString();
+                    if (string.IsNullOrWhiteSpace(key)) return;
+                    if (existingByKey.TryGetValue(key, out var current))
+                        await UpdateListItemAsync(listId, current.GetProperty("id").ToString(), source, token, itemCt);
+                    else
+                        await CreateListItemAsync(listId, source, token, itemCt);
+                });
             rowsByList[mapping.Key] = sourceRows.Count;
         }
         return new SharePointMasterDataPublishResult(rowsByList.Count, rowsByList.Values.Sum(), rowsByList);
