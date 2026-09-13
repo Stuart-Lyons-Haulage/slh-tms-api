@@ -9,6 +9,7 @@ namespace Slh.Tms.Jobs;
 public sealed class TachoMasterScheduledJob(
     TmsDbContext db,
     IntegrationSyncCoordinator integration,
+    TachoObservedDriverSyncService observedDrivers,
     TachoCanonicalDriverMasterOrchestrator canonical,
     ILogger<TachoMasterScheduledJob> logger)
 {
@@ -21,8 +22,12 @@ public sealed class TachoMasterScheduledJob(
             return new JobExecutionResult(result.Success, result.Message, result.Canonical.Created + result.Canonical.Updated + result.Canonical.DuplicateRecordsRetired);
         }
 
+        var observed = await observedDrivers.SyncAsync("system:aca-job:tachomaster-live-identity", ct);
         var sync = await integration.SyncTachoMasterAsync("system:aca-job:tachomaster", ct);
-        return new JobExecutionResult(sync.Success, sync.Message, sync.Changed);
+        var message = observed.Created > 0
+            ? $"{sync.Message} Live Tacho evidence created {observed.Created} previously unseen driver record(s) from SLH vehicles; SharePoint CRM mirror queued through the master-data audit outbox."
+            : sync.Message;
+        return new JobExecutionResult(sync.Success, message, sync.Changed + observed.Created);
     }
 
     private async Task<bool> CanonicalDueAsync(CancellationToken ct)
