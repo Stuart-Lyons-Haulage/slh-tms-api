@@ -165,18 +165,19 @@ public sealed class TachoDriverMasterSyncService(
                 .ToList();
             var cardKey = TachoDriverIdentityRules.NormaliseIdentifier(worker.CardNumber);
             var cardIsUnique = cardKey.Length > 0 && liveCardCounts.GetValueOrDefault(cardKey) == 1;
-            var strong = memberMatches.Count > 0
-                ? memberMatches
-                : cardIsUnique
-                    ? drivers.Where(driver => TachoDriverIdentityRules.CardsMatch(driver.TachoCardNumber, worker.CardNumber)).ToList()
-                    : [];
+            var cardMatches = cardIsUnique
+                ? drivers.Where(driver => TachoDriverIdentityRules.CardsMatch(driver.TachoCardNumber, worker.CardNumber)).ToList()
+                : [];
+            // The physical tachograph card is the canonical person identifier. Member code is
+            // retained as the fallback for workers whose live TachoMaster record has no card.
+            var strong = cardMatches.Count > 0 ? cardMatches : memberMatches;
 
             Driver? canonical = null;
             if (strong.Count > 0)
             {
                 canonical = SelectCanonical(strong, worker, loadUse);
-                if (memberMatches.Count > 0) matchedByMember++;
-                else matchedByCard++;
+                if (cardMatches.Count > 0) matchedByCard++;
+                else matchedByMember++;
             }
             else
             {
@@ -215,7 +216,11 @@ public sealed class TachoDriverMasterSyncService(
 
             // Strong duplicates are always safe. Name-only aliases are merged only when TachoMaster
             // has exactly one live person with that name and the alias has no conflicting member/card.
-            var duplicates = strong.Where(driver => driver.Id != canonical.Id).ToList();
+            var duplicates = cardMatches
+                .Concat(memberMatches)
+                .Where(driver => driver.Id != canonical.Id)
+                .DistinctBy(driver => driver.Id)
+                .ToList();
             var workerName = TachoDriverIdentityRules.NormalisePerson(worker.DisplayName);
             if (workerName.Length > 0 && liveNameCounts.GetValueOrDefault(workerName) == 1)
             {
