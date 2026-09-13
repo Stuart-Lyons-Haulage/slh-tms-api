@@ -8,7 +8,7 @@ namespace Slh.Tms.Api.Tests;
 public sealed class TachoDriverMasterIdentityTests
 {
     [Fact]
-    public void Member_code_is_the_primary_stable_identity()
+    public void Member_code_is_a_unique_secondary_identity()
     {
         Assert.True(TachoDriverIdentityRules.MemberMatches(" 1955725 ", "1955725"));
         Assert.False(TachoDriverIdentityRules.MemberMatches("1631289", "1955725"));
