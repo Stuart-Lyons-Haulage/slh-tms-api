@@ -49,6 +49,7 @@ public sealed class SharePointMasterDataSyncService(
     ILogger<SharePointMasterDataSyncService> logger)
 {
     private readonly SharePointMasterDataOptions settings = options;
+    public bool IsEnabled => settings.Enabled;
 
     public async Task<SharePointMasterDataPublishResult> PublishFromSqlAsync(TmsDbContext db, CancellationToken ct)
     {
