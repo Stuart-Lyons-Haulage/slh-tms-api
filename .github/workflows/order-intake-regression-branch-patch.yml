@@ -1,0 +1,210 @@
+name: Order Intake Regression Branch Patch
+
+on:
+  push:
+    branches:
+      - fix/order-intake-routing-regressions-20260913-v2
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-commit:
+    if: ${{ !contains(github.event.head_commit.message, '[order-intake-patched]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/order-intake-routing-regressions-20260913-v2
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Apply parser and regression-test patch
+        shell: python
+        run: |
+          from pathlib import Path
+
+          service = Path('Services/EmailOrderIntakeService.cs')
+          text = service.read_text()
+
+          old = '''        var barfootsWaitrose = ParseBarfootsWaitroseWaveBody(request, body, receivedAt);\n        if (barfootsWaitrose.Count > 0) return barfootsWaitrose;\n\n        var labelled = ParseLabelledBodyOrder(request, rawPo, body, sourceText, receivedAt);'''
+          new = '''        var barfootsWaitrose = ParseBarfootsWaitroseWaveBody(request, body, receivedAt);\n        if (barfootsWaitrose.Count > 0) return barfootsWaitrose;\n\n        var nisaBodyOnly = ParseNisaBodyOnly(request, rawPo, body, sourceText, receivedAt);\n        if (nisaBodyOnly.Count > 0) return nisaBodyOnly;\n\n        var labelled = ParseLabelledBodyOrder(request, rawPo, body, sourceText, receivedAt);'''
+          if old not in text:
+              raise SystemExit('Could not find ParseStructuredBodyOrders insertion point')
+          text = text.replace(old, new, 1)
+
+          marker = '''    private static List<ParsedEmailOrder> ParseBarfootsWaitroseWaveBody(\n        MailboxEmailIntakeRequest request,\n        string body,\n        DateTimeOffset receivedAt)\n    {'''
+          method = r'''    private static List<ParsedEmailOrder> ParseNisaBodyOnly(
+        MailboxEmailIntakeRequest request,
+        string? rawPo,
+        string body,
+        string sourceText,
+        DateTimeOffset receivedAt)
+    {
+        if (!sourceText.Contains("NISA", StringComparison.OrdinalIgnoreCase) ||
+            !Regex.IsMatch(body, @"\b\d{1,3}\s*(?:pallets?|plts?)\s+to\s+", RegexOptions.IgnoreCase))
+            return [];
+
+        var route = Regex.Match(
+            body,
+            @"\b(?<qty>\d{1,3})\s*(?:pallets?|plts?)\s+to\s+(?<destination>[A-Za-z0-9][A-Za-z0-9 .&'()/-]{1,80}?)\s+for\s+delivery(?:\s+on)?\s+(?<date>\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)\b",
+            RegexOptions.IgnoreCase);
+        if (!route.Success || !int.TryParse(route.Groups["qty"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var pallets) || pallets <= 0)
+            return [];
+
+        var deliveryDate = ExtractDate(route.Groups["date"].Value, receivedAt);
+        if (deliveryDate is null) return [];
+
+        var collectionSite = ExtractBodyCollectionPoint(body);
+        if (string.IsNullOrWhiteSpace(collectionSite)) return [];
+
+        var destination = CultureInfo.InvariantCulture.TextInfo.ToTitleCase(
+            CleanSourceLine(route.Groups["destination"].Value).ToLowerInvariant());
+        var warnings = new List<string>();
+        if (string.IsNullOrWhiteSpace(rawPo))
+            warnings.Add("No customer PO/reference was found; a stable email reference was generated and should be checked before approval.");
+
+        var order = BuildStructuredOrder(
+            request,
+            $"nisa-body-{NormaliseKey(destination)}",
+            "BARFOOTS",
+            rawPo,
+            deliveryDate.Value,
+            deliveryDate.Value,
+            pallets,
+            collectionSite,
+            destination,
+            "NISA pallet booking",
+            warnings);
+
+        var payload = JsonSerializer.Deserialize<Dictionary<string, object?>>(order.Payload.GetRawText()) ?? [];
+        payload["intakeFieldSources"] = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["collectionSite"] = "body.explicit.collection-point",
+            ["destination"] = "body.explicit.route",
+            ["pallets"] = "body.explicit.route",
+            ["deliveryDate"] = "body.explicit.route"
+        };
+        payload["parserTemplate"] = "NISA body-only route";
+        return [new ParsedEmailOrder(order.SourceKey, order.NaturalKey, JsonSerializer.SerializeToElement(payload), order.Warnings)];
+    }
+
+'''
+          if marker not in text:
+              raise SystemExit('Could not find Barfoots wave parser marker')
+          text = text.replace(marker, method + marker, 1)
+          service.write_text(text)
+
+          tests = Path('Slh.Tms.Api.Tests/OrderIntakeRoutingRegressionTests.cs')
+          tests.write_text(r'''using Microsoft.Extensions.DependencyInjection;
+using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Services;
+using Xunit;
+
+namespace Slh.Tms.Api.Tests;
+
+public sealed class OrderIntakeRoutingRegressionTests : IClassFixture<CustomWebFactory>
+{
+    private readonly CustomWebFactory factory;
+
+    public OrderIntakeRoutingRegressionTests(CustomWebFactory factory) => this.factory = factory;
+
+    [Fact]
+    public async Task SummerBerryCoop_pipeline_keeps_coop_customer_and_summer_berry_collection()
+    {
+        await using var scope = factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var sender = $"ioana-{suffix}@summerberry.co.uk";
+        var summerBerry = new Site
+        {
+            Id = Guid.NewGuid(), ExternalCode = $"SB-{suffix}", Name = $"Summer Berry {suffix}",
+            DriverTextName = $"Summer Berry {suffix}", Active = true
+        };
+        var coop = new Site
+        {
+            Id = Guid.NewGuid(), ExternalCode = $"COOP-{suffix}", Name = $"TSBC CO-OP {suffix}",
+            DriverTextName = $"TSBC CO-OP {suffix}", Active = true
+        };
+        db.Sites.AddRange(summerBerry, coop);
+        db.CustomerEmailRoutes.Add(new CustomerEmailRoute
+        {
+            CustomerCode = "COOP", SenderEmail = sender, DefaultSiteCode = summerBerry.ExternalCode,
+            RequiresReview = false, Active = true
+        });
+        await db.SaveChangesAsync();
+
+        var request = new MailboxEmailIntakeRequest(
+            $"summer-{suffix}", null, "info@lyonshaulage.com", sender, "Ioana",
+            "TSBC COOP - 18.08.2026", DateTimeOffset.Parse("2026-08-17T09:53:57Z"),
+            $"Please find attached pallet requirements. Total Pallets : 2 Collection time: 17:00 Transport at +3 degrees Collect from: {summerBerry.Name}",
+            null, null, null);
+
+        var parsed = new EmailOrderIntakeService().Parse(request, [summerBerry.Name, coop.Name]);
+        var routed = await CustomerEmailRouteService.ApplyAsync(db, parsed, request, CancellationToken.None);
+        var aligned = await EmailOrderSiteMasterAlignment.AlignAsync(db, routed, CancellationToken.None);
+        var payload = Assert.Single(aligned.Orders).Payload;
+
+        Assert.Equal("COOP", payload.GetProperty("customerCode").GetString());
+        Assert.Equal(summerBerry.Name, payload.GetProperty("sellerName").GetString());
+        Assert.DoesNotContain("NWF", payload.GetRawText(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Drayton", payload.GetRawText(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Barfoots_body_only_nisa_pipeline_never_routes_to_nwf_or_drayton()
+    {
+        await using var scope = factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var sender = $"orders-{suffix}@barfoots.co.uk";
+        var leythorne = new Site
+        {
+            Id = Guid.NewGuid(), ExternalCode = $"LEY-{suffix}", Name = "Barfoots Leythorne",
+            DriverTextName = "Barfoots Leythorne", Active = true
+        };
+        var nwfDrayton = new Site
+        {
+            Id = Guid.NewGuid(), ExternalCode = $"NWF-{suffix}", Name = $"NWF Drayton {suffix}",
+            DriverTextName = $"NWF Drayton {suffix}", Active = true
+        };
+        db.Sites.AddRange(leythorne, nwfDrayton);
+        db.CustomerEmailRoutes.Add(new CustomerEmailRoute
+        {
+            CustomerCode = "BARFOOTS", SenderEmail = sender, DefaultSiteCode = leythorne.ExternalCode,
+            RequiresReview = false, Active = true
+        });
+        await db.SaveChangesAsync();
+
+        var request = new MailboxEmailIntakeRequest(
+            $"barfoots-{suffix}", null, "info@lyonshaulage.com", sender, "Barfoots",
+            "NISA pallet booking 12/09/2026", DateTimeOffset.Parse("2026-09-10T09:00:00Z"),
+            "Collection point: Leythorne\nPlease book 4 pallets to Aylesford for delivery on 12/09/2026.",
+            null, null, null);
+
+        var parsed = new EmailOrderIntakeService().Parse(request, [leythorne.Name, nwfDrayton.Name, "Aylesford"]);
+        var routed = await CustomerEmailRouteService.ApplyAsync(db, parsed, request, CancellationToken.None);
+        var aligned = await EmailOrderSiteMasterAlignment.AlignAsync(db, routed, CancellationToken.None);
+        var payload = Assert.Single(aligned.Orders).Payload;
+
+        Assert.Equal("BARFOOTS", payload.GetProperty("customerCode").GetString());
+        Assert.Equal("Barfoots Leythorne", payload.GetProperty("sellerName").GetString());
+        Assert.Equal(4, payload.GetProperty("pallets").GetInt32());
+        Assert.DoesNotContain("NWF", payload.GetRawText(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Drayton", payload.GetRawText(), StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("body.explicit", payload.GetProperty("intakeFieldSources").GetProperty("collectionSite").GetString());
+    }
+}
+''')
+      - name: Run API tests
+        run: dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release
+      - name: Commit validated patch
+        run: |
+          rm .github/workflows/order-intake-regression-branch-patch.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Services/EmailOrderIntakeService.cs Slh.Tms.Api.Tests/OrderIntakeRoutingRegressionTests.cs .github/workflows/order-intake-regression-branch-patch.yml
+          git commit -m "Fix body-only NISA and routing regressions [order-intake-patched]"
+          git push origin HEAD:fix/order-intake-routing-regressions-20260913-v2
