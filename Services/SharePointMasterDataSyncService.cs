@@ -40,7 +40,7 @@ public sealed class SharePointMasterDataException(string code, string message, E
     public string Code { get; } = code;
 }
 
-// CI trigger: validated master-data publish duplicate-key handling.
+// CI trigger: validated master-data publish duplicate-key handling.\n// CI validation marker for tolerant SharePoint field retry.
 public sealed class SharePointMasterDataSyncService(
     HttpClient http,
     SharePointMasterDataOptions options,
