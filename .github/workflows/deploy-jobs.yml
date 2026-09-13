@@ -1,0 +1,148 @@
+name: CD - Deploy TMS scheduled jobs
+
+on:
+  workflow_run:
+    workflows: ["CD - Deploy TMS to Azure Container Apps"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full tested commit SHA to deploy to scheduled jobs
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: slh-tms-jobs-production
+  cancel-in-progress: true
+
+jobs:
+  deploy-jobs:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    env:
+      AZURE_CONTAINER_REGISTRY: slhtmsacrprod
+      AZURE_RESOURCE_GROUP: slh-tms-prod-rg
+      AZURE_CONTAINER_APP_FQDN: slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+      DEPLOY_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.sha || github.event.workflow_run.head_sha }}
+    steps:
+      - name: Validate source revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          deploy_sha="$(printf '%s' "$DEPLOY_SHA" | tr '[:upper:]' '[:lower:]')"
+          if ! [[ "$deploy_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Scheduled jobs deployment requires a full 40-character commit SHA."
+            exit 1
+          fi
+          curl --fail --silent --show-error \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/commits/$deploy_sha" >/dev/null
+          echo "DEPLOY_SHA=$deploy_sha" >> "$GITHUB_ENV"
+
+      - name: Check out tested source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Sign in to Azure with OpenID Connect
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build immutable scheduled-jobs image
+        run: |
+          set -euo pipefail
+          az acr build \
+            --registry "$AZURE_CONTAINER_REGISTRY" \
+            --file Slh.Tms.Jobs/Dockerfile \
+            --image "slh-tms-jobs:$DEPLOY_SHA" \
+            .
+
+      - name: Update production scheduled jobs
+        run: |
+          set -euo pipefail
+          image="$AZURE_CONTAINER_REGISTRY.azurecr.io/slh-tms-jobs:$DEPLOY_SHA"
+          jobs=(
+            slh-tms-job-tachomaster
+            slh-tms-job-fleetio
+            slh-tms-job-sagehr
+            slh-tms-job-eta
+          )
+
+          for job in "${jobs[@]}"; do
+            az containerapp job show \
+              --name "$job" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --output none
+            az containerapp job update \
+              --name "$job" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --image "$image" \
+              --output none
+            deployed_image="$(az containerapp job show \
+              --name "$job" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --query 'properties.template.containers[0].image' \
+              --output tsv)"
+            test "$deployed_image" = "$image"
+            echo "$job -> $deployed_image"
+          done
+
+      - name: Verify TachoMaster five-minute schedule
+        run: |
+          set -euo pipefail
+          trigger="$(az containerapp job show \
+            --name slh-tms-job-tachomaster \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query properties.configuration.triggerType \
+            --output tsv)"
+          cron="$(az containerapp job show \
+            --name slh-tms-job-tachomaster \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query properties.configuration.scheduleTriggerConfig.cronExpression \
+            --output tsv)"
+          test "$trigger" = "Schedule"
+          test "$cron" = "*/5 * * * *"
+          echo "TachoMaster trigger=$trigger cron=$cron"
+
+      - name: Prove a fresh TachoMaster scheduled sync reaches production
+        run: |
+          set -euo pipefail
+          success=false
+          for attempt in {1..40}; do
+            body="$(curl --silent --show-error --max-time 45 \
+              -H 'Cache-Control: no-cache' \
+              "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/tachomaster" || true)"
+            echo "$body"
+            status="$(jq -r '.status // empty' <<<"$body" 2>/dev/null || true)"
+            job_stale="$(jq -r '.scheduledSync.stale // true' <<<"$body" 2>/dev/null || true)"
+            job_age="$(jq -r '.scheduledSync.ageMinutes // empty' <<<"$body" 2>/dev/null || true)"
+            if test "$status" != "upstream-failure" -a "$job_stale" = "false"; then
+              echo "Fresh TachoMaster scheduled sync proven; age=${job_age:-unknown} minutes."
+              success=true
+              break
+            fi
+            sleep 15
+          done
+
+          if test "$success" != "true"; then
+            echo "::error::TachoMaster did not produce a fresh persisted sync within the production verification window."
+            az containerapp job execution list \
+              --name slh-tms-job-tachomaster \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --output table || true
+            exit 1
+          fi
