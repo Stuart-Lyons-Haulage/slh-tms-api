@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
@@ -7,9 +9,13 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/v1/health/tachomaster")]
 public sealed class TachoMasterHealthController(
+    TmsDbContext db,
     TachoMasterClient tachoMasterClient,
     ILogger<TachoMasterHealthController> logger) : ControllerBase
 {
+    private const double LiveJobAgeMinutes = 15;
+    private const double StaleJobAgeMinutes = 30;
+
     [HttpGet]
     [AllowAnonymous]
     public async Task<IActionResult> Get(CancellationToken cancellationToken)
@@ -32,10 +38,15 @@ public sealed class TachoMasterHealthController(
             var profilesTask = tachoMasterClient.GetDriverProfilesAsync(cancellationToken);
             var openDutiesTask = tachoMasterClient.GetOpenDriverStatusesByVehicleAsync(today, cancellationToken);
             var dayDutiesTask = tachoMasterClient.GetDriverDutyStatusesAsync(today, cancellationToken);
-            await Task.WhenAll(profilesTask, openDutiesTask, dayDutiesTask);
+            var latestPersistedSyncTask = db.Drivers.AsNoTracking()
+                .Where(driver => driver.LastTachoSyncUtc != null)
+                .MaxAsync(driver => driver.LastTachoSyncUtc, cancellationToken);
+
+            await Task.WhenAll(profilesTask, openDutiesTask, dayDutiesTask, latestPersistedSyncTask);
             var profiles = await profilesTask;
             var duties = await openDutiesTask;
             var dayDuties = await dayDutiesTask;
+            var latestPersistedSyncUtc = await latestPersistedSyncTask;
             var lastSuccessfulPollUtc = DateTimeOffset.UtcNow;
             var openDuties = duties.Values.SelectMany(items => items).ToList();
 
@@ -54,6 +65,13 @@ public sealed class TachoMasterHealthController(
                 _ => "stale"
             };
             var metricsStale = metricsAgeMinutes is null || metricsAgeMinutes > 60;
+
+            var jobAgeMinutes = latestPersistedSyncUtc is null
+                ? (double?)null
+                : Math.Max(0, Math.Round((lastSuccessfulPollUtc - latestPersistedSyncUtc.Value).TotalMinutes, 1));
+            var jobFreshness = JobFreshness(jobAgeMinutes);
+            var jobStale = jobAgeMinutes is null || jobAgeMinutes > StaleJobAgeMinutes;
+
             var latestDutyStartUtc = dayDuties.Count == 0
                 ? (DateTimeOffset?)null
                 : dayDuties.Max(item => item.DutyStartUtc);
@@ -65,7 +83,7 @@ public sealed class TachoMasterHealthController(
 
             return Ok(new
             {
-                status = "healthy",
+                status = jobStale ? "degraded" : "healthy",
                 configured = true,
                 usesSharedRoadTechCredentials = tachoMasterClient.UsesSharedRoadTechCredentials,
                 operatingDate = today,
@@ -80,6 +98,17 @@ public sealed class TachoMasterHealthController(
                 openVehicleDuties = openDuties.Count,
                 connectionFreshness = "live",
                 lastSuccessfulPollUtc,
+                scheduledSync = new
+                {
+                    expectedIntervalMinutes = 5,
+                    latestPersistedSyncUtc,
+                    ageMinutes = jobAgeMinutes,
+                    freshness = jobFreshness,
+                    stale = jobStale,
+                    warning = jobStale
+                        ? "The scheduled TachoMaster synchronisation has not refreshed persisted driver data within 30 minutes. Check the slh-tms-job-tachomaster Container Apps Job execution history and deployed jobs image."
+                        : (string?)null
+                },
                 metricsFreshness,
                 newestMetricsTimestampUtc = newestMetric == default ? (DateTimeOffset?)null : newestMetric,
                 metricsAgeMinutes,
@@ -87,7 +116,8 @@ public sealed class TachoMasterHealthController(
                 sourceFreshness = metricsFreshness,
                 newestSourceTimestampUtc = newestMetric == default ? (DateTimeOffset?)null : newestMetric,
                 sourceAgeMinutes = metricsAgeMinutes,
-                stale = metricsStale,
+                stale = jobStale,
+                sourceDataStale = metricsStale,
                 checkedAtUtc = lastSuccessfulPollUtc
             });
         }
@@ -105,6 +135,14 @@ public sealed class TachoMasterHealthController(
             });
         }
     }
+
+    internal static string JobFreshness(double? ageMinutes) => ageMinutes switch
+    {
+        null => "unknown",
+        <= LiveJobAgeMinutes => "live",
+        <= StaleJobAgeMinutes => "delayed",
+        _ => "stale"
+    };
 
     private static DateOnly UkOperatingDate(DateTimeOffset value)
     {
