@@ -8,7 +8,7 @@ using Slh.Tms.Api.Models;
 namespace Slh.Tms.Api.Services;
 public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingRuleStore = null)
 {
-    private static readonly HashSet<string> Types = new(StringComparer.OrdinalIgnoreCase) { "customer", "customercontact", "vehicle", "driver", "trailer", "site", "marketcontact", "fuelprice", "order", "communication" };
+    private static readonly HashSet<string> Types = new(StringComparer.OrdinalIgnoreCase) { "customer", "customercontact", "emailroute", "vehicle", "driver", "trailer", "site", "marketcontact", "fuelprice", "order", "communication" };
     public StagedImport Create(StageImportRequest r)
     {
         if (!Types.Contains(r.EntityType)) throw new ArgumentException("Unsupported entityType");
@@ -131,6 +131,7 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
         {
             case "customer": await PromoteCustomer(payload, ct); break;
             case "customercontact": await PromoteCustomerContact(payload, ct); break;
+            case "emailroute": await PromoteEmailRoute(payload, ct); break;
             case "vehicle": await PromoteVehicle(payload, ct); break;
             case "driver": await PromoteDriver(payload, ct); break;
             case "trailer": await PromoteTrailer(payload, ct); break;
@@ -182,6 +183,33 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
         var contact = await db.CustomerContacts.SingleOrDefaultAsync(item => item.CustomerCode == customerCode && item.Name == name, ct);
         if (contact is null) db.CustomerContacts.Add(new CustomerContact { CustomerCode = customerCode, Name = name, Email = Clip(Text(payload, "email"), 320), MobileNumber = Clip(Text(payload, "mobileNumber"), 40), ReceivesEtaUpdates = Bool(payload, "receivesEtaUpdates", true), Active = Bool(payload, "active", true) });
         else { contact.Email = Clip(Text(payload, "email"), 320); contact.MobileNumber = Clip(Text(payload, "mobileNumber"), 40); contact.ReceivesEtaUpdates = Bool(payload, "receivesEtaUpdates", true); contact.Active = Bool(payload, "active", true); }
+    }
+
+    private async Task PromoteEmailRoute(JsonElement payload, CancellationToken ct)
+    {
+        var customerCode = ClipRequired(Required(payload, "customerCode").Trim().ToUpperInvariant(), 40);
+        var senderEmail = CustomerEmailRouteService.NormalizeEmail(Text(payload, "senderEmail"));
+        var senderDomain = Clip(Text(payload, "senderDomain")?.Trim().TrimStart('@').ToLowerInvariant(), 320);
+        if (senderEmail is null && string.IsNullOrWhiteSpace(senderDomain))
+            throw new JsonException("Email route requires senderEmail or senderDomain.");
+        var routeId = Guid.TryParse(Text(payload, "id") ?? Text(payload, "routeKey"), out var parsedId) ? parsedId : Guid.NewGuid();
+        var route = await db.CustomerEmailRoutes.SingleOrDefaultAsync(item => item.Id == routeId, ct)
+            ?? await db.CustomerEmailRoutes.FirstOrDefaultAsync(item => item.CustomerCode == customerCode
+                && item.SenderEmail == senderEmail && item.SenderDomain == senderDomain
+                && item.SubjectContains == Clip(Text(payload, "subjectContains"), 200), ct);
+        if (route is null)
+        {
+            route = new CustomerEmailRoute { Id = routeId, CustomerCode = customerCode };
+            db.CustomerEmailRoutes.Add(route);
+        }
+        route.CustomerCode = customerCode;
+        route.SenderEmail = senderEmail;
+        route.SenderDomain = senderDomain;
+        route.SubjectContains = Clip(Text(payload, "subjectContains"), 200);
+        route.ParserType = Clip(Text(payload, "parserType"), 120);
+        route.DefaultSiteCode = Clip(Text(payload, "defaultSiteCode"), 80);
+        route.RequiresReview = Bool(payload, "requiresReview", true);
+        route.Active = Bool(payload, "active", true);
     }
 
     private async Task PromoteVehicle(JsonElement payload, CancellationToken ct)
@@ -316,6 +344,7 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
         var reference = Required(payload, "poNumber"); var customerCode = Required(payload, "customerCode"); var collectionDateText = Required(payload, "collectionDate");
         if (!DateOnly.TryParse(collectionDateText, out var collectionDate)) throw new JsonException("Order payload requires a valid collectionDate.");
         var (movement, plannerReady) = await RecordOrderRevision(item, payload, reference, customerCode, ct);
+        await CustomerEmailRouteService.LearnFromApprovedOrderAsync(db, payload, customerCode, ct);
         if (!plannerReady) return;
         var siteAlignment = await OrderSiteMasterAlignment.ResolveAsync(db, payload, ct);
         var timingSites = await db.Sites.AsNoTracking().Where(site => site.Active).Take(5000).ToListAsync(ct);

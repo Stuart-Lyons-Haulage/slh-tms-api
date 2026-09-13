@@ -13,6 +13,15 @@ The flow is configured as `Started` and accepts all inbound messages in the shar
 - Review/promotion: existing `/api/v1/staging/{id}/approve` and `/reject`
 - Import history: SQL `StagedImportEvents` snapshots plus the source mailbox identifiers
 - Live-order trace: SQL `TransportOrders.SourceStagedImportId`
+- Governed sender routing: SharePoint List `Order Email Routes`, synchronised with SQL `CustomerEmailRoutes`
+
+## Order Email Routes CRM
+
+The API provisions and maintains a normalised `Order Email Routes` List for Power Automate and planners. Its columns are `RouteKey`, `CustomerKey`, `SiteKey`, `SenderEmail`, `SenderDomain`, `SubjectContains`, `ParserType`, `RequiresReview`, and `Active`.
+
+The existing mailbox flow still submits every candidate email to `IntakeInfoMailboxEmail`; routing is applied centrally by the API so replays and non-flow callers behave identically. Exact sender addresses outrank domains, subject-specific mappings outrank generic mappings, and conflicts never auto-route. When a planner approves an order, its exact external sender is learned. If the same sender is later approved for a different collection site, the customer mapping is retained but the unsafe site default is cleared. Cross-customer conflicts are marked `RequiresReview`.
+
+Power Automate may read this List for conditions, reporting, or future branching, but it must not bypass the API's conflict and approval checks.
 
 No Microsoft List, SharePoint store, Power Automate Approval, secret, bearer token, client secret or live-order endpoint is present in the definition. The Info mailbox retains the original email/attachments under the organisation's mailbox retention policy; TMS SQL is the authoritative import, review and promotion history.
 
