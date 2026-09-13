@@ -59,6 +59,53 @@ public sealed class TachoDriverMasterIdentityTests
     }
 
     [Fact]
+    public void Live_worker_directory_is_collapsed_to_one_driver_per_physical_card()
+    {
+        var card = "GB-V100000149273000";
+        var loadedDriver = new Driver
+        {
+            Id = Guid.NewGuid(),
+            EmployeeNumber = "SLH-42",
+            DisplayName = "Driver One",
+            TachoMasterDriverId = "42",
+            TachoCardNumber = "V100000149273000",
+            Active = true
+        };
+        var workers = new[]
+        {
+            new TachoLiveWorker(99, "One, Driver", card, "TM-99", "Employed", null, null, null, null, null, null, null, null, null, null, null, "{}"),
+            new TachoLiveWorker(42, "Driver One", "V100000149273000", "SLH-42", "Employed", null, null, null, null, null, null, null, null, null, null, null, "{}")
+        };
+
+        var canonical = TachoDriverMasterSyncService.CanonicaliseLiveWorkers(
+            workers,
+            [loadedDriver],
+            new Dictionary<Guid, int> { [loadedDriver.Id] = 12 });
+
+        var selected = Assert.Single(canonical);
+        Assert.Equal(42, selected.MemberCode);
+        Assert.Equal("SLH-42", selected.EmployeeNumber);
+    }
+
+    [Fact]
+    public void Cardless_alias_for_an_existing_card_member_is_not_a_second_driver()
+    {
+        var workers = new[]
+        {
+            new TachoLiveWorker(42, "Driver One", "CARD42000000", "SLH-42", "Employed", null, null, null, null, null, null, null, null, null, null, null, "{}"),
+            new TachoLiveWorker(42, "Driver One", null, "SLH-42", "Employed", null, null, null, null, null, null, null, null, null, null, null, "{}")
+        };
+
+        var canonical = TachoDriverMasterSyncService.CanonicaliseLiveWorkers(
+            workers,
+            [],
+            new Dictionary<Guid, int>());
+
+        Assert.Single(canonical);
+        Assert.Equal("CARD42000000", canonical[0].CardNumber);
+    }
+
+    [Fact]
     public void Missing_profile_metrics_preserve_last_known_tacho_hours()
     {
         var driver = new Driver

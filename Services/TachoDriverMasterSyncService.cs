@@ -91,6 +91,7 @@ public sealed class TachoDriverMasterSyncService(
             return new(false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 $"TachoMaster live worker directory could not be read: {ex.GetBaseException().Message}. No Driver Master records were intentionally changed.", now);
         }
+        var rawSourceWorkerCount = workers.Count;
 
         // A tiny or unexpectedly collapsed provider result must never quarantine the real driver population.
         if (workers.Count < 25)
@@ -131,6 +132,16 @@ public sealed class TachoDriverMasterSyncService(
             .Select(group => new { DriverId = group.Key, Count = group.Count() })
             .ToDictionaryAsync(item => item.DriverId, item => item.Count, ct);
 
+        // TachoMaster can expose historical/member aliases as separate live rows even though
+        // they carry the same physical tachograph card. Processing those rows independently
+        // can retire a duplicate and then reactivate it later in the same run. Collapse the
+        // provider directory to one worker per physical card before touching SQL. Workers with
+        // no card remain keyed by Member Code and are retained for manual card completion.
+        workers = CanonicaliseLiveWorkers(workers, drivers, loadUse);
+        if (workers.Count < 25)
+            return new(false, workers.Count, activeBefore, 0, 0, 0, 0, 0, 0, 0, CountDuplicateNames(workers), workers.Count(worker => string.IsNullOrWhiteSpace(worker.CardNumber)),
+                $"TachoMaster returned {rawSourceWorkerCount} driver row(s), but only {workers.Count} canonical card/member identities remained. The safety floor stopped the cleanse.", now);
+
         var detailRows = await db.StagedImports
             .Where(row => row.EntityType == DetailType)
             .OrderByDescending(row => row.ReviewedAtUtc ?? row.ReceivedAtUtc)
@@ -161,12 +172,14 @@ public sealed class TachoDriverMasterSyncService(
         {
             var member = worker.MemberCode.ToString(CultureInfo.InvariantCulture);
             var memberMatches = drivers
+                .Where(driver => !claimedDriverIds.Contains(driver.Id))
                 .Where(driver => TachoDriverIdentityRules.MemberMatches(driver.TachoMasterDriverId, member))
                 .ToList();
             var cardKey = TachoDriverIdentityRules.NormaliseIdentifier(worker.CardNumber);
             var cardIsUnique = cardKey.Length > 0 && liveCardCounts.GetValueOrDefault(cardKey) == 1;
             var cardMatches = cardIsUnique
-                ? drivers.Where(driver => TachoDriverIdentityRules.CardsMatch(driver.TachoCardNumber, worker.CardNumber)).ToList()
+                ? drivers.Where(driver => !claimedDriverIds.Contains(driver.Id))
+                    .Where(driver => TachoDriverIdentityRules.CardsMatch(driver.TachoCardNumber, worker.CardNumber)).ToList()
                 : [];
             // The physical tachograph card is the canonical person identifier. Member code is
             // retained as the fallback for workers whose live TachoMaster record has no card.
@@ -279,6 +292,7 @@ public sealed class TachoDriverMasterSyncService(
         var auditPayload = JsonSerializer.Serialize(new
         {
             sourceWorkers = workers.Count,
+            rawSourceWorkers = rawSourceWorkerCount,
             canonicalActiveDrivers = activeAfter.Count,
             created,
             updated,
@@ -383,6 +397,60 @@ public sealed class TachoDriverMasterSyncService(
             .ThenBy(driver => driver.Id)
             .First();
 
+    internal static IReadOnlyList<TachoLiveWorker> CanonicaliseLiveWorkers(
+        IReadOnlyCollection<TachoLiveWorker> workers,
+        IReadOnlyCollection<Driver> drivers,
+        IReadOnlyDictionary<Guid, int> loadUse)
+    {
+        var cardWorkers = GroupByPhysicalCard(workers)
+            .Select(group => SelectPreferredLiveWorker(group, drivers, loadUse))
+            .ToList();
+
+        var representedMembers = cardWorkers.Select(worker => worker.MemberCode).ToHashSet();
+        var noCardWorkers = workers
+            .Where(worker => TachoDriverIdentityRules.NormaliseIdentifier(worker.CardNumber).Length == 0)
+            .Where(worker => !representedMembers.Contains(worker.MemberCode))
+            .GroupBy(worker => worker.MemberCode)
+            .Select(group => SelectPreferredLiveWorker(group.ToList(), drivers, loadUse));
+
+        return cardWorkers.Concat(noCardWorkers)
+            .OrderBy(worker => worker.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(worker => worker.MemberCode)
+            .ToList();
+    }
+
+    private static IReadOnlyList<IReadOnlyCollection<TachoLiveWorker>> GroupByPhysicalCard(
+        IReadOnlyCollection<TachoLiveWorker> workers)
+    {
+        var groups = new List<List<TachoLiveWorker>>();
+        foreach (var worker in workers.Where(worker => TachoDriverIdentityRules.NormaliseIdentifier(worker.CardNumber).Length > 0))
+        {
+            var group = groups.FirstOrDefault(existing =>
+                existing.Any(candidate => TachoDriverIdentityRules.CardsMatch(candidate.CardNumber, worker.CardNumber)));
+            if (group is null) groups.Add([worker]);
+            else group.Add(worker);
+        }
+        return groups;
+    }
+
+    private static TachoLiveWorker SelectPreferredLiveWorker(
+        IReadOnlyCollection<TachoLiveWorker> candidates,
+        IReadOnlyCollection<Driver> drivers,
+        IReadOnlyDictionary<Guid, int> loadUse)
+    {
+        return candidates
+            .OrderByDescending(worker => drivers
+                .Where(driver => TachoDriverIdentityRules.CardsMatch(driver.TachoCardNumber, worker.CardNumber) ||
+                                 TachoDriverIdentityRules.MemberMatches(driver.TachoMasterDriverId, worker.MemberCode.ToString(CultureInfo.InvariantCulture)))
+                .Select(driver => CanonicalScore(driver, worker, loadUse.GetValueOrDefault(driver.Id)))
+                .DefaultIfEmpty(0)
+                .Max())
+            .ThenByDescending(worker => !string.IsNullOrWhiteSpace(worker.EmployeeNumber))
+            .ThenByDescending(worker => !string.IsNullOrWhiteSpace(worker.CardNumber))
+            .ThenBy(worker => worker.MemberCode)
+            .First();
+    }
+
     private static int CanonicalScore(Driver driver, TachoLiveWorker worker, int loadCount)
     {
         var score = Math.Min(loadCount, 100) * 10;
@@ -437,14 +505,34 @@ public sealed class TachoDriverMasterSyncService(
         }
 
         foreach (var load in await db.Loads.Where(load => load.DriverId == duplicate.Id).ToListAsync(ct)) load.DriverId = canonical.Id;
+        foreach (var status in await db.DriverStatusLogs.Where(status => status.DriverId == duplicate.Id).ToListAsync(ct)) status.DriverId = canonical.Id;
         try
         {
             foreach (var run in await db.PlanProposalRuns.Where(run => run.DriverId == duplicate.Id).ToListAsync(ct)) run.DriverId = canonical.Id;
-            foreach (var candidate in await db.PlanProposalCandidates.Where(candidate => candidate.DriverId == duplicate.Id).ToListAsync(ct)) candidate.DriverId = canonical.Id;
+            foreach (var candidate in await db.PlanProposalCandidates.Where(candidate => candidate.DriverId == duplicate.Id).ToListAsync(ct))
+            {
+                var canonicalCandidateExists = await db.PlanProposalCandidates.AnyAsync(existing =>
+                    existing.Id != candidate.Id &&
+                    existing.ProposalRunId == candidate.ProposalRunId &&
+                    existing.VehicleId == candidate.VehicleId &&
+                    existing.DriverId == canonical.Id, ct);
+                if (canonicalCandidateExists) db.PlanProposalCandidates.Remove(candidate);
+                else candidate.DriverId = canonical.Id;
+            }
         }
         catch (Exception ex) when (SchemaUnavailable(ex))
         {
             logger.LogWarning(ex, "Optional planning proposal driver references could not be reassigned while merging driver {DuplicateDriverId}.", duplicate.Id);
+        }
+
+        try
+        {
+            foreach (var allocation in await db.RunResourceAllocations.Where(allocation => allocation.DriverId == duplicate.Id).ToListAsync(ct))
+                allocation.DriverId = canonical.Id;
+        }
+        catch (Exception ex) when (SchemaUnavailable(ex))
+        {
+            logger.LogWarning(ex, "Canonical run driver references could not be reassigned while merging driver {DuplicateDriverId}.", duplicate.Id);
         }
 
         try
