@@ -53,9 +53,62 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in {1..12}; do
-            body="$(curl --silent --show-error "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/tachomaster" || true)"
+            body="$(curl --silent --show-error --max-time 45 "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/tachomaster" || true)"
             echo "$body"
-            if echo "$body" | grep -q '"status":"healthy"'; then exit 0; fi
+            status="$(jq -r '.status // empty' <<<"$body" 2>/dev/null || true)"
+            connection="$(jq -r '.connectionFreshness // empty' <<<"$body" 2>/dev/null || true)"
+            if test "$status" != "upstream-failure" -a "$status" != "unconfigured" -a "$connection" = "live"; then exit 0; fi
             sleep 10
           done
           exit 1
+
+      - name: Verify scheduled TachoMaster job configuration
+        run: |
+          set -euo pipefail
+          trigger="$(az containerapp job show \
+            --name slh-tms-job-tachomaster \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query properties.configuration.triggerType \
+            --output tsv)"
+          cron="$(az containerapp job show \
+            --name slh-tms-job-tachomaster \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query properties.configuration.scheduleTriggerConfig.cronExpression \
+            --output tsv)"
+          image="$(az containerapp job show \
+            --name slh-tms-job-tachomaster \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query 'properties.template.containers[0].image' \
+            --output tsv)"
+          test "$trigger" = "Schedule"
+          test "$cron" = "*/5 * * * *"
+          test -n "$image"
+          echo "TachoMaster trigger=$trigger cron=$cron image=$image"
+
+      - name: Verify scheduled sync freshness
+        run: |
+          set -euo pipefail
+          success=false
+          for attempt in {1..24}; do
+            body="$(curl --silent --show-error --max-time 45 \
+              -H 'Cache-Control: no-cache' \
+              "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/tachomaster" || true)"
+            echo "$body"
+            stale="$(jq -r '.scheduledSync.stale // true' <<<"$body" 2>/dev/null || true)"
+            age="$(jq -r '.scheduledSync.ageMinutes // empty' <<<"$body" 2>/dev/null || true)"
+            if test "$stale" = "false"; then
+              echo "Scheduled TachoMaster sync is fresh; age=${age:-unknown} minutes."
+              success=true
+              break
+            fi
+            sleep 15
+          done
+
+          if test "$success" != "true"; then
+            echo "::error::TachoMaster upstream is reachable, but the scheduled synchronisation remains stale."
+            az containerapp job execution list \
+              --name slh-tms-job-tachomaster \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --output table || true
+            exit 1
+          fi
