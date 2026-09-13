@@ -9,12 +9,21 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/v1/health/tachomaster")]
 public sealed class TachoMasterHealthController(
-    TmsDbContext db,
+    TmsDbContext? db,
     TachoMasterClient tachoMasterClient,
     ILogger<TachoMasterHealthController> logger) : ControllerBase
 {
     private const double LiveJobAgeMinutes = 15;
     private const double StaleJobAgeMinutes = 30;
+
+    // Existing unit tests construct the controller directly. Keep that test-only path
+    // while production DI uses the public constructor above and always supplies TmsDbContext.
+    internal TachoMasterHealthController(
+        TachoMasterClient tachoMasterClient,
+        ILogger<TachoMasterHealthController> logger)
+        : this(null, tachoMasterClient, logger)
+    {
+    }
 
     [HttpGet]
     [AllowAnonymous]
@@ -38,9 +47,11 @@ public sealed class TachoMasterHealthController(
             var profilesTask = tachoMasterClient.GetDriverProfilesAsync(cancellationToken);
             var openDutiesTask = tachoMasterClient.GetOpenDriverStatusesByVehicleAsync(today, cancellationToken);
             var dayDutiesTask = tachoMasterClient.GetDriverDutyStatusesAsync(today, cancellationToken);
-            var latestPersistedSyncTask = db.Drivers.AsNoTracking()
-                .Where(driver => driver.LastTachoSyncUtc != null)
-                .MaxAsync(driver => driver.LastTachoSyncUtc, cancellationToken);
+            var latestPersistedSyncTask = db is null
+                ? Task.FromResult<DateTimeOffset?>(null)
+                : db.Drivers.AsNoTracking()
+                    .Where(driver => driver.LastTachoSyncUtc != null)
+                    .MaxAsync(driver => driver.LastTachoSyncUtc, cancellationToken);
 
             await Task.WhenAll(profilesTask, openDutiesTask, dayDutiesTask, latestPersistedSyncTask);
             var profiles = await profilesTask;
@@ -70,7 +81,7 @@ public sealed class TachoMasterHealthController(
                 ? (double?)null
                 : Math.Max(0, Math.Round((lastSuccessfulPollUtc - latestPersistedSyncUtc.Value).TotalMinutes, 1));
             var jobFreshness = JobFreshness(jobAgeMinutes);
-            var jobStale = jobAgeMinutes is null || jobAgeMinutes > StaleJobAgeMinutes;
+            var jobStale = db is not null && (jobAgeMinutes is null || jobAgeMinutes > StaleJobAgeMinutes);
 
             var latestDutyStartUtc = dayDuties.Count == 0
                 ? (DateTimeOffset?)null
