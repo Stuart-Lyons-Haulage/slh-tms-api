@@ -402,10 +402,8 @@ public sealed class TachoDriverMasterSyncService(
         IReadOnlyCollection<Driver> drivers,
         IReadOnlyDictionary<Guid, int> loadUse)
     {
-        var cardWorkers = workers
-            .Where(worker => TachoDriverIdentityRules.NormaliseIdentifier(worker.CardNumber).Length > 0)
-            .GroupBy(worker => TachoDriverIdentityRules.NormaliseIdentifier(worker.CardNumber), StringComparer.OrdinalIgnoreCase)
-            .Select(group => SelectPreferredLiveWorker(group.ToList(), drivers, loadUse))
+        var cardWorkers = GroupByPhysicalCard(workers)
+            .Select(group => SelectPreferredLiveWorker(group, drivers, loadUse))
             .ToList();
 
         var representedMembers = cardWorkers.Select(worker => worker.MemberCode).ToHashSet();
@@ -419,6 +417,20 @@ public sealed class TachoDriverMasterSyncService(
             .OrderBy(worker => worker.DisplayName, StringComparer.OrdinalIgnoreCase)
             .ThenBy(worker => worker.MemberCode)
             .ToList();
+    }
+
+    private static IReadOnlyList<IReadOnlyCollection<TachoLiveWorker>> GroupByPhysicalCard(
+        IReadOnlyCollection<TachoLiveWorker> workers)
+    {
+        var groups = new List<List<TachoLiveWorker>>();
+        foreach (var worker in workers.Where(worker => TachoDriverIdentityRules.NormaliseIdentifier(worker.CardNumber).Length > 0))
+        {
+            var group = groups.FirstOrDefault(existing =>
+                existing.Any(candidate => TachoDriverIdentityRules.CardsMatch(candidate.CardNumber, worker.CardNumber)));
+            if (group is null) groups.Add([worker]);
+            else group.Add(worker);
+        }
+        return groups;
     }
 
     private static TachoLiveWorker SelectPreferredLiveWorker(
