@@ -75,18 +75,27 @@ public sealed class AuditOutboxProcessor(
                 stale.RetryCount);
         }
 
-        var ids = await db.AuditOutboxes
+        var pending = await db.AuditOutboxes
             .AsNoTracking()
             .Where(x => x.ProcessedAt == null && x.FailedAt == null)
             .OrderBy(x => x.CreatedAt)
-            .Select(x => x.OutboxId)
+            .Select(x => new { x.OutboxId, x.EventType })
             .Take(BatchSize)
             .ToListAsync(ct);
 
-        var processed = 0;
-        foreach (var id in ids)
+        // Master writes have already committed to SQL. Mirror one complete, idempotent snapshot
+        // for the batch before acknowledging its outbox events. If Graph is unavailable the
+        // events stay pending and the background worker retries without failing the API request.
+        if (sharePoint?.IsEnabled == true &&
+            pending.Any(x => string.Equals(x.EventType, AuditOutboxEventTypes.MasterDataAudit, StringComparison.Ordinal)))
         {
-            if (await ProcessOneAsync(id, ct))
+            await sharePoint.PublishFromSqlAsync(db, ct);
+        }
+
+        var processed = 0;
+        foreach (var item in pending)
+        {
+            if (await ProcessOneAsync(item.OutboxId, ct))
                 processed++;
         }
 
