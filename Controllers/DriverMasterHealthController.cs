@@ -41,6 +41,7 @@ public sealed class DriverMasterHealthController(TmsDbContext db, TachoDriverMas
         var healthy = quality.DuplicateMemberGroups == 0 &&
                       quality.DuplicateCardGroups == 0 &&
                       quality.ActiveWithoutMember == 0 &&
+                      quality.ActiveWithoutCard == 0 &&
                       populationAligned;
 
         return Ok(new
