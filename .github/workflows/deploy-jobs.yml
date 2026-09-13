@@ -89,6 +89,7 @@ jobs:
               --output json)"
             environment_id="$(jq -r '.properties.managedEnvironmentId // .properties.environmentId // empty' <<<"$api_json")"
             identity_id="$(jq -r '(.identity.userAssignedIdentities // {}) | keys | first // empty' <<<"$api_json")"
+            identity_needs_acr_pull=false
 
             if test -z "$environment_id"; then
               echo "::error::Unable to resolve the production Container Apps environment from $AZURE_CONTAINER_APP_NAME."
@@ -103,12 +104,7 @@ jobs:
               identity_id="$(az identity show --name "$identity_name" --resource-group "$AZURE_RESOURCE_GROUP" --query id --output tsv)"
               identity_principal="$(az identity show --name "$identity_name" --resource-group "$AZURE_RESOURCE_GROUP" --query principalId --output tsv)"
               registry_id="$(az acr show --name "$AZURE_CONTAINER_REGISTRY" --resource-group "$AZURE_RESOURCE_GROUP" --query id --output tsv)"
-              az role assignment create \
-                --assignee-object-id "$identity_principal" \
-                --assignee-principal-type ServicePrincipal \
-                --role AcrPull \
-                --scope "$registry_id" \
-                --output none 2>/dev/null || true
+              identity_needs_acr_pull=true
             fi
 
             # Reuse the already-governed production values. --show-values is captured only
@@ -122,6 +118,33 @@ jobs:
             secret_value() {
               jq -r --arg name "$1" '[.[] | select(.name == $name)][0].value // empty' <<<"$source_secrets"
             }
+
+            registry_auth_args=(--registry-identity "$identity_id")
+            if test "$identity_needs_acr_pull" = true && ! az role assignment create \
+              --assignee-object-id "$identity_principal" \
+              --assignee-principal-type ServicePrincipal \
+              --role AcrPull \
+              --scope "$registry_id" \
+              --output none; then
+              echo "::warning::Deployment identity cannot grant AcrPull. Reusing the production API's governed ACR credentials."
+              registry_username="$(jq -r --arg server "$AZURE_CONTAINER_REGISTRY.azurecr.io" \
+                '[.properties.configuration.registries[]? | select(.server == $server)][0].username // empty' <<<"$api_json")"
+              registry_password_ref="$(jq -r --arg server "$AZURE_CONTAINER_REGISTRY.azurecr.io" \
+                '[.properties.configuration.registries[]? | select(.server == $server)][0].passwordSecretRef // empty' <<<"$api_json")"
+              registry_password="$(secret_value "$registry_password_ref")"
+
+              if test -z "$registry_username" || test -z "$registry_password"; then
+                registry_credentials="$(az acr credential show --name "$AZURE_CONTAINER_REGISTRY" --output json)"
+                registry_username="$(jq -r '.username // empty' <<<"$registry_credentials")"
+                registry_password="$(jq -r '.passwords[0].value // empty' <<<"$registry_credentials")"
+              fi
+
+              if test -z "$registry_username" || test -z "$registry_password"; then
+                echo "::error::Unable to configure ACR image pull: AcrPull cannot be assigned and governed registry credentials are unavailable."
+                exit 1
+              fi
+              registry_auth_args=(--registry-username "$registry_username" --registry-password "$registry_password")
+            fi
 
             tms_db="$(secret_value tms-db-connection)"
             dot_base="$(secret_value dot-base-url)"
@@ -182,7 +205,7 @@ jobs:
               --memory 1Gi \
               --mi-user-assigned "$identity_id" \
               --registry-server "$AZURE_CONTAINER_REGISTRY.azurecr.io" \
-              --registry-identity "$identity_id" \
+              "${registry_auth_args[@]}" \
               --secrets "${secret_args[@]}" \
               --env-vars "${env_args[@]}" \
               --output none
