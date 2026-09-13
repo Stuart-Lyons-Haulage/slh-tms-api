@@ -1,0 +1,35 @@
+{
+  "name": "SLH Modern",
+  "palette": {
+    "themePrimary": "#0B3A63",
+    "themeLighterAlt": "#F2F7FB",
+    "themeLighter": "#D5E4F1",
+    "themeLight": "#B5CEE3",
+    "themeTertiary": "#6E9CBD",
+    "themeSecondary": "#2E648D",
+    "themeDarkAlt": "#0A3459",
+    "themeDark": "#082C4B",
+    "themeDarker": "#061F36",
+    "accent": "#6AA84F",
+    "neutralLighterAlt": "#FAFAFA",
+    "neutralLighter": "#F4F4F4",
+    "neutralLight": "#EAEAEA",
+    "neutralQuaternaryAlt": "#DADADA",
+    "neutralQuaternary": "#D0D0D0",
+    "neutralTertiaryAlt": "#C8C8C8",
+    "neutralTertiary": "#A6A6A6",
+    "neutralSecondary": "#666666",
+    "neutralPrimaryAlt": "#3C3C3C",
+    "neutralPrimary": "#222222",
+    "neutralDark": "#111111",
+    "black": "#000000",
+    "white": "#FFFFFF"
+  },
+  "principles": {
+    "primary": "Lyons blue",
+    "accent": "Lyons green",
+    "surface": "White and light neutral",
+    "typography": "Microsoft 365 native / Segoe UI",
+    "navigation": "Task-first, shallow, role-oriented"
+  }
+}
