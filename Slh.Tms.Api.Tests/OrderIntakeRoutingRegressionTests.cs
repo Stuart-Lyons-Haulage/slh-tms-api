@@ -1,3 +1,6 @@
+using System.Net;
+using System.Net.Http.Json;
+using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
@@ -157,6 +160,57 @@ public sealed class OrderIntakeRoutingRegressionTests : IClassFixture<CustomWebF
 
         Assert.Equal("BARFOOTS", payload.GetProperty("customerCode").GetString());
         Assert.Equal("Barfoots Leythorne", payload.GetProperty("sellerName").GetString());
+        Assert.False(json.Contains("NWF", StringComparison.OrdinalIgnoreCase));
+        Assert.False(json.Contains("Drayton", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Preview_endpoint_parses_historic_Barfoots_09_September_waitrose_email()
+    {
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Access");
+        var request = new MailboxEmailIntakeRequest(
+            "historic-barfoots-20260909-preview", null, "info@lyonshaulage.com",
+            "Agnieszka.Zawislan@barfoots.co.uk", "Agnieszka Zawislan",
+            "Waitrose from Sefter & Leythorne for depot 09/09/26", DateTimeOffset.Parse("2026-09-08T09:49:54Z"),
+            "Good morning,\nPlease see attached Waitrose confirmed pallet booking:\n" +
+            "Aylesford WAVE 1 from Sefter 2 pallets PO O78442 & Aylesford Wave 3 6 pallets PO O78431.\n" +
+            "Leyland WAVE 1 from Sefter 1 pallet PO B78737 & Leyland Wave 3 2 pallets PO B78749.",
+            null, null, null);
+
+        var response = await client.PostAsJsonAsync("/api/v1/order-intake/email/preview", request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var root = await response.Content.ReadFromJsonAsync<JsonElement>();
+
+        Assert.Equal(4, root.GetProperty("orderCount").GetInt32());
+        var orders = root.GetProperty("orders").EnumerateArray().ToList();
+        Assert.All(orders, order => Assert.Equal("Sefter", order.GetProperty("payload").GetProperty("sellerName").GetString()));
+        Assert.Equal(2, orders.Count(order => order.GetProperty("payload").GetProperty("wave").GetInt32() == 3));
+        Assert.All(orders.Where(order => order.GetProperty("payload").GetProperty("wave").GetInt32() == 3),
+            order => Assert.Equal("17:00", order.GetProperty("payload").GetProperty("requestedTime").GetString()));
+    }
+
+    [Fact]
+    public async Task Preview_endpoint_parses_historic_SummerBerry_COOP_email_without_site_contamination()
+    {
+        var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Access");
+        var request = new MailboxEmailIntakeRequest(
+            "historic-summerberry-coop-20260913-preview", null, "info@lyonshaulage.com",
+            "Martyn.Clarkson@summerberry.co.uk", "Martyn Clarkson",
+            "TSBC  COOP - 13.09.2026", DateTimeOffset.Parse("2026-09-12T09:18:32Z"),
+            "Good morning,\nPlease find attached pallet requirements\nTSBC COOP\n13.09.2026\n" +
+            "Total Pallets: 3\nCollection time:17:00\nTransport at +3 degrees\nCollect from: TSBC, Chichester.",
+            null, null, null);
+
+        var response = await client.PostAsJsonAsync("/api/v1/order-intake/email/preview", request);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var root = await response.Content.ReadFromJsonAsync<JsonElement>();
+
+        Assert.Equal(1, root.GetProperty("orderCount").GetInt32());
+        var payload = root.GetProperty("orders")[0].GetProperty("payload");
+        var json = payload.GetRawText();
+        Assert.Equal("COOP", payload.GetProperty("customerCode").GetString());
+        Assert.Equal(3, payload.GetProperty("pallets").GetInt32());
+        Assert.Equal("Summer Berry", payload.GetProperty("sellerName").GetString());
         Assert.False(json.Contains("NWF", StringComparison.OrdinalIgnoreCase));
         Assert.False(json.Contains("Drayton", StringComparison.OrdinalIgnoreCase));
     }
