@@ -29,6 +29,7 @@ public sealed class SharePointMasterDataOptions
         Lists["trailer"] = "Hub Trailers";
         Lists["fuelcard"] = "Fuel Cards";
         Lists["marketcontact"] = "TMS Markets";
+        Lists["emailroute"] = "Order Email Routes";
     }
 }
 
@@ -95,16 +96,19 @@ public sealed class SharePointMasterDataSyncService(
             ["marketcontact"] = (await db.MarketContacts.AsNoTracking().OrderBy(x => x.Market).ThenBy(x => x.Name).ToListAsync(ct)).Select(x => Fields(
                 ("Title", $"{x.Market} · {x.Name}"), ("Market", x.Market), ("Name", x.Name),
                 ("StandOrLocation", x.StandOrLocation), ("Salesman", x.Salesman), ("Sender", x.Sender),
-                ("ReadOnlyMapPdfUrl", x.ReadOnlyMapPdfUrl), ("Active", x.Active))).ToArray()
+                ("ReadOnlyMapPdfUrl", x.ReadOnlyMapPdfUrl), ("Active", x.Active))).ToArray(),
+            ["emailroute"] = await BuildEmailRouteRowsAsync(db, ct)
         };
 
         var rowsByList = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         foreach (var mapping in settings.Lists)
         {
             if (!rows.TryGetValue(mapping.Key, out var sourceRows) || string.IsNullOrWhiteSpace(mapping.Value)) continue;
-            var listId = await ResolveListIdAsync(mapping.Value, token, ct);
+            var listId = mapping.Key == "emailroute"
+                ? await ResolveOrProvisionEmailRouteListAsync(mapping.Value, token, ct)
+                : await ResolveListIdAsync(mapping.Value, token, ct);
             var existing = await ReadListAsync(mapping.Key, listId, token, ct);
-            var keyField = mapping.Key switch { "customer" => "CustomerKey", "site" => "SiteKey", "driver" => "DriverKey", "vehicle" => "VehicleKey", "trailer" => "TrailerKey", "fuelcard" => "VehicleKey", "marketcontact" => "Title", _ => "Title" };
+            var keyField = mapping.Key switch { "customer" => "CustomerKey", "site" => "SiteKey", "driver" => "DriverKey", "vehicle" => "VehicleKey", "trailer" => "TrailerKey", "fuelcard" => "VehicleKey", "emailroute" => "RouteKey", "marketcontact" => "Title", _ => "Title" };
             var existingByKey = existing
                 .Where(item => item.TryGetProperty("fields", out var field) && field.TryGetProperty(keyField, out var key) && !string.IsNullOrWhiteSpace(key.ToString()))
                 .GroupBy(item => item.GetProperty("fields").GetProperty(keyField).ToString(), StringComparer.OrdinalIgnoreCase)
@@ -172,7 +176,9 @@ public sealed class SharePointMasterDataSyncService(
         {
             if (string.IsNullOrWhiteSpace(mapping.Value)) continue;
             listsRead++;
-            var listId = await ResolveListIdAsync(mapping.Value, token, ct);
+            var listId = mapping.Key == "emailroute"
+                ? await ResolveOrProvisionEmailRouteListAsync(mapping.Value, token, ct)
+                : await ResolveListIdAsync(mapping.Value, token, ct);
             var rows = await ReadListAsync(mapping.Key, listId, token, ct);
             foreach (var row in rows)
             {
@@ -218,6 +224,27 @@ public sealed class SharePointMasterDataSyncService(
             ("Title", x.ExternalCode), ("SiteKey", x.ExternalCode), ("CustomerKey", x.CustomerCode), ("SiteName", x.Name), ("BuildingName", x.DriverTextName ?? x.Name), ("Address1", x.CollectionAddress), ("Aliases", x.Aliases), ("GeofenceId", geofences.GetValueOrDefault(x.Id)), ("Active", x.Active), ("SyncStatus", "Synced"))).ToArray();
     }
 
+    private static async Task<IReadOnlyList<Dictionary<string, object?>>> BuildEmailRouteRowsAsync(TmsDbContext db, CancellationToken ct)
+    {
+        try
+        {
+            var routes = await db.CustomerEmailRoutes.AsNoTracking()
+                .OrderBy(x => x.SenderEmail).ThenBy(x => x.SenderDomain).ThenBy(x => x.CustomerCode)
+                .ToListAsync(ct);
+            return routes.Select(x => Fields(
+                    ("Title", x.SenderEmail ?? $"@{x.SenderDomain}"), ("RouteKey", x.Id.ToString()),
+                    ("CustomerKey", x.CustomerCode), ("SiteKey", x.DefaultSiteCode),
+                    ("SenderEmail", x.SenderEmail), ("SenderDomain", x.SenderDomain),
+                    ("SubjectContains", x.SubjectContains), ("ParserType", x.ParserType),
+                    ("RequiresReview", x.RequiresReview), ("Active", x.Active)))
+                .ToList();
+        }
+        catch (Exception ex) when (ex.GetBaseException().Message.Contains("CustomerEmailRoutes", StringComparison.OrdinalIgnoreCase))
+        {
+            return [];
+        }
+    }
+
     private async Task<JsonElement[]> ReadListAsync(string entityType, string listId, string token, CancellationToken ct)
     {
         var sitePath = settings.SitePath.Trim('/');
@@ -253,6 +280,62 @@ public sealed class SharePointMasterDataSyncService(
         var match = document.RootElement.GetProperty("value").EnumerateArray().FirstOrDefault();
         return match.ValueKind == JsonValueKind.Undefined ? throw new SharePointMasterDataException("ListNotFound", $"The required Microsoft List '{listName}' was not found on the SLH Hub site. Run the SLH Hub List provisioning script, then try again.") : match.GetProperty("id").GetString()!;
     }
+
+    private async Task<string> ResolveOrProvisionEmailRouteListAsync(string listName, string token, CancellationToken ct)
+    {
+        try { return await ResolveListIdAsync(listName, token, ct); }
+        catch (SharePointMasterDataException ex) when (ex.Code == "ListNotFound")
+        {
+            var sitePath = settings.SitePath.Trim('/');
+            var siteSelector = string.IsNullOrWhiteSpace(sitePath) ? settings.Hostname : $"{settings.Hostname}:/{sitePath}:";
+            using var create = new HttpRequestMessage(HttpMethod.Post, $"https://graph.microsoft.com/v1.0/sites/{siteSelector}/lists")
+            {
+                Content = JsonContent.Create(new { displayName = listName, list = new { template = "genericList" } })
+            };
+            create.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            using var response = await http.SendAsync(create, ct);
+            var body = await response.Content.ReadAsStringAsync(ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                throw Failure("ListProvisionFailed", "The Power Automate Order Email Routes List could not be provisioned", response.StatusCode, body);
+            }
+
+            using var document = JsonDocument.Parse(body);
+            var listId = document.RootElement.GetProperty("id").GetString()!;
+            foreach (var column in EmailRouteColumns())
+            {
+                using var columnRequest = new HttpRequestMessage(HttpMethod.Post, BuildListUrl(listId, "columns"))
+                {
+                    Content = JsonContent.Create(column)
+                };
+                columnRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                using var columnResponse = await http.SendAsync(columnRequest, ct);
+                if (!columnResponse.IsSuccessStatusCode)
+                    logger.LogWarning("Column {Column} could not be provisioned on Order Email Routes; publish will use the accepted field subset.", column["name"]);
+            }
+            return listId;
+        }
+    }
+
+    private static IReadOnlyList<Dictionary<string, object>> EmailRouteColumns() =>
+    [
+        TextColumn("RouteKey", true), TextColumn("CustomerKey"), TextColumn("SiteKey"),
+        TextColumn("SenderEmail"), TextColumn("SenderDomain"), TextColumn("SubjectContains"),
+        TextColumn("ParserType"), BooleanColumn("RequiresReview"), BooleanColumn("Active")
+    ];
+
+    private static Dictionary<string, object> TextColumn(string name, bool indexed = false) => new()
+    {
+        ["name"] = name,
+        ["indexed"] = indexed,
+        ["text"] = new { allowMultipleLines = false, maxLength = 320 }
+    };
+
+    private static Dictionary<string, object> BooleanColumn(string name) => new()
+    {
+        ["name"] = name,
+        ["boolean"] = new Dictionary<string, object>()
+    };
 
     private async Task<IReadOnlySet<string>> CreateListItemAsync(string listId, IReadOnlyDictionary<string, object?> fields, string token, CancellationToken ct)
     {
@@ -381,6 +464,17 @@ public sealed class SharePointMasterDataSyncService(
                 Set("salesman", Text("Salesman"));
                 Set("sender", Text("Sender"));
                 Set("readOnlyMapPdfUrl", Text("ReadOnlyMapPdfUrl"));
+                break;
+            case "emailroute":
+                Set("id", Text("RouteKey"));
+                Set("customerCode", Text("CustomerKey"));
+                Set("defaultSiteCode", Text("SiteKey"));
+                Set("senderEmail", Text("SenderEmail"));
+                Set("senderDomain", Text("SenderDomain"));
+                Set("subjectContains", Text("SubjectContains"));
+                Set("parserType", Text("ParserType"));
+                Set("requiresReview", Text("RequiresReview"));
+                Set("active", Text("Active"));
                 break;
         }
 
