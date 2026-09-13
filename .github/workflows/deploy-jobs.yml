@@ -95,8 +95,20 @@ jobs:
               exit 1
             fi
             if test -z "$identity_id"; then
-              echo "::error::The production API has no user-assigned identity to reuse for the scheduled job."
-              exit 1
+              identity_name="slh-tms-jobs-prod-id"
+              echo "$AZURE_CONTAINER_APP_NAME has no user-assigned identity. Ensuring dedicated scheduled-jobs identity $identity_name."
+              if ! az identity show --name "$identity_name" --resource-group "$AZURE_RESOURCE_GROUP" --output none 2>/dev/null; then
+                az identity create --name "$identity_name" --resource-group "$AZURE_RESOURCE_GROUP" --output none
+              fi
+              identity_id="$(az identity show --name "$identity_name" --resource-group "$AZURE_RESOURCE_GROUP" --query id --output tsv)"
+              identity_principal="$(az identity show --name "$identity_name" --resource-group "$AZURE_RESOURCE_GROUP" --query principalId --output tsv)"
+              registry_id="$(az acr show --name "$AZURE_CONTAINER_REGISTRY" --resource-group "$AZURE_RESOURCE_GROUP" --query id --output tsv)"
+              az role assignment create \
+                --assignee-object-id "$identity_principal" \
+                --assignee-principal-type ServicePrincipal \
+                --role AcrPull \
+                --scope "$registry_id" \
+                --output none 2>/dev/null || true
             fi
 
             # Reuse the already-governed production values. --show-values is captured only
@@ -189,6 +201,14 @@ jobs:
             --output tsv)"
           test "$deployed_image" = "$image"
           echo "$job -> $deployed_image"
+
+          # Start immediately so a repaired deployment proves the canonical path now rather
+          # than waiting for the next five-minute trigger. The job itself retains its lease,
+          # daily canonical gate and transactional rollback protections.
+          az containerapp job start \
+            --name "$job" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --output none
 
       - name: Update other scheduled jobs when provisioned
         run: |

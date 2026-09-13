@@ -144,11 +144,16 @@ public sealed class IntegrationSyncCoordinator(
             }
         }
         var now = DateTimeOffset.UtcNow;
+        var activeDriverEmployeeNumbers = candidates
+            .Select(employee => ClipRequired(string.IsNullOrWhiteSpace(employee.EmployeeNumber) ? $"SAGE-{employee.Id}" : employee.EmployeeNumber.Trim(), 40))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
         db.StagedImports.Add(new StagedImport
         {
             EntityType = "sagehrsync",
             IdempotencyKey = $"sagehrsync:{Guid.NewGuid():N}",
-            PayloadJson = JsonSerializer.Serialize(new { sourceEmployeeCount = employees.Count, driverCandidateCount = candidates.Count, created, updated, skipped }),
+            PayloadJson = JsonSerializer.Serialize(new { sourceEmployeeCount = employees.Count, driverCandidateCount = candidates.Count, activeDriverEmployeeNumbers, created, updated, skipped }),
             Source = actor.StartsWith("system:", StringComparison.OrdinalIgnoreCase) ? "Sage HR scheduled synchronisation" : "Sage HR manual synchronisation",
             Status = StagingStatus.Promoted,
             ReceivedAtUtc = now,

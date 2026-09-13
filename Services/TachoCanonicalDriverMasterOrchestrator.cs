@@ -14,7 +14,7 @@ public sealed record TachoCanonicalOrchestrationResult(
 /// <summary>
 /// Single authority for manual and scheduled TachoMaster Driver Master cleansing.
 /// The normal integration pass runs first because it can resolve an existing TMS driver by
-/// Member Code -> Tacho Card -> Employee Number -> Name and persist the strong Tacho identity.
+/// Tacho Card -> Member Code -> Employee Number -> Name and persist the strong Tacho identity.
 /// The canonical pass then consolidates/archives against the live TachoMaster worker directory.
 /// </summary>
 public sealed class TachoCanonicalDriverMasterOrchestrator(
@@ -88,7 +88,7 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
                 startedAtUtc = started,
                 completedAtUtc = completed,
                 success,
-                identityOrder = new[] { "TachoMaster Member Code", "Tacho Card Number", "Employee Number", "Unique compatible name" },
+                identityOrder = new[] { "Tacho Card Number", "TachoMaster Member Code", "Employee Number", "Unique compatible name" },
                 identityEnrichment = new
                 {
                     enrichment.Success,

@@ -112,6 +112,7 @@ public sealed class TachoDriverMasterSyncService(
 
         var drivers = await db.Drivers.OrderBy(driver => driver.DisplayName).ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
+        var activeSageDriverEmployeeNumbers = await LoadActiveSageDriverEmployeeNumbersAsync(ct);
         var activeBefore = drivers.Count(driver => driver.Active);
         if (activeBefore > 0 && workers.Count < Math.Max(25, (int)Math.Floor(activeBefore * 0.35m)))
             return new(false, workers.Count, activeBefore, 0, 0, 0, 0, 0, 0, 0, CountDuplicateNames(workers), workers.Count(worker => string.IsNullOrWhiteSpace(worker.CardNumber)),
@@ -174,6 +175,9 @@ public sealed class TachoDriverMasterSyncService(
             var memberMatches = drivers
                 .Where(driver => !claimedDriverIds.Contains(driver.Id))
                 .Where(driver => TachoDriverIdentityRules.MemberMatches(driver.TachoMasterDriverId, member))
+                .Where(driver => string.IsNullOrWhiteSpace(worker.CardNumber) ||
+                                 string.IsNullOrWhiteSpace(driver.TachoCardNumber) ||
+                                 TachoDriverIdentityRules.CardsMatch(driver.TachoCardNumber, worker.CardNumber))
                 .ToList();
             var cardKey = TachoDriverIdentityRules.NormaliseIdentifier(worker.CardNumber);
             var cardIsUnique = cardKey.Length > 0 && liveCardCounts.GetValueOrDefault(cardKey) == 1;
@@ -261,6 +265,8 @@ public sealed class TachoDriverMasterSyncService(
         var archived = 0;
         foreach (var driver in drivers.Where(driver => driver.Active && !claimedDriverIds.Contains(driver.Id)))
         {
+            if (activeSageDriverEmployeeNumbers.Contains(driver.EmployeeNumber))
+                continue;
             driver.Active = false;
             archived++;
             db.MasterDataAudits.Add(new MasterDataAudit
@@ -284,10 +290,11 @@ public sealed class TachoDriverMasterSyncService(
         var duplicateMemberGroupsAfter = DuplicateIdentityGroupCount(activeAfter, driver => driver.TachoMasterDriverId);
         var duplicateCardGroupsAfter = DuplicateIdentityGroupCount(activeAfter, driver => driver.TachoCardNumber);
         var activeWithoutMemberAfter = activeAfter.Count(driver => string.IsNullOrWhiteSpace(driver.TachoMasterDriverId));
-        var canonicalHealthy = activeAfter.Count == workers.Count &&
+        var workersWithoutCardAfter = workers.Count(worker => string.IsNullOrWhiteSpace(worker.CardNumber));
+        var canonicalHealthy = claimedDriverIds.Count == workers.Count &&
                                duplicateMemberGroupsAfter == 0 &&
                                duplicateCardGroupsAfter == 0 &&
-                               activeWithoutMemberAfter == 0;
+                               workersWithoutCardAfter == 0;
 
         var auditPayload = JsonSerializer.Serialize(new
         {
@@ -299,7 +306,8 @@ public sealed class TachoDriverMasterSyncService(
             duplicateRecordsRetired = retired,
             driversArchivedNotInTachoMaster = archived,
             sameNameDifferentIdentityGroups = CountDuplicateNames(workers),
-            workersWithoutCard = workers.Count(worker => string.IsNullOrWhiteSpace(worker.CardNumber)),
+            workersWithoutCard = workersWithoutCardAfter,
+            activeSageDriversRetained = activeAfter.Count(driver => activeSageDriverEmployeeNumbers.Contains(driver.EmployeeNumber)),
             duplicateMemberGroups = duplicateMemberGroupsAfter,
             duplicateCardGroups = duplicateCardGroupsAfter,
             activeWithoutMember = activeWithoutMemberAfter,
@@ -311,7 +319,7 @@ public sealed class TachoDriverMasterSyncService(
             await transaction.RollbackAsync(ct);
             await transaction.DisposeAsync();
             db.ChangeTracker.Clear();
-            var failureMessage = $"TachoMaster canonical Driver Master was not promoted because the resulting population failed the strict identity gate: source={workers.Count}, active={activeAfter.Count}, duplicate members={duplicateMemberGroupsAfter}, duplicate cards={duplicateCardGroupsAfter}, active without member={activeWithoutMemberAfter}. No partial cleanse was committed.";
+            var failureMessage = $"TachoMaster canonical Driver Master was not promoted because the resulting population failed the strict identity gate: source={workers.Count}, claimed={claimedDriverIds.Count}, active={activeAfter.Count}, duplicate members={duplicateMemberGroupsAfter}, duplicate cards={duplicateCardGroupsAfter}, source workers without card={workersWithoutCardAfter}. No partial cleanse was committed.";
             db.StagedImports.Add(new StagedImport
             {
                 EntityType = "tachodrivermastersync",
@@ -339,12 +347,12 @@ public sealed class TachoDriverMasterSyncService(
             ReceivedAtUtc = now,
             ReviewedAtUtc = DateTimeOffset.UtcNow,
             ReviewedBy = actor,
-            ReviewNote = "TachoMaster Member Code is authoritative. Card identity is used only when unique in the live source; Sage HR remains an enrichment source for employed staff."
+            ReviewNote = "Tachograph card is the canonical driver identity. TachoMaster Member Code is retained as a secondary external reference; active Sage HR drivers are protected from single-source archiving."
         });
 
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
-        var message = $"TachoMaster canonical Driver Master: {workers.Count} live worker(s), {activeAfter.Count} active canonical TMS driver(s), {created} created, {retired} duplicate record(s) retired and {archived} stale/non-live TMS driver(s) archived. Strict source parity and duplicate-identity checks passed.";
+        var message = $"TachoMaster canonical Driver Master: {workers.Count} card-backed live worker(s), {activeAfter.Count} active canonical TMS driver(s), {created} created, {retired} duplicate record(s) retired and {archived} stale/non-live TMS driver(s) archived. Card identity, Sage HR retention and duplicate checks passed.";
         return new(true, workers.Count, activeAfter.Count, created, updated, retired, archived, matchedByMember, matchedByCard, matchedByName,
             CountDuplicateNames(workers), workers.Count(worker => string.IsNullOrWhiteSpace(worker.CardNumber)), message, DateTimeOffset.UtcNow);
     }
@@ -375,6 +383,30 @@ public sealed class TachoDriverMasterSyncService(
             DuplicateMembers = duplicateMembers,
             DuplicateCards = duplicateCards
         };
+    }
+
+    private async Task<HashSet<string>> LoadActiveSageDriverEmployeeNumbersAsync(CancellationToken ct)
+    {
+        var payload = await db.StagedImports.AsNoTracking()
+            .Where(row => row.EntityType == "sagehrsync" && row.Status == StagingStatus.Promoted)
+            .OrderByDescending(row => row.ReviewedAtUtc ?? row.ReceivedAtUtc)
+            .Select(row => row.PayloadJson)
+            .FirstOrDefaultAsync(ct);
+        if (string.IsNullOrWhiteSpace(payload)) return new(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var document = JsonDocument.Parse(payload);
+            if (!document.RootElement.TryGetProperty("activeDriverEmployeeNumbers", out var values) || values.ValueKind != JsonValueKind.Array)
+                return new(StringComparer.OrdinalIgnoreCase);
+            return values.EnumerateArray()
+                .Select(value => value.GetString()?.Trim())
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase)!;
+        }
+        catch (JsonException)
+        {
+            return new(StringComparer.OrdinalIgnoreCase);
+        }
     }
 
     public async Task<TachoLiveWorker?> ProfileAsync(Guid driverId, CancellationToken ct)

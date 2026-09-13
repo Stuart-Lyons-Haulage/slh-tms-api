@@ -67,7 +67,7 @@ public sealed class SharePointMasterDataSyncService(
                 ("AccountOwner", x.AccountOwner), ("ServiceNotes", x.ServiceNotes), ("DefaultSiteCode", x.DefaultSiteCode), ("Active", x.Active))).ToArray(),
             ["site"] = await BuildSiteRowsAsync(db, ct),
             ["driver"] = drivers.Select(x => Fields(
-                ("Title", x.DisplayName), ("DriverKey", x.TachoCardNumber ?? x.TachoMasterDriverId ?? x.EmployeeNumber),
+                ("Title", x.DisplayName), ("DriverKey", x.TachoCardNumber),
                 ("DriverName", x.DisplayName), ("EmployeeNumber", x.EmployeeNumber), ("TachoName", x.TachoName),
                 ("MobileNumber", x.MobileNumber), ("DriverType", x.DriverType), ("DriverGroup", x.DriverGroup),
                 ("Skills", x.Skills), ("AgencyName", x.AgencyName), ("Coding", x.Coding), ("Notes", x.Notes),
@@ -107,6 +107,7 @@ public sealed class SharePointMasterDataSyncService(
             var listId = mapping.Key == "emailroute"
                 ? await ResolveOrProvisionEmailRouteListAsync(mapping.Value, token, ct)
                 : await ResolveListIdAsync(mapping.Value, token, ct);
+            await EnsureColumnsAsync(mapping.Key, listId, token, ct);
             var existing = await ReadListAsync(mapping.Key, listId, token, ct);
             var keyField = mapping.Key switch { "customer" => "CustomerKey", "site" => "SiteKey", "driver" => "DriverKey", "vehicle" => "VehicleKey", "trailer" => "TrailerKey", "fuelcard" => "VehicleKey", "emailroute" => "RouteKey", "marketcontact" => "Title", _ => "Title" };
             var existingByKey = existing
@@ -164,7 +165,9 @@ public sealed class SharePointMasterDataSyncService(
                     else
                         await CreateListItemAsync(listId, filtered, token, itemCt);
                 });
-            rowsByList[mapping.Key] = sourceRows.Count;
+            await RetireRowsOutsideSnapshotAsync(mapping.Key, listId, keyField,
+                distinctRows.Select(row => row[keyField]!.ToString()!).ToHashSet(StringComparer.OrdinalIgnoreCase), token, ct);
+            rowsByList[mapping.Key] = distinctRows.Length;
         }
         return new SharePointMasterDataPublishResult(rowsByList.Count, rowsByList.Values.Sum(), rowsByList);
     }
@@ -182,6 +185,7 @@ public sealed class SharePointMasterDataSyncService(
             var listId = mapping.Key == "emailroute"
                 ? await ResolveOrProvisionEmailRouteListAsync(mapping.Value, token, ct)
                 : await ResolveListIdAsync(mapping.Value, token, ct);
+            await EnsureColumnsAsync(mapping.Key, listId, token, ct);
             var rows = await ReadListAsync(mapping.Key, listId, token, ct);
             foreach (var row in rows)
             {
@@ -320,6 +324,119 @@ public sealed class SharePointMasterDataSyncService(
         }
     }
 
+    private async Task EnsureColumnsAsync(string entityType, string listId, string token, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, BuildListUrl(listId, "columns?$select=name"));
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var response = await http.SendAsync(request, ct);
+        var body = await response.Content.ReadAsStringAsync(ct);
+        if (!response.IsSuccessStatusCode)
+            throw Failure("ListSchemaReadFailed", $"Microsoft List '{entityType}' columns could not be read", response.StatusCode, body);
+
+        using var document = JsonDocument.Parse(body);
+        var existing = document.RootElement.GetProperty("value").EnumerateArray()
+            .Select(column => column.TryGetProperty("name", out var name) ? name.GetString() : null)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase)!;
+
+        foreach (var column in ColumnsFor(entityType).Where(column => !existing.Contains(column["name"].ToString()!)))
+        {
+            using var create = new HttpRequestMessage(HttpMethod.Post, BuildListUrl(listId, "columns"))
+            {
+                Content = JsonContent.Create(column)
+            };
+            create.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            using var createResponse = await http.SendAsync(create, ct);
+            var createBody = await createResponse.Content.ReadAsStringAsync(ct);
+            if (!createResponse.IsSuccessStatusCode)
+                throw Failure("ListSchemaProvisionFailed", $"Column '{column["name"]}' could not be provisioned on Microsoft List '{entityType}'", createResponse.StatusCode, createBody);
+        }
+    }
+
+    private async Task RetireRowsOutsideSnapshotAsync(
+        string entityType,
+        string listId,
+        string keyField,
+        IReadOnlySet<string> sourceKeys,
+        string token,
+        CancellationToken ct)
+    {
+        var current = await ReadListAsync(entityType, listId, token, ct);
+        var retainedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var retire = new List<JsonElement>();
+        foreach (var item in current)
+        {
+            if (!item.TryGetProperty("fields", out var fields) ||
+                !fields.TryGetProperty(keyField, out var keyValue) ||
+                string.IsNullOrWhiteSpace(keyValue.ToString()))
+            {
+                retire.Add(item);
+                continue;
+            }
+
+            var key = keyValue.ToString();
+            if (!sourceKeys.Contains(key) || !retainedKeys.Add(key))
+                retire.Add(item);
+        }
+
+        await Parallel.ForEachAsync(retire,
+            new ParallelOptions { MaxDegreeOfParallelism = 2, CancellationToken = ct },
+            async (item, itemCt) =>
+            {
+                if (!item.TryGetProperty("id", out var id)) return;
+                await UpdateListItemAsync(listId, id.ToString(), Fields(("Active", false)), token, itemCt);
+            });
+    }
+
+    private static IReadOnlyList<Dictionary<string, object>> ColumnsFor(string entityType) => entityType.ToLowerInvariant() switch
+    {
+        "customer" =>
+        [
+            TextColumn("CustomerKey", true), TextColumn("TradingName"), TextColumn("CustomerAliases"),
+            TextColumn("AccountOwner"), TextColumn("ServiceNotes", multiline: true), TextColumn("DefaultSiteCode"), BooleanColumn("Active")
+        ],
+        "site" =>
+        [
+            TextColumn("SiteKey", true), TextColumn("CustomerKey"), TextColumn("SiteName"), TextColumn("BuildingName"),
+            TextColumn("Address1"), TextColumn("Address2"), TextColumn("Town"), TextColumn("County"), TextColumn("Postcode"),
+            TextColumn("MapLink"), TextColumn("Aliases", multiline: true), TextColumn("GeofenceId"),
+            TextColumn("OperationalRegion"), BooleanColumn("Active"), TextColumn("SyncStatus")
+        ],
+        "driver" =>
+        [
+            TextColumn("DriverKey", true), TextColumn("DriverName"), TextColumn("EmployeeNumber"), TextColumn("TachoName"),
+            TextColumn("MobileNumber"), TextColumn("DriverType"), TextColumn("DriverGroup"), TextColumn("Skills", multiline: true),
+            TextColumn("AgencyName"), TextColumn("Coding"), TextColumn("Notes", multiline: true), TextColumn("LicenceNumber"),
+            TextColumn("LicenceExpiry"), TextColumn("TachoCardNumber", true), TextColumn("TachoMasterDriverId", true),
+            TextColumn("LastTachoSyncUtc"), BooleanColumn("Active"), TextColumn("ComplianceStatus")
+        ],
+        "vehicle" =>
+        [
+            TextColumn("VehicleKey", true), TextColumn("Registration"), TextColumn("VehicleType"), TextColumn("FleetNumber"),
+            TextColumn("Abbreviation"), TextColumn("Transmission"), BooleanColumn("DvsCompliant"), TextColumn("FuelProvider"),
+            TextColumn("CabMobile"), TextColumn("FuelPinSecretName"), TextColumn("FuelCardLastFour"), TextColumn("ShellCard"),
+            TextColumn("BpRedCard"), TextColumn("BpPlainCard"), TextColumn("Notes", multiline: true), TextColumn("FleetioId"),
+            TextColumn("FleetioName"), TextColumn("FleetioStatus"), TextColumn("TmsVehicleId"), BooleanColumn("Active"), TextColumn("ComplianceStatus")
+        ],
+        "trailer" =>
+        [
+            TextColumn("TrailerKey", true), TextColumn("Registration"), TextColumn("TrailerType"),
+            NumberColumn("StandardCapacity"), NumberColumn("EuroCapacity"), TextColumn("Notes", multiline: true), BooleanColumn("Active")
+        ],
+        "fuelcard" =>
+        [
+            TextColumn("VehicleKey", true), TextColumn("Registration"), TextColumn("FuelProvider"), TextColumn("FuelPinSecretName"),
+            TextColumn("FuelCardLastFour"), TextColumn("ShellCard"), TextColumn("BpRedCard"), TextColumn("BpPlainCard"), BooleanColumn("Active")
+        ],
+        "marketcontact" =>
+        [
+            TextColumn("Market"), TextColumn("Name"), TextColumn("StandOrLocation"), TextColumn("Salesman"),
+            TextColumn("Sender"), TextColumn("ReadOnlyMapPdfUrl"), BooleanColumn("Active")
+        ],
+        "emailroute" => EmailRouteColumns(),
+        _ => []
+    };
+
     private static IReadOnlyList<Dictionary<string, object>> EmailRouteColumns() =>
     [
         TextColumn("RouteKey", true), TextColumn("CustomerKey"), TextColumn("SiteKey"),
@@ -327,11 +444,11 @@ public sealed class SharePointMasterDataSyncService(
         TextColumn("ParserType"), BooleanColumn("RequiresReview"), BooleanColumn("Active")
     ];
 
-    private static Dictionary<string, object> TextColumn(string name, bool indexed = false) => new()
+    private static Dictionary<string, object> TextColumn(string name, bool indexed = false, bool multiline = false) => new()
     {
         ["name"] = name,
         ["indexed"] = indexed,
-        ["text"] = new { allowMultipleLines = false, maxLength = 320 }
+        ["text"] = new { allowMultipleLines = multiline, maxLength = multiline ? 4000 : 320 }
     };
 
     private static Dictionary<string, object> BooleanColumn(string name) => new()
@@ -340,16 +457,15 @@ public sealed class SharePointMasterDataSyncService(
         ["boolean"] = new Dictionary<string, object>()
     };
 
+    private static Dictionary<string, object> NumberColumn(string name) => new()
+    {
+        ["name"] = name,
+        ["number"] = new Dictionary<string, object> { ["decimalPlaces"] = "none" }
+    };
+
     private async Task<IReadOnlySet<string>> CreateListItemAsync(string listId, IReadOnlyDictionary<string, object?> fields, string token, CancellationToken ct)
     {
         var payload = new Dictionary<string, object?>(fields, StringComparer.OrdinalIgnoreCase);
-        var optionalFields = payload.Keys
-            .Where(key => !string.Equals(key, "Title", StringComparison.OrdinalIgnoreCase)
-                && !key.EndsWith("Key", StringComparison.OrdinalIgnoreCase))
-            .Reverse()
-            .ToList();
-
-        var fieldAttempt = 0;
         var throttleAttempt = 0;
         for (;;)
         {
@@ -368,29 +484,13 @@ public sealed class SharePointMasterDataSyncService(
                 continue;
             }
 
-            throttleAttempt = 0;
-            if (response.StatusCode != System.Net.HttpStatusCode.BadRequest || fieldAttempt >= optionalFields.Count)
-                throw Failure("ListCreateFailed", "A Microsoft List item could not be created", response.StatusCode, body);
-
-            var removedField = optionalFields[fieldAttempt++];
-            payload.Remove(removedField);
-            logger.LogWarning(
-                "SharePoint create returned 400; retrying without optional field {Field}. GraphBody={GraphBody}",
-                removedField,
-                body);
+            throw Failure("ListCreateFailed", "A complete Microsoft List item could not be created", response.StatusCode, body);
         }
     }
 
     private async Task<IReadOnlySet<string>> UpdateListItemAsync(string listId, string itemId, IReadOnlyDictionary<string, object?> fields, string token, CancellationToken ct)
     {
         var payload = new Dictionary<string, object?>(fields, StringComparer.OrdinalIgnoreCase);
-        var optionalFields = payload.Keys
-            .Where(key => !string.Equals(key, "Title", StringComparison.OrdinalIgnoreCase)
-                && !key.EndsWith("Key", StringComparison.OrdinalIgnoreCase))
-            .Reverse()
-            .ToList();
-
-        var fieldAttempt = 0;
         var throttleAttempt = 0;
         for (;;)
         {
@@ -409,16 +509,7 @@ public sealed class SharePointMasterDataSyncService(
                 continue;
             }
 
-            throttleAttempt = 0;
-            if (response.StatusCode != System.Net.HttpStatusCode.BadRequest || fieldAttempt >= optionalFields.Count)
-                throw Failure("ListUpdateFailed", "A Microsoft List item could not be updated", response.StatusCode, body);
-
-            var removedField = optionalFields[fieldAttempt++];
-            payload.Remove(removedField);
-            logger.LogWarning(
-                "SharePoint update returned 400; retrying without optional field {Field}. GraphBody={GraphBody}",
-                removedField,
-                body);
+            throw Failure("ListUpdateFailed", "A complete Microsoft List item could not be updated", response.StatusCode, body);
         }
     }
 
