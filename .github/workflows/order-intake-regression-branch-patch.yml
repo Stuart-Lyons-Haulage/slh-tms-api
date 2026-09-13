@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   patch-test-commit:
-    if: ${{ !contains(github.event.head_commit.message, '[order-intake-patched]') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,10 +18,10 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: '8.0.x'
       - name: Apply parser and regression-test patch
-        shell: python
         run: |
+          python <<'PY'
           from pathlib import Path
 
           service = Path('Services/EmailOrderIntakeService.cs')
@@ -198,6 +197,7 @@ public sealed class OrderIntakeRoutingRegressionTests : IClassFixture<CustomWebF
     }
 }
 ''')
+          PY
       - name: Run API tests
         run: dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj --configuration Release
       - name: Commit validated patch
