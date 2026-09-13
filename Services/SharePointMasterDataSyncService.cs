@@ -62,8 +62,7 @@ public sealed class SharePointMasterDataSyncService(
         {
             ["customer"] = (await db.Customers.AsNoTracking().OrderBy(x => x.Code).ToListAsync(ct)).Select(x => Fields(
                 ("Title", x.Code), ("CustomerKey", x.Code), ("TradingName", x.TradingName ?? x.Name),
-                ("AccountOwner", x.AccountOwner), ("ServiceNotes", x.ServiceNotes), ("DefaultSiteCode", x.DefaultSiteCode),
-                ("TmsCustomerId", x.Id.ToString()), ("Active", x.Active))).ToArray(),
+                ("AccountOwner", x.AccountOwner), ("ServiceNotes", x.ServiceNotes), ("DefaultSiteCode", x.DefaultSiteCode), ("Active", x.Active))).ToArray(),
             ["site"] = await BuildSiteRowsAsync(db, ct),
             ["driver"] = drivers.Select(x => Fields(
                 ("Title", x.DisplayName), ("DriverKey", x.TachoCardNumber ?? x.TachoMasterDriverId ?? x.EmployeeNumber),
@@ -72,7 +71,7 @@ public sealed class SharePointMasterDataSyncService(
                 ("Skills", x.Skills), ("AgencyName", x.AgencyName), ("Coding", x.Coding), ("Notes", x.Notes),
                 ("LicenceNumber", x.DrivingLicenceNumber), ("LicenceExpiry", x.LicenceExpiry),
                 ("TachoCardNumber", x.TachoCardNumber), ("TachoMasterDriverId", x.TachoMasterDriverId),
-                ("LastTachoSyncUtc", x.LastTachoSyncUtc), ("TmsDriverId", x.Id.ToString()),
+                ("LastTachoSyncUtc", x.LastTachoSyncUtc),
                 ("Active", x.Active), ("ComplianceStatus", string.IsNullOrWhiteSpace(x.LicenceStatus) ? "Unknown" : x.LicenceStatus))).ToArray(),
             ["vehicle"] = vehicles.Select(x => Fields(
                 ("Title", x.Registration), ("VehicleKey", x.FleetNumber ?? x.Registration), ("Registration", x.Registration),
@@ -91,7 +90,7 @@ public sealed class SharePointMasterDataSyncService(
             ["trailer"] = (await db.Trailers.AsNoTracking().OrderBy(x => x.TrailerNumber).ToListAsync(ct)).Select(x => Fields(
                 ("Title", x.TrailerNumber), ("TrailerKey", x.TrailerNumber), ("Registration", x.TrailerNumber),
                 ("TrailerType", x.Type), ("StandardCapacity", x.StandardCapacity), ("EuroCapacity", x.EuroCapacity),
-                ("Notes", x.Notes), ("TmsTrailerId", x.Id.ToString()), ("Active", x.Active))).ToArray(),
+                ("Notes", x.Notes), ("Active", x.Active))).ToArray(),
             ["marketcontact"] = (await db.MarketContacts.AsNoTracking().OrderBy(x => x.Market).ThenBy(x => x.Name).ToListAsync(ct)).Select(x => Fields(
                 ("Title", $"{x.Market} · {x.Name}"), ("Market", x.Market), ("Name", x.Name),
                 ("StandOrLocation", x.StandOrLocation), ("Salesman", x.Salesman), ("Sender", x.Sender),
@@ -109,6 +108,13 @@ public sealed class SharePointMasterDataSyncService(
                 .Where(item => item.TryGetProperty("fields", out var field) && field.TryGetProperty(keyField, out var key) && !string.IsNullOrWhiteSpace(key.ToString()))
                 .GroupBy(item => item.GetProperty("fields").GetProperty(keyField).ToString(), StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+            var existingDriversByEmployee = mapping.Key == "driver"
+                ? existing.Where(item => item.TryGetProperty("fields", out var field)
+                        && field.TryGetProperty("EmployeeNumber", out var employee)
+                        && !string.IsNullOrWhiteSpace(employee.ToString()))
+                    .GroupBy(item => item.GetProperty("fields").GetProperty("EmployeeNumber").ToString(), StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
             var distinctRows = sourceRows
                 .Where(row => !string.IsNullOrWhiteSpace(row.GetValueOrDefault(keyField)?.ToString()))
                 .GroupBy(row => row[keyField]!.ToString()!, StringComparer.OrdinalIgnoreCase)
@@ -119,7 +125,12 @@ public sealed class SharePointMasterDataSyncService(
             {
                 var probe = distinctRows[0];
                 var probeKey = probe[keyField]!.ToString()!;
-                acceptedFields = existingByKey.TryGetValue(probeKey, out var probeCurrent)
+                var probeExists = existingByKey.TryGetValue(probeKey, out var probeCurrent)
+                    || (mapping.Key == "driver"
+                        && probe.TryGetValue("EmployeeNumber", out var probeEmployee)
+                        && probeEmployee is not null
+                        && existingDriversByEmployee.TryGetValue(probeEmployee.ToString()!, out probeCurrent));
+                acceptedFields = probeExists
                     ? await UpdateListItemAsync(listId, probeCurrent.GetProperty("id").ToString(), probe, token, ct)
                     : await CreateListItemAsync(listId, probe, token, ct);
             }
@@ -135,7 +146,12 @@ public sealed class SharePointMasterDataSyncService(
                         ? source
                         : source.Where(pair => acceptedFields.Contains(pair.Key))
                             .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
-                    if (existingByKey.TryGetValue(key, out var current))
+                    var exists = existingByKey.TryGetValue(key, out var current)
+                        || (mapping.Key == "driver"
+                            && source.TryGetValue("EmployeeNumber", out var employee)
+                            && employee is not null
+                            && existingDriversByEmployee.TryGetValue(employee.ToString()!, out current));
+                    if (exists)
                         await UpdateListItemAsync(listId, current.GetProperty("id").ToString(), filtered, token, itemCt);
                     else
                         await CreateListItemAsync(listId, filtered, token, itemCt);
