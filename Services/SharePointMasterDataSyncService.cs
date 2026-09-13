@@ -40,7 +40,8 @@ public sealed class SharePointMasterDataException(string code, string message, E
     public string Code { get; } = code;
 }
 
-// CI trigger: validated master-data publish duplicate-key handling.\n// CI validation marker for tolerant SharePoint field retry.
+// CI trigger: validated master-data publish duplicate-key handling.
+// CI validation marker for tolerant SharePoint field retry.
 public sealed class SharePointMasterDataSyncService(
     HttpClient http,
     SharePointMasterDataOptions options,
@@ -361,6 +362,7 @@ public sealed class SharePointMasterDataSyncService(
             _ => "Check the SLH SharePoint integration log for the Graph response."
         };
         logger.LogError("{Action} failed. GraphStatus={GraphStatus}; GraphBody={GraphBody}", action, (int)status, body);
-        return new SharePointMasterDataException(code, $"{action} (Microsoft Graph {(int)status}). {guidance}");
+        var graphDetail = body.Length > 800 ? body[..800] : body;
+        return new SharePointMasterDataException(code, $"{action} (Microsoft Graph {(int)status}). {guidance} Graph detail: {graphDetail}");
     }
 }
