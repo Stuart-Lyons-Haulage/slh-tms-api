@@ -1,0 +1,184 @@
+name: One-shot - Repair production scheduled jobs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/production-jobs-repair.yml'
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  RG: slh-tms-prod-rg
+  API_APP: slh-tms-api-prod
+  API_BASE: https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+  ACR: slhtmsacrprod
+  TACHO: slh-tms-job-tachomaster
+  ETA: slh-tms-job-eta
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build current scheduled-jobs image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_sha="$(git rev-parse HEAD)"
+          echo "IMAGE_SHA=$image_sha" >> "$GITHUB_ENV"
+          az acr build --registry "$ACR" --file Slh.Tms.Jobs/Dockerfile --image "slh-tms-jobs:$image_sha" .
+
+      - name: Reconcile Tacho job and provision ETA job
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="$ACR.azurecr.io/slh-tms-jobs:$IMAGE_SHA"
+          api_secrets="$(az containerapp secret list -n "$API_APP" -g "$RG" --show-values -o json)"
+          sval() { jq -r --arg n "$1" '[.[]|select(.name==$n)][0].value // empty' <<<"$api_secrets"; }
+          db="$(sval tms-db-connection)"
+          tv="$(sval tv-wallboard-access-key)"
+          dot_base="$(sval dot-base-url)"
+          dot_api="$(sval dot-api-key)"
+          dot_company="$(sval dot-company-code)"
+          dot_user="$(sval dot-username)"
+          dot_pass="$(sval dot-password)"
+          test -n "$db" -a -n "$tv" -a -n "$dot_base" -a -n "$dot_api" -a -n "$dot_user" -a -n "$dot_pass"
+
+          tacho="$(az containerapp job show -n "$TACHO" -g "$RG" -o json)"
+          mi_client="$(jq -r '.identity.userAssignedIdentities | to_entries[0].value.clientId // empty' <<<"$tacho")"
+          if grep -qi 'Authentication=Active Directory Managed Identity' <<<"$db" && test -n "$mi_client"; then
+            db="$(printf '%s' "$db" | sed -E 's/(^|;)[[:space:]]*[Uu]ser[[:space:]]+[Ii][Dd]=[^;]*//g')"
+            db="${db%;};User Id=${mi_client};"
+          fi
+
+          secret_args=("tms-db=$db" "dot-base-url=$dot_base" "dot-api-key=$dot_api" "dot-username=$dot_user" "dot-password=$dot_pass")
+          env_args=(
+            "TMS_JOB_KIND=tachomaster"
+            "ConnectionStrings__TmsDb=secretref:tms-db"
+            "Tracking__Dot__Enabled=true"
+            "Tracking__Dot__BaseUrl=secretref:dot-base-url"
+            "Tracking__Dot__ApiKey=secretref:dot-api-key"
+            "Tracking__Dot__Username=secretref:dot-username"
+            "Tracking__Dot__Password=secretref:dot-password"
+            "Integrations__TachoMaster__Enabled=true"
+            "Integrations__TachoMaster__BaseUrl=secretref:dot-base-url"
+            "Integrations__TachoMaster__ApiKey=secretref:dot-api-key"
+            "Integrations__TachoMaster__Username=secretref:dot-username"
+            "Integrations__TachoMaster__Password=secretref:dot-password"
+          )
+          if test -n "$dot_company"; then
+            secret_args+=("dot-company-code=$dot_company")
+            env_args+=("Tracking__Dot__CompanyCode=secretref:dot-company-code")
+          fi
+          az containerapp job secret set -n "$TACHO" -g "$RG" --secrets "${secret_args[@]}" -o none
+          az containerapp job update -n "$TACHO" -g "$RG" --image "$image" --set-env-vars "${env_args[@]}" -o none
+
+          if ! az containerapp job show -n "$ETA" -g "$RG" -o none 2>/dev/null; then
+            # Create ETA by retaining the proven production environment, managed identity,
+            # registry configuration and execution limits from Tacho, while giving ETA only
+            # its own minimal runtime secrets and settings.
+            eta_body="$(jq -n --argjson src "$tacho" --arg image "$image" --arg db "$db" --arg tv "$tv" --arg api "$API_BASE" '
+              {
+                location:$src.location,
+                identity:$src.identity,
+                properties:{
+                  environmentId:$src.properties.environmentId,
+                  workloadProfileName:$src.properties.workloadProfileName,
+                  configuration:($src.properties.configuration
+                    | .triggerType="Schedule"
+                    | .scheduleTriggerConfig={cronExpression:"*/5 * * * *",parallelism:1,replicaCompletionCount:1}
+                    | del(.manualTriggerConfig)
+                    | .secrets=[{name:"tms-db",value:$db},{name:"wallboard-key",value:$tv}]),
+                  template:($src.properties.template
+                    | .containers[0].name="slh-tms-job-eta"
+                    | .containers[0].image=$image
+                    | .containers[0].env=[
+                        {name:"TMS_JOB_KIND",value:"eta"},
+                        {name:"ConnectionStrings__TmsDb",secretRef:"tms-db"},
+                        {name:"TmsApi__BaseUrl",value:$api},
+                        {name:"TvWallboard__AccessKey",secretRef:"wallboard-key"}
+                      ])
+                }
+              }')"
+            sub="$(az account show --query id -o tsv)"
+            url="https://management.azure.com/subscriptions/$sub/resourceGroups/$RG/providers/Microsoft.App/jobs/$ETA?api-version=2024-03-01"
+            az rest --method put --url "$url" --body "$eta_body" -o none
+          else
+            az containerapp job secret set -n "$ETA" -g "$RG" --secrets "tms-db=$db" "wallboard-key=$tv" -o none
+            az containerapp job update -n "$ETA" -g "$RG" --image "$image" --set-env-vars \
+              "TMS_JOB_KIND=eta" "ConnectionStrings__TmsDb=secretref:tms-db" "TmsApi__BaseUrl=$API_BASE" "TvWallboard__AccessKey=secretref:wallboard-key" -o none
+          fi
+
+          echo 'Tacho:'
+          az containerapp job show -n "$TACHO" -g "$RG" --query '{state:properties.provisioningState,cron:properties.configuration.scheduleTriggerConfig.cronExpression,image:properties.template.containers[0].image}' -o json
+          echo 'ETA:'
+          az containerapp job show -n "$ETA" -g "$RG" --query '{state:properties.provisioningState,cron:properties.configuration.scheduleTriggerConfig.cronExpression,image:properties.template.containers[0].image,envNames:properties.template.containers[0].env[].name}' -o json
+
+      - name: Execute both jobs now
+        shell: bash
+        run: |
+          set -euo pipefail
+          wait_exec() {
+            local job="$1" exec state
+            exec="$(az containerapp job start -n "$job" -g "$RG" --query name -o tsv)"
+            echo "Started $job: $exec"
+            for n in $(seq 1 90); do
+              state="$(az containerapp job execution show -n "$job" -g "$RG" --job-execution-name "$exec" --query properties.status -o tsv 2>/dev/null || true)"
+              echo "$job=$state"
+              case "$state" in Succeeded) return 0;; Failed) return 1;; esac
+              sleep 10
+            done
+            return 2
+          }
+          wait_exec "$TACHO"
+          wait_exec "$ETA"
+
+      - name: Verify Driver Master and runtime freshness
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics
+          for n in $(seq 1 24); do
+            driver="$(curl -sS --max-time 60 -H 'Cache-Control: no-cache' "$API_BASE/api/v1/health/driver-master")"
+            if test "$(jq -r '.duplicateMemberGroups' <<<"$driver")" = 0 \
+              -a "$(jq -r '.duplicateCardGroups' <<<"$driver")" = 0 \
+              -a "$(jq -r '.activeWithoutMember' <<<"$driver")" = 0 \
+              -a "$(jq -r '.populationAligned' <<<"$driver")" = true; then
+              break
+            fi
+            sleep 10
+          done
+          tacho="$(curl -sS --max-time 60 -H 'Cache-Control: no-cache' "$API_BASE/api/v1/health/tachomaster")"
+          jq -n --arg checked "$(date -u +%FT%TZ)" --argjson driver "$driver" --argjson tacho "$tacho" \
+            '{checkedAtUtc:$checked,driverMaster:$driver,tachomaster:$tacho}' > diagnostics/production-jobs-repair-verification.json
+          test "$(jq -r '.driverMaster.duplicateMemberGroups' diagnostics/production-jobs-repair-verification.json)" = 0
+          test "$(jq -r '.driverMaster.duplicateCardGroups' diagnostics/production-jobs-repair-verification.json)" = 0
+          test "$(jq -r '.driverMaster.activeWithoutMember' diagnostics/production-jobs-repair-verification.json)" = 0
+          test "$(jq -r '.driverMaster.populationAligned' diagnostics/production-jobs-repair-verification.json)" = true
+          test "$(jq -r 'if .tachomaster.scheduledSync.stale == null then true else .tachomaster.scheduledSync.stale end' diagnostics/production-jobs-repair-verification.json)" = false
+
+      - name: Commit production verification
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f diagnostics/production-jobs-repair-verification.json || exit 0
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add diagnostics/production-jobs-repair-verification.json
+          git commit -m 'Record production scheduled jobs repair verification' || exit 0
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
