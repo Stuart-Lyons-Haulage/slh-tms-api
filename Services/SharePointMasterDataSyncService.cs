@@ -139,15 +139,7 @@ public sealed class SharePointMasterDataSyncService(
                 ("AccountOwner", x.AccountOwner), ("ServiceNotes", x.ServiceNotes), ("DefaultSiteCode", x.DefaultSiteCode), ("Active", x.Active))).ToArray(),
             ["customercontact"] = await BuildCustomerContactRowsAsync(db, ct),
             ["site"] = await BuildSiteRowsAsync(db, ct),
-            ["driver"] = drivers.Select(x => Fields(
-                ("Title", x.DisplayName), ("DriverKey", x.TachoCardNumber ?? x.EmployeeNumber),
-                ("DriverName", x.DisplayName), ("EmployeeNumber", x.EmployeeNumber), ("TachoName", x.TachoName),
-                ("MobileNumber", x.MobileNumber), ("DriverType", x.DriverType), ("DriverGroup", x.DriverGroup),
-                ("Skills", x.Skills), ("AgencyName", x.AgencyName), ("Coding", x.Coding), ("Notes", x.Notes),
-                ("LicenceNumber", x.DrivingLicenceNumber), ("LicenceExpiry", x.LicenceExpiry),
-                ("TachoCardNumber", x.TachoCardNumber), ("TachoMasterDriverId", x.TachoMasterDriverId),
-                ("LastTachoSyncUtc", x.LastTachoSyncUtc), ("Active", x.Active),
-                ("ComplianceStatus", string.IsNullOrWhiteSpace(x.LicenceStatus) ? "Unknown" : x.LicenceStatus))).ToArray(),
+            ["driver"] = await BuildDriverRowsAsync(db, drivers, ct),
             ["vehicle"] = vehicles.Select(x => Fields(
                 ("Title", x.Registration), ("VehicleKey", x.FleetNumber ?? x.Registration), ("Registration", x.Registration),
                 ("FleetNumber", x.FleetNumber), ("Abbreviation", x.Abbreviation), ("Transmission", x.Transmission),
@@ -172,6 +164,41 @@ public sealed class SharePointMasterDataSyncService(
                 ("ReadOnlyMapPdfUrl", x.ReadOnlyMapPdfUrl), ("Active", x.Active))).ToArray(),
             ["emailroute"] = await BuildEmailRouteRowsAsync(db, ct)
         };
+    }
+
+    private static async Task<IReadOnlyList<Dictionary<string, object?>>> BuildDriverRowsAsync(
+        TmsDbContext db,
+        IReadOnlyList<Driver> drivers,
+        CancellationToken ct)
+    {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow.Date);
+        var vehicles = await db.Vehicles.AsNoTracking().ToDictionaryAsync(x => x.Id, ct);
+        var allocations = await db.Loads.AsNoTracking()
+            .Where(x => x.DriverId != null && x.Status != LoadStatus.Cancelled && x.Status != LoadStatus.Completed)
+            .OrderBy(x => x.PlanningDate < today ? 1 : 0)
+            .ThenBy(x => x.PlanningDate)
+            .ThenBy(x => x.Reference)
+            .ToListAsync(ct);
+
+        var allocatedByDriver = allocations
+            .Where(x => x.DriverId is not null && x.VehicleId is not null && vehicles.ContainsKey(x.VehicleId.Value))
+            .GroupBy(x => x.DriverId!.Value)
+            .ToDictionary(
+                group => group.Key,
+                group => vehicles[group.First().VehicleId!.Value].Registration,
+                EqualityComparer<Guid>.Default);
+
+        return drivers.Select(x => Fields(
+            ("Title", x.DisplayName), ("DriverKey", x.TachoCardNumber ?? x.EmployeeNumber),
+            ("DriverName", x.DisplayName), ("EmployeeNumber", x.EmployeeNumber), ("TachoName", x.TachoName),
+            ("Email", x.Email), ("MobileNumber", x.MobileNumber), ("GradeCode", x.GradeCode),
+            ("AllocatedVehicle", allocatedByDriver.GetValueOrDefault(x.Id)),
+            ("DriverType", x.DriverType), ("DriverGroup", x.DriverGroup),
+            ("Skills", x.Skills), ("AgencyName", x.AgencyName), ("Coding", x.Coding), ("Notes", x.Notes),
+            ("LicenceNumber", x.DrivingLicenceNumber), ("LicenceExpiry", x.LicenceExpiry),
+            ("TachoCardNumber", x.TachoCardNumber), ("TachoMasterDriverId", x.TachoMasterDriverId),
+            ("LastTachoSyncUtc", x.LastTachoSyncUtc), ("Active", x.Active),
+            ("ComplianceStatus", string.IsNullOrWhiteSpace(x.LicenceStatus) ? "Unknown" : x.LicenceStatus))).ToArray();
     }
 
     private static async Task<IReadOnlyList<Dictionary<string, object?>>> BuildCustomerContactRowsAsync(TmsDbContext db, CancellationToken ct)
@@ -438,7 +465,7 @@ public sealed class SharePointMasterDataSyncService(
         "driver" =>
         [
             TextColumn("DriverKey", true), TextColumn("DriverName"), TextColumn("EmployeeNumber"), TextColumn("TachoName"),
-            TextColumn("MobileNumber"), TextColumn("DriverType"), TextColumn("DriverGroup"), TextColumn("Skills", multiline: true),
+            TextColumn("Email"), TextColumn("MobileNumber"), TextColumn("GradeCode"), TextColumn("AllocatedVehicle"), TextColumn("DriverType"), TextColumn("DriverGroup"), TextColumn("Skills", multiline: true),
             TextColumn("AgencyName"), TextColumn("Coding"), TextColumn("Notes", multiline: true), TextColumn("LicenceNumber"),
             TextColumn("LicenceExpiry"), TextColumn("TachoCardNumber", true), TextColumn("TachoMasterDriverId", true),
             TextColumn("LastTachoSyncUtc"), BooleanColumn("Active"), TextColumn("ComplianceStatus")
@@ -612,7 +639,10 @@ public sealed class SharePointMasterDataSyncService(
                 Set("employeeNumber", Text("EmployeeNumber") ?? Text("DriverKey"));
                 Set("displayName", Text("DriverName") ?? Text("DriverKey"));
                 Set("tachoName", Text("TachoName"));
+                Set("email", Text("Email"));
                 Set("mobileNumber", Text("MobileNumber"));
+                Set("gradeCode", Text("GradeCode"));
+                Set("allocatedVehicle", Text("AllocatedVehicle"));
                 Set("driverType", Text("DriverType"));
                 Set("driverGroup", Text("DriverGroup"));
                 Set("skills", Text("Skills"));
