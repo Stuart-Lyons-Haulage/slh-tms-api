@@ -57,7 +57,7 @@ public static class CustomerEmailRouteService
                     return order with { Payload = JsonSerializer.SerializeToElement(root) };
                 }).ToList(),
                 Warnings = parsed.Warnings.Append(
-                    $"Sender {sender} has conflicting SQL customer mappings. Planner review is required before this sender can be automated.")
+                    $"Sender {sender} has conflicting CRM routes/customer mappings in SQL. Planner review is required before this sender can be automated.")
                     .Distinct(StringComparer.OrdinalIgnoreCase).ToList()
             };
             return await OrderIntakeRouteRuleMatcher.ApplyAsync(db, conflicted, ct);
@@ -85,7 +85,7 @@ public static class CustomerEmailRouteService
         {
             var root = JsonNode.Parse(order.Payload.GetRawText())?.AsObject() ?? new JsonObject();
             var warnings = order.Warnings.ToList();
-            var conflict = ApplyCustomerMapping(root, route, collectionSite, deliverySite, sender, warnings, subjectSpecific);
+            var conflict = ApplyCustomerMapping(root, route.Route, collectionSite, deliverySite, sender, warnings, subjectSpecific);
             if (route.RequiresReview || conflict)
                 root["plannerReady"] = false;
             routed.Add(order with
