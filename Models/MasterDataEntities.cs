@@ -38,6 +38,16 @@ public sealed class MasterCustomer : ActiveMasterRow
     public string? DefaultSiteCode { get; set; }
 }
 
+public sealed class MasterCustomerContact : ActiveMasterRow
+{
+    public string ContactId { get; set; } = "";
+    public string CustomerId { get; set; } = "";
+    public string ContactName { get; set; } = "";
+    public string? Email { get; set; }
+    public string? MobileNumber { get; set; }
+    public bool ReceivesEtaUpdates { get; set; }
+}
+
 public sealed class MasterDriver : ActiveMasterRow
 {
     public string DriverId { get; set; } = "";
