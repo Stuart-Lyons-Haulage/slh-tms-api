@@ -108,6 +108,7 @@ public sealed class IntegrationSyncCoordinator(
 
         var employees = await sageHr.GetActiveEmployeesAsync(ct);
         var rawCandidates = employees.Where(IsDriver).ToList();
+        var excludedNonDrivers = employees.Count - rawCandidates.Count;
         var candidates = rawCandidates
             .GroupBy(employee => string.IsNullOrWhiteSpace(employee.EmployeeNumber) ? $"SAGE-{employee.Id}" : employee.EmployeeNumber.Trim(), StringComparer.OrdinalIgnoreCase)
             .Select(group => group.First()).ToList();
@@ -153,7 +154,7 @@ public sealed class IntegrationSyncCoordinator(
         {
             EntityType = "sagehrsync",
             IdempotencyKey = $"sagehrsync:{Guid.NewGuid():N}",
-            PayloadJson = JsonSerializer.Serialize(new { sourceEmployeeCount = employees.Count, driverCandidateCount = candidates.Count, activeDriverEmployeeNumbers, created, updated, skipped }),
+            PayloadJson = JsonSerializer.Serialize(new { sourceEmployeeCount = employees.Count, driverCandidateCount = candidates.Count, excludedNonDrivers, activeDriverEmployeeNumbers, created, updated, skipped }),
             Source = actor.StartsWith("system:", StringComparison.OrdinalIgnoreCase) ? "Sage HR scheduled synchronisation" : "Sage HR manual synchronisation",
             Status = StagingStatus.Promoted,
             ReceivedAtUtc = now,
@@ -163,7 +164,7 @@ public sealed class IntegrationSyncCoordinator(
         });
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
-        return new("Sage HR", true, now, $"Sage HR synchronised {created + updated} driver records ({created} created, {updated} updated).", created + updated);
+        return new("Sage HR", true, now, $"Sage HR synchronised {created + updated} driver records ({created} created, {updated} updated); excluded {excludedNonDrivers} non-driver employee(s).", created + updated);
     }
 
     public async Task<IntegrationSyncResult> SyncFleetioAsync(string actor, CancellationToken ct)
