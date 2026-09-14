@@ -1,4 +1,4 @@
-name: One-shot TachoMaster live repair
+name: One-shot TachoMaster SQL identity repair
 
 on:
   push:
@@ -20,6 +20,7 @@ jobs:
       API_APP: slh-tms-api-prod
       API_FQDN: slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
       TACHO_JOB: slh-tms-job-tachomaster
+      JOB_SQL_USER: slh-tms-jobs-prod-id
     steps:
       - name: Sign in to Azure
         uses: azure/login@v2
@@ -28,7 +29,7 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Repair job SQL managed identity connection
+      - name: Grant job identity access to TMS SQL database
         shell: bash
         run: |
           set -euo pipefail
@@ -36,54 +37,73 @@ jobs:
           conn="$(jq -r '[.[] | select(.name == "tms-db-connection")][0].value // empty' <<<"$source_secrets")"
           test -n "$conn"
 
-          job_client_id="$(az containerapp job show \
-            --name "$TACHO_JOB" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --query 'identity.userAssignedIdentities.*.clientId | [0]' \
-            --output tsv)"
-          test -n "$job_client_id"
+          server="$(printf '%s' "$conn" | tr ';' '\n' | sed -n -E 's/^[[:space:]]*(Server|Data Source)[[:space:]]*=[[:space:]]*//Ip' | head -1)"
+          database="$(printf '%s' "$conn" | tr ';' '\n' | sed -n -E 's/^[[:space:]]*(Database|Initial Catalog)[[:space:]]*=[[:space:]]*//Ip' | head -1)"
+          server="${server#tcp:}"
+          test -n "$server"
+          test -n "$database"
 
-          # The API uses a system-assigned identity, so its governed connection string has no
-          # User ID. The scheduled job uses a user-assigned identity and SqlClient therefore
-          # needs that identity's client ID in the Managed Identity connection string.
-          job_conn="$(printf '%s' "$conn" | sed -E 's/(^|;)[[:space:]]*[Uu]ser[[:space:]]+[Ii][Dd]=[^;]*//g')"
-          job_conn="${job_conn%;};User Id=${job_client_id};"
+          job_principal_id="$(az containerapp job show \
+            --name "$TACHO_JOB" --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query 'identity.userAssignedIdentities.*.principalId | [0]' --output tsv)"
+          test -n "$job_principal_id"
 
-          az containerapp job secret set \
-            --name "$TACHO_JOB" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --secrets "tms-db=$job_conn" \
-            --output none
-          az containerapp job update \
-            --name "$TACHO_JOB" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --set-env-vars "ConnectionStrings__TmsDb=secretref:tms-db" \
-            --output none
-          echo "TachoMaster job SQL connection now targets its configured user-assigned managed identity."
+          python -m pip install --quiet pyodbc
+          export SQL_SERVER="$server" SQL_DATABASE="$database" JOB_PRINCIPAL_ID="$job_principal_id"
+          python <<'PY'
+          import os, struct, subprocess, uuid
+          import pyodbc
+
+          token = subprocess.check_output([
+              'az','account','get-access-token','--resource','https://database.windows.net/',
+              '--query','accessToken','--output','tsv'
+          ], text=True).strip()
+          raw = token.encode('utf-16-le')
+          packed = struct.pack('<I', len(raw)) + raw
+          cs = (
+              'Driver={ODBC Driver 18 for SQL Server};'
+              f"Server={os.environ['SQL_SERVER']};Database={os.environ['SQL_DATABASE']};"
+              'Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;'
+          )
+          cn = pyodbc.connect(cs, attrs_before={1256: packed}, autocommit=True)
+          cur = cn.cursor()
+          name = 'slh-tms-jobs-prod-id'
+          principal = os.environ['JOB_PRINCIPAL_ID']
+          existing = cur.execute('SELECT COUNT(*) FROM sys.database_principals WHERE name = ?', name).fetchone()[0]
+          if not existing:
+              try:
+                  cur.execute(f'CREATE USER [{name}] FROM EXTERNAL PROVIDER')
+              except Exception:
+                  sid = uuid.UUID(principal).bytes_le.hex().upper()
+                  cur.execute(f'CREATE USER [{name}] WITH SID = 0x{sid}, TYPE = E')
+          for role in ('db_datareader','db_datawriter'):
+              member = cur.execute('''
+                  SELECT COUNT(*)
+                  FROM sys.database_role_members drm
+                  JOIN sys.database_principals r ON r.principal_id = drm.role_principal_id
+                  JOIN sys.database_principals m ON m.principal_id = drm.member_principal_id
+                  WHERE r.name = ? AND m.name = ?
+              ''', role, name).fetchone()[0]
+              if not member:
+                  cur.execute(f'ALTER ROLE [{role}] ADD MEMBER [{name}]')
+          cur.execute(f'GRANT EXECUTE TO [{name}]')
+          print('SQL job identity exists with db_datareader, db_datawriter and EXECUTE grants.')
+          cn.close()
+          PY
 
       - name: Run canonical TachoMaster sync immediately
         shell: bash
         run: |
           set -euo pipefail
-          execution="$(az containerapp job start \
-            --name "$TACHO_JOB" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --query name --output tsv)"
+          execution="$(az containerapp job start --name "$TACHO_JOB" --resource-group "$AZURE_RESOURCE_GROUP" --query name --output tsv)"
           echo "EXECUTION=$execution"
           for attempt in {1..60}; do
-            state="$(az containerapp job execution show \
-              --name "$TACHO_JOB" \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --job-execution-name "$execution" \
-              --query properties.status --output tsv 2>/dev/null || true)"
+            state="$(az containerapp job execution show --name "$TACHO_JOB" --resource-group "$AZURE_RESOURCE_GROUP" --job-execution-name "$execution" --query properties.status --output tsv 2>/dev/null || true)"
             echo "status=${state:-unknown}"
             case "$state" in
               Succeeded) exit 0 ;;
               Failed)
-                timeout 30s az containerapp job logs show \
-                  --name "$TACHO_JOB" --resource-group "$AZURE_RESOURCE_GROUP" \
-                  --execution "$execution" --container "$TACHO_JOB" \
-                  --follow false --tail 150 --format text || true
+                timeout 30s az containerapp job logs show --name "$TACHO_JOB" --resource-group "$AZURE_RESOURCE_GROUP" --execution "$execution" --container "$TACHO_JOB" --follow false --tail 180 --format text || true
                 exit 1
                 ;;
             esac
@@ -96,9 +116,7 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in {1..30}; do
-            body="$(curl --silent --show-error --max-time 45 \
-              -H 'Cache-Control: no-cache' \
-              "https://$API_FQDN/api/v1/health/driver-master" || true)"
+            body="$(curl --silent --show-error --max-time 45 -H 'Cache-Control: no-cache' "https://$API_FQDN/api/v1/health/driver-master" || true)"
             echo "$body"
             member_dupes="$(jq -r '.duplicateMemberGroups // -1' <<<"$body" 2>/dev/null || echo -1)"
             card_dupes="$(jq -r '.duplicateCardGroups // -1' <<<"$body" 2>/dev/null || echo -1)"
