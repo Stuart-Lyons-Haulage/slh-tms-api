@@ -70,6 +70,26 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
 
             if (canonicalResult.Success)
                 await classification.ApplyAsync(actor, ct);
+
+            // Site/market/vehicle repair is independent of Tacho identity health. It is deliberately
+            // conservative: Site consolidation only auto-merges high-confidence identities and puts
+            // ambiguous cases into review rather than guessing.
+            try
+            {
+                db.ChangeTracker.Clear();
+                var masterRepair = await MasterDataDuplicateConsolidation.RunAsync(db, actor, logger, ct);
+                logger.LogInformation(
+                    "Master duplicate consolidation completed: {SiteDuplicates} site duplicate(s), {MarketDuplicates} market duplicate(s), {VehicleDuplicates} vehicle duplicate(s), {FuelRecovered} vehicle fuel detail recovery/recoveries.",
+                    masterRepair.Sites.ArchivedDuplicates,
+                    masterRepair.MarketDuplicatesArchived,
+                    masterRepair.VehicleDuplicatesArchived,
+                    masterRepair.VehicleFuelDetailsRecovered);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                db.ChangeTracker.Clear();
+                logger.LogWarning(ex, "Non-driver master duplicate consolidation failed; Driver Master result is retained and the repair will retry on the next canonical pass.");
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
