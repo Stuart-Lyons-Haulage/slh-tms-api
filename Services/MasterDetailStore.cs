@@ -53,6 +53,8 @@ public static class MasterDetailStore
                 var normalised = NormaliseKey(employeeNumber);
                 if (!applied.Add(normalised) || !byEmployee.TryGetValue(normalised, out var driver)) continue;
                 driver.Coding = Text(payload, "coding");
+                driver.Email = Text(payload, "email") ?? Text(payload, "emailAddress");
+                driver.GradeCode = Text(payload, "gradeCode") ?? Text(payload, "grade") ?? Text(payload, "driverGrade");
                 driver.AgencyName = Text(payload, "agencyName");
                 driver.NorthEligible = Bool(payload, "northEligible");
                 driver.PreloadEligible = Bool(payload, "preloadEligible");
