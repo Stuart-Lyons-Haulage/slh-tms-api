@@ -17,10 +17,11 @@ $lists = @{
   @{Name='AliasKey';Type='Text';Required=$true}; @{Name='SiteKey';Type='Text'}; @{Name='Alias';Type='Text'}; @{Name='AliasType';Type='Choice';Choices=@('Customer','Site','Building','Legacy')}; @{Name='Active';Type='Boolean'}
  )
  'Hub Drivers'=@(
-  @{Name='DriverKey';Type='Text';Required=$true}; @{Name='DriverName';Type='Text'}; @{Name='EmployeeNumber';Type='Text'}; @{Name='TachoName';Type='Text'}; @{Name='MobileNumber';Type='Text'}; @{Name='DriverType';Type='Text'}; @{Name='DriverGroup';Type='Text'}; @{Name='Skills';Type='Text'}; @{Name='AgencyName';Type='Text'}; @{Name='Coding';Type='Text'}; @{Name='Notes';Type='Note'}; @{Name='LicenceNumber';Type='Text'}; @{Name='LicenceExpiry';Type='DateTime'}; @{Name='CPCExpiry';Type='DateTime'}; @{Name='DigitalTachoCardExpiry';Type='DateTime'}; @{Name='MedicalExpiry';Type='DateTime'}; @{Name='TachoCardNumber';Type='Text'}; @{Name='TachoMasterDriverId';Type='Text'}; @{Name='Active';Type='Boolean'}; @{Name='TmsDriverId';Type='Number'}; @{Name='ComplianceStatus';Type='Choice';Choices=@('OK','Warning','Expired','Unknown')}; @{Name='LastSyncUtc';Type='DateTime'}; @{Name='LastTachoSyncUtc';Type='DateTime'}
+  @{Name='DriverKey';Type='Text'}; @{Name='DriverName';Type='Text'}; @{Name='Employee Number';InternalName='EmployeeNumber';Type='Text'}; @{Name='Member Code';InternalName='MemberCode';Type='Text'}; @{Name='TachoName';Type='Text'}; @{Name='MobileNumber';Type='Text'}; @{Name='DriverType';Type='Text'}; @{Name='DriverGroup';Type='Text'}; @{Name='Skills';Type='Text'}; @{Name='AgencyName';Type='Text'}; @{Name='Coding';Type='Text'}; @{Name='Notes';Type='Note'}; @{Name='Email';Type='Text'}; @{Name='Site';Type='Text'}; @{Name='Type';Type='Text'}; @{Name='Agency';Type='Text'}; @{Name='Started';Type='DateTime'}; @{Name='Licence Pass Date';InternalName='LicencePassDate';Type='DateTime'}; @{Name='Licence Check Due';InternalName='LicenceCheckDue';Type='DateTime'}; @{Name='Licence Photo Exp.';InternalName='LicencePhotoExp';Type='DateTime'}; @{Name='DQC Expiry';InternalName='DQCExpiry';Type='DateTime'}; @{Name='LicenceNumber';Type='Text'}; @{Name='Driving Licence Exp.';InternalName='DrivingLicenceExp';Type='DateTime'}; @{Name='CPC Expiry';InternalName='CPCExpiry';Type='DateTime'}; @{Name='Driver Card Exp.';InternalName='DriverCardExp';Type='DateTime'}; @{Name='MedicalExpiry';Type='DateTime'}; @{Name='Driver Card No.';InternalName='DriverCardNo';Type='Text'}; @{Name='TachoMasterDriverId';Type='Text'}; @{Name='Card Last Read';InternalName='CardLastRead';Type='DateTime'}; @{Name='Active';Type='Boolean'}; @{Name='TmsDriverId';Type='Number'}; @{Name='ComplianceStatus';Type='Choice';Choices=@('OK','Warning','Expired','Unknown')}; @{Name='LastSyncUtc';Type='DateTime'}; @{Name='LastTachoSyncUtc';Type='DateTime'}
  )
  'Hub Vehicles'=@(
-  @{Name='VehicleKey';Type='Text';Required=$true}; @{Name='Registration';Type='Text'}; @{Name='FleetNumber';Type='Text'}; @{Name='VehicleType';Type='Text'}; @{Name='Abbreviation';Type='Text'}; @{Name='Transmission';Type='Text'}; @{Name='DvsCompliant';Type='Boolean'}; @{Name='FuelProvider';Type='Text'}; @{Name='CabMobile';Type='Text'}; @{Name='FuelPin';Type='Text'}; @{Name='ShellCard';Type='Text'}; @{Name='BpRedCard';Type='Text'}; @{Name='BpPlainCard';Type='Text'}; @{Name='FuelPinSecretName';Type='Text'}; @{Name='FuelCardLastFour';Type='Text'}; @{Name='Notes';Type='Note'}; @{Name='FleetioId';Type='Text'}; @{Name='FleetioName';Type='Text'}; @{Name='FleetioStatus';Type='Text'}; @{Name='MOTExpiry';Type='DateTime'}; @{Name='TachoCalibrationExpiry';Type='DateTime'}; @{Name='VehicleTestExpiry';Type='DateTime'}; @{Name='SamsaraAssetId';Type='Text'}; @{Name='Capacity';Type='Number'}; @{Name='Active';Type='Boolean'}; @{Name='TmsVehicleId';Type='Number'}; @{Name='ComplianceStatus';Type='Choice';Choices=@('OK','Warning','Expired','Unknown')}; @{Name='LastSyncUtc';Type='DateTime'}
+  @{Name='VehicleKey';Type='Text';Required=$true}; @{Name='Registration';Type='Text'}; @{Name='VIN';Type='Text'}; @{Name='Site';Type='Text'}; @{Name='OwnerType';Type='Text'}; @{Name='FleetNumber';Type='Text'}; @{Name='VehicleType';Type='Text'}; @{Name='Abbreviation';Type='Text'}; @{Name='Transmission';Type='Text'}; @{Name='DvsCompliant';Type='Boolean'}; @{Name='FuelProvider';Type='Text'}; @{Name='CabMobile';Type='Text'}; @{Name='FuelPin';Type='Text'}; @{Name='ShellCard';Type='Text'}; @{Name='BpRedCard';Type='Text'}; @{Name='BpPlainCard';Type='Text'}; @{Name='FuelPinSecretName';Type='Text'}; @{Name='FuelCardLastFour';Type='Text'}; @{Name='Notes';Type='Note'}; @{Name='FleetioId';Type='Text'}; @{Name='FleetioName';Type='Text'}; @{Name='FleetioStatus';Type='Text'}; @{Name='MOTExpiry';Type='DateTime'}; @{Name='TachoCalibrationExpiry';Type='DateTime'}; @{Name='VehicleTestExpiry';Type='DateTime'}; @{Name='SamsaraAssetId';Type='Text'}; @{Name='Capacity';Type='Number'}; @{Name='Active';Type='Boolean'}; @{Name='TmsVehicleId';Type='Number'}; @{Name='ComplianceStatus';Type='Choice';Choices=@('OK','Warning','Expired','Unknown')}; @{Name='LastSyncUtc';Type='DateTime'}
+ )
  'Hub Trailers'=@(
   @{Name='TrailerKey';Type='Text';Required=$true}; @{Name='Registration';Type='Text'}; @{Name='TrailerType';Type='Text'}; @{Name='StandardCapacity';Type='Number'}; @{Name='EuroCapacity';Type='Number'}; @{Name='MOTExpiry';Type='DateTime'}; @{Name='TestExpiry';Type='DateTime'}; @{Name='Active';Type='Boolean'}; @{Name='TmsTrailerId';Type='Number'}; @{Name='LastSyncUtc';Type='DateTime'}
  )
@@ -31,7 +32,10 @@ $lists = @{
   @{Name='WeekCommencing';Type='DateTime';Required=$true}; @{Name='Provider';Type='Text';Required=$true}; @{Name='PricePencePerLitre';Type='Number';Required=$true}; @{Name='IsPricingMaximum';Type='Boolean'}; @{Name='Source';Type='Text'}; @{Name='Notes';Type='Note'}; @{Name='Active';Type='Boolean'}; @{Name='LastSyncUtc';Type='DateTime'}
  )
  'TMS Markets'=@(
-  @{Name='MarketKey';Type='Text';Required=$true}; @{Name='Market';Type='Text';Required=$true}; @{Name='Name';Type='Text';Required=$true}; @{Name='StandOrLocation';Type='Text'}; @{Name='Salesman';Type='Text'}; @{Name='Sender';Type='Text'}; @{Name='ReadOnlyMapPdfUrl';Type='URL'}; @{Name='Active';Type='Boolean'}; @{Name='LastSyncUtc';Type='DateTime'}
+  @{Name='MarketKey';Type='Text'}; @{Name='Market Name';InternalName='Market';Type='Text'}; @{Name='Seller';Type='Text'}; @{Name='Sender';Type='Text'}; @{Name='Stall/Stand';InternalName='StallStand';Type='Text'}; @{Name='Salesman';Type='Text'}; @{Name='ReadOnlyMapPdfUrl';Type='URL'}; @{Name='Active';Type='Boolean'}; @{Name='LastSyncUtc';Type='DateTime'}
+ )
+ 'Order Email Routes'=@(
+  @{Name='RouteKey';Type='Text';Required=$true}; @{Name='CustomerKey';Type='Text'}; @{Name='SiteKey';Type='Text'}; @{Name='MarketKey';Type='Text'}; @{Name='SenderEmail';Type='Text'}; @{Name='SenderDomain';Type='Text'}; @{Name='SubjectContains';Type='Text'}; @{Name='ParserType';Type='Text'}; @{Name='RequiresReview';Type='Boolean'}; @{Name='Active';Type='Boolean'}
  )
  'Hub Integration Log'=@(
   @{Name='CorrelationId';Type='Text';Required=$true}; @{Name='EntityType';Type='Choice';Choices=@('Customer','Site','Alias','Driver','Vehicle','Trailer','Order','Document')}; @{Name='BusinessKey';Type='Text'}; @{Name='Direction';Type='Choice';Choices=@('SharePointToTms','TmsToSharePoint','Inbound')}; @{Name='Status';Type='Choice';Choices=@('Started','Succeeded','Warning','Failed','Retrying')}; @{Name='Message';Type='Note'}; @{Name='OccurredUtc';Type='DateTime'}
@@ -56,13 +60,14 @@ $views = @{
  'Hub Customers'=@{Title='Hub Customers - Active';Fields=@('CustomerKey','TradingName','Active','AccountOwner','DefaultSiteCode','LastSyncStatus','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
  'Hub Sites'=@{Title='Hub Sites - Active';Fields=@('SiteKey','CustomerKey','SiteName','BuildingName','Town','Postcode','AccessWindowStart','AccessWindowEnd','GeofenceId','Active','SyncStatus');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
  'Hub Site Aliases'=@{Title='Hub Site Aliases - Active';Fields=@('AliasKey','SiteKey','Alias','AliasType','Active');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
- 'Hub Drivers'=@{Title='Hub Drivers - Active';Fields=@('DriverKey','DriverName','EmployeeNumber','LicenceNumber','LicenceExpiry','CPCExpiry','DigitalTachoCardExpiry','MedicalExpiry','Active','ComplianceStatus','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
+ 'Hub Drivers'=@{Title='Hub Drivers - Active';Fields=@('DriverKey','DriverName','EmployeeNumber','MemberCode','CardLastRead','LicenceNumber','LicenceExpiry','CPCExpiry','DigitalTachoCardExpiry','MedicalExpiry','Active','ComplianceStatus','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
  'Hub Vehicles'=@{Title='Hub Vehicles - Active';Fields=@('VehicleKey','Registration','VehicleType','Capacity','MOTExpiry','TachoCalibrationExpiry','Active','ComplianceStatus','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
  'Hub Trailers'=@{Title='Hub Trailers - Active';Fields=@('TrailerKey','Registration','TrailerType','StandardCapacity','EuroCapacity','MOTExpiry','TestExpiry','Active','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
  'Hub Integration Log'=@{Title='Hub Integration Log - Recent';Fields=@('CorrelationId','EntityType','BusinessKey','Direction','Status','Message','OccurredUtc');Query='';RowLimit=100}
  'Fuel Cards'=@{Title='Fuel Cards - Active';Fields=@('VehicleKey','Registration','FuelProvider','FuelCardLastFour','Active','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
  'Fuel Pricing'=@{Title='Fuel Pricing - Active';Fields=@('WeekCommencing','Provider','PricePencePerLitre','IsPricingMaximum','Source','Active','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
- 'TMS Markets'=@{Title='TMS Markets - Active';Fields=@('MarketKey','Market','Name','StandOrLocation','Salesman','Sender','ReadOnlyMapPdfUrl','Active','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
+ 'TMS Markets'=@{Title='TMS Markets - Active';Fields=@('MarketKey','Market','Seller','Sender','StallStand','Salesman','ReadOnlyMapPdfUrl','Active','LastSyncUtc');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
+ 'Order Email Routes'=@{Title='Order Email Routes - Active';Fields=@('RouteKey','CustomerKey','SiteKey','MarketKey','SenderEmail','SenderDomain','SubjectContains','ParserType','RequiresReview','Active');Query="<Where><Eq><FieldRef Name='Active'/><Value Type='Boolean'>1</Value></Eq></Where>"}
  'Hub Incidents & Claims'=@{Title='Hub Incidents & Claims - Open';Fields=@('ClaimKey','IncidentDate','CustomerKey','VehicleKey','DriverKey','Status','Severity','Description','TmsIncidentId');Query="<Where><Neq><FieldRef Name='Status'/><Value Type='Choice'>Closed</Value></Neq></Where>"}
 }
 
@@ -73,8 +78,10 @@ foreach($entry in $lists.GetEnumerator()) {
   Set-PnPList -Identity $list -Description $descriptions[$entry.Key] -EnableVersioning $true -MajorVersions 20 | Out-Null
  }
  foreach($field in $entry.Value){
-  $internal=$field.Name -replace '[^A-Za-z0-9]',''
-  if(-not(Get-PnPField -List $list -Identity $internal -ErrorAction SilentlyContinue)){
+  $internal=$field.InternalName
+  if(-not $internal){$internal=$field.Name -replace '[^A-Za-z0-9]',''}
+  $existingField=Get-PnPField -List $list -ErrorAction SilentlyContinue | Where-Object { $_.Title -eq $field.Name -or $_.InternalName -eq $internal } | Select-Object -First 1
+  if(-not $existingField){
    $p=@{List=$list;DisplayName=$field.Name;InternalName=$internal;Type=$field.Type;AddToDefaultView=$true}
    if($field.Required){$p.Required=$true}; if($field.Choices){$p.Choices=$field.Choices}; Add-PnPField @p | Out-Null
   }
@@ -84,15 +91,21 @@ foreach($entry in $lists.GetEnumerator()) {
 foreach($entry in $views.GetEnumerator()) {
  $list=$entry.Key
  $view=$entry.Value
+ $listFields=Get-PnPField -List $list
+ $resolvedViewFields=@($view.Fields | ForEach-Object {
+  $fieldName=$_
+  $field=$listFields | Where-Object { $_.Title -eq $fieldName -or $_.InternalName -eq $fieldName } | Select-Object -First 1
+  if($field){$field.InternalName}else{$fieldName}
+ })
  $existing=Get-PnPView -List $list -Identity $view.Title -ErrorAction SilentlyContinue
  if(-not $existing){
   $rowLimit=100
   if($view.ContainsKey('RowLimit')){$rowLimit=[uint32]$view.RowLimit}
-  $params=@{List=$list;Title=$view.Title;Fields=$view.Fields;SetAsDefault=$true;Paged=$true;RowLimit=$rowLimit}
+  $params=@{List=$list;Title=$view.Title;Fields=$resolvedViewFields;SetAsDefault=$true;Paged=$true;RowLimit=$rowLimit}
   if($view.Query){$params.Query=$view.Query}
   Add-PnPView @params | Out-Null
  } else {
-  Set-PnPView -List $list -Identity $view.Title -Fields $view.Fields | Out-Null
+  Set-PnPView -List $list -Identity $view.Title -Fields $resolvedViewFields | Out-Null
  }
 }
 

@@ -154,9 +154,8 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
             .HasFilter("[TachoMasterDriverId] IS NOT NULL");
         b.Entity<Trailer>().HasIndex(x => x.TrailerNumber).IsUnique();
         b.Entity<Site>().HasIndex(x => x.ExternalCode).IsUnique();
-        if (Database.ProviderName == "Microsoft.EntityFrameworkCore.SqlServer")
-            b.Entity<Site>().Ignore(x => x.OperationalRegion);
-        b.Entity<MarketContact>().HasIndex(x => new { x.Market, x.Name }).IsUnique();
+        b.Entity<MarketContact>().HasIndex(x => new { x.Market, x.Name, x.StandOrLocation });
+        b.Entity<MarketContact>().HasIndex(x => x.MarketKey).IsUnique().HasFilter("[MarketKey] IS NOT NULL");
         b.Entity<FuelPrice>().HasIndex(x => new { x.WeekCommencing, x.Provider }).IsUnique();
         b.Entity<FuelPrice>().Property(x => x.PricePencePerLitre).HasPrecision(10, 2);
 
@@ -247,6 +246,8 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<SiteGeofence>().HasIndex(x => x.SiteId);
         b.Entity<Customer>().HasIndex(x => x.Code).IsUnique(false);
         b.Entity<CustomerEmailRoute>().HasIndex(x => new { x.CustomerCode, x.SenderEmail, x.SenderDomain });
+        b.Entity<CustomerEmailRoute>().HasIndex(x => new { x.Active, x.SenderEmail });
+        b.Entity<CustomerEmailRoute>().HasIndex(x => new { x.Active, x.SenderDomain });
         b.Entity<Site>().HasIndex(x => new { x.CustomerCode, x.ExternalCode });
         b.Entity<GeofenceVisit>().HasIndex(x => new { x.VehicleIdentifier, x.ExitedAtUtc });
         b.Entity<GeofenceVisit>().HasIndex(x => new { x.LoadId, x.LoadStopId });

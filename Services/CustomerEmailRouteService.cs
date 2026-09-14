@@ -1,4 +1,5 @@
 using System.Net.Mail;
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
@@ -13,6 +14,19 @@ namespace Slh.Tms.Api.Services;
 /// </summary>
 public static class CustomerEmailRouteService
 {
+    private static readonly ConcurrentDictionary<string, CachedRouteCandidates> RouteCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan RouteCacheLifetime = TimeSpan.FromMinutes(1);
+
+    /// <summary>True only for an unambiguous, planner-approved route. It is used to
+    /// bypass broad Site Master reads before parsing a recurring sender's email.</summary>
+    public static async Task<bool> HasApprovedRouteAsync(TmsDbContext db, MailboxEmailIntakeRequest request, CancellationToken ct)
+    {
+        var match = await FindRouteAsync(db, request, ct);
+        return match is { RequiresReview: false };
+    }
+
+    public static void InvalidateCache() => RouteCache.Clear();
+
     public static async Task<EmailIntakeParseResult> ApplyAsync(
         TmsDbContext db,
         EmailIntakeParseResult parsed,
@@ -22,35 +36,9 @@ public static class CustomerEmailRouteService
         if (parsed.Orders.Count == 0 || NormalizeEmail(request.SenderAddress) is not { } sender)
             return parsed;
 
-        List<CustomerEmailRoute> routes;
-        try
-        {
-            routes = await db.CustomerEmailRoutes.AsNoTracking().Where(route => route.Active).ToListAsync(ct);
-        }
-        catch (Exception ex) when (DatabaseObjectUnavailable(ex))
-        {
-            // Migration 043 is deliberately non-blocking in production. Until its
-            // maintenance migration is applied, order intake must remain available.
-            return parsed;
-        }
-
-        var subject = request.Subject ?? string.Empty;
-        var domain = sender[(sender.IndexOf('@') + 1)..];
-        var matches = routes
-            .Select(route => new { Route = route, Score = Score(route, sender, domain, subject) })
-            .Where(match => match.Score >= 0)
-            .OrderByDescending(match => match.Score)
-            .ThenBy(match => match.Route.Id)
-            .ToList();
-        if (matches.Count == 0) return parsed;
-
-        var bestScore = matches[0].Score;
-        var best = matches.Where(match => match.Score == bestScore).Select(match => match.Route).ToList();
-        var distinctDestinations = best
-            .Select(route => $"{route.CustomerCode.Trim().ToUpperInvariant()}|{route.DefaultSiteCode?.Trim().ToUpperInvariant()}")
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        if (distinctDestinations.Count != 1)
+        var route = await FindRouteAsync(db, request, ct);
+        if (route is null) return parsed;
+        if (route.Conflicting)
         {
             return parsed with
             {
@@ -60,13 +48,16 @@ public static class CustomerEmailRouteService
             };
         }
 
-        var route = best[0];
-        Site? site = null;
+        Site? collectionSite = null;
+        Site? deliverySite = null;
         if (!string.IsNullOrWhiteSpace(route.DefaultSiteCode))
         {
-            site = await db.Sites.AsNoTracking().FirstOrDefaultAsync(
+            collectionSite = await db.Sites.AsNoTracking().FirstOrDefaultAsync(
                 item => item.Active && item.ExternalCode == route.DefaultSiteCode, ct);
         }
+        if (!string.IsNullOrWhiteSpace(route.DefaultDeliverySiteCode))
+            deliverySite = await db.Sites.AsNoTracking().FirstOrDefaultAsync(
+                item => item.Active && item.ExternalCode == route.DefaultDeliverySiteCode, ct);
 
         var routed = new List<ParsedEmailOrder>(parsed.Orders.Count);
         var globalWarnings = parsed.Warnings.ToList();
@@ -74,7 +65,7 @@ public static class CustomerEmailRouteService
         {
             var root = JsonNode.Parse(order.Payload.GetRawText())?.AsObject() ?? new JsonObject();
             var warnings = order.Warnings.ToList();
-            var conflict = ApplyRoute(root, route, site, sender, warnings);
+            var conflict = ApplyRoute(root, route, collectionSite, deliverySite, sender, warnings);
             if (route.RequiresReview || conflict)
                 root["plannerReady"] = false;
             routed.Add(order with
@@ -91,6 +82,38 @@ public static class CustomerEmailRouteService
             Orders = routed,
             Warnings = globalWarnings.Distinct(StringComparer.OrdinalIgnoreCase).ToList()
         };
+    }
+
+    private static async Task<RouteMatch?> FindRouteAsync(TmsDbContext db, MailboxEmailIntakeRequest request, CancellationToken ct)
+    {
+        var sender = NormalizeEmail(request.SenderAddress);
+        if (sender is null) return null;
+        var domain = sender[(sender.IndexOf('@') + 1)..];
+        var key = $"{sender}|{request.Subject?.Trim()}";
+        if (!RouteCache.TryGetValue(key, out var cached) || cached.ExpiresAtUtc <= DateTimeOffset.UtcNow)
+        {
+            try
+            {
+                // This predicate is deliberately indexable: the former implementation
+                // fetched every active CRM route for every incoming email.
+                var routes = await db.CustomerEmailRoutes.AsNoTracking()
+                    .Where(route => route.Active && (route.SenderEmail == sender || route.SenderDomain == domain))
+                    .ToListAsync(ct);
+                cached = new CachedRouteCandidates(routes, DateTimeOffset.UtcNow.Add(RouteCacheLifetime));
+                RouteCache[key] = cached;
+            }
+            catch (Exception ex) when (DatabaseObjectUnavailable(ex)) { return null; }
+        }
+
+        var subject = request.Subject ?? string.Empty;
+        var matches = cached.Routes.Select(route => new { Route = route, Score = Score(route, sender, domain, subject) })
+            .Where(match => match.Score >= 0).OrderByDescending(match => match.Score).ThenBy(match => match.Route.Id).ToList();
+        if (matches.Count == 0) return null;
+        var bestScore = matches[0].Score;
+        var best = matches.Where(match => match.Score == bestScore).Select(match => match.Route).ToList();
+        var destinations = best.Select(route => $"{route.CustomerCode.Trim().ToUpperInvariant()}|{route.DefaultSiteCode?.Trim().ToUpperInvariant()}|{route.DefaultDeliverySiteCode?.Trim().ToUpperInvariant()}|{route.MarketKey?.Trim()}")
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return destinations.Count == 1 ? new RouteMatch(best[0], false) : new RouteMatch(best[0], true);
     }
 
     /// <summary>
@@ -117,6 +140,7 @@ public static class CustomerEmailRouteService
                     .Select(site => site.ExternalCode)
                     .FirstOrDefaultAsync(ct);
         }
+        var deliverySiteCode = Text(payload, "deliverySiteCode");
 
         try
         {
@@ -134,6 +158,8 @@ public static class CustomerEmailRouteService
                     SenderDomain = sender[(sender.IndexOf('@') + 1)..],
                     ParserType = Clip(Text(payload, "parserTemplate") ?? Text(payload, "mappingTemplate"), 120),
                     DefaultSiteCode = Clip(siteCode, 80),
+                    DefaultDeliverySiteCode = Clip(deliverySiteCode, 80),
+                    MarketKey = Clip(Text(payload, "marketKey"), 160),
                     RequiresReview = false,
                     Active = true
                 };
@@ -145,11 +171,25 @@ public static class CustomerEmailRouteService
             }
             else
             {
+                var marketConflict = false;
                 if (!string.IsNullOrWhiteSpace(existing.DefaultSiteCode)
                     && !string.IsNullOrWhiteSpace(siteCode)
                     && !string.Equals(existing.DefaultSiteCode, siteCode, StringComparison.OrdinalIgnoreCase))
                     existing.DefaultSiteCode = null;
-                existing.RequiresReview = false;
+                if (!string.IsNullOrWhiteSpace(existing.DefaultDeliverySiteCode)
+                    && !string.IsNullOrWhiteSpace(deliverySiteCode)
+                    && !string.Equals(existing.DefaultDeliverySiteCode, deliverySiteCode, StringComparison.OrdinalIgnoreCase))
+                    existing.DefaultDeliverySiteCode = null;
+                var marketKey = Clip(Text(payload, "marketKey"), 160);
+                if (!string.IsNullOrWhiteSpace(marketKey))
+                {
+                    if (!string.IsNullOrWhiteSpace(existing.MarketKey)
+                        && !string.Equals(existing.MarketKey, marketKey, StringComparison.OrdinalIgnoreCase))
+                        marketConflict = true;
+                    else
+                        existing.MarketKey = marketKey;
+                }
+                existing.RequiresReview = marketConflict;
             }
 
             db.MasterDataAudits.Add(new MasterDataAudit
@@ -166,6 +206,7 @@ public static class CustomerEmailRouteService
                     existing.RequiresReview
                 })
             });
+            InvalidateCache();
         }
         catch (Exception ex) when (DatabaseObjectUnavailable(ex))
         {
@@ -173,7 +214,7 @@ public static class CustomerEmailRouteService
         }
     }
 
-    private static bool ApplyRoute(JsonObject root, CustomerEmailRoute route, Site? site, string sender, List<string> warnings)
+    private static bool ApplyRoute(JsonObject root, CustomerEmailRoute route, Site? collectionSite, Site? deliverySite, string sender, List<string> warnings)
     {
         var conflict = false;
         var currentCustomer = Text(root, "customerCode");
@@ -185,22 +226,39 @@ public static class CustomerEmailRouteService
             warnings.Add($"Parsed customer {currentCustomer} conflicts with CRM sender route {route.CustomerCode}; planner review retained.");
         }
 
-        if (site is not null)
+        if (collectionSite is not null)
         {
             var currentCode = Text(root, "collectionSiteCode");
             var currentName = Text(root, "collectionSite") ?? Text(root, "sellerName");
             if (string.IsNullOrWhiteSpace(currentCode) && string.IsNullOrWhiteSpace(currentName))
             {
-                root["collectionSiteCode"] = site.ExternalCode;
-                root["collectionSiteId"] = site.Id.ToString();
-                root["collectionSite"] = site.Name;
-                root["sellerName"] = site.Name;
+                root["collectionSiteCode"] = collectionSite.ExternalCode;
+                root["collectionSiteId"] = collectionSite.Id.ToString();
+                root["collectionSite"] = collectionSite.Name;
+                root["sellerName"] = collectionSite.Name;
             }
             else if (!string.IsNullOrWhiteSpace(currentCode)
-                && !string.Equals(currentCode, site.ExternalCode, StringComparison.OrdinalIgnoreCase))
+                && !string.Equals(currentCode, collectionSite.ExternalCode, StringComparison.OrdinalIgnoreCase))
             {
                 conflict = true;
-                warnings.Add($"Parsed collection site {currentCode} conflicts with CRM sender route {site.ExternalCode}; planner review retained.");
+                warnings.Add($"Parsed collection site {currentCode} conflicts with CRM sender route {collectionSite.ExternalCode}; planner review retained.");
+            }
+        }
+        if (deliverySite is not null)
+        {
+            var currentCode = Text(root, "deliverySiteCode");
+            var currentName = Text(root, "deliverySite") ?? Text(root, "destination");
+            if (string.IsNullOrWhiteSpace(currentCode) && string.IsNullOrWhiteSpace(currentName))
+            {
+                root["deliverySiteCode"] = deliverySite.ExternalCode;
+                root["deliverySiteId"] = deliverySite.Id.ToString();
+                root["deliverySite"] = deliverySite.Name;
+                root["destination"] = deliverySite.Name;
+            }
+            else if (!string.IsNullOrWhiteSpace(currentCode) && !string.Equals(currentCode, deliverySite.ExternalCode, StringComparison.OrdinalIgnoreCase))
+            {
+                conflict = true;
+                warnings.Add($"Parsed delivery site {currentCode} conflicts with CRM sender route {deliverySite.ExternalCode}; planner review retained.");
             }
         }
 
@@ -208,7 +266,10 @@ public static class CustomerEmailRouteService
         root["emailRouteId"] = route.Id.ToString();
         root["emailRouteSender"] = sender;
         root["emailRouteCustomerCode"] = route.CustomerCode;
+        if (!string.IsNullOrWhiteSpace(route.MarketKey))
+            root["marketKey"] = route.MarketKey.Trim();
         root["emailRouteDefaultSiteCode"] = route.DefaultSiteCode;
+        root["emailRouteDefaultDeliverySiteCode"] = route.DefaultDeliverySiteCode;
         root["emailRouteRequiresReview"] = route.RequiresReview || conflict;
         return conflict;
     }
@@ -276,4 +337,16 @@ public static class CustomerEmailRouteService
     private static string? Clip(string? value, int length) => string.IsNullOrWhiteSpace(value)
         ? null
         : value.Length <= length ? value : value[..length];
+
+    private sealed record CachedRouteCandidates(IReadOnlyList<CustomerEmailRoute> Routes, DateTimeOffset ExpiresAtUtc);
+    private sealed record RouteMatch(CustomerEmailRoute Route, bool Conflicting)
+    {
+        public static implicit operator CustomerEmailRoute(RouteMatch match) => match.Route;
+        public bool RequiresReview => Route.RequiresReview;
+        public string CustomerCode => Route.CustomerCode;
+        public string? DefaultSiteCode => Route.DefaultSiteCode;
+        public string? DefaultDeliverySiteCode => Route.DefaultDeliverySiteCode;
+        public string? MarketKey => Route.MarketKey;
+        public Guid Id => Route.Id;
+    }
 }

@@ -38,9 +38,6 @@ public sealed class SqlMasterDataRepository(IOptions<SyncOptions> options, ILogg
             }
         }
 
-        if (summary.Failed == 0)
-            summary.Deactivated = await DeactivateMissingAsync(connection, transaction, definition, items.Select(x => x.Id).ToArray(), ct);
-
         await transaction.CommitAsync(ct);
         return summary.ToImmutable();
     }
@@ -54,6 +51,26 @@ public sealed class SqlMasterDataRepository(IOptions<SyncOptions> options, ILogg
                 .Select(name => item.Fields.TryGetValue(name, out var candidate) ? candidate : null)
                 .FirstOrDefault(candidate => !string.IsNullOrWhiteSpace(candidate));
             values[field.SqlColumn] = ConvertValue(field.SqlColumn, value);
+        }
+
+        // Existing Market rows have a combined Title (for example, "Covent · Seller").
+        // Keep those rows importable while the new structured columns are being populated.
+        // SharePoint item IDs are stable for the life of the list item and therefore make
+        // a safer fallback key than a mutable title.
+        if (definition.Key.Equals("market", StringComparison.OrdinalIgnoreCase))
+        {
+            var title = item.Fields.TryGetValue("Title", out var titleValue) ? titleValue?.Trim() : null;
+            if (values[definition.AnchorColumn] is null)
+                values[definition.AnchorColumn] = item.Id.ToString(CultureInfo.InvariantCulture);
+
+            if (!string.IsNullOrWhiteSpace(title) && title.Contains('·'))
+            {
+                var separator = title.IndexOf('·');
+                if (values.GetValueOrDefault("Market") is null)
+                    values["Market"] = title[..separator].Trim();
+                if (values.GetValueOrDefault("Name") is null)
+                    values["Name"] = title[(separator + 1)..].Trim();
+            }
         }
 
         if (values[definition.AnchorColumn] is not string anchor || string.IsNullOrWhiteSpace(anchor))
@@ -74,8 +91,11 @@ public sealed class SqlMasterDataRepository(IOptions<SyncOptions> options, ILogg
     private static async Task UpsertAsync(SqlConnection connection, SqlTransaction tx, MasterListDefinition definition, Dictionary<string, object?> values, CancellationToken ct)
     {
         var columns = definition.Fields.Select(x => x.SqlColumn).Where(x => x != "IsActive").ToArray();
+        // Incomplete Lists rows and newly added columns must not erase populated SQL data.
+        // Explicit values (including false/zero) still update; blank/null values retain the
+        // existing projection until a deliberate clear workflow is introduced.
         var assignments = columns.Where(x => x != definition.AnchorColumn)
-            .Select(x => $"[{x}] = @{x}")
+            .Select(x => $"[{x}] = COALESCE(@{x}, [{x}])")
             .Append("[IsActive] = @IsActive")
             .Append("[SharePointItemId] = @SharePointItemId")
             .Append("[LastSyncedAt] = @LastSyncedAt")
@@ -123,7 +143,7 @@ END";
         if (column is "DvsCompliant" or "IsActive" or "IsPricingMaximum" or "ReceivesEtaUpdates")
             return bool.TryParse(value, out var boolean)
                 ? boolean : throw new FormatException($"{column} is not true/false.");
-        if (column.EndsWith("Expiry", StringComparison.OrdinalIgnoreCase) || column == "WeekCommencing")
+        if (column.EndsWith("Expiry", StringComparison.OrdinalIgnoreCase) || column is "WeekCommencing" or "CardLastRead" or "StartedOn" or "LicencePassDate" or "LicenceCheckDue")
             return DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var date)
                 ? date.Date : throw new FormatException($"{column} is not a valid date.");
         if (column is "OpenTime" or "CloseTime")

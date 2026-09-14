@@ -57,6 +57,7 @@ BEGIN
     CREATE TABLE dbo.master_drivers
     (
         DriverId nvarchar(40) NOT NULL CONSTRAINT PK_master_drivers PRIMARY KEY,
+        EmployeeNumber nvarchar(40) NULL,
         FullName nvarchar(160) NOT NULL,
         PreferredName nvarchar(160) NULL,
         DisplayName nvarchar(160) NULL,
@@ -69,6 +70,14 @@ BEGIN
         MedicalExpiry date NULL,
         TachoCardNumber nvarchar(80) NULL,
         TachoMasterDriverId nvarchar(80) NULL,
+        CardLastRead date NULL,
+        Email nvarchar(320) NULL,
+        SourceSite nvarchar(160) NULL,
+        StartedOn date NULL,
+        LicencePassDate date NULL,
+        LicenceCheckDue date NULL,
+        LicencePhotoExpiry date NULL,
+        DqcExpiry date NULL,
         EmploymentType nvarchar(30) NULL,
         AgencyName nvarchar(160) NULL,
         DriverType nvarchar(80) NULL,
@@ -93,6 +102,9 @@ BEGIN
         VehicleId nvarchar(40) NOT NULL CONSTRAINT PK_master_vehicles PRIMARY KEY,
         FleetNumber nvarchar(40) NULL,
         Registration nvarchar(20) NOT NULL,
+        VIN nvarchar(40) NULL,
+        VehicleSite nvarchar(160) NULL,
+        OwnerType nvarchar(80) NULL,
         VehicleType nvarchar(80) NULL,
         Abbreviation nvarchar(20) NULL,
         Transmission nvarchar(20) NULL,
@@ -264,8 +276,8 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_drivers_TachoM
     CREATE UNIQUE INDEX UX_master_drivers_TachoMasterDriverId ON dbo.master_drivers(TachoMasterDriverId) WHERE TachoMasterDriverId IS NOT NULL;
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_trailers_Registration' AND object_id = OBJECT_ID(N'dbo.master_trailers'))
     CREATE UNIQUE INDEX UX_master_trailers_Registration ON dbo.master_trailers(Registration) WHERE Registration IS NOT NULL;
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_markets_Market_Name' AND object_id = OBJECT_ID(N'dbo.master_markets'))
-    CREATE UNIQUE INDEX UX_master_markets_Market_Name ON dbo.master_markets(Market, [Name]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_master_markets_Market_Name' AND object_id = OBJECT_ID(N'dbo.master_markets'))
+    CREATE INDEX IX_master_markets_Market_Name ON dbo.master_markets(Market, [Name]);
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_fuel_prices_Week_Provider' AND object_id = OBJECT_ID(N'dbo.master_fuel_prices'))
     CREATE UNIQUE INDEX UX_master_fuel_prices_Week_Provider ON dbo.master_fuel_prices(WeekCommencing, Provider);
 

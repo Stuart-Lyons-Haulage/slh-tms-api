@@ -7,8 +7,8 @@ public sealed class SyncTelemetry(TelemetryClient telemetry, ILogger<SyncTelemet
 {
     public void Summary(string list, SyncSummary summary)
     {
-        logger.LogInformation("Master sync {List}: added={Added}, updated={Updated}, deactivated={Deactivated}, failed={Failed}, read={Read}.",
-            list, summary.Added, summary.Updated, summary.Deactivated, summary.Failed, summary.Read);
+        logger.LogInformation("Master sync {List}: added={Added}, updated={Updated}, deactivated={Deactivated}, failed={Failed}, skipped={Skipped}, read={Read}.",
+            list, summary.Added, summary.Updated, summary.Deactivated, summary.Failed, summary.Skipped, summary.Read);
         telemetry.TrackEvent("MasterDataSyncSummary", new Dictionary<string, string>
         {
             ["List"] = list,
@@ -16,9 +16,10 @@ public sealed class SyncTelemetry(TelemetryClient telemetry, ILogger<SyncTelemet
             ["Updated"] = summary.Updated.ToString(),
             ["Deactivated"] = summary.Deactivated.ToString(),
             ["Failed"] = summary.Failed.ToString(),
-            ["Read"] = summary.Read.ToString()
+            ["Read"] = summary.Read.ToString(),
+            ["Skipped"] = summary.Skipped.ToString()
         });
     }
 }
 
-public sealed record SyncSummary(int Read, int Added, int Updated, int Deactivated, int Failed);
+public sealed record SyncSummary(int Read, int Added, int Updated, int Deactivated, int Failed, int Skipped = 0);

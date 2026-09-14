@@ -197,19 +197,46 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
     private async Task<EmailIntakeParseResult> ParseEmail(MailboxEmailIntakeRequest request, CancellationToken ct)
     {
+        // Recurring, planner-approved senders need only extract the changed movement
+        // details. Do not load/enrich the entire Site Master just to rediscover sites
+        // already pinned on their CRM route.
+        var knownSender = await CustomerEmailRouteService.HasApprovedRouteAsync(db, request, ct);
         var parsed = nwfQuantityChangeParser.TryParse(request)
             ?? nwfCsvParser.TryParse(request)
             ?? nwfWorkbookParser.TryParse(request)
             ?? nwfParser.TryParse(request)
             ?? sainsburyParser.TryParse(request)
             ?? specialistParser.TryParse(request)
-            ?? emailParser.Parse(request, await MasterSiteNames(ct));
+            ?? emailParser.Parse(request, knownSender ? [] : await MasterSiteNames(ct));
 
         // Every parser, including specialist/NWF routes, now passes through the same
         // Site Master resolver before planners see the email in Order Review.
         var routed = await CustomerEmailRouteService.ApplyAsync(db, parsed, request, ct);
+        var fullyMappedFastPath = knownSender && routed.Orders.Count > 0 && routed.Orders.All(order =>
+            ReadBool(order.Payload, "emailRouteMatched") == true &&
+            !string.IsNullOrWhiteSpace(ReadText(order.Payload, "emailRouteDefaultSiteCode")) &&
+            !string.IsNullOrWhiteSpace(ReadText(order.Payload, "emailRouteDefaultDeliverySiteCode")) &&
+            ReadBool(order.Payload, "emailRouteRequiresReview") != true);
+        if (fullyMappedFastPath)
+        {
+            routed = routed with
+            {
+                Orders = routed.Orders.Select(order => order with
+                {
+                    Payload = AddFastPathMarker(order.Payload)
+                }).ToList()
+            };
+            return routed;
+        }
         var aligned = await EmailOrderSiteMasterAlignment.AlignAsync(db, routed, ct);
         return await NwfCrateReferenceLinker.EnrichAsync(db, aligned, request, ct);
+    }
+
+    private static JsonElement AddFastPathMarker(JsonElement payload)
+    {
+        var root = JsonNode.Parse(payload.GetRawText())?.AsObject() ?? new JsonObject();
+        root["emailIntakePath"] = "sender-route-fast-path";
+        return JsonSerializer.SerializeToElement(root);
     }
 
     private async Task<IReadOnlyCollection<string>> MasterSiteNames(CancellationToken ct)
@@ -379,7 +406,10 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                value.Contains("crate", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("tray", StringComparison.OrdinalIgnoreCase);
 
-        return recognisedSource && LooksLikeOrderIntent(request, value);
+        // Any external sender with credible order intent is a mapping exception. This
+        // preserves potentially useful new customer mail without turning unrelated
+        // newsletters or load adverts into work for the planner.
+        return LooksLikeOrderIntent(request, value) && (recognisedSource || !sender.EndsWith("@lyonshaulage.com", StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool LooksLikeOrderIntent(MailboxEmailIntakeRequest request, string value)

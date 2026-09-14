@@ -154,7 +154,7 @@ public sealed class MasterDataReconciliationController(TmsDbContext db, StagingS
                 var rows = await db.MarketContacts.AsNoTracking().OrderBy(x => x.Market).ThenBy(x => x.Name).Take(10000).ToListAsync(ct);
                 return rows.Select(x => JsonObjectOf(new
                 {
-                    x.Id, x.Market, x.Name, x.StandOrLocation, x.Salesman, x.Sender, x.Active
+                    x.Id, x.MarketKey, x.Market, x.Name, x.StandOrLocation, x.Salesman, x.Sender, x.Active
                 })).ToList();
             }
             case "sitetimingrule":
@@ -197,8 +197,11 @@ public sealed class MasterDataReconciliationController(TmsDbContext db, StagingS
             "trailer" => Same(Value(current, "trailerNumber"), Value(incoming, "trailerNumber")),
             "site" => Same(Value(current, "externalCode"), Value(incoming, "externalCode")) ||
                       (string.IsNullOrWhiteSpace(Value(incoming, "externalCode")) && Same(Value(current, "name"), Value(incoming, "name"))),
-            "marketcontact" => Same(Value(current, "market"), Value(incoming, "market")) &&
-                               Same(Value(current, "name"), Value(incoming, "name")),
+            "marketcontact" => !string.IsNullOrWhiteSpace(Value(incoming, "marketKey"))
+                ? Same(Value(current, "marketKey"), Value(incoming, "marketKey"))
+                : Same(Value(current, "market"), Value(incoming, "market")) &&
+                  Same(Value(current, "name"), Value(incoming, "name")) &&
+                  Same(Value(current, "standOrLocation"), Value(incoming, "standOrLocation")),
             _ => false
         };
     }

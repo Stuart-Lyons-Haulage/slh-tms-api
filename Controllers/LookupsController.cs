@@ -61,6 +61,36 @@ public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController
         return Ok(rows.OrderBy(row => row.Market).ThenBy(row => row.Name));
     }
 
+    [HttpPut("market-contacts/{id:guid}"), Authorize(Policy = "TmsWrite")]
+    public async Task<IActionResult> UpdateMarketContact(Guid id, [FromBody] MarketContactUpdateRequest request, CancellationToken ct)
+    {
+        var contact = await db.MarketContacts.SingleOrDefaultAsync(item => item.Id == id, ct);
+        if (contact is null) return NotFound();
+        var market = ClipRequired(request.Market ?? string.Empty, 80);
+        var name = ClipRequired(request.Name ?? string.Empty, 200);
+        if (string.IsNullOrWhiteSpace(market) || string.IsNullOrWhiteSpace(name))
+            return BadRequest(new { message = "Market and seller/sender name are required." });
+
+        var before = JsonSerializer.Serialize(contact);
+        contact.MarketKey ??= id.ToString("N");
+        contact.Market = market;
+        contact.Name = name;
+        contact.StandOrLocation = Clip(request.StandOrLocation, 200);
+        contact.Salesman = Clip(request.Salesman, 200);
+        contact.Sender = Clip(request.Sender, 200);
+        contact.Active = request.Active;
+        db.MasterDataAudits.Add(new MasterDataAudit
+        {
+            EntityType = "MarketContact",
+            EntityId = id,
+            Action = "Updated",
+            ChangesJson = JsonSerializer.Serialize(new { before = JsonDocument.Parse(before).RootElement, after = contact }),
+            ChangedBy = User.Identity?.Name ?? User.FindFirst("preferred_username")?.Value ?? "unknown"
+        });
+        await db.SaveChangesAsync(ct);
+        return Ok(contact);
+    }
+
     [HttpPut("vehicles/{id:guid}")]
     [Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> UpdateVehicle(Guid id, [FromBody] LookupVehicleUpdateRequest request, CancellationToken ct)
@@ -182,3 +212,4 @@ public sealed record LookupCustomerUpdateRequest(string? Code, string? Name, boo
 public sealed record CustomerContactUpdateRequest(string? CustomerCode, string? Name, string? Email, string? MobileNumber, bool ReceivesEtaUpdates, bool Active);
 public sealed record LookupTrailerUpdateRequest(string? TrailerNumber, string? Type, int? StandardCapacity, int? EuroCapacity, string? Notes, bool Active);
 public sealed record LookupSiteUpdateRequest(string? ExternalCode, string? Name, string? DriverTextName, string? Aliases, string? CollectionAddress, string? CollectionInstructions, string? MapLink, decimal? Latitude, decimal? Longitude, string? CustomField1, string? CustomField2, string? CustomField3, bool Active);
+public sealed record MarketContactUpdateRequest(string? Market, string? Name, string? StandOrLocation, string? Salesman, string? Sender, bool Active);

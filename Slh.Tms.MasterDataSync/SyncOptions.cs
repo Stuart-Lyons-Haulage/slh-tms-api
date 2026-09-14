@@ -2,6 +2,7 @@ namespace Slh.Tms.MasterDataSync;
 
 public sealed class SyncOptions
 {
+    public bool Enabled { get; set; }
     public string TenantId { get; set; } = "";
     public string ClientId { get; set; } = "";
     public string ClientSecret { get; set; } = "";
@@ -14,6 +15,7 @@ public sealed class SyncOptions
 
     public void ApplyDefaults()
     {
+        if (bool.TryParse(Environment.GetEnvironmentVariable("MasterDataSync__Enabled"), out var enabled)) Enabled = enabled;
         TenantId = Environment.GetEnvironmentVariable("MasterDataSync__TenantId") ?? TenantId;
         ClientId = Environment.GetEnvironmentVariable("MasterDataSync__ClientId") ?? ClientId;
         ClientSecret = Environment.GetEnvironmentVariable("MasterDataSync__ClientSecret") ?? ClientSecret;

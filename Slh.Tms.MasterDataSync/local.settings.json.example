@@ -3,7 +3,8 @@
   "Values": {
     "AzureWebJobsStorage": "",
     "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
-    "MasterDataSyncSchedule": "0 */5 * * * *",
+    "MasterDataSyncSchedule": "0 0 * * * *",
+    "MasterDataSync__Enabled": "false",
     "MasterDataSync__TenantId": "5aec48a1-c3c7-4cfd-a073-b38ae50041b1",
     "MasterDataSync__ClientId": "e52218ab-0a5a-459a-84b2-423a83152582",
     "MasterDataSync__ClientSecret": "",

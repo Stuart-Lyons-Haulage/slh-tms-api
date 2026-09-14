@@ -1,14 +1,20 @@
 using System.Net;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
+using Microsoft.Extensions.Options;
 
 namespace Slh.Tms.MasterDataSync;
 
-public sealed class SyncFunctions(MasterDataSyncOrchestrator orchestrator, ILogger<SyncFunctions> logger)
+public sealed class SyncFunctions(MasterDataSyncOrchestrator orchestrator, IOptions<SyncOptions> options, ILogger<SyncFunctions> logger)
 {
     [Function("MasterDataSyncTimer")]
     public async Task RunTimerAsync([TimerTrigger("%MasterDataSyncSchedule%")] TimerInfo timer, CancellationToken ct)
     {
+        if (!options.Value.Enabled)
+        {
+            logger.LogInformation("SharePoint-to-SQL master sync is disabled; SQL is the authoritative source.");
+            return;
+        }
         logger.LogInformation("Master data timer started at {StartedAtUtc}.", DateTime.UtcNow);
         await orchestrator.RunAsync(null, ct);
     }
@@ -19,6 +25,12 @@ public sealed class SyncFunctions(MasterDataSyncOrchestrator orchestrator, ILogg
         string listName,
         CancellationToken ct)
     {
+        if (!options.Value.Enabled)
+        {
+            var disabled = request.CreateResponse(HttpStatusCode.Conflict);
+            await disabled.WriteStringAsync("SharePoint-to-SQL master sync is disabled; SQL is the authoritative source.", ct);
+            return disabled;
+        }
         try
         {
             var result = await orchestrator.RunAsync(listName, ct);

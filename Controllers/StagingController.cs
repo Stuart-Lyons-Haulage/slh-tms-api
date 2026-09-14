@@ -19,7 +19,9 @@ public sealed class StagingController(TmsDbContext db, StagingService service) :
         [FromQuery] int take = 100,
         CancellationToken ct = default)
     {
-        take = Math.Clamp(take, 1, 2000);
+        // Review is an operational queue, not an export. Keeping this bounded stops a
+        // large historical staging table (and its source JSON) from timing out the UI.
+        take = Math.Clamp(take, 1, 200);
         var query = db.StagedImports.AsNoTracking().AsQueryable();
         query = query.Where(x => x.Status == (status ?? StagingStatus.PendingReview));
         if (!string.IsNullOrWhiteSpace(entityType))

@@ -12,6 +12,9 @@ public sealed class MasterDataSyncOrchestrator(
 {
     public async Task<SyncSummaryEnvelope> RunAsync(string? requestedList, CancellationToken ct)
     {
+        if (!options.Value.Enabled)
+            throw new InvalidOperationException("SharePoint-to-SQL master sync is disabled; SQL is the authoritative source.");
+
         var selected = string.IsNullOrWhiteSpace(requestedList)
             ? MasterListDefinition.All.Values
             : MasterListDefinition.All.TryGetValue(requestedList, out var definition)
@@ -38,6 +41,7 @@ public sealed class MasterDataSyncOrchestrator(
             acc.Updated += next.Updated;
             acc.Deactivated += next.Deactivated;
             acc.Failed += next.Failed;
+            acc.Skipped += next.Skipped;
             return acc;
         }).ToSummary();
 
@@ -64,7 +68,8 @@ public sealed class MasterDataSyncOrchestrator(
         public int Updated;
         public int Deactivated;
         public int Failed;
-        public SyncSummary ToSummary() => new(Read, Added, Updated, Deactivated, Failed);
+        public int Skipped;
+        public SyncSummary ToSummary() => new(Read, Added, Updated, Deactivated, Failed, Skipped);
     }
 }
 

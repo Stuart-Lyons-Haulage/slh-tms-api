@@ -20,11 +20,13 @@ public sealed class CustomerEmailRouteServiceTests : IClassFixture<CustomWebFact
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
         var suffix = Guid.NewGuid().ToString("N")[..8];
         var sender = $"orders-{suffix}@customer.example";
+        var marketKey = $"market-{suffix}";
         var site = new Site { ExternalCode = $"SITE-{suffix}", Name = $"Farm {suffix}", Active = true };
         db.Sites.Add(site);
         db.CustomerEmailRoutes.Add(new CustomerEmailRoute
         {
             CustomerCode = $"CUS-{suffix}", SenderEmail = sender, DefaultSiteCode = site.ExternalCode,
+            MarketKey = marketKey,
             RequiresReview = false, Active = true
         });
         await db.SaveChangesAsync();
@@ -43,6 +45,7 @@ public sealed class CustomerEmailRouteServiceTests : IClassFixture<CustomWebFact
         Assert.Equal($"CUS-{suffix}".ToUpperInvariant(), payload.GetProperty("customerCode").GetString());
         Assert.Equal(site.ExternalCode, payload.GetProperty("collectionSiteCode").GetString());
         Assert.Equal(site.Name, payload.GetProperty("collectionSite").GetString());
+        Assert.Equal(marketKey, payload.GetProperty("marketKey").GetString());
         Assert.True(payload.GetProperty("emailRouteMatched").GetBoolean());
         Assert.False(payload.GetProperty("emailRouteRequiresReview").GetBoolean());
     }
@@ -65,6 +68,37 @@ public sealed class CustomerEmailRouteServiceTests : IClassFixture<CustomWebFact
 
         Assert.Equal("UNKNOWN", result.Orders.Single().Payload.GetProperty("customerCode").GetString());
         Assert.Contains(result.Warnings, warning => warning.Contains("conflicting CRM routes", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Approved_domain_route_resolves_collection_and_delivery_without_site_master_scan()
+    {
+        await using var scope = factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var domain = $"mapped-{suffix}.example";
+        var collection = new Site { ExternalCode = $"COL-{suffix}", Name = $"Collection {suffix}", Active = true };
+        var delivery = new Site { ExternalCode = $"DEL-{suffix}", Name = $"Delivery {suffix}", Active = true };
+        db.Sites.AddRange(collection, delivery);
+        db.CustomerEmailRoutes.Add(new CustomerEmailRoute
+        {
+            CustomerCode = $"CUS-{suffix}", SenderDomain = domain,
+            DefaultSiteCode = collection.ExternalCode, DefaultDeliverySiteCode = delivery.ExternalCode,
+            RequiresReview = false, Active = true
+        });
+        await db.SaveChangesAsync();
+
+        var request = Request($"planner@{domain}", "Daily pallets");
+        Assert.True(await CustomerEmailRouteService.HasApprovedRouteAsync(db, request, CancellationToken.None));
+        var parsed = new EmailIntakeParseResult([new ParsedEmailOrder("one", "same-movement",
+            JsonSerializer.SerializeToElement(new { customerCode = "UNKNOWN", pallets = 17 }), [])], [], null);
+
+        var result = await CustomerEmailRouteService.ApplyAsync(db, parsed, request, CancellationToken.None);
+        var payload = result.Orders.Single().Payload;
+        Assert.Equal(collection.ExternalCode, payload.GetProperty("collectionSiteCode").GetString());
+        Assert.Equal(delivery.ExternalCode, payload.GetProperty("deliverySiteCode").GetString());
+        Assert.Equal(17, payload.GetProperty("pallets").GetInt32());
+        Assert.False(payload.GetProperty("emailRouteRequiresReview").GetBoolean());
     }
 
     [Fact]

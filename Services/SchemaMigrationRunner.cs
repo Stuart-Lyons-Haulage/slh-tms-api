@@ -100,7 +100,15 @@ public static class SchemaMigrationRunner
         "042_Operational_Read_Performance_Indexes.sql",
         "043_Customer_Site_Crm_Links.sql",
         "044_Market_Read_Only_Map.sql",
-        "045_Customer_Contacts_Master_Projection.sql"
+        "045_Customer_Contacts_Master_Projection.sql",
+        "046_Driver_Card_Read_And_Source_Detail.sql",
+        "047_Market_Seller_Stand_Duplicates.sql",
+        "048_Customer_Email_Route_Market_Key.sql",
+        "049_Market_Contact_Stable_Key_And_Stands.sql",
+        "050_Master_Vehicle_Source_Detail.sql",
+        "051_Vehicle_Source_Detail.sql",
+        "052_Email_Intake_Fast_Path.sql",
+        "058_Operational_Compliance_Fields.sql"
     ];
 
     internal const string HistoryTableSql = """

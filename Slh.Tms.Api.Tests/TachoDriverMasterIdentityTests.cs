@@ -7,6 +7,36 @@ namespace Slh.Tms.Api.Tests;
 
 public sealed class TachoDriverMasterIdentityTests
 {
+    [Theory]
+    [InlineData("14/03/2026", true)]
+    [InlineData("13/03/2026", false)]
+    [InlineData("14/09/2026", true)]
+    [InlineData("15/09/2026", false)]
+    [InlineData("", false)]
+    [InlineData("not a date", false)]
+    public void Card_read_eligibility_is_limited_to_the_inclusive_six_month_window(string lastRead, bool expected)
+    {
+        Assert.Equal(expected, TachoDriverCardReadEligibility.IsEligible(lastRead, new DateOnly(2026, 9, 14)));
+    }
+
+    [Fact]
+    public void Card_read_cutoff_uses_the_UK_calendar_date()
+    {
+        Assert.Equal(new DateOnly(2026, 9, 15), TachoDriverCardReadEligibility.UkToday(new DateTimeOffset(2026, 9, 14, 23, 30, 0, TimeSpan.Zero)));
+    }
+
+    [Theory]
+    [InlineData("14/03/2026", true)]
+    [InlineData("13/03/2026", false)]
+    [InlineData("14/09/2026", true)]
+    [InlineData("15/09/2026", false)]
+    [InlineData("", false)]
+    [InlineData("not a date", false)]
+    public void Card_read_eligibility_includes_only_the_last_six_months_and_never_future_reads(string lastRead, bool expected)
+    {
+        Assert.Equal(expected, TachoDriverCardReadEligibility.IsEligible(lastRead, new DateOnly(2026, 9, 14)));
+    }
+
     [Fact]
     public void Member_code_is_a_unique_secondary_identity()
     {

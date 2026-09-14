@@ -112,20 +112,15 @@ public sealed class TachoDriverMasterSyncService(
 
         var drivers = await db.Drivers.OrderBy(driver => driver.DisplayName).ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
-        var activeSageDriverEmployeeNumbers = await LoadActiveSageDriverEmployeeNumbersAsync(ct);
         var activeBefore = drivers.Count(driver => driver.Active);
-        if (activeBefore > 0 && workers.Count < Math.Max(25, (int)Math.Floor(activeBefore * 0.35m)))
+        var ukToday = TachoDriverCardReadEligibility.UkToday(now);
+        workers = workers
+            .Where(DriverPopulationRules.IsDriver)
+            .Where(worker => TachoDriverCardReadEligibility.IsEligible(worker.CardLastRead, ukToday))
+            .ToList();
+        if (workers.Count < 25 || (activeBefore > 0 && workers.Count < Math.Max(25, (int)Math.Floor(activeBefore * 0.35m))) )
             return new(false, workers.Count, activeBefore, 0, 0, 0, 0, 0, 0, 0, CountDuplicateNames(workers), workers.Count(worker => string.IsNullOrWhiteSpace(worker.CardNumber)),
-                $"TachoMaster returned {workers.Count} live workers against {activeBefore} active TMS drivers. The result failed the population safety check, so no records were archived.", now);
-
-        var knownDriverMembers = drivers.Where(DriverPopulationRules.IsDriver)
-            .Where(driver => !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId))
-            .Select(driver => driver.TachoMasterDriverId!.Trim()).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        workers = workers.Where(worker => DriverPopulationRules.IsDriver(worker) ||
-            knownDriverMembers.Contains(worker.MemberCode.ToString(System.Globalization.CultureInfo.InvariantCulture))).ToList();
-        if (workers.Count < 25)
-            return new(false, workers.Count, activeBefore, 0, 0, 0, 0, 0, 0, 0, CountDuplicateNames(workers), workers.Count(worker => string.IsNullOrWhiteSpace(worker.CardNumber)),
-                "The driver-only population is below the safety floor; no records were changed.", now);
+                $"Only {workers.Count} driver(s) had a TachoMaster card read within the last six months against {activeBefore} active TMS drivers. The eligibility/population safety check stopped the sync; no records were changed.", now);
 
         var loadUse = await db.Loads.AsNoTracking()
             .Where(load => load.DriverId != null)
@@ -265,8 +260,6 @@ public sealed class TachoDriverMasterSyncService(
         var archived = 0;
         foreach (var driver in drivers.Where(driver => driver.Active && !claimedDriverIds.Contains(driver.Id)))
         {
-            if (activeSageDriverEmployeeNumbers.Contains(driver.EmployeeNumber))
-                continue;
             driver.Active = false;
             archived++;
             db.MasterDataAudits.Add(new MasterDataAudit
@@ -277,7 +270,7 @@ public sealed class TachoDriverMasterSyncService(
                 ChangedBy = actor,
                 ChangesJson = JsonSerializer.Serialize(new
                 {
-                    reason = "Not present in the current TachoMaster driver population",
+                    reason = "No qualifying TachoMaster card read within the last six months",
                     driver.EmployeeNumber,
                     driver.DisplayName,
                     driver.TachoMasterDriverId,
@@ -307,7 +300,6 @@ public sealed class TachoDriverMasterSyncService(
             driversArchivedNotInTachoMaster = archived,
             sameNameDifferentIdentityGroups = CountDuplicateNames(workers),
             workersWithoutCard = workersWithoutCardAfter,
-            activeSageDriversRetained = activeAfter.Count(driver => activeSageDriverEmployeeNumbers.Contains(driver.EmployeeNumber)),
             duplicateMemberGroups = duplicateMemberGroupsAfter,
             duplicateCardGroups = duplicateCardGroupsAfter,
             activeWithoutMember = activeWithoutMemberAfter,
@@ -347,12 +339,12 @@ public sealed class TachoDriverMasterSyncService(
             ReceivedAtUtc = now,
             ReviewedAtUtc = DateTimeOffset.UtcNow,
             ReviewedBy = actor,
-            ReviewNote = "Tachograph card is the canonical driver identity. TachoMaster Member Code is retained as a secondary external reference; active Sage HR drivers are protected from single-source archiving."
+            ReviewNote = "Only driver records with a TachoMaster card read in the last six months are refreshed. Member Code remains the stable secondary external reference; older records are retained inactive."
         });
 
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
-        var message = $"TachoMaster canonical Driver Master: {workers.Count} card-backed live worker(s), {activeAfter.Count} active canonical TMS driver(s), {created} created, {retired} duplicate record(s) retired and {archived} stale/non-live TMS driver(s) archived. Card identity, Sage HR retention and duplicate checks passed.";
+        var message = $"TachoMaster canonical Driver Master: {workers.Count} driver(s) with a card read in the last six months, {activeAfter.Count} active canonical TMS driver(s), {created} created, {retired} duplicate record(s) retired and {archived} old/ineligible TMS driver(s) archived. Card-read eligibility, identity and duplicate checks passed.";
         return new(true, workers.Count, activeAfter.Count, created, updated, retired, archived, matchedByMember, matchedByCard, matchedByName,
             CountDuplicateNames(workers), workers.Count(worker => string.IsNullOrWhiteSpace(worker.CardNumber)), message, DateTimeOffset.UtcNow);
     }
@@ -383,30 +375,6 @@ public sealed class TachoDriverMasterSyncService(
             DuplicateMembers = duplicateMembers,
             DuplicateCards = duplicateCards
         };
-    }
-
-    private async Task<HashSet<string>> LoadActiveSageDriverEmployeeNumbersAsync(CancellationToken ct)
-    {
-        var payload = await db.StagedImports.AsNoTracking()
-            .Where(row => row.EntityType == "sagehrsync" && row.Status == StagingStatus.Promoted)
-            .OrderByDescending(row => row.ReviewedAtUtc ?? row.ReceivedAtUtc)
-            .Select(row => row.PayloadJson)
-            .FirstOrDefaultAsync(ct);
-        if (string.IsNullOrWhiteSpace(payload)) return new(StringComparer.OrdinalIgnoreCase);
-        try
-        {
-            using var document = JsonDocument.Parse(payload);
-            if (!document.RootElement.TryGetProperty("activeDriverEmployeeNumbers", out var values) || values.ValueKind != JsonValueKind.Array)
-                return new(StringComparer.OrdinalIgnoreCase);
-            return values.EnumerateArray()
-                .Select(value => value.GetString()?.Trim())
-                .Where(value => !string.IsNullOrWhiteSpace(value))
-                .ToHashSet(StringComparer.OrdinalIgnoreCase)!;
-        }
-        catch (JsonException)
-        {
-            return new(StringComparer.OrdinalIgnoreCase);
-        }
     }
 
     public async Task<TachoLiveWorker?> ProfileAsync(Guid driverId, CancellationToken ct)
@@ -667,6 +635,8 @@ public sealed class TachoDriverMasterSyncService(
             string.Equals(driver.DriverType, "Casual", StringComparison.OrdinalIgnoreCase))
             driver.DriverType = Clean(worker.WorkerType) ?? driver.DriverType;
         driver.LicenceExpiry = ParseDate(worker.DrivingLicenceExpiry) ?? driver.LicenceExpiry;
+        driver.CPCExpiry = ParseDate(worker.CpcExpiry) ?? driver.CPCExpiry;
+        driver.DigitalTachoCardExpiry = ParseDate(worker.DriverCardExpiry) ?? driver.DigitalTachoCardExpiry;
         driver.TachoDriveAvailableTodayMinutes = profile?.DriveAvailableTodayMinutes ?? driver.TachoDriveAvailableTodayMinutes;
         driver.TachoDriveAvailableWeekMinutes = profile?.DriveAvailableWeekMinutes ?? driver.TachoDriveAvailableWeekMinutes;
         driver.TachoWorkAvailableWeekMinutes = profile?.WorkAvailableWeekMinutes ?? driver.TachoWorkAvailableWeekMinutes;
@@ -803,6 +773,41 @@ public sealed class TachoDriverMasterSyncService(
                message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) ||
                message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase) ||
                message.Contains("Cannot find the object", StringComparison.OrdinalIgnoreCase);
+    }
+}
+
+public static class TachoDriverCardReadEligibility
+{
+    private static readonly string[] DayFirstFormats = ["d/M/yyyy", "dd/MM/yyyy", "d/M/yy", "dd/MM/yy", "yyyy-MM-dd"];
+
+    public static bool IsEligible(string? cardLastRead, DateOnly ukToday)
+    {
+        if (!TryParseUkDate(cardLastRead, out var lastRead)) return false;
+        return lastRead >= ukToday.AddMonths(-6) && lastRead <= ukToday;
+    }
+
+    public static DateOnly UkToday(DateTimeOffset? nowUtc = null)
+        => DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(nowUtc ?? DateTimeOffset.UtcNow, LondonTimeZone()).DateTime);
+
+    private static bool TryParseUkDate(string? value, out DateOnly date)
+    {
+        date = default;
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        var clean = value.Trim();
+        if (DateOnly.TryParseExact(clean, DayFirstFormats, CultureInfo.GetCultureInfo("en-GB"), DateTimeStyles.None, out date))
+            return true;
+        if (DateTimeOffset.TryParse(clean, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var timestamp))
+        {
+            date = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(timestamp, LondonTimeZone()).DateTime);
+            return true;
+        }
+        return DateOnly.TryParse(clean, CultureInfo.GetCultureInfo("en-GB"), DateTimeStyles.AllowWhiteSpaces, out date);
+    }
+
+    private static TimeZoneInfo LondonTimeZone()
+    {
+        try { return TimeZoneInfo.FindSystemTimeZoneById("Europe/London"); }
+        catch (TimeZoneNotFoundException) { return TimeZoneInfo.FindSystemTimeZoneById("GMT Standard Time"); }
     }
 }
 

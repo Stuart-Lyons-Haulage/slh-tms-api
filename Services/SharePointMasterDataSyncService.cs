@@ -49,37 +49,6 @@ public sealed class SharePointMasterDataSyncService(
     private readonly SharePointMasterDataOptions settings = options;
     public bool IsEnabled => settings.Enabled;
 
-    public async Task<SharePointMasterDataPublishResult> PublishFromSqlAsync(TmsDbContext db, CancellationToken ct)
-    {
-        ValidateConfiguration();
-        var token = await GetTokenAsync(ct);
-        var rows = await BuildAllRowsAsync(db, ct);
-        var rowsByList = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var mapping in settings.Lists)
-        {
-            if (!rows.TryGetValue(mapping.Key, out var sourceRows) || string.IsNullOrWhiteSpace(mapping.Value)) continue;
-            rowsByList[mapping.Key] = await PublishRowsAsync(mapping.Key, mapping.Value, sourceRows, token, ct);
-        }
-
-        return new SharePointMasterDataPublishResult(rowsByList.Count, rowsByList.Values.Sum(), rowsByList);
-    }
-
-    /// <summary>
-    /// Seeds only the governed Customer Contacts List. This is intentionally separate from the
-    /// original all-master bootstrap so adding CRM contacts later cannot overwrite deliberate
-    /// edits already made to Customers, Sites, Drivers or Fleet Lists.
-    /// </summary>
-    public async Task<int> PublishCustomerContactsFromSqlAsync(TmsDbContext db, CancellationToken ct)
-    {
-        ValidateConfiguration();
-        if (!settings.Lists.TryGetValue("customercontact", out var listName) || string.IsNullOrWhiteSpace(listName))
-            throw new SharePointMasterDataException("ListConfigurationMissing", "The governed Customer Contacts List is not configured.");
-        var token = await GetTokenAsync(ct);
-        var rows = await BuildCustomerContactRowsAsync(db, ct);
-        return await PublishRowsAsync("customercontact", listName, rows, token, ct);
-    }
-
     public async Task<SharePointMasterDataSyncResult> ReadAsync(CancellationToken ct)
     {
         ValidateConfiguration();
@@ -91,8 +60,7 @@ public sealed class SharePointMasterDataSyncService(
         {
             if (string.IsNullOrWhiteSpace(mapping.Value)) continue;
             listsRead++;
-            var listId = await ResolveForEntityAsync(mapping.Key, mapping.Value, token, ct);
-            await EnsureColumnsAsync(mapping.Key, listId, token, ct);
+            var listId = await ResolveListIdAsync(mapping.Value, token, ct);
             var rows = await ReadListAsync(mapping.Key, listId, token, ct);
             foreach (var row in rows)
             {
@@ -102,29 +70,13 @@ public sealed class SharePointMasterDataSyncService(
                 requests.Add(new StageImportRequest(
                     mapping.Key,
                     $"sharepoint:{mapping.Key}:{itemId}:{sourceVersion ?? "unversioned"}",
-                    NormalizeFields(mapping.Key, fields),
+                    NormalizeFields(mapping.Key, fields, itemId),
                     "Microsoft Lists / SharePoint"));
             }
         }
 
         logger.LogInformation("Read {RowsRead} master-data rows from {ListsRead} Microsoft Lists.", requests.Count, listsRead);
         return new SharePointMasterDataSyncResult(listsRead, requests.Count, requests);
-    }
-
-    public async Task PublishSiteAliasesAsync(string siteKey, string? aliases, CancellationToken ct)
-    {
-        ValidateConfiguration();
-        var token = await GetTokenAsync(ct);
-        if (!settings.Lists.TryGetValue("site", out var listName) || string.IsNullOrWhiteSpace(listName))
-            throw new SharePointMasterDataException("ListConfigurationMissing", "The Hub Sites List is not configured for SharePoint CRM sync.");
-        var listId = await ResolveListIdAsync(listName, token, ct);
-        var existing = await ReadListAsync("site", listId, token, ct);
-        var current = existing.FirstOrDefault(item => item.TryGetProperty("fields", out var fields)
-            && fields.TryGetProperty("SiteKey", out var key)
-            && string.Equals(key.ToString(), siteKey, StringComparison.OrdinalIgnoreCase));
-        if (current.ValueKind == JsonValueKind.Undefined)
-            throw new SharePointMasterDataException("SiteNotFoundInCrm", $"Site '{siteKey}' is not yet in Hub Sites. Run the initial CRM publish before alias sync can update it.");
-        await UpdateListItemAsync(listId, current.GetProperty("id").ToString(), Fields(("Aliases", aliases), ("SyncStatus", "Synced")), token, ct);
     }
 
     private async Task<Dictionary<string, IReadOnlyList<Dictionary<string, object?>>>> BuildAllRowsAsync(TmsDbContext db, CancellationToken ct)
@@ -143,6 +95,7 @@ public sealed class SharePointMasterDataSyncService(
             ["driver"] = await BuildDriverRowsAsync(db, drivers, ct),
             ["vehicle"] = vehicles.Select(x => Fields(
                 ("Title", x.Registration), ("VehicleKey", x.FleetNumber ?? x.Registration), ("Registration", x.Registration),
+                ("VIN", x.VIN), ("Site", x.VehicleSite), ("Owner Type", x.OwnerType),
                 ("FleetNumber", x.FleetNumber), ("Abbreviation", x.Abbreviation), ("Transmission", x.Transmission),
                 ("DvsCompliant", x.DvsCompliant), ("FuelProvider", x.FuelProvider), ("CabMobile", x.CabMobile), ("FuelPin", x.FuelPin),
                 ("FuelPinSecretName", x.FuelPinSecretName), ("FuelCardLastFour", x.FuelCardLastFour),
@@ -159,9 +112,9 @@ public sealed class SharePointMasterDataSyncService(
                 ("Title", x.TrailerNumber), ("TrailerKey", x.TrailerNumber), ("Registration", x.TrailerNumber),
                 ("TrailerType", x.Type), ("StandardCapacity", x.StandardCapacity), ("EuroCapacity", x.EuroCapacity),
                 ("Notes", x.Notes), ("SourcePayloadJson", JsonSerializer.Serialize(x)), ("Active", x.Active))).ToArray(),
-            ["marketcontact"] = (await db.MarketContacts.AsNoTracking().OrderBy(x => x.Market).ThenBy(x => x.Name).ToListAsync(ct)).Select(x => Fields(
-                ("Title", $"{x.Market} · {x.Name}"), ("Market", x.Market), ("Name", x.Name),
-                ("StandOrLocation", x.StandOrLocation), ("Salesman", x.Salesman), ("Sender", x.Sender),
+            ["marketcontact"] = (await db.MarketContacts.AsNoTracking().OrderBy(x => x.Market).ThenBy(x => x.Name).ThenBy(x => x.StandOrLocation).ToListAsync(ct)).Select(x => Fields(
+                ("Title", $"{x.Market} · {x.Name}"), ("MarketKey", x.MarketKey), ("Market", x.Market), ("Seller", x.Name),
+                ("Stall/Stand", x.StandOrLocation), ("Salesman", x.Salesman), ("Sender", x.Sender),
                 ("ReadOnlyMapPdfUrl", x.ReadOnlyMapPdfUrl), ("SourcePayloadJson", JsonSerializer.Serialize(x)), ("Active", x.Active))).ToArray(),
             ["emailroute"] = await BuildEmailRouteRowsAsync(db, ct)
         };
@@ -241,7 +194,8 @@ public sealed class SharePointMasterDataSyncService(
                 .ToListAsync(ct);
             return routes.Select(x => Fields(
                 ("Title", x.SenderEmail ?? $"@{x.SenderDomain}"), ("RouteKey", x.Id.ToString()),
-                ("CustomerKey", x.CustomerCode), ("SiteKey", x.DefaultSiteCode),
+                ("CustomerKey", x.CustomerCode), ("SiteKey", x.DefaultSiteCode), ("DeliverySiteKey", x.DefaultDeliverySiteCode),
+                ("MarketKey", x.MarketKey),
                 ("SenderEmail", x.SenderEmail), ("SenderDomain", x.SenderDomain),
                 ("SubjectContains", x.SubjectContains), ("ParserType", x.ParserType),
                 ("RequiresReview", x.RequiresReview), ("SourcePayloadJson", JsonSerializer.Serialize(x)), ("Active", x.Active))).ToArray();
@@ -343,9 +297,6 @@ public sealed class SharePointMasterDataSyncService(
 
     private async Task<string> ResolveForEntityAsync(string entityType, string listName, string token, CancellationToken ct)
     {
-        if (entityType.Equals("customercontact", StringComparison.OrdinalIgnoreCase)
-            || entityType.Equals("emailroute", StringComparison.OrdinalIgnoreCase))
-            return await ResolveOrProvisionManagedListAsync(entityType, listName, token, ct);
         return await ResolveListIdAsync(listName, token, ct);
     }
 
@@ -465,15 +416,16 @@ public sealed class SharePointMasterDataSyncService(
         ],
         "driver" =>
         [
-            TextColumn("DriverKey", true), TextColumn("DriverName"), TextColumn("EmployeeNumber"), TextColumn("TachoName"),
-            TextColumn("Email"), TextColumn("MobileNumber"), TextColumn("GradeCode"), TextColumn("AllocatedVehicle"), TextColumn("DriverType"), TextColumn("DriverGroup"), TextColumn("Skills", multiline: true),
+            TextColumn("DriverKey", true), TextColumn("Member Code", true), TextColumn("DriverName"), TextColumn("EmployeeNumber"), TextColumn("TachoName"),
+            TextColumn("Site"), TextColumn("Type"), TextColumn("Agency"), TextColumn("Email"),
+            TextColumn("MobileNumber"), TextColumn("GradeCode"), TextColumn("AllocatedVehicle"), TextColumn("DriverType"), TextColumn("DriverGroup"), TextColumn("Skills", multiline: true),
             TextColumn("AgencyName"), TextColumn("Coding"), TextColumn("Notes", multiline: true), TextColumn("LicenceNumber"),
-            TextColumn("LicenceExpiry"), TextColumn("TachoCardNumber", true), TextColumn("TachoMasterDriverId", true),
+            TextColumn("LicenceExpiry"), DateColumn("Card Last Read"), TextColumn("TachoCardNumber", true), TextColumn("TachoMasterDriverId", true),
             TextColumn("LastTachoSyncUtc"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active"), TextColumn("ComplianceStatus")
         ],
         "vehicle" =>
         [
-            TextColumn("VehicleKey", true), TextColumn("Registration"), TextColumn("VehicleType"), TextColumn("FleetNumber"),
+            TextColumn("VehicleKey", true), TextColumn("Registration"), TextColumn("VIN"), TextColumn("Site"), TextColumn("Owner Type"), TextColumn("VehicleType"), TextColumn("FleetNumber"),
             TextColumn("Abbreviation"), TextColumn("Transmission"), BooleanColumn("DvsCompliant"), TextColumn("FuelProvider"),
             TextColumn("CabMobile"), TextColumn("FuelPin"), TextColumn("FuelPinSecretName"), TextColumn("FuelCardLastFour"), TextColumn("ShellCard"),
             TextColumn("BpRedCard"), TextColumn("BpPlainCard"), TextColumn("Notes", multiline: true), TextColumn("FleetioId"),
@@ -491,13 +443,13 @@ public sealed class SharePointMasterDataSyncService(
         ],
         "marketcontact" =>
         [
-            TextColumn("Market"), TextColumn("Name"), TextColumn("StandOrLocation"), TextColumn("Salesman"),
+            TextColumn("MarketKey", true), TextColumn("Market"), TextColumn("Seller"), TextColumn("Stall/Stand"), TextColumn("Salesman"),
             TextColumn("Sender"), TextColumn("ReadOnlyMapPdfUrl"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active")
         ],
         "emailroute" =>
         [
-            TextColumn("RouteKey", true), TextColumn("CustomerKey"), TextColumn("SiteKey"),
-            TextColumn("SenderEmail"), TextColumn("SenderDomain"), TextColumn("SubjectContains"),
+            TextColumn("RouteKey", true), TextColumn("CustomerKey"), TextColumn("SiteKey"), TextColumn("MarketKey"),
+            TextColumn("SenderEmail"), TextColumn("SenderDomain"), TextColumn("SubjectContains"), TextColumn("DeliverySiteKey"),
             TextColumn("ParserType"), BooleanColumn("RequiresReview"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active")
         ],
         _ => []
@@ -514,6 +466,12 @@ public sealed class SharePointMasterDataSyncService(
     {
         ["name"] = name,
         ["boolean"] = new Dictionary<string, object>()
+    };
+
+    private static Dictionary<string, object> DateColumn(string name) => new()
+    {
+        ["name"] = name,
+        ["dateTime"] = new Dictionary<string, object> { ["format"] = "dateOnly" }
     };
 
     private static Dictionary<string, object> NumberColumn(string name) => new()
@@ -590,7 +548,7 @@ public sealed class SharePointMasterDataSyncService(
         .Where(pair => pair.Value is not null)
         .ToDictionary(pair => pair.Name, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
 
-    private static JsonElement NormalizeFields(string entityType, JsonElement fields)
+    private static JsonElement NormalizeFields(string entityType, JsonElement fields, string? itemId = null)
     {
         var values = JsonNode.Parse(fields.GetRawText())?.AsObject() ?? new JsonObject();
         string? Text(string name)
@@ -637,7 +595,13 @@ public sealed class SharePointMasterDataSyncService(
                 Set("active", Text("Active"));
                 break;
             case "driver":
-                Set("employeeNumber", Text("EmployeeNumber") ?? Text("DriverKey"));
+                Set("tachoMasterDriverId", Text("Member Code") ?? Text("MemberCode") ?? Text("Member_x0020_Code") ?? Text("TachoMasterDriverId"));
+                Set("cardLastRead", Text("Card Last Read") ?? Text("CardLastRead") ?? Text("Card_x0020_Last_x0020_Read"));
+                Set("sourceSite", Text("Site"));
+                Set("employmentType", Text("Type"));
+                Set("agencyName", Text("Agency") ?? Text("AgencyName"));
+                Set("startedOn", Text("Started") ?? Text("StartedOn"));
+                Set("employeeNumber", Text("EmployeeNumber") ?? Text("Employee Number") ?? Text("Employee_x0020_Number") ?? Text("DriverKey"));
                 Set("displayName", Text("DriverName") ?? Text("DriverKey"));
                 Set("tachoName", Text("TachoName"));
                 Set("email", Text("Email"));
@@ -660,6 +624,9 @@ public sealed class SharePointMasterDataSyncService(
             case "vehicle":
                 Set("registration", Text("Registration") ?? Text("VehicleKey"));
                 Set("fleetNumber", Text("FleetNumber") ?? Text("VehicleKey"));
+                Set("vin", Text("VIN"));
+                Set("site", Text("Site"));
+                Set("ownerType", Text("Owner Type") ?? Text("OwnerType") ?? Text("Owner_x0020_Type"));
                 Set("abbreviation", Text("Abbreviation"));
                 Set("transmission", Text("Transmission"));
                 Set("dvsCompliant", Text("DvsCompliant"));
@@ -686,18 +653,25 @@ public sealed class SharePointMasterDataSyncService(
                 Set("active", Text("Active"));
                 break;
             case "marketcontact":
-                Set("market", Text("Market"));
-                Set("name", Text("Name"));
-                Set("standOrLocation", Text("StandOrLocation"));
+            {
+                var title = Text("Title") ?? string.Empty;
+                var titleParts = title.Split('·', 2, StringSplitOptions.TrimEntries);
+                Set("marketKey", Text("MarketKey") ?? itemId);
+                Set("market", Text("Market") ?? (titleParts.Length == 2 ? titleParts[0] : null));
+                Set("name", Text("Seller") ?? Text("Name") ?? (titleParts.Length == 2 ? titleParts[1] : null));
+                Set("standOrLocation", Text("Stall/Stand") ?? Text("StallStand") ?? Text("Stall_x002f_Stand") ?? Text("StandOrLocation"));
                 Set("salesman", Text("Salesman"));
                 Set("sender", Text("Sender"));
                 Set("readOnlyMapPdfUrl", Text("ReadOnlyMapPdfUrl"));
                 Set("active", Text("Active"));
                 break;
+            }
             case "emailroute":
                 Set("id", Text("RouteKey"));
                 Set("customerCode", Text("CustomerKey"));
                 Set("defaultSiteCode", Text("SiteKey"));
+                Set("defaultDeliverySiteCode", Text("DeliverySiteKey"));
+                Set("marketKey", Text("MarketKey"));
                 Set("senderEmail", Text("SenderEmail"));
                 Set("senderDomain", Text("SenderDomain"));
                 Set("subjectContains", Text("SubjectContains"));

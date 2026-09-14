@@ -208,8 +208,11 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
         route.SubjectContains = Clip(Text(payload, "subjectContains"), 200);
         route.ParserType = Clip(Text(payload, "parserType"), 120);
         route.DefaultSiteCode = Clip(Text(payload, "defaultSiteCode"), 80);
+        route.DefaultDeliverySiteCode = Clip(Text(payload, "defaultDeliverySiteCode"), 80);
+        route.MarketKey = Clip(Text(payload, "marketKey"), 160);
         route.RequiresReview = Bool(payload, "requiresReview", true);
         route.Active = Bool(payload, "active", true);
+        CustomerEmailRouteService.InvalidateCache();
     }
 
     private async Task PromoteVehicle(JsonElement payload, CancellationToken ct)
@@ -221,6 +224,9 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             vehicle = new Vehicle { Registration = registration };
             db.Vehicles.Add(vehicle);
         }
+        vehicle.VIN = Clip(Text(payload, "vin"), 40);
+        vehicle.OwnerType = Clip(Text(payload, "ownerType"), 80);
+        vehicle.VehicleSite = Clip(Text(payload, "vehicleSite") ?? Text(payload, "site"), 160);
         vehicle.FleetNumber = Clip(Text(payload, "fleetNumber"), 40);
         vehicle.Abbreviation = Clip(Text(payload, "abbreviation"), 20);
         vehicle.Transmission = Clip(Text(payload, "transmission"), 20);
@@ -320,13 +326,16 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
         var market = CanonicalMarket(ClipRequired(Text(payload, "market") ?? Text(payload, "marketName") ?? "General", 80));
         var name = Clip(Text(payload, "name") ?? Text(payload, "contactName") ?? Text(payload, "sellerName"), 200);
         if (string.IsNullOrWhiteSpace(name)) throw new JsonException("Market contact payload requires name.");
-        var contact = await db.MarketContacts.SingleOrDefaultAsync(item => item.Market == market && item.Name == name, ct);
         var standOrLocation = Clip(Text(payload, "standOrLocation") ?? Text(payload, "stallNumber"), 200);
+        var marketKey = Clip(Text(payload, "marketKey"), 160);
+        var contact = !string.IsNullOrWhiteSpace(marketKey)
+            ? await db.MarketContacts.SingleOrDefaultAsync(item => item.MarketKey == marketKey, ct)
+            : await db.MarketContacts.FirstOrDefaultAsync(item => item.Market == market && item.Name == name && item.StandOrLocation == standOrLocation, ct);
         var salesman = Clip(Text(payload, "salesman"), 200);
         var sender = Clip(Text(payload, "sender"), 200);
         var readOnlyMapPdfUrl = Clip(Text(payload, "readOnlyMapPdfUrl"), 1000);
-        if (contact is null) db.MarketContacts.Add(new MarketContact { Market = market, Name = name, StandOrLocation = standOrLocation, Salesman = salesman, Sender = sender, ReadOnlyMapPdfUrl = readOnlyMapPdfUrl, Active = Bool(payload, "active", true) });
-        else { contact.StandOrLocation = standOrLocation; contact.Salesman = salesman; contact.Sender = sender; contact.ReadOnlyMapPdfUrl = readOnlyMapPdfUrl; contact.Active = Bool(payload, "active", true); }
+        if (contact is null) db.MarketContacts.Add(new MarketContact { MarketKey = marketKey, Market = market, Name = name, StandOrLocation = standOrLocation, Salesman = salesman, Sender = sender, ReadOnlyMapPdfUrl = readOnlyMapPdfUrl, Active = Bool(payload, "active", true) });
+        else { contact.MarketKey ??= marketKey; contact.Market = market; contact.Name = name; contact.StandOrLocation = standOrLocation; contact.Salesman = salesman; contact.Sender = sender; contact.ReadOnlyMapPdfUrl = readOnlyMapPdfUrl; contact.Active = Bool(payload, "active", true); }
     }
 
     private async Task PromoteFuelPrice(JsonElement payload, CancellationToken ct)
