@@ -121,7 +121,8 @@ public static class SchemaMigrationRunner
         "051_Vehicle_Source_Detail.sql",
         "052_Email_Intake_Fast_Path.sql",
         "058_Operational_Compliance_Fields.sql",
-        "059_RoadTech_Operational_Visits.sql"
+        "059_RoadTech_Operational_Visits.sql",
+        "060_TachoMaster_Job_Managed_Identity.sql"
     ];
 
     internal const string HistoryTableSql = """
