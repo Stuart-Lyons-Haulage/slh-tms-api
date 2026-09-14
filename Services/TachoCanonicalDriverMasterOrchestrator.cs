@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Models.Tracking;
 
 namespace Slh.Tms.Api.Services;
 
@@ -13,21 +14,22 @@ public sealed record TachoCanonicalOrchestrationResult(
 
 /// <summary>
 /// Single authority for manual and scheduled TachoMaster Driver Master cleansing.
-/// The normal integration pass runs first because it can resolve an existing TMS driver by
-/// Tacho Card -> Member Code -> Employee Number -> Name and persist the strong Tacho identity.
-/// The canonical pass then consolidates/archives against the live TachoMaster worker directory.
+/// TachoMaster Member Code is the canonical person identity. Card number, employee number and
+/// compatible name are supporting evidence only and must never merge two different Member Codes.
 /// </summary>
 public sealed class TachoCanonicalDriverMasterOrchestrator(
     TmsDbContext db,
     IntegrationSyncCoordinator integration,
-    TachoDriverMasterSyncService canonical,
     DriverMasterClassificationService classification,
     DistributedLeaseManager leases,
+    TachoMasterClient tachoMaster,
+    TachoMasterOptions tachoMasterOptions,
+    IHttpClientFactory httpClientFactory,
     ILogger<TachoCanonicalDriverMasterOrchestrator> logger)
 {
     public async Task<TachoCanonicalOrchestrationResult> RunAsync(string actor, CancellationToken ct)
     {
-        await using var lease = await leases.TryAcquireAsync(IntegrationLeaseNames.TachoMaster, TimeSpan.FromMinutes(60), ct);
+        await using var lease = await leases.TryAcquireAsync(IntegrationLeaseNames.TachoMaster, TimeSpan.FromMinutes(15), ct);
         if (lease is null)
         {
             var now = DateTimeOffset.UtcNow;
@@ -48,17 +50,38 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
         try
         {
             await classification.ApplyAsync(actor, ct);
-
-            // This pass is intentionally first. It adds Employee Number as the safe fallback
-            // between card and name, then persists Member Code/Card so the canonical pass can
-            // use strong identities for consolidation.
             enrichment = await integration.SyncTachoMasterCoreAsync($"{actor}:identity-enrichment", ct);
             if (!enrichment.Success)
                 logger.LogWarning("TachoMaster identity-enrichment pass did not complete before canonical sync: {Message}", enrichment.Message);
 
-            canonicalResult = await canonical.SyncCoreAsync(actor, ct);
+            canonicalResult = await TachoMemberCodeDriverMasterSync.RunAsync(
+                db,
+                tachoMaster,
+                httpClientFactory,
+                tachoMasterOptions,
+                logger,
+                actor,
+                ct);
+
             if (canonicalResult.Success)
                 await classification.ApplyAsync(actor, ct);
+
+            try
+            {
+                db.ChangeTracker.Clear();
+                var masterRepair = await MasterDataDuplicateConsolidation.RunAsync(db, actor, logger, ct);
+                logger.LogInformation(
+                    "Master duplicate consolidation completed: {SiteDuplicates} site duplicate(s), {MarketDuplicates} market duplicate(s), {VehicleDuplicates} vehicle duplicate(s), {FuelRecovered} vehicle fuel detail recovery/recoveries.",
+                    masterRepair.Sites.ArchivedDuplicates,
+                    masterRepair.MarketDuplicatesArchived,
+                    masterRepair.VehicleDuplicatesArchived,
+                    masterRepair.VehicleFuelDetailsRecovered);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                db.ChangeTracker.Clear();
+                logger.LogWarning(ex, "Non-driver master duplicate consolidation failed; Driver Master result is retained and the repair will retry on the next canonical pass.");
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -66,7 +89,7 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "TachoMaster canonical Driver Master orchestration failed.");
+            logger.LogError(ex, "TachoMaster Member Code canonical Driver Master orchestration failed.");
             enrichment = new IntegrationSyncResult("TachoMaster", false, DateTimeOffset.UtcNow, "Identity-enrichment pass did not complete.");
             canonicalResult = new TachoDriverMasterSyncResult(false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 ex.GetBaseException().Message, DateTimeOffset.UtcNow);
@@ -75,10 +98,9 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
         var completed = DateTimeOffset.UtcNow;
         var success = canonicalResult.Success;
         var message = success
-            ? $"Canonical TachoMaster Driver Master completed. {canonicalResult.Message}"
-            : $"Canonical TachoMaster Driver Master failed safely. {canonicalResult.Message}";
+            ? $"Canonical TachoMaster Member Code Driver Master completed. {canonicalResult.Message}"
+            : $"Canonical TachoMaster Member Code Driver Master failed safely. {canonicalResult.Message}";
 
-        // Record every orchestration attempt, including provider failures and safety-floor aborts.
         db.StagedImports.Add(new StagedImport
         {
             EntityType = "tachodrivermasterorchestration",
@@ -88,7 +110,8 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
                 startedAtUtc = started,
                 completedAtUtc = completed,
                 success,
-                identityOrder = new[] { "Tacho Card Number", "TachoMaster Member Code", "Employee Number", "Unique compatible name" },
+                identityAuthority = "TachoMaster Member Code",
+                identityOrder = new[] { "TachoMaster Member Code", "Tacho Card Number", "Employee Number", "Unique compatible name" },
                 identityEnrichment = new
                 {
                     enrichment.Success,
@@ -114,8 +137,8 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
                 }
             }),
             Source = actor.StartsWith("system:", StringComparison.OrdinalIgnoreCase)
-                ? "Scheduled TachoMaster canonical Driver Master"
-                : "Manual TachoMaster canonical Driver Master",
+                ? "Scheduled TachoMaster Member Code canonical Driver Master"
+                : "Manual TachoMaster Member Code canonical Driver Master",
             Status = success ? StagingStatus.Promoted : StagingStatus.Rejected,
             ReceivedAtUtc = started,
             ReviewedAtUtc = completed,
