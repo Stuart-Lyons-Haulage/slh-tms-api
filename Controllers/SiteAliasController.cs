@@ -52,7 +52,8 @@ public sealed class SiteAliasController(TmsDbContext db) : ControllerBase
             site.Name,
             site.Aliases,
             geofenceLinksRepaired,
-            sharePointSync = "disabled; Microsoft Lists remains authoritative"
+            masterDataAuthority = "SQL/TMS",
+            sharePointSync = "disabled"
         });
     }
 
