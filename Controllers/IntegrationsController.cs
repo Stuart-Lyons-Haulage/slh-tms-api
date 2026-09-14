@@ -153,6 +153,7 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
         {
             var employees = await sageHr.GetActiveEmployeesAsync(ct);
             var rawCandidates = employees.Where(IsDriver).ToList();
+            var excludedNonDrivers = employees.Count - rawCandidates.Count;
             // Sage can return the same employee more than once when historical
             // team/position records are expanded. De-duplicate before touching
             // the unique EmployeeNumber index in Azure SQL.
@@ -197,7 +198,7 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
             {
                 EntityType = "sagehrsync",
                 IdempotencyKey = $"sagehrsync:{Guid.NewGuid():N}",
-                PayloadJson = JsonSerializer.Serialize(new { sourceEmployeeCount = employees.Count, driverCandidateCount = candidates.Count, created, updated, skipped }),
+                PayloadJson = JsonSerializer.Serialize(new { sourceEmployeeCount = employees.Count, driverCandidateCount = candidates.Count, excludedNonDrivers, created, updated, skipped }),
                 Source = "Sage HR driver synchronisation",
                 Status = StagingStatus.Promoted,
                 ReviewedAtUtc = DateTimeOffset.UtcNow,
@@ -206,7 +207,7 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
             });
             await db.SaveChangesAsync(ct);
             await transaction.CommitAsync(ct);
-            return Ok(new { sourceEmployeeCount = employees.Count, driverCandidateCount = candidates.Count, created, updated, skipped, syncedAtUtc = DateTimeOffset.UtcNow });
+            return Ok(new { sourceEmployeeCount = employees.Count, driverCandidateCount = candidates.Count, excludedNonDrivers, created, updated, skipped, syncedAtUtc = DateTimeOffset.UtcNow });
         }
         catch (Exception exception)
         {
