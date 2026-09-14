@@ -20,7 +20,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj -c Release --no-restore > test.log 2>&1
+          dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj -c Release > test.log 2>&1
           result=$?
           cat test.log
           echo "$result" > test.exit
