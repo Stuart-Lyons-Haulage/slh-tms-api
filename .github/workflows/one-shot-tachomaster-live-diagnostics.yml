@@ -51,11 +51,8 @@ jobs:
               --job-execution-name "$execution" \
               --output json || true
 
-            echo '=== Azure CLI job logs command help ==='
-            az containerapp job logs show --help || true
-
-            echo '=== Latest execution console logs ==='
-            az containerapp job logs show \
+            echo '=== Latest execution console logs (bounded) ==='
+            timeout 25s az containerapp job logs show \
               --name "$TACHO_JOB" \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --execution "$execution" \
