@@ -6,12 +6,17 @@ namespace Slh.Tms.Api.Services;
 /// <summary>A worker/member number alone is not evidence that an employee is a driver.</summary>
 public static class DriverPopulationRules
 {
+    private const string NonDriverRolePattern = @"\b(non[- ]?driver|office|administrator|admin|manager|management|workshop)\b";
+
     public static bool IsOfficeReference(string? employeeNumber) =>
         !string.IsNullOrWhiteSpace(employeeNumber) && employeeNumber.Trim().StartsWith("TM", StringComparison.OrdinalIgnoreCase);
 
     public static bool HasDriverRole(string? value) => !string.IsNullOrWhiteSpace(value) &&
         Regex.IsMatch(value, @"\bdrivers?\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) &&
-        !Regex.IsMatch(value, @"\b(non[- ]?driver|office|administrator|admin|manager|management|workshop)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        !HasNonDriverRole(value);
+
+    public static bool HasNonDriverRole(string? value) => !string.IsNullOrWhiteSpace(value) &&
+        Regex.IsMatch(value, NonDriverRolePattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     public static bool IsSubcontractor(Driver driver) =>
         string.Equals(driver.DriverType?.Trim(), "Subcontractor", StringComparison.OrdinalIgnoreCase) ||
@@ -31,9 +36,19 @@ public static class DriverPopulationRules
         string.Equals(worker.WorkerType?.Trim(), "Subcontractor", StringComparison.OrdinalIgnoreCase) ||
         !string.IsNullOrWhiteSpace(worker.AgencyName);
 
-    public static bool IsSageDriver(SageHrEmployee employee, string? driverTeam, string? positionKeyword) =>
-        (!string.IsNullOrWhiteSpace(driverTeam) && HasDriverRole(driverTeam) &&
-            string.Equals(employee.Team?.Trim(), driverTeam.Trim(), StringComparison.OrdinalIgnoreCase)) ||
-        (!string.IsNullOrWhiteSpace(positionKeyword) && HasDriverRole(employee.Position) &&
-            employee.Position!.Contains(positionKeyword.Trim(), StringComparison.OrdinalIgnoreCase));
+    public static bool IsSageDriver(SageHrEmployee employee, string? driverTeam, string? positionKeyword)
+    {
+        // A Sage employee can carry an old or broad "Drivers" team assignment while
+        // their current position identifies them as office/management staff. Any
+        // explicit non-driving role wins over a positive team or position match.
+        if (HasNonDriverRole(employee.Team) || HasNonDriverRole(employee.Position))
+            return false;
+
+        var isConfiguredDriverTeam = !string.IsNullOrWhiteSpace(driverTeam) && HasDriverRole(driverTeam) &&
+            string.Equals(employee.Team?.Trim(), driverTeam.Trim(), StringComparison.OrdinalIgnoreCase);
+        var hasDriverPosition = !string.IsNullOrWhiteSpace(positionKeyword) && HasDriverRole(employee.Position) &&
+            employee.Position!.Contains(positionKeyword.Trim(), StringComparison.OrdinalIgnoreCase);
+
+        return isConfiguredDriverTeam || hasDriverPosition;
+    }
 }
