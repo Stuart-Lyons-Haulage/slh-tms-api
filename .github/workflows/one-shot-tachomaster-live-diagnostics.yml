@@ -1,4 +1,4 @@
-name: One-shot TachoMaster live diagnostics
+name: One-shot TachoMaster live repair
 
 on:
   push:
@@ -11,13 +11,14 @@ permissions:
   id-token: write
 
 jobs:
-  diagnose:
+  repair:
     runs-on: ubuntu-latest
     environment:
       name: production
     env:
       AZURE_RESOURCE_GROUP: slh-tms-prod-rg
       API_APP: slh-tms-api-prod
+      API_FQDN: slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
       TACHO_JOB: slh-tms-job-tachomaster
     steps:
       - name: Sign in to Azure
@@ -27,18 +28,86 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Inspect production SQL identity wiring
+      - name: Repair job SQL managed identity connection
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== API identity ==='
-          az containerapp show --name "$API_APP" --resource-group "$AZURE_RESOURCE_GROUP" --query identity --output json
-          echo '=== Tacho job identity ==='
-          az containerapp job show --name "$TACHO_JOB" --resource-group "$AZURE_RESOURCE_GROUP" --query identity --output json
-
           source_secrets="$(az containerapp secret list --name "$API_APP" --resource-group "$AZURE_RESOURCE_GROUP" --show-values --output json)"
           conn="$(jq -r '[.[] | select(.name == "tms-db-connection")][0].value // empty' <<<"$source_secrets")"
-          auth="$(sed -n 's/.*[Aa]uthentication=\([^;]*\).*/\1/p' <<<"$conn")"
-          userid="$(sed -n 's/.*[Uu]ser [Ii][Dd]=\([^;]*\).*/\1/p' <<<"$conn")"
-          echo "SQL_AUTH_MODE=${auth:-not-explicit}"
-          if test -n "$userid"; then echo "SQL_CONNECTION_HAS_USER_ID=true"; else echo "SQL_CONNECTION_HAS_USER_ID=false"; fi
+          test -n "$conn"
+
+          job_client_id="$(az containerapp job show \
+            --name "$TACHO_JOB" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query 'identity.userAssignedIdentities.*.clientId | [0]' \
+            --output tsv)"
+          test -n "$job_client_id"
+
+          # The API uses a system-assigned identity, so its governed connection string has no
+          # User ID. The scheduled job uses a user-assigned identity and SqlClient therefore
+          # needs that identity's client ID in the Managed Identity connection string.
+          job_conn="$(printf '%s' "$conn" | sed -E 's/(^|;)[[:space:]]*[Uu]ser[[:space:]]+[Ii][Dd]=[^;]*//g')"
+          job_conn="${job_conn%;};User Id=${job_client_id};"
+
+          az containerapp job secret set \
+            --name "$TACHO_JOB" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --secrets "tms-db=$job_conn" \
+            --output none
+          az containerapp job update \
+            --name "$TACHO_JOB" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --set-env-vars "ConnectionStrings__TmsDb=secretref:tms-db" \
+            --output none
+          echo "TachoMaster job SQL connection now targets its configured user-assigned managed identity."
+
+      - name: Run canonical TachoMaster sync immediately
+        shell: bash
+        run: |
+          set -euo pipefail
+          execution="$(az containerapp job start \
+            --name "$TACHO_JOB" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query name --output tsv)"
+          echo "EXECUTION=$execution"
+          for attempt in {1..60}; do
+            state="$(az containerapp job execution show \
+              --name "$TACHO_JOB" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --job-execution-name "$execution" \
+              --query properties.status --output tsv 2>/dev/null || true)"
+            echo "status=${state:-unknown}"
+            case "$state" in
+              Succeeded) exit 0 ;;
+              Failed)
+                timeout 30s az containerapp job logs show \
+                  --name "$TACHO_JOB" --resource-group "$AZURE_RESOURCE_GROUP" \
+                  --execution "$execution" --container "$TACHO_JOB" \
+                  --follow false --tail 150 --format text || true
+                exit 1
+                ;;
+            esac
+            sleep 10
+          done
+          exit 1
+
+      - name: Verify canonical Driver Master
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in {1..30}; do
+            body="$(curl --silent --show-error --max-time 45 \
+              -H 'Cache-Control: no-cache' \
+              "https://$API_FQDN/api/v1/health/driver-master" || true)"
+            echo "$body"
+            member_dupes="$(jq -r '.duplicateMemberGroups // -1' <<<"$body" 2>/dev/null || echo -1)"
+            card_dupes="$(jq -r '.duplicateCardGroups // -1' <<<"$body" 2>/dev/null || echo -1)"
+            aligned="$(jq -r '.populationAligned // false' <<<"$body" 2>/dev/null || echo false)"
+            latest="$(jq -r '.latestCanonicalSyncUtc // empty' <<<"$body" 2>/dev/null || true)"
+            if test "$member_dupes" = "0" -a "$card_dupes" = "0" -a "$aligned" = "true" -a -n "$latest"; then
+              echo "Canonical Driver Master clean/aligned at $latest"
+              exit 0
+            fi
+            sleep 10
+          done
+          exit 1
