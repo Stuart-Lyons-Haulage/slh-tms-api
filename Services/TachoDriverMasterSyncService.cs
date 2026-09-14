@@ -287,7 +287,7 @@ public sealed class TachoDriverMasterSyncService(
         var canonicalHealthy = claimedDriverIds.Count == workers.Count &&
                                duplicateMemberGroupsAfter == 0 &&
                                duplicateCardGroupsAfter == 0 &&
-                               workersWithoutCardAfter == 0;
+                               activeWithoutMemberAfter == 0;
 
         var auditPayload = JsonSerializer.Serialize(new
         {
@@ -311,7 +311,7 @@ public sealed class TachoDriverMasterSyncService(
             await transaction.RollbackAsync(ct);
             await transaction.DisposeAsync();
             db.ChangeTracker.Clear();
-            var failureMessage = $"TachoMaster canonical Driver Master was not promoted because the resulting population failed the strict identity gate: source={workers.Count}, claimed={claimedDriverIds.Count}, active={activeAfter.Count}, duplicate members={duplicateMemberGroupsAfter}, duplicate cards={duplicateCardGroupsAfter}, source workers without card={workersWithoutCardAfter}. No partial cleanse was committed.";
+            var failureMessage = $"TachoMaster canonical Driver Master was not promoted because the resulting population failed the strict identity gate: source={workers.Count}, claimed={claimedDriverIds.Count}, active={activeAfter.Count}, duplicate members={duplicateMemberGroupsAfter}, duplicate cards={duplicateCardGroupsAfter}, active without member code={activeWithoutMemberAfter}, source workers without card={workersWithoutCardAfter}. Cardless workers are allowed when their stable TachoMaster Member Code is present. No partial cleanse was committed.";
             db.StagedImports.Add(new StagedImport
             {
                 EntityType = "tachodrivermastersync",
@@ -344,7 +344,7 @@ public sealed class TachoDriverMasterSyncService(
 
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
-        var message = $"TachoMaster canonical Driver Master: {workers.Count} driver(s) with a card read in the last six months, {activeAfter.Count} active canonical TMS driver(s), {created} created, {retired} duplicate record(s) retired and {archived} old/ineligible TMS driver(s) archived. Card-read eligibility, identity and duplicate checks passed.";
+        var message = $"TachoMaster canonical Driver Master: {workers.Count} driver(s) with a qualifying card-read date in the last six months, {activeAfter.Count} active canonical TMS driver(s), {created} created, {retired} duplicate record(s) retired and {archived} old/ineligible TMS driver(s) archived. Identity and duplicate checks passed; {workersWithoutCardAfter} current worker(s) have no card number and remain keyed by stable TachoMaster Member Code.";
         return new(true, workers.Count, activeAfter.Count, created, updated, retired, archived, matchedByMember, matchedByCard, matchedByName,
             CountDuplicateNames(workers), workers.Count(worker => string.IsNullOrWhiteSpace(worker.CardNumber)), message, DateTimeOffset.UtcNow);
     }
