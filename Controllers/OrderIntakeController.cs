@@ -77,27 +77,33 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         await EnsureSourceEmailEvidence(request, ct);
         var staged = 0;
         var existing = 0;
-        var superseded = 0;
         var records = new List<object>();
 
-        // NWF tracker workbooks and pallet-order CSVs are versioned snapshots.
-        // Supersede older pending versions by any stable alias before inserting
-        // the new snapshot rows. Strong NWF references are canonicalised without
-        // the planning date so corrected customer snapshots replace earlier rows.
-        var matchKeys = parsed.Orders
-            .SelectMany(order => ReadMatchKeys(order.Payload))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        if (matchKeys.Count > 0)
-            superseded += await SupersedeOlderPendingByMatchKeys(matchKeys, request.MessageId, ct);
-
-        foreach (var order in parsed.Orders)
+        var prepared = parsed.Orders.Select(order =>
         {
-            var idempotencyKey = $"email:{CompactKey(request.MessageId)}:{order.SourceKey}";
-            if (idempotencyKey.Length > 200) idempotencyKey = idempotencyKey[..200];
+            var key = $"email:{CompactKey(request.MessageId)}:{order.SourceKey}";
+            if (key.Length > 200) key = key[..200];
+            return (Order: order, IdempotencyKey: key);
+        }).ToList();
 
-            var already = await db.StagedImports.AsNoTracking().SingleOrDefaultAsync(item => item.IdempotencyKey == idempotencyKey, ct);
-            if (already is not null)
+        var idempotencyKeys = prepared.Select(item => item.IdempotencyKey).Distinct(StringComparer.Ordinal).ToList();
+        var existingByKey = idempotencyKeys.Count == 0
+            ? new Dictionary<string, StagedImport>(StringComparer.Ordinal)
+            : await db.StagedImports.AsNoTracking()
+                .Where(item => idempotencyKeys.Contains(item.IdempotencyKey))
+                .ToDictionaryAsync(item => item.IdempotencyKey, StringComparer.Ordinal, ct);
+
+        var missingOrders = prepared
+            .Where(item => !existingByKey.ContainsKey(item.IdempotencyKey))
+            .Select(item => item.Order)
+            .ToList();
+        var superseded = await SupersedeOlderPendingBatch(missingOrders, parsed.Orders, request.MessageId, ct);
+        var createdByKey = new Dictionary<string, StagedImport>(StringComparer.Ordinal);
+
+        foreach (var preparedOrder in prepared)
+        {
+            if (existingByKey.TryGetValue(preparedOrder.IdempotencyKey, out var already) ||
+                createdByKey.TryGetValue(preparedOrder.IdempotencyKey, out already))
             {
                 existing++;
                 records.Add(new
@@ -110,16 +116,16 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 continue;
             }
 
-            superseded += await SupersedeOlderPending(order.NaturalKey, request.MessageId, ct);
+            var order = preparedOrder.Order;
             var stagedPayload = EnrichSourceEvidence(order.Payload, request);
             var item = stagingService.Create(new StageImportRequest(
                 "order",
-                idempotencyKey,
+                preparedOrder.IdempotencyKey,
                 stagedPayload,
                 $"Info mailbox / {(request.SenderAddress ?? "unknown sender").Trim()}"));
             db.StagedImports.Add(item);
             db.StagedImportEvents.Add(StagingAudit.Create(item, "Received"));
-            await db.SaveChangesAsync(ct);
+            createdByKey[preparedOrder.IdempotencyKey] = item;
             staged++;
 
             records.Add(new
@@ -133,6 +139,9 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 reviewUrl = $"{Request.Scheme}://{Request.Host}/api/v1/staging/{item.Id}"
             });
         }
+
+        if (staged > 0 || superseded > 0)
+            await db.SaveChangesAsync(ct);
 
         TmsMetrics.Shared.RecordImportBatch(staged + existing, existing, "email_order");
 
@@ -197,9 +206,6 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
     private async Task<EmailIntakeParseResult> ParseEmail(MailboxEmailIntakeRequest request, CancellationToken ct)
     {
-        // Recurring, planner-approved senders need only extract the changed movement
-        // details. Do not load/enrich the entire Site Master just to rediscover sites
-        // already pinned on their CRM route.
         var knownSender = await CustomerEmailRouteService.HasApprovedRouteAsync(db, request, ct);
         var parsed = nwfQuantityChangeParser.TryParse(request)
             ?? nwfCsvParser.TryParse(request)
@@ -209,8 +215,6 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             ?? specialistParser.TryParse(request)
             ?? emailParser.Parse(request, knownSender ? [] : await MasterSiteNames(ct));
 
-        // Every parser, including specialist/NWF routes, now passes through the same
-        // Site Master resolver before planners see the email in Order Review.
         var routed = await CustomerEmailRouteService.ApplyAsync(db, parsed, request, ct);
         var fullyMappedFastPath = knownSender && routed.Orders.Count > 0 && routed.Orders.All(order =>
             ReadBool(order.Payload, "emailRouteMatched") == true &&
@@ -367,8 +371,6 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         var value = $"{sender} {subject} {body} {attachments}";
         if (LooksOperationalNoise(value))
             return false;
-        // Unknown market layouts and incomplete market rows must remain visible
-        // for review, including body-only instructions and planner replies.
         if (subject.Contains("market", StringComparison.OrdinalIgnoreCase) &&
             Regex.IsMatch(body, @"\b\d+\s*(?:pt|pallets?|p)\b", RegexOptions.IgnoreCase) &&
             Regex.IsMatch(body, @"\b(?:collect\w*|deliver\w*)\b", RegexOptions.IgnoreCase))
@@ -406,9 +408,6 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                value.Contains("crate", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("tray", StringComparison.OrdinalIgnoreCase);
 
-        // Any external sender with credible order intent is a mapping exception. This
-        // preserves potentially useful new customer mail without turning unrelated
-        // newsletters or load adverts into work for the planner.
         return LooksLikeOrderIntent(request, value) && (recognisedSource || !sender.EndsWith("@lyonshaulage.com", StringComparison.OrdinalIgnoreCase));
     }
 
@@ -503,6 +502,62 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         catch (ArgumentOutOfRangeException) { return null; }
     }
 
+    private async Task<int> SupersedeOlderPendingBatch(
+        IReadOnlyCollection<ParsedEmailOrder> missingOrders,
+        IReadOnlyCollection<ParsedEmailOrder> allOrders,
+        string currentMessageId,
+        CancellationToken ct)
+    {
+        var naturalKeys = missingOrders
+            .Select(order => order.NaturalKey)
+            .Where(key => !string.IsNullOrWhiteSpace(key))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var matchKeys = allOrders
+            .SelectMany(order => ReadMatchKeys(order.Payload))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (naturalKeys.Count == 0 && matchKeys.Count == 0) return 0;
+
+        var candidates = await db.StagedImports
+            .Where(item => item.EntityType == "order" && item.Status == StagingStatus.PendingReview)
+            .ToListAsync(ct);
+        var now = DateTimeOffset.UtcNow;
+        var count = 0;
+
+        foreach (var candidate in candidates)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(candidate.PayloadJson);
+                var root = document.RootElement;
+                if (string.Equals(ReadText(root, "sourceMessageId"), currentMessageId, StringComparison.Ordinal))
+                    continue;
+
+                var naturalKey = ReadText(root, "intakeNaturalKey");
+                var naturalMatch = !string.IsNullOrWhiteSpace(naturalKey) && naturalKeys.Contains(naturalKey);
+                var stableMatch = matchKeys.Count > 0 && ReadMatchKeys(root).Any(matchKeys.Contains);
+                if (!naturalMatch && !stableMatch)
+                    continue;
+
+                var previous = candidate.Status;
+                candidate.Status = StagingStatus.Rejected;
+                candidate.ReviewedAtUtc = now;
+                candidate.ReviewedBy = stableMatch ? "Mailbox snapshot supersession" : "Mailbox supersession";
+                candidate.ReviewNote = stableMatch
+                    ? $"Superseded by a newer NWF/Info mailbox snapshot ({currentMessageId}). Original evidence retained."
+                    : $"Superseded automatically by a newer Info mailbox message ({currentMessageId}). Original evidence retained.";
+                db.StagedImportEvents.Add(StagingAudit.Create(candidate, "Superseded", previous, candidate.ReviewNote, candidate.ReviewedBy));
+                count++;
+            }
+            catch (JsonException)
+            {
+                // A malformed legacy staging payload remains visible for manual review
+                // and must not block newer mailbox work from being staged.
+            }
+        }
+
+        return count;
+    }
+
     private async Task<int> SupersedeOlderPendingByMatchKeys(IReadOnlyCollection<string> currentKeys, string currentMessageId, CancellationToken ct)
     {
         if (currentKeys.Count == 0) return 0;
@@ -525,8 +580,6 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             }
             catch (JsonException)
             {
-                // A malformed legacy staging payload should not block the new
-                // mailbox snapshot; it remains visible for manual review.
             }
         }
 
@@ -613,8 +666,6 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             return $"IFCO|{parts[2].ToUpperInvariant()}";
         }
 
-        // Route/loading fallback identities remain date-scoped because they are
-        // not unique enough to link across planning dates safely.
         return key.ToUpperInvariant();
     }
 
