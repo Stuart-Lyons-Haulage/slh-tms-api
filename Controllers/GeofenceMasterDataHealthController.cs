@@ -44,9 +44,12 @@ public sealed class GeofenceMasterDataHealthController(TmsDbContext db, IConfigu
     {
         if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
 
-        var result = await SiteMasterConsolidation.ReconcileAsync(db, "production-geofence-site-sync", ct);
-        var changed = result.PromotedCustomers > 0 || result.ArchivedDuplicates > 0 ||
-                      result.LinkedGeofences > 0 || result.CanonicalizedGeofences > 0;
+        // Site Master is the canonical physical-location register. This endpoint may repair
+        // Site/geofence links and canonical SITE### codes, but must never create Sites from
+        // Customers or any other legacy register.
+        var result = await SiteGeofenceMasterSync.SyncAsync(db, ct);
+        var changed = result.SitesCoded > 0 || result.GeofencesLinked > 0 ||
+                      result.GeofencesUnlinked > 0 || result.GeofencesCanonicalized > 0;
         var reprojected = false;
         DateOnly? planningDate = null;
 
@@ -65,16 +68,19 @@ public sealed class GeofenceMasterDataHealthController(TmsDbContext db, IConfigu
 
         return Ok(new
         {
-            result.PromotedCustomers,
-            result.ArchivedDuplicates,
-            result.LinkedGeofences,
-            result.CanonicalizedGeofences,
-            result.NeedsReview,
+            promotedCustomers = 0,
+            archivedDuplicates = 0,
+            result.SitesCoded,
+            result.GeofencesLinked,
+            result.GeofencesUnlinked,
+            result.GeofencesCanonicalized,
+            result.SitesMissingGeofence,
+            result.Warnings,
             pendingSiteReviews,
             pendingGeofenceReviews,
             reprojected,
             planningDate,
-            source = "SiteMasterConsolidation+EmbeddedGeofenceProjection",
+            source = "SiteGeofenceMasterSync+EmbeddedGeofenceProjection",
             syncedAtUtc = DateTimeOffset.UtcNow
         });
     }
