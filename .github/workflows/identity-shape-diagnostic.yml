@@ -1,0 +1,64 @@
+name: One-shot - Production identity shape diagnostic
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/identity-shape-diagnostic.yml'
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  RG: slh-tms-prod-rg
+  API_APP: slh-tms-api-prod
+  TACHO: slh-tms-job-tachomaster
+  ETA: slh-tms-job-eta
+
+jobs:
+  identity-shape:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Capture non-secret identity relationship
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics
+          api="$(az containerapp show -n "$API_APP" -g "$RG" -o json)"
+          tj="$(az containerapp job show -n "$TACHO" -g "$RG" -o json)"
+          ej="$(az containerapp job show -n "$ETA" -g "$RG" -o json)"
+          sec="$(az containerapp secret list -n "$API_APP" -g "$RG" --show-values -o json)"
+          db="$(jq -r '[.[]|select(.name=="tms-db-connection")][0].value // empty' <<<"$sec")"
+          dbuid="$(printf '%s' "$db" | sed -nE 's/.*[Uu]ser[[:space:]]+[Ii][Dd]=([^;]+).*/\1/p')"
+          dbuid_hash="$(printf '%s' "$dbuid" | sha256sum | cut -d' ' -f1)"
+          summarise() {
+            jq '[.identity.userAssignedIdentities // {} | to_entries[] | {resourceId:.key,clientId:.value.clientId,clientIdHash:(.value.clientId|@base64)}]'
+          }
+          apiids="$(summarise <<<"$api")"; tids="$(summarise <<<"$tj")"; eids="$(summarise <<<"$ej")"
+          # Replace reversible placeholder with one-way SHA hashes before persistence.
+          hashids() { jq '[.[] | .clientIdHash=(.clientId|@sh) | del(.clientId)]'; }
+          # Persist resource IDs and whether the DB User Id equals each live client ID; no credentials/client IDs.
+          jq -n --arg checked "$(date -u +%FT%TZ)" --arg uid "$dbuid" --argjson a "$apiids" --argjson t "$tids" --argjson e "$eids" '
+            def shape($arr): [$arr[] | {resourceId:.resourceId,dbUserIdMatchesClientId:(.clientId==$uid)}];
+            {checkedAtUtc:$checked,apiIdentityType:"UserAssigned",apiIdentities:shape($a),tachoIdentities:shape($t),etaIdentities:shape($e),dbUsesExplicitUserId:($uid|length>0)}' > diagnostics/identity-shape.json
+      - name: Commit diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add diagnostics/identity-shape.json
+          git commit -m 'Record production managed identity shape' || exit 0
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
