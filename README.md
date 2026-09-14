@@ -1,6 +1,6 @@
 # Stuart Lyons Haulage TMS API
 
-Production .NET 8 API for the Stuart Lyons Haulage transport management system. The API is the system of record for orders, staging, planning, live run progress, geofence evidence, compliance checks, integrations and audited operational recovery.
+Production .NET 8 API for the Stuart Lyons Haulage transport management system. The API/SQL layer is the system of record for orders, staging, planning, live run progress, geofence evidence, compliance checks, integrations and audited operational recovery. Microsoft Lists is the governed business source for master data; the API holds its synchronised operational projection.
 
 The React portal lives in `slh-tms-web`. This repository owns the secured backend, Azure SQL data model, live integrations and production health checks.
 
@@ -26,7 +26,7 @@ Deployment is performed by GitHub Actions using Azure OIDC. Do not use publish p
 - Receive and stage new transport work.
 - Validate and promote reviewed orders into live operational work.
 - Import planner source-line JSON into loads, stops and allocations.
-- Store master data for customers, sites, drivers, vehicles, trailers and planning preferences.
+- Synchronise governed master-data projections for customers, sites, drivers, vehicles, trailers and planning preferences without making a second editable source of truth.
 - Ingest RoadTech/Falcon live vehicle telemetry.
 - Read TachoMaster driver, card, duty and legal-hours evidence.
 - Process geofence arrival, dwell and departure evidence.
@@ -295,3 +295,177 @@ Production `main` deploys through GitHub Actions to Azure Container Apps. A prod
 - `docs/PowerAutomate-InfoMailbox-Order-Intake-Production.md`
 - `docs/DRIVER_SMS_DELIVERY.md`
 - `docs/plans/`
+
+## Master-data authority and operating boundary
+
+**Current design (verified in this repository):** Microsoft Lists is the
+business-maintained, governed master-data source; the portal exposes it as a
+read-only operational view. SQL is still the authoritative transactional store
+for orders, staging, plans, allocations, tracking, ETAs, integrations and audit
+history, and holds a synchronised master-data projection so planning does not
+depend on a live Graph/Lists call. Do not describe SQL as an independent
+editable master-data system or restore write controls to the portal.
+
+The API reads and normalises the configured Lists, assigns deterministic
+idempotency keys from entity, List item and source version, and stages the
+change for reconciliation. It also has controlled SQL-to-Lists publish paths
+for bootstrap/recovery and learned site aliases. A retrying audit outbox keeps
+temporary Graph failure from discarding a learned alias or a governed change.
+Conflicts, unknown identities and retirements require review; sync must not
+silently delete records or rewrite a planner's deliberate List edit.
+
+Configured List families are `Hub Customers`, `Hub Customer Contacts`, `Hub
+Sites`, `Hub Drivers`, `Hub Vehicles`, `Hub Trailers`, `Fuel Cards`, `TMS
+Markets` and `Order Email Routes`. The names are configuration defaults, not a
+guarantee that a tenant has not renamed a List.
+
+| Entity | Operational fields retained by the projection |
+| --- | --- |
+| Customers and contacts | stable customer/account key, name/trading name/aliases, invoice and default-contact detail, owner, service notes, default site; contact email/mobile and ETA-recipient flag |
+| Sites / geofences | site and customer keys, address/postcode/coordinates, geofence identity/radius, opening hours, collection and driver instructions, aliases, map link and operational region |
+| Drivers | employee number and display/Tacho names, email/mobile, grade, driver type/group/skills/agency/coding, licence and expiry detail, **tachograph card number**, TachoMaster member ID, last sync and current allocated vehicle |
+| Vehicles / trailers | registration/fleet number/type, abbreviation/transmission/DVS, depot, capacities, MOT/test/tacho-calibration evidence, Fleetio identifiers/status and notes |
+| Fuel cards | vehicle/registration relationship, provider, PIN or PIN secret reference, last four digits and Shell/BP red/BP plain allocation fields. These are business-required fields; protect actual PIN values and never put them in browser configuration or documentation exports. |
+| Markets / sender CRM | market, trader/name, stand/location, salesman, sender, optional read-only map PDF; email-route key, customer/site mapping, exact sender/domain/subject matcher, parser type, active and review-required flags |
+
+Driver identity must be treated as a reconciliation problem, not a name match.
+The TachoMaster orchestration enriches then canonicalises in this order:
+tachograph card number, TachoMaster member code, employee number, then a unique
+compatible name. Same-name/different-identity cases remain separate. A worker
+is not a driver merely because it has an employee number: office `TM*` records
+are excluded; a card, driver role/group, agency or subcontractor evidence is
+required. Sage HR filtering is implemented as a driver-team and/or driver
+position-keyword filter, but the live Sage configuration and source data cannot
+be verified from Git.
+
+Useful master-data controls include the operational Master Data, SharePoint
+master-data, reconciliation and Tacho driver controllers. Exact routes are
+defined by their controller attributes and the OpenAPI document at runtime;
+do not invent a direct Graph browser write path.
+
+## Order intake, source evidence and replay
+
+The supported inbound route is `POST /api/v1/order-intake/email`, normally
+called by the source-controlled `SLH-TMS | Info Mailbox | Order Intake | PROD`
+Power Automate flow. The flow obtains every source attachment via Outlook's
+attachment API (not the trigger's attachment string), preserves attachment
+metadata including inline/content-ID state, and sends source message,
+conversation, sender, subject, body/body preview and web-link identifiers to
+the API. Attachment bytes are used for parsing but are intentionally not copied
+into SQL; immutable source evidence and identifiers remain traceable to the
+mailbox retention system.
+
+The API parses structured body content, HTML-normalised text, tables and
+non-inline Excel workbooks. It has specialist parsers for Barfoots/Waitrose
+wave, Summer Berry Morrisons/Aldi and legacy Vitacress/Waitrose workbooks, with
+generic parsing only as a fallback. All candidates enter staging as review work;
+mailbox automation must never promote a live order directly.
+
+Duplicate/amendment handling is intentionally PO-first where a PO exists, with
+source message/attachment identity, natural keys and an append-only intake
+ledger providing additional evidence. Exact sender rules outrank domain rules;
+subject-specific routes outrank generic routes; routing conflicts are marked
+`RequiresReview`. Planner approval promotes a reviewed staging item and can
+learn the exact sender mapping. If the sender is later approved against another
+collection site, keep the customer association but clear the unsafe default site.
+Amendments and cancellations remain auditable staging/review events. Historic
+replay is safe only through the same intake endpoint with the original source
+identity—do not hand-create live orders to "replay" an email.
+
+Power Automate is external to this repository at runtime. The checked-in flow
+definition and validation scripts prove the contract, not that the tenant flow,
+connector binding, mailbox permissions or parent/child flow topology currently
+match it. In particular, a parent/child orchestration, any SharePoint links in
+email bodies, and current production connection references need tenant-side
+confirmation before being stated as fact.
+
+## Preserved routing and planning rules
+
+The following rules are code-backed safeguards, not mere operational folklore:
+
+- NWF/Nature's Way, Barfoots/Barefoots, Langmeads, Summer Berry, TSBC/COOP,
+  Aldi, Morrisons, Waitrose, Amazon, Crosspoint/PCC, IFCO/JS and London-market
+  inputs should resolve through governed customer/site/sender mappings and
+  planner review. The repository has explicit parser/resolver coverage for only
+  some of those names; treat unrecognised mappings as review work rather than a
+  production guarantee.
+- **Negative safeguard:** Barfoots/Barefoots and Summer Berry must never fall
+  through to NWF, Drayton or another generic depot default. A collection/site
+  match must be positive and unambiguous. Preserve this when changing lookup or
+  importer code.
+- Market resolution understands Covent Garden (`COVENT`) and New Spitalfields
+  (`SPIT`) labels and resolves a unique market/contact/stand rather than a loose
+  city-name match. Market, sender and stall detail lives in the governed
+  `TMS Markets` projection.
+- Import labels derive AM/PM from explicit run type or first collection time;
+  WAVE 1 normalises to AM and WAVE 3 to PM. A date crossing, `O/N`,
+  `overnight`, or `night out` produces O/N and night-out evidence. Do not infer
+  a night driver merely from a planned load without a reviewed allocation.
+- Capacity is calculated from standard/euro/unknown pallets. The calculator is
+  the authority for the actual threshold and result. Import rules preserve the
+  business pallet conventions: Morrisons and Waitrose standard; Aldi from
+  Barfoots/NWF euro; Langmeads-to-Aldi Atherstone euro, other Langmeads standard.
+  The requested 26-pallet operational capacity must be confirmed against the
+  active vehicle/trailer and capacity-calculator configuration before changing
+  an allocation; it is not hard-coded as a universal limit in the inspected
+  importer.
+- Vehicle, driver and trailer swaps are allocations that need fresh dispatch,
+  Tacho and tracking evidence. A planned resource is never proof of a live run.
+
+## Runbooks and recovery sequence
+
+1. **Health/release:** check `/api/v1/health`, `/api/v1/health/ready`, tracking,
+   TachoMaster and geofence health; confirm the deployed revision; then check
+   the portal proxy. Follow the named production-health, RoadTech, TachoMaster,
+   wallboard and final-ETA workflows rather than treating HTTP 200 alone as a
+   release proof.
+2. **Lists freshness/sync:** verify the Lists configuration and Graph credentials,
+   inspect master-data/reconciliation status and audit/outbox failures, correct
+   the governed List row, then re-run the controlled sync/reconciliation. Do
+   not repair a stale projection by editing SQL directly.
+3. **Failed import or email:** retain the staging row and source identity; read
+   parser warnings and duplicate decision; fix mapping/parser data; replay the
+   original request through the intake/import endpoint; have a planner review
+   before promotion. Never delete the evidence just to clear the queue.
+4. **Tracking/geofence backfill:** establish vehicle and site/geofence linkage
+   first, then use the guarded replay/recovery controllers. Validate stop order,
+   arrival/departure and final-completion evidence afterwards; generic geofence
+   matches must not complete a run.
+5. **Rollback:** deploy an earlier tested immutable image/revision using the
+   existing GitHub/Azure workflow or Container Apps revision controls, verify
+   health and proxy checks, and preserve SQL/audit history. Roll back app code,
+   not operational data, unless an approved recovery plan says otherwise.
+
+## Schema, tests and change discipline
+
+Schema history is deliberately retained in both embedded `Database/000_*.sql`
+through `045_*.sql` repair/projection scripts and EF migrations in `Migrations/`.
+`SchemaMigrationRunner` and the schema-health tests exist because production has
+encountered partially applied or legacy schema states. Add a forward-only,
+idempotent migration and its regression coverage; do not renumber or edit an
+applied migration, and do not use an ad-hoc production DDL command as a fix.
+
+The test project contains API, schema, intake, planning, master-data,
+TachoMaster, geofence, dispatch and resilience regressions. At minimum run the
+three .NET commands above before a backend documentation-adjacent change; run
+the checked-in Power Automate validators when changing either flow definition.
+For a behavioural change, add a narrowly named regression that proves the
+negative case as well as the intended happy path (especially duplicate intake,
+unsafe site routing, capacity, identity mismatch and stale tracking).
+
+## ChatGPT / new-engineer handover context
+
+This repository is deliberately defensive because dispatch has real operational
+consequences. Preserve approval-first intake, audited fallbacks, idempotent
+imports, provider-specific evidence labels, SQL runtime resilience and the
+Lists governance boundary. The TV board, operations wallboard and live-runs
+views must consume the same evidence-derived progress contract: planned times
+are schedule context, not live ETA; a final linked geofence departure completes
+a run; missing or stale evidence must remain visible as an exception.
+
+What is **not** verified by repository contents: live List data and permissions,
+Power Automate deployment/run history, Sage HR population, RoadTech/Falcon and
+TachoMaster credentials/data quality, Fleetio tenancy, current customer-specific
+commercial instructions, physical 26-pallet fleet limits, production secret
+values, and whether every named sender/customer is currently mapped. Confirm
+these with operations before changing a rule or relying on it in a release.
