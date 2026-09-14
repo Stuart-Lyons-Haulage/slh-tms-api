@@ -91,15 +91,6 @@ builder.Services.Configure<AzureMapsMatrixOptions>(builder.Configuration.GetSect
 builder.Services.Configure<BackloadMatchingOptions>(builder.Configuration.GetSection("Optimisation:Backload"));
 builder.Services.Configure<LiveEtaOptions>(builder.Configuration.GetSection("Eta:Live"));
 builder.Services.Configure<FuelCostOptions>(builder.Configuration.GetSection("Fuel:Costing"));
-var sharePointMasterDataOptions = new SharePointMasterDataOptions();
-builder.Configuration.GetSection("Integrations:SharePointMasterData").Bind(sharePointMasterDataOptions);
-sharePointMasterDataOptions.TenantId = ReadSetting(builder.Configuration, sharePointMasterDataOptions.TenantId, "Integrations:SharePointMasterData:TenantId", "sharepoint-master-data-tenant-id");
-sharePointMasterDataOptions.ClientId = ReadSetting(builder.Configuration, sharePointMasterDataOptions.ClientId, "Integrations:SharePointMasterData:ClientId", "sharepoint-master-data-client-id");
-sharePointMasterDataOptions.ClientSecret = ReadSetting(builder.Configuration, sharePointMasterDataOptions.ClientSecret, "Integrations:SharePointMasterData:ClientSecret", "sharepoint-master-data-client-secret");
-sharePointMasterDataOptions.Hostname = ReadSetting(builder.Configuration, sharePointMasterDataOptions.Hostname, "Integrations:SharePointMasterData:Hostname", "sharepoint-master-data-hostname");
-sharePointMasterDataOptions.SitePath = ReadSetting(builder.Configuration, sharePointMasterDataOptions.SitePath, "Integrations:SharePointMasterData:SitePath", "sharepoint-master-data-site-path");
-builder.Services.AddSingleton(sharePointMasterDataOptions);
-builder.Services.AddHttpClient<SharePointMasterDataSyncService>();
 
 var configuredOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()?
     .Where(origin => !string.IsNullOrWhiteSpace(origin))
@@ -245,7 +236,6 @@ builder.Services.AddHostedService<DotTrackingIngestionService>();
 builder.Services.AddHostedService<TachoDriverMasterSyncJobWorker>();
 builder.Services.AddHostedService<DriverMasterClassificationBackgroundService>();
 builder.Services.AddHostedService<AuditOutboxBackgroundService>();
-builder.Services.AddHostedService<SharePointMasterDataBackgroundService>();
 builder.Services.AddHostedService<BackloadTriggerHostedService>();
 builder.Services.AddHostedService<LiveEtaService>();
 builder.Services.AddHostedService<EtaAccuracyService>();
@@ -300,8 +290,6 @@ builder.Services.AddAuthorization(options =>
     options.DefaultPolicy = tmsAccessPolicy;
     options.FallbackPolicy = tmsAccessPolicy;
     options.AddPolicy("TmsAccess", tmsAccessPolicy);
-    // Read/write/approve currently share the company-user assertion. Keeping separate policy
-    // names lets Entra app-role enforcement be introduced deliberately without mislabelling GETs.
     options.AddPolicy("TmsRead", tmsAccessPolicy);
     options.AddPolicy("TmsWrite", tmsAccessPolicy);
     options.AddPolicy("TmsApprove", tmsAccessPolicy);

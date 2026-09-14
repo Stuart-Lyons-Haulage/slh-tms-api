@@ -77,7 +77,7 @@ public sealed class AuditOutboxProcessor(
             .AsNoTracking()
             .Where(x => x.ProcessedAt == null && x.FailedAt == null)
             .OrderBy(x => x.CreatedAt)
-            .Select(x => new { x.OutboxId, x.EventType })
+            .Select(x => new { x.OutboxId })
             .Take(BatchSize)
             .ToListAsync(ct);
 
@@ -101,13 +101,6 @@ public sealed class AuditOutboxProcessor(
 
         try
         {
-            if (string.Equals(item.EventType, AuditOutboxEventTypes.SharePointSiteAliasSync, StringComparison.Ordinal))
-            {
-                logger.LogWarning("Completing legacy SQL-to-SharePoint alias event {OutboxId} without writing to the authoritative Microsoft Lists.", outboxId);
-                item.ProcessedAt = DateTimeOffset.UtcNow;
-                await db.SaveAuditReplayChangesAsync(ct);
-                return true;
-            }
             if (!string.Equals(item.EventType, AuditOutboxEventTypes.MasterDataAudit, StringComparison.Ordinal))
                 throw new InvalidOperationException($"Unsupported audit outbox event type '{item.EventType}'.");
 
@@ -131,9 +124,6 @@ public sealed class AuditOutboxProcessor(
             logger.LogWarning(ex, "Audit outbox event {OutboxId} failed to replay.", outboxId);
             db.ChangeTracker.Clear();
 
-            // Another API replica may have committed the same deterministic audit Id after
-            // this worker checked for it. Treat that as successful idempotent replay rather
-            // than consuming retries on a duplicate primary-key insert.
             if (auditId.HasValue && await db.MasterDataAudits.AsNoTracking().AnyAsync(x => x.Id == auditId.Value, ct))
             {
                 var concurrentlyProcessed = await db.AuditOutboxes.SingleOrDefaultAsync(x => x.OutboxId == outboxId, ct);
@@ -150,7 +140,7 @@ public sealed class AuditOutboxProcessor(
                 return false;
 
             failed.RetryCount++;
-            if (failed.RetryCount >= MaximumRetries && !string.Equals(failed.EventType, AuditOutboxEventTypes.SharePointSiteAliasSync, StringComparison.Ordinal))
+            if (failed.RetryCount >= MaximumRetries)
             {
                 failed.FailedAt = DateTimeOffset.UtcNow;
                 logger.LogError(

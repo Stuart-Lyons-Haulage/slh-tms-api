@@ -55,8 +55,6 @@ public sealed class StagingQueueController(TmsDbContext db) : ControllerBase
             page,
             pageSize,
             total,
-            returned = records.Count,
-            unusablePlanningDateOnPage = rows.Count(row => !StagingQueueProjection.HasUsablePlanningDate(row.PayloadJson)),
             hasMore = offset + rows.Count < total,
             records
         });
@@ -101,29 +99,6 @@ internal static class StagingQueueProjection
         reviewedBy = row.ReviewedBy,
         reviewNote = row.ReviewNote
     };
-
-    internal static bool HasUsablePlanningDate(string payloadJson)
-    {
-        try
-        {
-            var source = JsonNode.Parse(payloadJson)?.AsObject();
-            if (source is null) return false;
-            return IsIsoDate(GetString(source, "collectionDate")) || IsIsoDate(GetString(source, "deliveryDate"));
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
-    }
-
-    private static string? GetString(JsonObject source, string field)
-    {
-        var match = source.FirstOrDefault(property => string.Equals(property.Key, field, StringComparison.OrdinalIgnoreCase));
-        return match.Value?.GetValue<string?>();
-    }
-
-    private static bool IsIsoDate(string? value) =>
-        !string.IsNullOrWhiteSpace(value) && DateOnly.TryParseExact(value.Trim(), "yyyy-MM-dd", out _);
 
     internal static string BuildPayloadSummary(string payloadJson)
     {

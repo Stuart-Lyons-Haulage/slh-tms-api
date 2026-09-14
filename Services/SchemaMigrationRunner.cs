@@ -39,10 +39,6 @@ public static class SchemaMigrationRunner
 {
     private const string ResourcePrefix = "Slh.Tms.Api.Database.";
     private const string MigrationLockResource = "SLH.TMS.SchemaMigration";
-    // SQL Server can bind the MarketKey index before executing the guarded ALTER
-    // TABLE later in the same migration batch. Prepare that additive column first
-    // when the immutable migration is pending, so existing databases with the
-    // legacy MarketContacts shape can apply migration 049 safely.
     internal const string MarketContactsStableKeyPreparationSql = """
         IF OBJECT_ID(N'dbo.MarketContacts', N'U') IS NOT NULL
            AND COL_LENGTH(N'dbo.MarketContacts', N'MarketKey') IS NULL
@@ -51,12 +47,6 @@ public static class SchemaMigrationRunner
         END;
         """;
     private const string MarketContactsStableKeyMigration = "049_Market_Contact_Stable_Key_And_Stands.sql";
-    // These migrations are maintenance or privileged infrastructure changes rather
-    // than prerequisites for API correctness. They remain registered and
-    // checksum-protected but must not block an API revision from becoming ready.
-    // In particular, migration 060 creates/grants a contained database principal
-    // and therefore requires database-admin rights that the runtime API identity
-    // intentionally does not have.
     private static readonly IReadOnlySet<string> DeferredStartupMigrations = new HashSet<string>(StringComparer.Ordinal)
     {
         "042_Operational_Read_Performance_Indexes.sql",
@@ -125,7 +115,8 @@ public static class SchemaMigrationRunner
         "052_Email_Intake_Fast_Path.sql",
         "058_Operational_Compliance_Fields.sql",
         "059_RoadTech_Operational_Visits.sql",
-        "060_TachoMaster_Job_Managed_Identity.sql"
+        "060_TachoMaster_Job_Managed_Identity.sql",
+        "061_Email_Intake_Mapping_V2.sql"
     ];
 
     internal const string HistoryTableSql = """
