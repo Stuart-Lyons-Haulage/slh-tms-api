@@ -5,7 +5,7 @@ public sealed class MailboxIntakeBatchingPolicyTests
     [Fact]
     public void Intake_batches_idempotency_lookup_supersession_and_save()
     {
-        var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+        var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
         var source = File.ReadAllText(Path.Combine(root, "Controllers", "OrderIntakeController.cs"));
         var intakeStart = source.IndexOf("public async Task<IActionResult> Intake", StringComparison.Ordinal);
         var sourceEmailStart = source.IndexOf("[HttpGet(\"source-email/{stagingId:guid}\")]", StringComparison.Ordinal);
