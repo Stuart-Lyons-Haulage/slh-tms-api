@@ -97,6 +97,19 @@ jobs:
           }
 
           tms_db="$(secret_value tms-db-connection)"
+          job_mi_client_id="$(az containerapp job show \
+            --name "$TACHO_JOB" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query 'identity.userAssignedIdentities.*.clientId | [0]' \
+            --output tsv)"
+          if test -z "$job_mi_client_id"; then
+            echo "::error::$TACHO_JOB must have a user-assigned managed identity before deployment."
+            exit 1
+          fi
+          if grep -qi 'Authentication=Active Directory Managed Identity' <<<"$tms_db"; then
+            tms_db="$(printf '%s' "$tms_db" | sed -E 's/(^|;)[[:space:]]*[Uu]ser[[:space:]]+[Ii][Dd]=[^;]*//g')"
+            tms_db="${tms_db%;};User Id=${job_mi_client_id};"
+          fi
           dot_base="$(secret_value dot-base-url)"
           dot_api="$(secret_value dot-api-key)"
           dot_company="$(secret_value dot-company-code)"
@@ -157,7 +170,7 @@ jobs:
           cron="$(az containerapp job show --name "$TACHO_JOB" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.configuration.scheduleTriggerConfig.cronExpression --output tsv)"
           test "$trigger" = "Schedule"
           test "$cron" = "*/5 * * * *"
-          echo "Reconciled $TACHO_JOB with production secrets/environment; trigger=$trigger cron=$cron image=$image"
+          echo "Reconciled $TACHO_JOB with production secrets/environment and its managed identity client ID; trigger=$trigger cron=$cron image=$image"
 
       - name: Run canonical TachoMaster sync immediately
         run: |
