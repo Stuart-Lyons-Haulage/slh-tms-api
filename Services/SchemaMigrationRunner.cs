@@ -39,6 +39,18 @@ public static class SchemaMigrationRunner
 {
     private const string ResourcePrefix = "Slh.Tms.Api.Database.";
     private const string MigrationLockResource = "SLH.TMS.SchemaMigration";
+    // SQL Server can bind the MarketKey index before executing the guarded ALTER
+    // TABLE later in the same migration batch. Prepare that additive column first
+    // when the immutable migration is pending, so existing databases with the
+    // legacy MarketContacts shape can apply migration 049 safely.
+    internal const string MarketContactsStableKeyPreparationSql = """
+        IF OBJECT_ID(N'dbo.MarketContacts', N'U') IS NOT NULL
+           AND COL_LENGTH(N'dbo.MarketContacts', N'MarketKey') IS NULL
+        BEGIN
+            ALTER TABLE dbo.MarketContacts ADD MarketKey nvarchar(160) NULL;
+        END;
+        """;
+    private const string MarketContactsStableKeyMigration = "049_Market_Contact_Stable_Key_And_Stands.sql";
     // These migrations are additive CRM/read-model maintenance. They must not prevent
     // the API from starting when SQL permissions or lock duration make the change
     // unsuitable for the deployment readiness window. They remain registered and
@@ -217,6 +229,14 @@ public static class SchemaMigrationRunner
                     logger.LogInformation(
                         "Applying required schema migration {Version} {MigrationName} ({Checksum}).",
                         migration.Version, migration.Name, migration.Checksum);
+
+                    if (string.Equals(migration.Name, MarketContactsStableKeyMigration, StringComparison.Ordinal))
+                    {
+                        logger.LogInformation(
+                            "Applying additive MarketContacts.MarketKey compatibility preparation before migration {Version}.",
+                            migration.Version);
+                        await db.Database.ExecuteSqlRawAsync(MarketContactsStableKeyPreparationSql, ct);
+                    }
 
                     await ApplySingleMigrationAsync(db, migration, logger, ct);
                     appliedCount++;
