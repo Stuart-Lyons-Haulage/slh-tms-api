@@ -1,0 +1,145 @@
+name: One-shot - Align scheduled job SQL identity
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/production-job-sql-identity-align.yml'
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  RG: slh-tms-prod-rg
+  API_APP: slh-tms-api-prod
+  API_BASE: https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+  TACHO: slh-tms-job-tachomaster
+  ETA: slh-tms-job-eta
+
+jobs:
+  align-and-run:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Align job identities and SQL connection secret to production API
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics
+          api="$(az containerapp show -n "$API_APP" -g "$RG" -o json)"
+          api_secrets="$(az containerapp secret list -n "$API_APP" -g "$RG" --show-values -o json)"
+          db="$(jq -r '[.[]|select(.name=="tms-db-connection")][0].value // empty' <<<"$api_secrets")"
+          test -n "$db"
+
+          # SQL uses the identity referenced by the API's live connection string. Attach the API's
+          # user-assigned identity/identities to each job while retaining the existing job identity
+          # used for ACR/Key Vault. Never rewrite the DB User Id to the job identity.
+          api_uais="$(jq -c '.identity.userAssignedIdentities // {} | with_entries(.value={})' <<<"$api")"
+          api_uai_count="$(jq 'length' <<<"$api_uais")"
+          if test "$api_uai_count" -eq 0; then
+            echo 'Production API has no shareable user-assigned identity; refusing to guess SQL principal.' >&2
+            exit 1
+          fi
+
+          sub="$(az account show --query id -o tsv)"
+          for job in "$TACHO" "$ETA"; do
+            src="$(az containerapp job show -n "$job" -g "$RG" -o json)"
+            jid="$(jq -r '.id' <<<"$src")"
+            existing="$(jq -c '.identity.userAssignedIdentities // {} | with_entries(.value={})' <<<"$src")"
+            merged="$(jq -n --argjson a "$existing" --argjson b "$api_uais" '$a * $b')"
+            identity_patch="$(jq -n --argjson u "$merged" '{identity:{type:"UserAssigned",userAssignedIdentities:$u}}')"
+            az rest --method patch --url "https://management.azure.com${jid}?api-version=2024-03-01" --body "$identity_patch" -o none
+            # Restore the exact DB connection string used by the healthy API.
+            az containerapp job secret set -n "$job" -g "$RG" --secrets "tms-db=$db" -o none
+          done
+
+          jq -n --arg checked "$(date -u +%FT%TZ)" \
+            --argjson apiIdentityCount "$api_uai_count" \
+            --argjson tachoIdentityCount "$(az containerapp job show -n "$TACHO" -g "$RG" --query 'length(identity.userAssignedIdentities)' -o json)" \
+            --argjson etaIdentityCount "$(az containerapp job show -n "$ETA" -g "$RG" --query 'length(identity.userAssignedIdentities)' -o json)" \
+            '{checkedAtUtc:$checked,apiUserAssignedIdentityCount:$apiIdentityCount,tachoUserAssignedIdentityCount:$tachoIdentityCount,etaUserAssignedIdentityCount:$etaIdentityCount,sqlSecretAlignedToApi:true}' \
+            > diagnostics/job-sql-identity-alignment.json
+
+      - name: Execute Tacho canonical sync
+        id: tacho
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec="$(az containerapp job start -n "$TACHO" -g "$RG" --query name -o tsv)"
+          echo "execution=$exec" >> "$GITHUB_OUTPUT"
+          for n in $(seq 1 120); do
+            s="$(az containerapp job execution show -n "$TACHO" -g "$RG" --job-execution-name "$exec" --query properties.status -o tsv 2>/dev/null || true)"
+            echo "Tacho=$s"
+            case "$s" in Succeeded) exit 0;; Failed) exit 1;; esac
+            sleep 10
+          done
+          exit 2
+
+      - name: Execute ETA independently
+        id: eta
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          exec="$(az containerapp job start -n "$ETA" -g "$RG" --query name -o tsv)"
+          echo "execution=$exec" >> "$GITHUB_OUTPUT"
+          for n in $(seq 1 90); do
+            s="$(az containerapp job execution show -n "$ETA" -g "$RG" --job-execution-name "$exec" --query properties.status -o tsv 2>/dev/null || true)"
+            echo "ETA=$s"
+            case "$s" in Succeeded) exit 0;; Failed) exit 1;; esac
+            sleep 10
+          done
+          exit 2
+
+      - name: Capture production readiness state
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          driver="$(curl -sS --max-time 90 -H 'Cache-Control: no-cache' "$API_BASE/api/v1/health/driver-master" || echo '{}')"
+          tacho="$(curl -sS --max-time 90 -H 'Cache-Control: no-cache' "$API_BASE/api/v1/health/tachomaster" || echo '{}')"
+          texec='${{ steps.tacho.outputs.execution }}'; eexec='${{ steps.eta.outputs.execution }}'
+          ts=''; es=''
+          test -z "$texec" || ts="$(az containerapp job execution show -n "$TACHO" -g "$RG" --job-execution-name "$texec" --query properties.status -o tsv 2>/dev/null || true)"
+          test -z "$eexec" || es="$(az containerapp job execution show -n "$ETA" -g "$RG" --job-execution-name "$eexec" --query properties.status -o tsv 2>/dev/null || true)"
+          align='{}'; test ! -f diagnostics/job-sql-identity-alignment.json || align="$(cat diagnostics/job-sql-identity-alignment.json)"
+          jq -n --arg checked "$(date -u +%FT%TZ)" --arg tn "$texec" --arg ts "$ts" --arg en "$eexec" --arg es "$es" --argjson align "$align" --argjson driver "$driver" --argjson tacho "$tacho" \
+            '{checkedAtUtc:$checked,identityAlignment:$align,tachoExecution:{name:$tn,status:$ts},etaExecution:{name:$en,status:$es},driverMaster:$driver,tachomaster:$tacho}' > diagnostics/production-sql-identity-readiness.json
+          jq '{checkedAtUtc,identityAlignment,tachoExecution,etaExecution,driverMaster:{activeDrivers:.driverMaster.activeDrivers,sourceWorkers:.driverMaster.sourceWorkers,populationAligned:.driverMaster.populationAligned,duplicateMemberGroups:.driverMaster.duplicateMemberGroups,duplicateCardGroups:.driverMaster.duplicateCardGroups,activeWithoutMember:.driverMaster.activeWithoutMember,activeWithoutCard:.driverMaster.activeWithoutCard,latestCanonicalSyncUtc:.driverMaster.latestCanonicalSyncUtc},scheduledSync:.tachomaster.scheduledSync}' diagnostics/production-sql-identity-readiness.json
+
+      - name: Commit readiness evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f diagnostics/production-sql-identity-readiness.json || exit 0
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add diagnostics/job-sql-identity-alignment.json diagnostics/production-sql-identity-readiness.json
+          git commit -m 'Record production job SQL identity readiness' || exit 0
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
+
+      - name: Gate live production readiness
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          f=diagnostics/production-sql-identity-readiness.json
+          test "$(jq -r '.tachoExecution.status' "$f")" = Succeeded
+          test "$(jq -r '.etaExecution.status' "$f")" = Succeeded
+          test "$(jq -r '.driverMaster.duplicateMemberGroups // -1' "$f")" = 0
+          test "$(jq -r '.driverMaster.duplicateCardGroups // -1' "$f")" = 0
+          test "$(jq -r '.driverMaster.activeWithoutMember // -1' "$f")" = 0
+          test "$(jq -r '.driverMaster.populationAligned // false' "$f")" = true
