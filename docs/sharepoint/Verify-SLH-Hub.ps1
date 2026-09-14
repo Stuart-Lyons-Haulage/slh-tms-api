@@ -7,6 +7,7 @@ Connect-PnPOnline -Url $SiteUrl -Interactive
 
 $expected = @{
  'Hub Customers'=@('CustomerKey','TradingName','Active','AccountOwner','ServiceNotes','DefaultSiteCode','TmsCustomerId','LastSyncStatus','LastSyncUtc')
+ 'Hub Customer Contacts'=@('ContactKey','CustomerKey','ContactName','Email','MobileNumber','ReceivesEtaUpdates','Active')
  'Hub Sites'=@('SiteKey','CustomerKey','SiteName','BuildingName','Address1','Address2','Town','County','Postcode','Latitude','Longitude','AccessWindowStart','AccessWindowEnd','GeofenceId','Active','TmsSiteId','SyncStatus')
  'Hub Site Aliases'=@('AliasKey','SiteKey','Alias','AliasType','Active')
  'Hub Drivers'=@('DriverKey','DriverName','EmployeeNumber','TachoName','MobileNumber','DriverType','DriverGroup','Skills','AgencyName','Coding','Notes','LicenceNumber','LicenceExpiry','CPCExpiry','DigitalTachoCardExpiry','MedicalExpiry','TachoCardNumber','TachoMasterDriverId','Active','TmsDriverId','ComplianceStatus','LastSyncUtc','LastTachoSyncUtc')
@@ -17,6 +18,21 @@ $expected = @{
  'TMS Markets'=@('Market','Name','StandOrLocation','Salesman','Sender','Active','LastSyncUtc')
  'Hub Integration Log'=@('CorrelationId','EntityType','BusinessKey','Direction','Status','Message','OccurredUtc')
  'Hub Incidents & Claims'=@('ClaimKey','IncidentDate','CustomerKey','VehicleKey','DriverKey','Status','Severity','Description','TmsIncidentId')
+}
+
+$operationalViews = @{
+ 'Hub Customers'='Hub Customers - Active'
+ 'Hub Customer Contacts'='Hub Customer Contacts - Active'
+ 'Hub Sites'='Hub Sites - Active'
+ 'Hub Site Aliases'='Hub Site Aliases - Active'
+ 'Hub Drivers'='Hub Drivers - Active'
+ 'Hub Vehicles'='Hub Vehicles - Active'
+ 'Hub Trailers'='Hub Trailers - Active'
+ 'Fuel Cards'='Fuel Cards - Active'
+ 'Fuel Pricing'='Fuel Pricing - Active'
+ 'TMS Markets'='TMS Markets - Active'
+ 'Hub Integration Log'='Hub Integration Log - Recent'
+ 'Hub Incidents & Claims'='Hub Incidents & Claims - Open'
 }
 
 $failures = [System.Collections.Generic.List[string]]::new()
@@ -31,15 +47,12 @@ foreach($entry in $expected.GetEnumerator()) {
         }
     }
 
-    $activeView = Get-PnPView -List $entry.Key -Identity ((@{
-        'Hub Customers'='Hub Customers - Active'; 'Hub Sites'='Hub Sites - Active'; 'Hub Site Aliases'='Hub Site Aliases - Active';
-        'Hub Drivers'='Hub Drivers - Active'; 'Hub Vehicles'='Hub Vehicles - Active'; 'Hub Trailers'='Hub Trailers - Active';
-        'Hub Integration Log'='Hub Integration Log - Recent'; 'Hub Incidents & Claims'='Hub Incidents & Claims - Open'
-    })[$entry.Key]) -ErrorAction SilentlyContinue
-    if(-not $activeView) { $failures.Add("Missing operational view: $($entry.Key)") }
+    if($operationalViews.ContainsKey($entry.Key)) {
+        $activeView = Get-PnPView -List $entry.Key -Identity $operationalViews[$entry.Key] -ErrorAction SilentlyContinue
+        if(-not $activeView) { $failures.Add("Missing operational view: $($entry.Key)") }
+    }
 }
 
-# Explicitly check the site-identity rule is represented in the provisioned schema.
 $site = Get-PnPList -Identity 'Hub Sites' -ErrorAction SilentlyContinue
 if($site) {
     $siteKey = Get-PnPField -List $site -Identity 'SiteKey' -ErrorAction SilentlyContinue
