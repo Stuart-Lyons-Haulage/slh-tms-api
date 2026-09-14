@@ -137,6 +137,9 @@ public sealed class PlannerIncidentRegressionTests : IClassFixture<CustomWebFact
     [InlineData("Office", "Driver Manager", false)]
     [InlineData("Office", "Non-driver", false)]
     [InlineData("Office", "Administrator", false)]
+    [InlineData("Drivers", "Office Administrator", false)]
+    [InlineData("Drivers", "Driver Manager", false)]
+    [InlineData("Office", "HGV Driver", false)]
     [InlineData("Drivers", "HGV Driver", true)]
     [InlineData("Transport", "HGV Driver", true)]
     public void Sage_import_requires_a_driving_role(string team, string position, bool expected)
