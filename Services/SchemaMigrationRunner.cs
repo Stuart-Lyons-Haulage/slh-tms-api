@@ -97,9 +97,10 @@ public static class SchemaMigrationRunner
         "039_Canonical_Relational_Planning.sql",
         "040_Audit_Outbox.sql",
         "041_Distributed_Integration_Lease.sql",
-        "042_Operational_Read_Performance_Indexes.sql"
-        ,"043_Customer_Site_Crm_Links.sql"
-        ,"044_Market_Read_Only_Map.sql"
+        "042_Operational_Read_Performance_Indexes.sql",
+        "043_Customer_Site_Crm_Links.sql",
+        "044_Market_Read_Only_Map.sql",
+        "045_Customer_Contacts_Master_Projection.sql"
     ];
 
     internal const string HistoryTableSql = """
