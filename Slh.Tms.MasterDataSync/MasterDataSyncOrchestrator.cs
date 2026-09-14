@@ -48,12 +48,13 @@ public sealed class MasterDataSyncOrchestrator(
     {
         "depot" => 0,
         "customer" => 1,
-        "vehicle" => 2,
-        "driver" => 3,
-        "trailer" => 4,
-        "site" => 5,
-        "fuelcard" => 6,
-        _ => 7
+        "customercontact" => 2,
+        "vehicle" => 3,
+        "driver" => 4,
+        "trailer" => 5,
+        "site" => 6,
+        "fuelcard" => 7,
+        _ => 8
     };
 
     private sealed class MutableTotal

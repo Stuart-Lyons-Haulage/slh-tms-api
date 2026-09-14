@@ -13,11 +13,13 @@ Configuration settings:
 
 Manual endpoint: POST /api/sync/trigger/{listName}
 
-Valid keys: depot, customer, driver, vehicle, trailer, site, subcontractor, market, fuelcard and fuelprice.
+Valid keys: depot, customer, customercontact, driver, vehicle, trailer, site, subcontractor, market, fuelcard and fuelprice.
+
+`customercontact` reads the governed **Hub Customer Contacts** list. `ReceivesEtaUpdates` controls whether a contact is presented as an ETA-recipient suggestion. It never causes an email to be sent automatically.
 
 Deployment order:
 
-1. Apply Database/040_SharePoint_Master_Projection.sql.
+1. Apply Database/040_SharePoint_Master_Projection.sql and Database/045_Customer_Contacts_Master_Projection.sql.
 2. Give the Function identity or credential write rights only to master_ tables.
 3. Give the TMS API identity SELECT only on active views.
 4. Configure cache invalidation only after the Entra fail-closed gate confirms the TMS.Admin app role.

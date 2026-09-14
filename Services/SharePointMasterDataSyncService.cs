@@ -20,9 +20,8 @@ public sealed class SharePointMasterDataOptions
 
     public SharePointMasterDataOptions()
     {
-        // These are the governed Lists provisioned in the SLH Hub.  Keep the
-        // operational entity name on the left: it is the contract used by SQL.
         Lists["customer"] = "Hub Customers";
+        Lists["customercontact"] = "Hub Customer Contacts";
         Lists["site"] = "Hub Sites";
         Lists["driver"] = "Hub Drivers";
         Lists["vehicle"] = "Hub Vehicles";
@@ -36,14 +35,11 @@ public sealed class SharePointMasterDataOptions
 public sealed record SharePointMasterDataSyncResult(int ListsRead, int RowsRead, IReadOnlyList<StageImportRequest> Requests);
 public sealed record SharePointMasterDataPublishResult(int ListsWritten, int RowsWritten, IReadOnlyDictionary<string, int> RowsByList);
 
-/// <summary>Safe, supportable failures returned to the portal without exposing credentials or Graph responses.</summary>
 public sealed class SharePointMasterDataException(string code, string message, Exception? innerException = null) : Exception(message, innerException)
 {
     public string Code { get; } = code;
 }
 
-// CI trigger: validated master-data publish duplicate-key handling.
-// CI validation marker for tolerant SharePoint field retry.
 public sealed class SharePointMasterDataSyncService(
     HttpClient http,
     SharePointMasterDataOptions options,
@@ -56,25 +52,102 @@ public sealed class SharePointMasterDataSyncService(
     {
         ValidateConfiguration();
         var token = await GetTokenAsync(ct);
+        var rows = await BuildAllRowsAsync(db, ct);
+        var rowsByList = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var mapping in settings.Lists)
+        {
+            if (!rows.TryGetValue(mapping.Key, out var sourceRows) || string.IsNullOrWhiteSpace(mapping.Value)) continue;
+            rowsByList[mapping.Key] = await PublishRowsAsync(mapping.Key, mapping.Value, sourceRows, token, ct);
+        }
+
+        return new SharePointMasterDataPublishResult(rowsByList.Count, rowsByList.Values.Sum(), rowsByList);
+    }
+
+    /// <summary>
+    /// Seeds only the governed Customer Contacts List. This is intentionally separate from the
+    /// original all-master bootstrap so adding CRM contacts later cannot overwrite deliberate
+    /// edits already made to Customers, Sites, Drivers or Fleet Lists.
+    /// </summary>
+    public async Task<int> PublishCustomerContactsFromSqlAsync(TmsDbContext db, CancellationToken ct)
+    {
+        ValidateConfiguration();
+        if (!settings.Lists.TryGetValue("customercontact", out var listName) || string.IsNullOrWhiteSpace(listName))
+            throw new SharePointMasterDataException("ListConfigurationMissing", "The governed Customer Contacts List is not configured.");
+        var token = await GetTokenAsync(ct);
+        var rows = await BuildCustomerContactRowsAsync(db, ct);
+        return await PublishRowsAsync("customercontact", listName, rows, token, ct);
+    }
+
+    public async Task<SharePointMasterDataSyncResult> ReadAsync(CancellationToken ct)
+    {
+        ValidateConfiguration();
+        var token = await GetTokenAsync(ct);
+        var requests = new List<StageImportRequest>();
+        var listsRead = 0;
+
+        foreach (var mapping in settings.Lists)
+        {
+            if (string.IsNullOrWhiteSpace(mapping.Value)) continue;
+            listsRead++;
+            var listId = await ResolveForEntityAsync(mapping.Key, mapping.Value, token, ct);
+            await EnsureColumnsAsync(mapping.Key, listId, token, ct);
+            var rows = await ReadListAsync(mapping.Key, listId, token, ct);
+            foreach (var row in rows)
+            {
+                var itemId = row.TryGetProperty("id", out var id) ? id.ToString() : Guid.NewGuid().ToString("N");
+                var fields = row.TryGetProperty("fields", out var f) ? f : row;
+                var sourceVersion = row.TryGetProperty("eTag", out var eTag) ? eTag.GetString() : null;
+                requests.Add(new StageImportRequest(
+                    mapping.Key,
+                    $"sharepoint:{mapping.Key}:{itemId}:{sourceVersion ?? "unversioned"}",
+                    NormalizeFields(mapping.Key, fields),
+                    "Microsoft Lists / SharePoint"));
+            }
+        }
+
+        logger.LogInformation("Read {RowsRead} master-data rows from {ListsRead} Microsoft Lists.", requests.Count, listsRead);
+        return new SharePointMasterDataSyncResult(listsRead, requests.Count, requests);
+    }
+
+    public async Task PublishSiteAliasesAsync(string siteKey, string? aliases, CancellationToken ct)
+    {
+        ValidateConfiguration();
+        var token = await GetTokenAsync(ct);
+        if (!settings.Lists.TryGetValue("site", out var listName) || string.IsNullOrWhiteSpace(listName))
+            throw new SharePointMasterDataException("ListConfigurationMissing", "The Hub Sites List is not configured for SharePoint CRM sync.");
+        var listId = await ResolveListIdAsync(listName, token, ct);
+        var existing = await ReadListAsync("site", listId, token, ct);
+        var current = existing.FirstOrDefault(item => item.TryGetProperty("fields", out var fields)
+            && fields.TryGetProperty("SiteKey", out var key)
+            && string.Equals(key.ToString(), siteKey, StringComparison.OrdinalIgnoreCase));
+        if (current.ValueKind == JsonValueKind.Undefined)
+            throw new SharePointMasterDataException("SiteNotFoundInCrm", $"Site '{siteKey}' is not yet in Hub Sites. Run the initial CRM publish before alias sync can update it.");
+        await UpdateListItemAsync(listId, current.GetProperty("id").ToString(), Fields(("Aliases", aliases), ("SyncStatus", "Synced")), token, ct);
+    }
+
+    private async Task<Dictionary<string, IReadOnlyList<Dictionary<string, object?>>>> BuildAllRowsAsync(TmsDbContext db, CancellationToken ct)
+    {
         var drivers = await db.Drivers.AsNoTracking().OrderBy(x => x.EmployeeNumber).ToListAsync(ct);
         await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
         var vehicles = await db.Vehicles.AsNoTracking().OrderBy(x => x.Registration).ToListAsync(ct);
 
-        var rows = new Dictionary<string, IReadOnlyList<Dictionary<string, object?>>>(StringComparer.OrdinalIgnoreCase)
+        return new Dictionary<string, IReadOnlyList<Dictionary<string, object?>>>(StringComparer.OrdinalIgnoreCase)
         {
             ["customer"] = (await db.Customers.AsNoTracking().OrderBy(x => x.Code).ToListAsync(ct)).Select(x => Fields(
                 ("Title", x.Code), ("CustomerKey", x.Code), ("TradingName", x.TradingName ?? x.Name),
                 ("AccountOwner", x.AccountOwner), ("ServiceNotes", x.ServiceNotes), ("DefaultSiteCode", x.DefaultSiteCode), ("Active", x.Active))).ToArray(),
+            ["customercontact"] = await BuildCustomerContactRowsAsync(db, ct),
             ["site"] = await BuildSiteRowsAsync(db, ct),
             ["driver"] = drivers.Select(x => Fields(
-                ("Title", x.DisplayName), ("DriverKey", x.TachoCardNumber),
+                ("Title", x.DisplayName), ("DriverKey", x.TachoCardNumber ?? x.EmployeeNumber),
                 ("DriverName", x.DisplayName), ("EmployeeNumber", x.EmployeeNumber), ("TachoName", x.TachoName),
                 ("MobileNumber", x.MobileNumber), ("DriverType", x.DriverType), ("DriverGroup", x.DriverGroup),
                 ("Skills", x.Skills), ("AgencyName", x.AgencyName), ("Coding", x.Coding), ("Notes", x.Notes),
                 ("LicenceNumber", x.DrivingLicenceNumber), ("LicenceExpiry", x.LicenceExpiry),
                 ("TachoCardNumber", x.TachoCardNumber), ("TachoMasterDriverId", x.TachoMasterDriverId),
-                ("LastTachoSyncUtc", x.LastTachoSyncUtc),
-                ("Active", x.Active), ("ComplianceStatus", string.IsNullOrWhiteSpace(x.LicenceStatus) ? "Unknown" : x.LicenceStatus))).ToArray(),
+                ("LastTachoSyncUtc", x.LastTachoSyncUtc), ("Active", x.Active),
+                ("ComplianceStatus", string.IsNullOrWhiteSpace(x.LicenceStatus) ? "Unknown" : x.LicenceStatus))).ToArray(),
             ["vehicle"] = vehicles.Select(x => Fields(
                 ("Title", x.Registration), ("VehicleKey", x.FleetNumber ?? x.Registration), ("Registration", x.Registration),
                 ("FleetNumber", x.FleetNumber), ("Abbreviation", x.Abbreviation), ("Transmission", x.Transmission),
@@ -99,125 +172,22 @@ public sealed class SharePointMasterDataSyncService(
                 ("ReadOnlyMapPdfUrl", x.ReadOnlyMapPdfUrl), ("Active", x.Active))).ToArray(),
             ["emailroute"] = await BuildEmailRouteRowsAsync(db, ct)
         };
-
-        var rowsByList = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        foreach (var mapping in settings.Lists)
-        {
-            if (!rows.TryGetValue(mapping.Key, out var sourceRows) || string.IsNullOrWhiteSpace(mapping.Value)) continue;
-            var listId = mapping.Key == "emailroute"
-                ? await ResolveOrProvisionEmailRouteListAsync(mapping.Value, token, ct)
-                : await ResolveListIdAsync(mapping.Value, token, ct);
-            await EnsureColumnsAsync(mapping.Key, listId, token, ct);
-            var existing = await ReadListAsync(mapping.Key, listId, token, ct);
-            var keyField = mapping.Key switch { "customer" => "CustomerKey", "site" => "SiteKey", "driver" => "DriverKey", "vehicle" => "VehicleKey", "trailer" => "TrailerKey", "fuelcard" => "VehicleKey", "emailroute" => "RouteKey", "marketcontact" => "Title", _ => "Title" };
-            var existingByKey = existing
-                .Where(item => item.TryGetProperty("fields", out var field) && field.TryGetProperty(keyField, out var key) && !string.IsNullOrWhiteSpace(key.ToString()))
-                .GroupBy(item => item.GetProperty("fields").GetProperty(keyField).ToString(), StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
-            var existingDriversByEmployee = mapping.Key == "driver"
-                ? existing.Where(item => item.TryGetProperty("fields", out var field)
-                        && field.TryGetProperty("EmployeeNumber", out var employee)
-                        && !string.IsNullOrWhiteSpace(employee.ToString()))
-                    .GroupBy(item => item.GetProperty("fields").GetProperty("EmployeeNumber").ToString(), StringComparer.OrdinalIgnoreCase)
-                    .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase)
-                : new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
-            var distinctRows = sourceRows
-                .Where(row => !string.IsNullOrWhiteSpace(row.GetValueOrDefault(keyField)?.ToString()))
-                .GroupBy(row => row[keyField]!.ToString()!, StringComparer.OrdinalIgnoreCase)
-                .Select(group => group.First())
-                .ToArray();
-            IReadOnlySet<string>? acceptedFields = null;
-            if (distinctRows.Length > 0)
-            {
-                var probe = distinctRows[0];
-                var probeKey = probe[keyField]!.ToString()!;
-                var probeExists = existingByKey.TryGetValue(probeKey, out var probeCurrent)
-                    || (mapping.Key == "driver"
-                        && probe.TryGetValue("EmployeeNumber", out var probeEmployee)
-                        && probeEmployee is not null
-                        && existingDriversByEmployee.TryGetValue(probeEmployee.ToString()!, out probeCurrent));
-                acceptedFields = probeExists
-                    ? await UpdateListItemAsync(listId, probeCurrent.GetProperty("id").ToString(), probe, token, ct)
-                    : await CreateListItemAsync(listId, probe, token, ct);
-            }
-
-            await Parallel.ForEachAsync(
-                distinctRows.Skip(1),
-                // SharePoint applies tenant-wide activity quotas. A small degree of
-                // parallelism keeps a full master-data publish moving without turning
-                // a routine refresh into a burst of thousands of Graph requests.
-                new ParallelOptions { MaxDegreeOfParallelism = 2, CancellationToken = ct },
-                async (source, itemCt) =>
-                {
-                    var key = source[keyField]?.ToString();
-                    if (string.IsNullOrWhiteSpace(key)) return;
-                    var filtered = acceptedFields is null
-                        ? source
-                        : source.Where(pair => acceptedFields.Contains(pair.Key))
-                            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
-                    var exists = existingByKey.TryGetValue(key, out var current)
-                        || (mapping.Key == "driver"
-                            && source.TryGetValue("EmployeeNumber", out var employee)
-                            && employee is not null
-                            && existingDriversByEmployee.TryGetValue(employee.ToString()!, out current));
-                    if (exists)
-                        await UpdateListItemAsync(listId, current.GetProperty("id").ToString(), filtered, token, itemCt);
-                    else
-                        await CreateListItemAsync(listId, filtered, token, itemCt);
-                });
-            await RetireRowsOutsideSnapshotAsync(mapping.Key, listId, keyField,
-                distinctRows.Select(row => row[keyField]!.ToString()!).ToHashSet(StringComparer.OrdinalIgnoreCase), token, ct);
-            rowsByList[mapping.Key] = distinctRows.Length;
-        }
-        return new SharePointMasterDataPublishResult(rowsByList.Count, rowsByList.Values.Sum(), rowsByList);
     }
 
-    public async Task<SharePointMasterDataSyncResult> ReadAsync(CancellationToken ct)
+    private static async Task<IReadOnlyList<Dictionary<string, object?>>> BuildCustomerContactRowsAsync(TmsDbContext db, CancellationToken ct)
     {
-        ValidateConfiguration();
-        var token = await GetTokenAsync(ct);
-        var requests = new List<StageImportRequest>();
-        var listsRead = 0;
-        foreach (var mapping in settings.Lists)
-        {
-            if (string.IsNullOrWhiteSpace(mapping.Value)) continue;
-            listsRead++;
-            var listId = mapping.Key == "emailroute"
-                ? await ResolveOrProvisionEmailRouteListAsync(mapping.Value, token, ct)
-                : await ResolveListIdAsync(mapping.Value, token, ct);
-            await EnsureColumnsAsync(mapping.Key, listId, token, ct);
-            var rows = await ReadListAsync(mapping.Key, listId, token, ct);
-            foreach (var row in rows)
-            {
-                var itemId = row.TryGetProperty("id", out var id) ? id.ToString() : Guid.NewGuid().ToString("N");
-                var fields = row.TryGetProperty("fields", out var f) ? f : row;
-                var sourceVersion = row.TryGetProperty("eTag", out var eTag) ? eTag.GetString() : null;
-                requests.Add(new StageImportRequest(
-                    mapping.Key,
-                    $"sharepoint:{mapping.Key}:{itemId}:{sourceVersion ?? "unversioned"}",
-                    NormalizeFields(mapping.Key, fields),
-                    "Microsoft Lists / SharePoint"));
-            }
-        }
-        logger.LogInformation("Read {RowsRead} master-data rows from {ListsRead} Microsoft Lists.", requests.Count, listsRead);
-        return new SharePointMasterDataSyncResult(listsRead, requests.Count, requests);
-    }
-
-    /// <summary>Writes a learned site alias back to the CRM without making the planner wait for it.</summary>
-    public async Task PublishSiteAliasesAsync(string siteKey, string? aliases, CancellationToken ct)
-    {
-        ValidateConfiguration();
-        var token = await GetTokenAsync(ct);
-        if (!settings.Lists.TryGetValue("site", out var listName) || string.IsNullOrWhiteSpace(listName))
-            throw new SharePointMasterDataException("ListConfigurationMissing", "The Hub Sites List is not configured for SharePoint CRM sync.");
-        var listId = await ResolveListIdAsync(listName, token, ct);
-        var existing = await ReadListAsync("site", listId, token, ct);
-        var current = existing.FirstOrDefault(item => item.TryGetProperty("fields", out var fields)
-            && fields.TryGetProperty("SiteKey", out var key)
-            && string.Equals(key.ToString(), siteKey, StringComparison.OrdinalIgnoreCase));
-        if (current.ValueKind == JsonValueKind.Undefined)
-            throw new SharePointMasterDataException("SiteNotFoundInCrm", $"Site '{siteKey}' is not yet in Hub Sites. Run the initial CRM publish before alias sync can update it.");
-        await UpdateListItemAsync(listId, current.GetProperty("id").ToString(), Fields(("Aliases", aliases), ("SyncStatus", "Synced")), token, ct);
+        var contacts = await db.CustomerContacts.AsNoTracking()
+            .OrderBy(x => x.CustomerCode).ThenBy(x => x.Name).ThenBy(x => x.Email)
+            .ToListAsync(ct);
+        return contacts.Select(x => Fields(
+            ("Title", $"{x.CustomerCode} · {x.Name}"),
+            ("ContactKey", x.Id.ToString()),
+            ("CustomerKey", x.CustomerCode),
+            ("ContactName", x.Name),
+            ("Email", x.Email),
+            ("MobileNumber", x.MobileNumber),
+            ("ReceivesEtaUpdates", x.ReceivesEtaUpdates),
+            ("Active", x.Active))).ToArray();
     }
 
     private static async Task<IReadOnlyList<Dictionary<string, object?>>> BuildSiteRowsAsync(TmsDbContext db, CancellationToken ct)
@@ -228,7 +198,10 @@ public sealed class SharePointMasterDataSyncService(
             .GroupBy(g => g.SiteId!.Value)
             .ToDictionaryAsync(group => group.Key, group => group.OrderBy(g => g.Id).First().Id.ToString(), ct);
         return sites.Select(x => Fields(
-            ("Title", x.ExternalCode), ("SiteKey", x.ExternalCode), ("CustomerKey", x.CustomerCode), ("SiteName", x.Name), ("BuildingName", x.DriverTextName ?? x.Name), ("Address1", x.CollectionAddress), ("Aliases", x.Aliases), ("GeofenceId", geofences.GetValueOrDefault(x.Id)), ("Active", x.Active), ("SyncStatus", "Synced"))).ToArray();
+            ("Title", x.ExternalCode), ("SiteKey", x.ExternalCode), ("CustomerKey", x.CustomerCode),
+            ("SiteName", x.Name), ("BuildingName", x.DriverTextName ?? x.Name), ("Address1", x.CollectionAddress),
+            ("MapLink", x.MapLink), ("Aliases", x.Aliases), ("GeofenceId", geofences.GetValueOrDefault(x.Id)),
+            ("OperationalRegion", x.OperationalRegion), ("Active", x.Active), ("SyncStatus", "Synced"))).ToArray();
     }
 
     private static async Task<IReadOnlyList<Dictionary<string, object?>>> BuildEmailRouteRowsAsync(TmsDbContext db, CancellationToken ct)
@@ -239,12 +212,11 @@ public sealed class SharePointMasterDataSyncService(
                 .OrderBy(x => x.SenderEmail).ThenBy(x => x.SenderDomain).ThenBy(x => x.CustomerCode)
                 .ToListAsync(ct);
             return routes.Select(x => Fields(
-                    ("Title", x.SenderEmail ?? $"@{x.SenderDomain}"), ("RouteKey", x.Id.ToString()),
-                    ("CustomerKey", x.CustomerCode), ("SiteKey", x.DefaultSiteCode),
-                    ("SenderEmail", x.SenderEmail), ("SenderDomain", x.SenderDomain),
-                    ("SubjectContains", x.SubjectContains), ("ParserType", x.ParserType),
-                    ("RequiresReview", x.RequiresReview), ("Active", x.Active)))
-                .ToList();
+                ("Title", x.SenderEmail ?? $"@{x.SenderDomain}"), ("RouteKey", x.Id.ToString()),
+                ("CustomerKey", x.CustomerCode), ("SiteKey", x.DefaultSiteCode),
+                ("SenderEmail", x.SenderEmail), ("SenderDomain", x.SenderDomain),
+                ("SubjectContains", x.SubjectContains), ("ParserType", x.ParserType),
+                ("RequiresReview", x.RequiresReview), ("Active", x.Active))).ToArray();
         }
         catch (Exception ex) when (ex.GetBaseException().Message.Contains("CustomerEmailRoutes", StringComparison.OrdinalIgnoreCase))
         {
@@ -252,10 +224,76 @@ public sealed class SharePointMasterDataSyncService(
         }
     }
 
+    private async Task<int> PublishRowsAsync(
+        string entityType,
+        string listName,
+        IReadOnlyList<Dictionary<string, object?>> sourceRows,
+        string token,
+        CancellationToken ct)
+    {
+        var listId = await ResolveForEntityAsync(entityType, listName, token, ct);
+        await EnsureColumnsAsync(entityType, listId, token, ct);
+        var existing = await ReadListAsync(entityType, listId, token, ct);
+        var keyField = KeyField(entityType);
+        var existingByKey = existing
+            .Where(item => item.TryGetProperty("fields", out var fields)
+                && fields.TryGetProperty(keyField, out var key)
+                && !string.IsNullOrWhiteSpace(key.ToString()))
+            .GroupBy(item => item.GetProperty("fields").GetProperty(keyField).ToString(), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+
+        var existingDriversByEmployee = entityType.Equals("driver", StringComparison.OrdinalIgnoreCase)
+            ? existing.Where(item => item.TryGetProperty("fields", out var fields)
+                    && fields.TryGetProperty("EmployeeNumber", out var employee)
+                    && !string.IsNullOrWhiteSpace(employee.ToString()))
+                .GroupBy(item => item.GetProperty("fields").GetProperty("EmployeeNumber").ToString(), StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+
+        var distinctRows = sourceRows
+            .Where(row => !string.IsNullOrWhiteSpace(row.GetValueOrDefault(keyField)?.ToString()))
+            .GroupBy(row => row[keyField]!.ToString()!, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToArray();
+
+        await Parallel.ForEachAsync(distinctRows,
+            new ParallelOptions { MaxDegreeOfParallelism = 2, CancellationToken = ct },
+            async (source, itemCt) =>
+            {
+                var key = source[keyField]!.ToString()!;
+                var exists = existingByKey.TryGetValue(key, out var current)
+                    || (entityType.Equals("driver", StringComparison.OrdinalIgnoreCase)
+                        && source.TryGetValue("EmployeeNumber", out var employee)
+                        && employee is not null
+                        && existingDriversByEmployee.TryGetValue(employee.ToString()!, out current));
+                if (exists)
+                    await UpdateListItemAsync(listId, current.GetProperty("id").ToString(), source, token, itemCt);
+                else
+                    await CreateListItemAsync(listId, source, token, itemCt);
+            });
+
+        await RetireRowsOutsideSnapshotAsync(entityType, listId, keyField,
+            distinctRows.Select(row => row[keyField]!.ToString()!).ToHashSet(StringComparer.OrdinalIgnoreCase), token, ct);
+        return distinctRows.Length;
+    }
+
+    private static string KeyField(string entityType) => entityType.ToLowerInvariant() switch
+    {
+        "customer" => "CustomerKey",
+        "customercontact" => "ContactKey",
+        "site" => "SiteKey",
+        "driver" => "DriverKey",
+        "vehicle" => "VehicleKey",
+        "trailer" => "TrailerKey",
+        "fuelcard" => "VehicleKey",
+        "emailroute" => "RouteKey",
+        "marketcontact" => "Title",
+        _ => "Title"
+    };
+
     private async Task<JsonElement[]> ReadListAsync(string entityType, string listId, string token, CancellationToken ct)
     {
-        var sitePath = settings.SitePath.Trim('/');
-        var siteSelector = string.IsNullOrWhiteSpace(sitePath) ? settings.Hostname : $"{settings.Hostname}:/{sitePath}:";
+        var siteSelector = SiteSelector();
         var listSelector = Uri.EscapeDataString(listId);
         string? uri = $"https://graph.microsoft.com/v1.0/sites/{siteSelector}/lists/{listSelector}/items?expand=fields&$top=999";
         var rows = new List<JsonElement>();
@@ -265,37 +303,48 @@ public sealed class SharePointMasterDataSyncService(
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             using var response = await http.SendAsync(request, ct);
             var body = await response.Content.ReadAsStringAsync(ct);
-            if (!response.IsSuccessStatusCode) throw Failure("ListReadFailed", $"Microsoft List '{entityType}' could not be read", response.StatusCode, body);
+            if (!response.IsSuccessStatusCode)
+                throw Failure("ListReadFailed", $"Microsoft List '{entityType}' could not be read", response.StatusCode, body);
             using var document = JsonDocument.Parse(body);
-            if (document.RootElement.TryGetProperty("value", out var value)) rows.AddRange(value.EnumerateArray().Select(x => x.Clone()));
+            if (document.RootElement.TryGetProperty("value", out var value))
+                rows.AddRange(value.EnumerateArray().Select(x => x.Clone()));
             uri = document.RootElement.TryGetProperty("@odata.nextLink", out var nextLink) ? nextLink.GetString() : null;
         }
         return rows.ToArray();
     }
 
+    private async Task<string> ResolveForEntityAsync(string entityType, string listName, string token, CancellationToken ct)
+    {
+        if (entityType.Equals("customercontact", StringComparison.OrdinalIgnoreCase)
+            || entityType.Equals("emailroute", StringComparison.OrdinalIgnoreCase))
+            return await ResolveOrProvisionManagedListAsync(entityType, listName, token, ct);
+        return await ResolveListIdAsync(listName, token, ct);
+    }
+
     private async Task<string> ResolveListIdAsync(string listName, string token, CancellationToken ct)
     {
-        var sitePath = settings.SitePath.Trim('/');
-        var siteSelector = string.IsNullOrWhiteSpace(sitePath) ? settings.Hostname : $"{settings.Hostname}:/{sitePath}:";
         var filter = Uri.EscapeDataString($"displayName eq '{listName.Replace("'", "''")}'");
-        using var request = new HttpRequestMessage(HttpMethod.Get, $"https://graph.microsoft.com/v1.0/sites/{siteSelector}/lists?$filter={filter}&$select=id,displayName");
+        using var request = new HttpRequestMessage(HttpMethod.Get,
+            $"https://graph.microsoft.com/v1.0/sites/{SiteSelector()}/lists?$filter={filter}&$select=id,displayName");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         using var response = await http.SendAsync(request, ct);
         var body = await response.Content.ReadAsStringAsync(ct);
-        if (!response.IsSuccessStatusCode) throw Failure("ListResolveFailed", $"Microsoft List '{listName}' could not be resolved", response.StatusCode, body);
+        if (!response.IsSuccessStatusCode)
+            throw Failure("ListResolveFailed", $"Microsoft List '{listName}' could not be resolved", response.StatusCode, body);
         using var document = JsonDocument.Parse(body);
         var match = document.RootElement.GetProperty("value").EnumerateArray().FirstOrDefault();
-        return match.ValueKind == JsonValueKind.Undefined ? throw new SharePointMasterDataException("ListNotFound", $"The required Microsoft List '{listName}' was not found on the SLH Hub site. Run the SLH Hub List provisioning script, then try again.") : match.GetProperty("id").GetString()!;
+        return match.ValueKind == JsonValueKind.Undefined
+            ? throw new SharePointMasterDataException("ListNotFound", $"The required Microsoft List '{listName}' was not found on the SLH Hub site.")
+            : match.GetProperty("id").GetString()!;
     }
 
-    private async Task<string> ResolveOrProvisionEmailRouteListAsync(string listName, string token, CancellationToken ct)
+    private async Task<string> ResolveOrProvisionManagedListAsync(string entityType, string listName, string token, CancellationToken ct)
     {
         try { return await ResolveListIdAsync(listName, token, ct); }
         catch (SharePointMasterDataException ex) when (ex.Code == "ListNotFound")
         {
-            var sitePath = settings.SitePath.Trim('/');
-            var siteSelector = string.IsNullOrWhiteSpace(sitePath) ? settings.Hostname : $"{settings.Hostname}:/{sitePath}:";
-            using var create = new HttpRequestMessage(HttpMethod.Post, $"https://graph.microsoft.com/v1.0/sites/{siteSelector}/lists")
+            using var create = new HttpRequestMessage(HttpMethod.Post,
+                $"https://graph.microsoft.com/v1.0/sites/{SiteSelector()}/lists")
             {
                 Content = JsonContent.Create(new { displayName = listName, list = new { template = "genericList" } })
             };
@@ -303,23 +352,10 @@ public sealed class SharePointMasterDataSyncService(
             using var response = await http.SendAsync(create, ct);
             var body = await response.Content.ReadAsStringAsync(ct);
             if (!response.IsSuccessStatusCode)
-            {
-                throw Failure("ListProvisionFailed", "The Power Automate Order Email Routes List could not be provisioned", response.StatusCode, body);
-            }
-
+                throw Failure("ListProvisionFailed", $"Microsoft List '{listName}' could not be provisioned", response.StatusCode, body);
             using var document = JsonDocument.Parse(body);
             var listId = document.RootElement.GetProperty("id").GetString()!;
-            foreach (var column in EmailRouteColumns())
-            {
-                using var columnRequest = new HttpRequestMessage(HttpMethod.Post, BuildListUrl(listId, "columns"))
-                {
-                    Content = JsonContent.Create(column)
-                };
-                columnRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-                using var columnResponse = await http.SendAsync(columnRequest, ct);
-                if (!columnResponse.IsSuccessStatusCode)
-                    logger.LogWarning("Column {Column} could not be provisioned on Order Email Routes; publish will use the accepted field subset.", column["name"]);
-            }
+            logger.LogInformation("Provisioned governed Microsoft List {ListName} for {EntityType}.", listName, entityType);
             return listId;
         }
     }
@@ -332,7 +368,6 @@ public sealed class SharePointMasterDataSyncService(
         var body = await response.Content.ReadAsStringAsync(ct);
         if (!response.IsSuccessStatusCode)
             throw Failure("ListSchemaReadFailed", $"Microsoft List '{entityType}' columns could not be read", response.StatusCode, body);
-
         using var document = JsonDocument.Parse(body);
         var existing = document.RootElement.GetProperty("value").EnumerateArray()
             .Select(column => column.TryGetProperty("name", out var name) ? name.GetString() : null)
@@ -353,38 +388,31 @@ public sealed class SharePointMasterDataSyncService(
         }
     }
 
-    private async Task RetireRowsOutsideSnapshotAsync(
-        string entityType,
-        string listId,
-        string keyField,
-        IReadOnlySet<string> sourceKeys,
-        string token,
-        CancellationToken ct)
+    private async Task RetireRowsOutsideSnapshotAsync(string entityType, string listId, string keyField,
+        IReadOnlySet<string> sourceKeys, string token, CancellationToken ct)
     {
         var current = await ReadListAsync(entityType, listId, token, ct);
         var retainedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var retire = new List<JsonElement>();
         foreach (var item in current)
         {
-            if (!item.TryGetProperty("fields", out var fields) ||
-                !fields.TryGetProperty(keyField, out var keyValue) ||
-                string.IsNullOrWhiteSpace(keyValue.ToString()))
+            if (!item.TryGetProperty("fields", out var fields)
+                || !fields.TryGetProperty(keyField, out var keyValue)
+                || string.IsNullOrWhiteSpace(keyValue.ToString()))
             {
                 retire.Add(item);
                 continue;
             }
-
             var key = keyValue.ToString();
-            if (!sourceKeys.Contains(key) || !retainedKeys.Add(key))
-                retire.Add(item);
+            if (!sourceKeys.Contains(key) || !retainedKeys.Add(key)) retire.Add(item);
         }
 
         await Parallel.ForEachAsync(retire,
             new ParallelOptions { MaxDegreeOfParallelism = 2, CancellationToken = ct },
             async (item, itemCt) =>
             {
-                if (!item.TryGetProperty("id", out var id)) return;
-                await UpdateListItemAsync(listId, id.ToString(), Fields(("Active", false)), token, itemCt);
+                if (item.TryGetProperty("id", out var id))
+                    await UpdateListItemAsync(listId, id.ToString(), Fields(("Active", false)), token, itemCt);
             });
     }
 
@@ -394,6 +422,11 @@ public sealed class SharePointMasterDataSyncService(
         [
             TextColumn("CustomerKey", true), TextColumn("TradingName"), TextColumn("CustomerAliases"),
             TextColumn("AccountOwner"), TextColumn("ServiceNotes", multiline: true), TextColumn("DefaultSiteCode"), BooleanColumn("Active")
+        ],
+        "customercontact" =>
+        [
+            TextColumn("ContactKey", true), TextColumn("CustomerKey", true), TextColumn("ContactName"),
+            TextColumn("Email"), TextColumn("MobileNumber"), BooleanColumn("ReceivesEtaUpdates"), BooleanColumn("Active")
         ],
         "site" =>
         [
@@ -433,16 +466,14 @@ public sealed class SharePointMasterDataSyncService(
             TextColumn("Market"), TextColumn("Name"), TextColumn("StandOrLocation"), TextColumn("Salesman"),
             TextColumn("Sender"), TextColumn("ReadOnlyMapPdfUrl"), BooleanColumn("Active")
         ],
-        "emailroute" => EmailRouteColumns(),
+        "emailroute" =>
+        [
+            TextColumn("RouteKey", true), TextColumn("CustomerKey"), TextColumn("SiteKey"),
+            TextColumn("SenderEmail"), TextColumn("SenderDomain"), TextColumn("SubjectContains"),
+            TextColumn("ParserType"), BooleanColumn("RequiresReview"), BooleanColumn("Active")
+        ],
         _ => []
     };
-
-    private static IReadOnlyList<Dictionary<string, object>> EmailRouteColumns() =>
-    [
-        TextColumn("RouteKey", true), TextColumn("CustomerKey"), TextColumn("SiteKey"),
-        TextColumn("SenderEmail"), TextColumn("SenderDomain"), TextColumn("SubjectContains"),
-        TextColumn("ParserType"), BooleanColumn("RequiresReview"), BooleanColumn("Active")
-    ];
 
     private static Dictionary<string, object> TextColumn(string name, bool indexed = false, bool multiline = false) => new()
     {
@@ -466,8 +497,7 @@ public sealed class SharePointMasterDataSyncService(
     private async Task<IReadOnlySet<string>> CreateListItemAsync(string listId, IReadOnlyDictionary<string, object?> fields, string token, CancellationToken ct)
     {
         var payload = new Dictionary<string, object?>(fields, StringComparer.OrdinalIgnoreCase);
-        var throttleAttempt = 0;
-        for (;;)
+        for (var attempt = 0; ; attempt++)
         {
             using var request = new HttpRequestMessage(HttpMethod.Post, BuildListUrl(listId, "items"))
             {
@@ -476,14 +506,12 @@ public sealed class SharePointMasterDataSyncService(
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             using var response = await http.SendAsync(request, ct);
             if (response.IsSuccessStatusCode) return payload.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
-
             var body = await response.Content.ReadAsStringAsync(ct);
-            if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests && throttleAttempt < 8)
+            if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests && attempt < 8)
             {
-                await DelayForThrottleAsync(response, throttleAttempt++, ct);
+                await DelayForThrottleAsync(response, attempt, ct);
                 continue;
             }
-
             throw Failure("ListCreateFailed", "A complete Microsoft List item could not be created", response.StatusCode, body);
         }
     }
@@ -491,8 +519,7 @@ public sealed class SharePointMasterDataSyncService(
     private async Task<IReadOnlySet<string>> UpdateListItemAsync(string listId, string itemId, IReadOnlyDictionary<string, object?> fields, string token, CancellationToken ct)
     {
         var payload = new Dictionary<string, object?>(fields, StringComparer.OrdinalIgnoreCase);
-        var throttleAttempt = 0;
-        for (;;)
+        for (var attempt = 0; ; attempt++)
         {
             using var request = new HttpRequestMessage(new HttpMethod("PATCH"), BuildListUrl(listId, $"items/{Uri.EscapeDataString(itemId)}/fields"))
             {
@@ -501,14 +528,12 @@ public sealed class SharePointMasterDataSyncService(
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             using var response = await http.SendAsync(request, ct);
             if (response.IsSuccessStatusCode) return payload.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
-
             var body = await response.Content.ReadAsStringAsync(ct);
-            if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests && throttleAttempt < 8)
+            if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests && attempt < 8)
             {
-                await DelayForThrottleAsync(response, throttleAttempt++, ct);
+                await DelayForThrottleAsync(response, attempt, ct);
                 continue;
             }
-
             throw Failure("ListUpdateFailed", "A complete Microsoft List item could not be updated", response.StatusCode, body);
         }
     }
@@ -516,22 +541,21 @@ public sealed class SharePointMasterDataSyncService(
     private async Task DelayForThrottleAsync(HttpResponseMessage response, int attempt, CancellationToken ct)
     {
         var retryAfter = response.Headers.RetryAfter?.Delta;
-        if (retryAfter is null && response.Headers.RetryAfter?.Date is { } retryDate)
-            retryAfter = retryDate - DateTimeOffset.UtcNow;
+        if (retryAfter is null && response.Headers.RetryAfter?.Date is { } retryDate) retryAfter = retryDate - DateTimeOffset.UtcNow;
         var fallbackSeconds = Math.Min(30, Math.Pow(2, attempt + 1));
-        var delay = retryAfter is { } requested && requested > TimeSpan.Zero
-            ? requested
-            : TimeSpan.FromSeconds(fallbackSeconds);
+        var delay = retryAfter is { } requested && requested > TimeSpan.Zero ? requested : TimeSpan.FromSeconds(fallbackSeconds);
         if (delay > TimeSpan.FromSeconds(60)) delay = TimeSpan.FromSeconds(60);
         logger.LogWarning("Microsoft Graph throttled the SharePoint publish; retrying in {DelaySeconds:n0}s (attempt {Attempt}/8).", delay.TotalSeconds, attempt + 1);
         await Task.Delay(delay, ct);
     }
 
-    private string BuildListUrl(string listId, string suffix)
+    private string BuildListUrl(string listId, string suffix) =>
+        $"https://graph.microsoft.com/v1.0/sites/{SiteSelector()}/lists/{Uri.EscapeDataString(listId)}/{suffix}";
+
+    private string SiteSelector()
     {
         var sitePath = settings.SitePath.Trim('/');
-        var siteSelector = string.IsNullOrWhiteSpace(sitePath) ? settings.Hostname : $"{settings.Hostname}:/{sitePath}:";
-        return $"https://graph.microsoft.com/v1.0/sites/{siteSelector}/lists/{Uri.EscapeDataString(listId)}/{suffix}";
+        return string.IsNullOrWhiteSpace(sitePath) ? settings.Hostname : $"{settings.Hostname}:/{sitePath}:";
     }
 
     private static Dictionary<string, object?> Fields(params (string Name, object? Value)[] values) => values
@@ -559,6 +583,19 @@ public sealed class SharePointMasterDataSyncService(
                 Set("code", Text("CustomerKey"));
                 Set("name", Text("TradingName") ?? Text("CustomerKey"));
                 Set("tradingName", Text("TradingName"));
+                Set("accountOwner", Text("AccountOwner"));
+                Set("serviceNotes", Text("ServiceNotes"));
+                Set("defaultSiteCode", Text("DefaultSiteCode"));
+                Set("active", Text("Active"));
+                break;
+            case "customercontact":
+                Set("id", Text("ContactKey"));
+                Set("customerCode", Text("CustomerKey"));
+                Set("name", Text("ContactName") ?? Text("Title"));
+                Set("email", Text("Email"));
+                Set("mobileNumber", Text("MobileNumber"));
+                Set("receivesEtaUpdates", Text("ReceivesEtaUpdates"));
+                Set("active", Text("Active"));
                 break;
             case "site":
                 Set("externalCode", Text("SiteKey"));
@@ -568,20 +605,53 @@ public sealed class SharePointMasterDataSyncService(
                 Set("collectionAddress", string.Join(", ", new[] { Text("Address1"), Text("Address2"), Text("Town"), Text("County"), Text("Postcode") }.Where(value => !string.IsNullOrWhiteSpace(value))));
                 Set("mapLink", Text("MapLink"));
                 Set("aliases", Text("Aliases"));
+                Set("operationalRegion", Text("OperationalRegion"));
+                Set("active", Text("Active"));
                 break;
             case "driver":
                 Set("employeeNumber", Text("EmployeeNumber") ?? Text("DriverKey"));
                 Set("displayName", Text("DriverName") ?? Text("DriverKey"));
+                Set("tachoName", Text("TachoName"));
+                Set("mobileNumber", Text("MobileNumber"));
+                Set("driverType", Text("DriverType"));
+                Set("driverGroup", Text("DriverGroup"));
+                Set("skills", Text("Skills"));
+                Set("agencyName", Text("AgencyName"));
+                Set("coding", Text("Coding"));
+                Set("notes", Text("Notes"));
                 Set("drivingLicenceNumber", Text("LicenceNumber"));
+                Set("licenceExpiry", Text("LicenceExpiry"));
+                Set("tachoCardNumber", Text("TachoCardNumber"));
+                Set("tachoMasterDriverId", Text("TachoMasterDriverId"));
+                Set("lastTachoSyncUtc", Text("LastTachoSyncUtc"));
+                Set("active", Text("Active"));
                 break;
             case "vehicle":
                 Set("registration", Text("Registration") ?? Text("VehicleKey"));
-                Set("fleetNumber", Text("VehicleKey"));
+                Set("fleetNumber", Text("FleetNumber") ?? Text("VehicleKey"));
+                Set("abbreviation", Text("Abbreviation"));
+                Set("transmission", Text("Transmission"));
+                Set("dvsCompliant", Text("DvsCompliant"));
+                Set("fuelProvider", Text("FuelProvider"));
+                Set("cabMobile", Text("CabMobile"));
+                Set("fuelPinSecretName", Text("FuelPinSecretName"));
+                Set("fuelCardLastFour", Text("FuelCardLastFour"));
+                Set("shellCard", Text("ShellCard"));
+                Set("bpRedCard", Text("BpRedCard"));
+                Set("bpPlainCard", Text("BpPlainCard"));
+                Set("notes", Text("Notes"));
+                Set("fleetioId", Text("FleetioId"));
+                Set("fleetioName", Text("FleetioName"));
+                Set("fleetioStatus", Text("FleetioStatus"));
+                Set("active", Text("Active"));
                 break;
             case "trailer":
                 Set("trailerNumber", Text("Registration") ?? Text("TrailerKey"));
                 Set("type", Text("TrailerType"));
-                Set("standardCapacity", Text("Capacity"));
+                Set("standardCapacity", Text("StandardCapacity"));
+                Set("euroCapacity", Text("EuroCapacity"));
+                Set("notes", Text("Notes"));
+                Set("active", Text("Active"));
                 break;
             case "marketcontact":
                 Set("market", Text("Market"));
@@ -590,6 +660,7 @@ public sealed class SharePointMasterDataSyncService(
                 Set("salesman", Text("Salesman"));
                 Set("sender", Text("Sender"));
                 Set("readOnlyMapPdfUrl", Text("ReadOnlyMapPdfUrl"));
+                Set("active", Text("Active"));
                 break;
             case "emailroute":
                 Set("id", Text("RouteKey"));
@@ -622,14 +693,18 @@ public sealed class SharePointMasterDataSyncService(
         };
         using var response = await http.SendAsync(request, ct);
         var body = await response.Content.ReadAsStringAsync(ct);
-        if (!response.IsSuccessStatusCode) throw Failure("GraphAuthenticationFailed", "Microsoft Graph rejected the SLH SharePoint integration credential", response.StatusCode, body);
+        if (!response.IsSuccessStatusCode)
+            throw Failure("GraphAuthenticationFailed", "Microsoft Graph rejected the SLH SharePoint integration credential", response.StatusCode, body);
         using var document = JsonDocument.Parse(body);
-        return document.RootElement.GetProperty("access_token").GetString() ?? throw new SharePointMasterDataException("GraphAuthenticationFailed", "Microsoft Graph returned no access token.");
+        return document.RootElement.GetProperty("access_token").GetString()
+            ?? throw new SharePointMasterDataException("GraphAuthenticationFailed", "Microsoft Graph returned no access token.");
     }
 
     private void ValidateConfiguration()
     {
-        if (string.IsNullOrWhiteSpace(settings.TenantId) || string.IsNullOrWhiteSpace(settings.ClientId) || string.IsNullOrWhiteSpace(settings.ClientSecret) || string.IsNullOrWhiteSpace(settings.Hostname) || string.IsNullOrWhiteSpace(settings.SitePath) || settings.Lists.Count == 0)
+        if (string.IsNullOrWhiteSpace(settings.TenantId) || string.IsNullOrWhiteSpace(settings.ClientId)
+            || string.IsNullOrWhiteSpace(settings.ClientSecret) || string.IsNullOrWhiteSpace(settings.Hostname)
+            || string.IsNullOrWhiteSpace(settings.SitePath) || settings.Lists.Count == 0)
             throw new SharePointMasterDataException("SharePointConfigurationMissing", "The SLH SharePoint integration is not fully configured. Add the Microsoft Graph app credential before publishing or syncing Lists.");
     }
 
