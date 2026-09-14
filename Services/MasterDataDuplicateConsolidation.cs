@@ -11,10 +11,6 @@ public sealed record MasterDataDuplicateConsolidationResult(
     int VehicleDuplicatesArchived,
     int VehicleFuelDetailsRecovered);
 
-/// <summary>
-/// Idempotent high-confidence clean-up for duplicate operational master rows. It deliberately
-/// keeps the canonical records and archives aliases rather than deleting history.
-/// </summary>
 public static class MasterDataDuplicateConsolidation
 {
     public static async Task<MasterDataDuplicateConsolidationResult> RunAsync(
@@ -62,12 +58,12 @@ public static class MasterDataDuplicateConsolidation
                     ChangesJson = JsonSerializer.Serialize(new
                     {
                         canonicalMarketContactId = canonical.Id,
-                        canonical.MarketKey,
-                        canonical.Market,
-                        canonical.Name,
-                        canonical.StandOrLocation,
+                        canonicalMarketKey = canonical.MarketKey,
+                        market = canonical.Market,
+                        name = canonical.Name,
+                        standOrLocation = canonical.StandOrLocation,
                         duplicateMarketContactId = duplicate.Id,
-                        duplicate.MarketKey
+                        duplicateMarketKey = duplicate.MarketKey
                     })
                 });
             }
@@ -83,8 +79,6 @@ public static class MasterDataDuplicateConsolidation
         ILogger logger,
         CancellationToken ct)
     {
-        // Include inactive aliases as well as active vehicles. Fleetio may already have retired an
-        // older duplicate that still contains the fuel PIN/card data we need to preserve.
         var vehicles = await db.Vehicles.ToListAsync(ct);
         var loadUse = await db.Loads.AsNoTracking()
             .Where(load => load.VehicleId != null)
@@ -112,8 +106,6 @@ public static class MasterDataDuplicateConsolidation
                 PreserveVehicleDetail(canonical, duplicate);
                 if (hadFuelGap && HasFuelData(canonical)) fuelRecovered++;
 
-                // Historical inactive aliases only donate missing master detail. Active duplicate
-                // rows must also have operational references moved before they are retired.
                 if (!duplicate.Active) continue;
 
                 foreach (var load in await db.Loads.Where(load => load.VehicleId == duplicate.Id).ToListAsync(ct))
@@ -170,17 +162,15 @@ public static class MasterDataDuplicateConsolidation
                     ChangesJson = JsonSerializer.Serialize(new
                     {
                         canonicalVehicleId = canonical.Id,
-                        canonical.Registration,
+                        canonicalRegistration = canonical.Registration,
                         duplicateVehicleId = duplicate.Id,
-                        duplicate.Registration,
+                        duplicateRegistration = duplicate.Registration,
                         fuelDetailsRecovered = hadFuelGap
                     })
                 });
             }
         }
 
-        // Save even when no active duplicate was archived because an inactive alias may have
-        // restored fuel details onto the active canonical vehicle.
         if (archived > 0 || fuelRecovered > 0) await db.SaveChangesAsync(ct);
         return (archived, fuelRecovered);
     }
