@@ -1,0 +1,198 @@
+name: One-shot - Final production integration verification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/live-final-verification.yml'
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  AZURE_RESOURCE_GROUP: slh-tms-prod-rg
+  AZURE_CONTAINER_APP_NAME: slh-tms-api-prod
+  API_BASE: https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+  TACHO_JOB: slh-tms-job-tachomaster
+  ETA_JOB: slh-tms-job-eta
+
+jobs:
+  verify-live:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sign in to Azure with OpenID Connect
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Execute live syncs and cross-system acceptance checks
+        id: live
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p diagnostics
+          tmp="$(mktemp -d)"
+          failures=()
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          planning_date="$(TZ=Europe/London date +%F)"
+
+          wait_job() {
+            local job="$1" execution="$2" state="" attempt
+            for attempt in $(seq 1 60); do
+              state="$(az containerapp job execution show --name "$job" --resource-group "$AZURE_RESOURCE_GROUP" --job-execution-name "$execution" --query properties.status -o tsv 2>/dev/null || true)"
+              echo "$job $execution status=${state:-unknown}"
+              case "$state" in
+                Succeeded) return 0 ;;
+                Failed) return 1 ;;
+              esac
+              sleep 10
+            done
+            return 2
+          }
+
+          start_and_wait() {
+            local job="$1" execution
+            execution="$(az containerapp job start --name "$job" --resource-group "$AZURE_RESOURCE_GROUP" --query name -o tsv 2>/dev/null || true)"
+            if test -z "$execution"; then
+              failures+=("$job could not be started")
+              return 1
+            fi
+            echo "Started $job execution $execution"
+            if ! wait_job "$job" "$execution"; then
+              failures+=("$job execution $execution did not succeed")
+              return 1
+            fi
+            return 0
+          }
+
+          # Force the current Tacho identity/canonical pass before reading live execution evidence.
+          start_and_wait "$TACHO_JOB" || true
+
+          secrets_json="$(az containerapp secret list --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --show-values -o json 2>/dev/null || echo '[]')"
+          tv_key="$(jq -r '[.[] | select(.name == "tv-wallboard-access-key")][0].value // empty' <<<"$secrets_json")"
+          if test ${#tv_key} -lt 24; then
+            failures+=("TV wallboard access key unavailable from production Container App")
+          fi
+
+          call_json() {
+            local name="$1" method="$2" path="$3"
+            local outfile="$tmp/$name.json" code
+            if test "$method" = POST; then
+              code="$(curl -sS --max-time 120 -o "$outfile" -w '%{http_code}' -X POST -H "X-TMS-TV-Key: $tv_key" -H "X-TV-Display-Key: $tv_key" "$API_BASE$path" || echo 000)"
+            else
+              code="$(curl -sS --max-time 120 -o "$outfile" -w '%{http_code}' -H 'Cache-Control: no-cache' -H "X-TMS-TV-Key: $tv_key" -H "X-TV-Display-Key: $tv_key" "$API_BASE$path" || echo 000)"
+            fi
+            echo "$code" > "$tmp/$name.code"
+            if test "$code" != 200; then
+              failures+=("$name returned HTTP $code")
+              echo '{}' > "$outfile"
+            fi
+          }
+
+          # Site Master is authoritative: safely repair Site/geofence links and reproject today if needed.
+          call_json geofence_sync POST "/api/v1/health/geofence-links/sync"
+          call_json geofence_links GET "/api/v1/health/geofence-links"
+
+          # Reading route-progress runs the same mapping repair used by the wallboard itself.
+          call_json route_progress GET "/api/v1/tv-display/route-progress?date=$planning_date"
+
+          # Give live ingestion a short opportunity to persist any mapping/evidence repair, then refresh ETAs.
+          sleep 20
+          start_and_wait "$ETA_JOB" || true
+
+          call_json driver_master GET "/api/v1/health/driver-master"
+          call_json tachomaster GET "/api/v1/health/tachomaster"
+          call_json run_evidence GET "/api/v1/health/run-evidence?date=$planning_date"
+          call_json wallboard_source GET "/api/v1/operations/wallboard-source-health?date=$planning_date"
+          call_json planned_runs GET "/api/v1/tv-display/planned-runs?date=$planning_date"
+          call_json run_timing GET "/api/v1/run-timing?date=$planning_date"
+          call_json route_progress_final GET "/api/v1/tv-display/route-progress?date=$planning_date"
+
+          # Acceptance gates. Cardless current workers are allowed when stable member identity exists.
+          member_dupes="$(jq -r '.duplicateMemberGroups // -1' "$tmp/driver_master.json")"
+          card_dupes="$(jq -r '.duplicateCardGroups // -1' "$tmp/driver_master.json")"
+          without_member="$(jq -r '.activeWithoutMember // -1' "$tmp/driver_master.json")"
+          aligned="$(jq -r '.populationAligned // false' "$tmp/driver_master.json")"
+          canonical="$(jq -r '.latestCanonicalSyncUtc // empty' "$tmp/driver_master.json")"
+          tacho_stale="$(jq -r 'if .scheduledSync.stale == null then true else .scheduledSync.stale end' "$tmp/tachomaster.json")"
+          geo_unlinked="$(jq -r '.unlinked // -1' "$tmp/geofence_links.json")"
+          board_all_visible="$(jq -r '.allImportedRunsVisible // false' "$tmp/wallboard_source.json")"
+          imported_runs="$(jq -r '.importedPlanRuns // -1' "$tmp/wallboard_source.json")"
+          wallboard_runs="$(jq -r '.wallboardRuns // -1' "$tmp/wallboard_source.json")"
+          evidence_planned="$(jq -r '.geofences.plannedRuns // -1' "$tmp/run_evidence.json")"
+          tracking_planned="$(jq -r '.tracking.plannedVehicleCount // -1' "$tmp/run_evidence.json")"
+          tracking_none="$(jq -r '.tracking.vehiclesWithNoSamples // -1' "$tmp/run_evidence.json")"
+          tracking_latest="$(jq -r '.tracking.latestTrackingUtc // empty' "$tmp/run_evidence.json")"
+          evidence_gaps="$(jq -r '.evidenceGapCount // -1' "$tmp/run_evidence.json")"
+          planned_count="$(jq -r 'if type=="array" then length else (.runs|length // -1) end' "$tmp/planned_runs.json" 2>/dev/null || echo -1)"
+          route_count="$(jq -r '.runs | length' "$tmp/route_progress_final.json" 2>/dev/null || echo -1)"
+          timing_count="$(jq -r '.records | length' "$tmp/run_timing.json" 2>/dev/null || echo -1)"
+
+          test "$member_dupes" = 0 || failures+=("Driver Master duplicate member groups=$member_dupes")
+          test "$card_dupes" = 0 || failures+=("Driver Master duplicate card groups=$card_dupes")
+          test "$without_member" = 0 || failures+=("Active drivers without stable member identity=$without_member")
+          test "$aligned" = true || failures+=("Driver Master populationAligned=$aligned")
+          test -n "$canonical" || failures+=("Driver Master canonical sync timestamp missing")
+          test "$tacho_stale" = false || failures+=("TachoMaster scheduled source remains stale")
+          test "$geo_unlinked" = 0 || failures+=("Site Master geofences still unlinked=$geo_unlinked")
+          test "$board_all_visible" = true || failures+=("Wallboard source is missing imported plan runs")
+          test "$planned_count" -ge 0 2>/dev/null || failures+=("Planned-runs feed did not return a valid collection")
+          test "$route_count" -ge 0 2>/dev/null || failures+=("Route-progress feed did not return a valid collection")
+          test "$timing_count" -ge 0 2>/dev/null || failures+=("Run-timing summary feed did not return a valid collection")
+          if test "$planned_count" -gt 0 2>/dev/null; then
+            test "$route_count" -gt 0 2>/dev/null || failures+=("Route-progress returned no rows while planned runs exist")
+            test "$timing_count" -gt 0 2>/dev/null || failures+=("Run-timing returned no rows while planned runs exist")
+          fi
+
+          overall=true
+          if (( ${#failures[@]} > 0 )); then overall=false; fi
+          jq -n \
+            --arg checkedAtUtc "$now" \
+            --arg planningDate "$planning_date" \
+            --argjson ready "$overall" \
+            --argjson failures "$(printf '%s\n' "${failures[@]:-}" | jq -R . | jq -s 'map(select(length>0))')" \
+            --slurpfile driverMaster "$tmp/driver_master.json" \
+            --slurpfile tachomaster "$tmp/tachomaster.json" \
+            --slurpfile geofenceSync "$tmp/geofence_sync.json" \
+            --slurpfile geofenceLinks "$tmp/geofence_links.json" \
+            --slurpfile runEvidence "$tmp/run_evidence.json" \
+            --slurpfile wallboardSource "$tmp/wallboard_source.json" \
+            --slurpfile plannedRuns "$tmp/planned_runs.json" \
+            --slurpfile routeProgress "$tmp/route_progress_final.json" \
+            --slurpfile runTiming "$tmp/run_timing.json" \
+            '{checkedAtUtc:$checkedAtUtc,planningDate:$planningDate,readyForUse:$ready,failures:$failures,driverMaster:$driverMaster[0],tachomaster:$tachomaster[0],geofenceSync:$geofenceSync[0],geofenceLinks:$geofenceLinks[0],runEvidence:$runEvidence[0],wallboardSource:$wallboardSource[0],wallboardFeeds:{plannedRunCount:(if ($plannedRuns[0]|type)=="array" then ($plannedRuns[0]|length) else (($plannedRuns[0].runs // [])|length) end),routeProgressRunCount:(($routeProgress[0].runs // [])|length),runTimingRecordCount:(($runTiming[0].records // [])|length),latestTrackingUtc:($routeProgress[0].latestTrackingUtc // null),tachoWarning:($routeProgress[0].tachoWarning // null)}}' \
+            > diagnostics/live-final-verification.json
+
+          echo "--- final production verification ---"
+          jq '{checkedAtUtc,planningDate,readyForUse,failures,driverMaster:{activeDrivers:.driverMaster.activeDrivers,sourceWorkers:.driverMaster.sourceWorkers,populationAligned:.driverMaster.populationAligned,duplicateMemberGroups:.driverMaster.duplicateMemberGroups,duplicateCardGroups:.driverMaster.duplicateCardGroups,activeWithoutMember:.driverMaster.activeWithoutMember,activeWithoutCard:.driverMaster.activeWithoutCard,latestCanonicalSyncUtc:.driverMaster.latestCanonicalSyncUtc},tachomaster:{connected:.tachomaster.connected,scheduledSync:.tachomaster.scheduledSync},geofenceLinks,wallboardSource,wallboardFeeds,tracking:.runEvidence.tracking,evidenceGapCount:.runEvidence.evidenceGapCount}' diagnostics/live-final-verification.json
+
+          echo "ready=$overall" >> "$GITHUB_OUTPUT"
+
+      - name: Commit verification evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f diagnostics/live-final-verification.json || echo '{"readyForUse":false,"failures":["Verification script did not produce evidence"]}' > diagnostics/live-final-verification.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add diagnostics/live-final-verification.json
+          git commit -m "Record final production integration verification" || exit 0
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
+
+      - name: Enforce final readiness gate
+        if: always()
+        shell: bash
+        run: |
+          test "${{ steps.live.outputs.ready }}" = "true"
