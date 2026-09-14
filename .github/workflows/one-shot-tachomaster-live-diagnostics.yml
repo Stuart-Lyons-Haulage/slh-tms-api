@@ -51,10 +51,13 @@ jobs:
               --job-execution-name "$execution" \
               --output json || true
 
-            echo '=== Latest execution console logs (bounded) ==='
-            timeout 25s az containerapp job logs show \
+            echo '=== Latest execution console logs ==='
+            timeout 35s az containerapp job logs show \
               --name "$TACHO_JOB" \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --execution "$execution" \
-              --tail 300 || true
+              --container "$TACHO_JOB" \
+              --follow false \
+              --tail 300 \
+              --format text || true
           fi
