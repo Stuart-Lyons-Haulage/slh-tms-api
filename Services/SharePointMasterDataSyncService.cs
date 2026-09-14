@@ -5,6 +5,7 @@ using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Contracts;
 using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
 
 namespace Slh.Tms.Api.Services;
 
