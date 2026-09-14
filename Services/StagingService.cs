@@ -81,9 +81,6 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
     public async Task<StagedImport> ReviewAndPromote(Guid id, bool approve, string? note, ClaimsPrincipal user, CancellationToken ct)
     {
         var item = await db.StagedImports.SingleOrDefaultAsync(x => x.Id == id, ct) ?? throw new KeyNotFoundException("Staged item not found");
-        // Reject is intentionally idempotent. The review screen can have stale rows
-        // after another user has acted, but repeating a rejection must not create a
-        // second decision event or turn a harmless refresh into a 500.
         if (!approve && item.Status == StagingStatus.Rejected) return item;
         if (item.Status != StagingStatus.PendingReview)
             throw new InvalidOperationException($"This staged item has already been reviewed ({item.Status}). Refresh the review queue before trying again.");
@@ -139,7 +136,7 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             case "marketcontact": await PromoteMarketContact(payload, ct); break;
             case "fuelprice": await PromoteFuelPrice(payload, ct); break;
             case "order": await PromoteOrder(item, payload, ct); break;
-            case "communication": break; // Approval records the decision only; it never creates a live order.
+            case "communication": break;
             default: throw new JsonException($"Unsupported registered entity type '{item.EntityType}'.");
         }
         await db.SaveChangesAsync(ct);
@@ -164,13 +161,10 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             db.Customers.Add(customer);
         }
         else { customer.Name = name; customer.Active = Bool(payload, "active", true); }
-        if (customer is not null)
-        {
-            customer.TradingName = Clip(Text(payload, "tradingName"), 200);
-            customer.AccountOwner = Clip(Text(payload, "accountOwner"), 200);
-            customer.ServiceNotes = Clip(Text(payload, "serviceNotes"), 1000);
-            customer.DefaultSiteCode = Clip(Text(payload, "defaultSiteCode"), 80);
-        }
+        customer.TradingName = Clip(Text(payload, "tradingName"), 200) ?? customer.TradingName;
+        customer.AccountOwner = Clip(Text(payload, "accountOwner"), 200) ?? customer.AccountOwner;
+        customer.ServiceNotes = Clip(Text(payload, "serviceNotes"), 1000) ?? customer.ServiceNotes;
+        customer.DefaultSiteCode = Clip(Text(payload, "defaultSiteCode"), 80) ?? customer.DefaultSiteCode;
     }
 
     private async Task PromoteCustomerContact(JsonElement payload, CancellationToken ct)
@@ -182,7 +176,7 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
         else if (customer.Name == customer.Code && !string.Equals(customerName, customerCode, StringComparison.OrdinalIgnoreCase)) customer.Name = customerName;
         var contact = await db.CustomerContacts.SingleOrDefaultAsync(item => item.CustomerCode == customerCode && item.Name == name, ct);
         if (contact is null) db.CustomerContacts.Add(new CustomerContact { CustomerCode = customerCode, Name = name, Email = Clip(Text(payload, "email"), 320), MobileNumber = Clip(Text(payload, "mobileNumber"), 40), ReceivesEtaUpdates = Bool(payload, "receivesEtaUpdates", true), Active = Bool(payload, "active", true) });
-        else { contact.Email = Clip(Text(payload, "email"), 320); contact.MobileNumber = Clip(Text(payload, "mobileNumber"), 40); contact.ReceivesEtaUpdates = Bool(payload, "receivesEtaUpdates", true); contact.Active = Bool(payload, "active", true); }
+        else { contact.Email = Clip(Text(payload, "email"), 320) ?? contact.Email; contact.MobileNumber = Clip(Text(payload, "mobileNumber"), 40) ?? contact.MobileNumber; contact.ReceivesEtaUpdates = Bool(payload, "receivesEtaUpdates", contact.ReceivesEtaUpdates); contact.Active = Bool(payload, "active", contact.Active); }
     }
 
     private async Task PromoteEmailRoute(JsonElement payload, CancellationToken ct)
@@ -203,55 +197,59 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             db.CustomerEmailRoutes.Add(route);
         }
         route.CustomerCode = customerCode;
-        route.SenderEmail = senderEmail;
-        route.SenderDomain = senderDomain;
-        route.SubjectContains = Clip(Text(payload, "subjectContains"), 200);
-        route.ParserType = Clip(Text(payload, "parserType"), 120);
-        route.DefaultSiteCode = Clip(Text(payload, "defaultSiteCode"), 80);
-        route.DefaultDeliverySiteCode = Clip(Text(payload, "defaultDeliverySiteCode"), 80);
-        route.MarketKey = Clip(Text(payload, "marketKey"), 160);
-        route.RequiresReview = Bool(payload, "requiresReview", true);
-        route.Active = Bool(payload, "active", true);
+        route.SenderEmail = senderEmail ?? route.SenderEmail;
+        route.SenderDomain = senderDomain ?? route.SenderDomain;
+        route.SubjectContains = Clip(Text(payload, "subjectContains"), 200) ?? route.SubjectContains;
+        route.ParserType = Clip(Text(payload, "parserType"), 120) ?? route.ParserType;
+        route.DefaultSiteCode = Clip(Text(payload, "defaultSiteCode"), 80) ?? route.DefaultSiteCode;
+        route.DefaultDeliverySiteCode = Clip(Text(payload, "defaultDeliverySiteCode"), 80) ?? route.DefaultDeliverySiteCode;
+        route.MarketKey = Clip(Text(payload, "marketKey"), 160) ?? route.MarketKey;
+        route.RequiresReview = Bool(payload, "requiresReview", route.RequiresReview);
+        route.Active = Bool(payload, "active", route.Active);
         CustomerEmailRouteService.InvalidateCache();
     }
 
     private async Task PromoteVehicle(JsonElement payload, CancellationToken ct)
     {
         var registration = ClipRequired(Required(payload, "registration").Replace(" ", "").ToUpperInvariant(), 20);
-        var vehicle = await db.Vehicles.SingleOrDefaultAsync(item => item.Registration == registration, ct);
+        var vehicles = await db.Vehicles.ToListAsync(ct);
+        var vehicle = vehicles.FirstOrDefault(item => NormaliseKey(item.Registration) == NormaliseKey(registration));
         if (vehicle is null)
         {
-            vehicle = new Vehicle { Registration = registration };
+            vehicle = new Vehicle { Registration = registration, Active = true };
             db.Vehicles.Add(vehicle);
         }
-        vehicle.VIN = Clip(Text(payload, "vin"), 40);
-        vehicle.OwnerType = Clip(Text(payload, "ownerType"), 80);
-        vehicle.VehicleSite = Clip(Text(payload, "vehicleSite") ?? Text(payload, "site"), 160);
-        vehicle.FleetNumber = Clip(Text(payload, "fleetNumber"), 40);
-        vehicle.Abbreviation = Clip(Text(payload, "abbreviation"), 20);
-        vehicle.Transmission = Clip(Text(payload, "transmission"), 20);
-        vehicle.DvsCompliant = BoolOrNull(payload, "dvsCompliant");
-        vehicle.CabMobile = Clip(Text(payload, "cabMobile") ?? Text(payload, "cabPhone") ?? Text(payload, "cabPhoneNumber"), 40);
-        vehicle.FuelPin = Clip(Text(payload, "fuelPin"), 80);
-        vehicle.ShellCard = Clip(Text(payload, "shellCard"), 80);
-        vehicle.BpRedCard = Clip(Text(payload, "bpRedCard"), 80);
-        vehicle.BpPlainCard = Clip(Text(payload, "bpPlainCard"), 80);
-        vehicle.Notes = Clip(Text(payload, "notes"), 500);
-        vehicle.FuelProvider = Clip(Text(payload, "fuelProvider"), 30);
-        vehicle.FuelPinSecretName = Clip(Text(payload, "fuelPinSecretName"), 120);
-        vehicle.FuelCardLastFour = Clip(Text(payload, "fuelCardLastFour"), 4);
-        vehicle.FleetioId = Clip(Text(payload, "fleetioId") ?? Text(payload, "fleetioID") ?? Text(payload, "fleetioVehicleId"), 80);
-        vehicle.FleetioName = Clip(Text(payload, "fleetioName"), 160);
-        vehicle.FleetioStatus = Clip(Text(payload, "fleetioStatus"), 80);
-        vehicle.Active = Bool(payload, "active", true);
+        vehicle.VIN = Clip(Text(payload, "vin"), 40) ?? vehicle.VIN;
+        vehicle.OwnerType = Clip(Text(payload, "ownerType"), 80) ?? vehicle.OwnerType;
+        vehicle.VehicleSite = Clip(Text(payload, "vehicleSite") ?? Text(payload, "site"), 160) ?? vehicle.VehicleSite;
+        vehicle.FleetNumber = Clip(Text(payload, "fleetNumber"), 40) ?? vehicle.FleetNumber;
+        vehicle.Abbreviation = Clip(Text(payload, "abbreviation"), 20) ?? vehicle.Abbreviation;
+        vehicle.Transmission = Clip(Text(payload, "transmission"), 20) ?? vehicle.Transmission;
+        vehicle.DvsCompliant = BoolOrNull(payload, "dvsCompliant") ?? vehicle.DvsCompliant;
+        vehicle.CabMobile = Clip(Text(payload, "cabMobile") ?? Text(payload, "cabPhone") ?? Text(payload, "cabPhoneNumber"), 40) ?? vehicle.CabMobile;
+        vehicle.FuelPin = Clip(Text(payload, "fuelPin"), 80) ?? vehicle.FuelPin;
+        vehicle.ShellCard = Clip(Text(payload, "shellCard"), 80) ?? vehicle.ShellCard;
+        vehicle.BpRedCard = Clip(Text(payload, "bpRedCard"), 80) ?? vehicle.BpRedCard;
+        vehicle.BpPlainCard = Clip(Text(payload, "bpPlainCard"), 80) ?? vehicle.BpPlainCard;
+        vehicle.Notes = Clip(Text(payload, "notes"), 500) ?? vehicle.Notes;
+        vehicle.FuelProvider = Clip(Text(payload, "fuelProvider"), 30) ?? vehicle.FuelProvider;
+        vehicle.FuelPinSecretName = Clip(Text(payload, "fuelPinSecretName"), 120) ?? vehicle.FuelPinSecretName;
+        vehicle.FuelCardLastFour = Clip(Text(payload, "fuelCardLastFour"), 4) ?? vehicle.FuelCardLastFour;
+        vehicle.FleetioId = Clip(Text(payload, "fleetioId") ?? Text(payload, "fleetioID") ?? Text(payload, "fleetioVehicleId"), 80) ?? vehicle.FleetioId;
+        vehicle.FleetioName = Clip(Text(payload, "fleetioName"), 160) ?? vehicle.FleetioName;
+        vehicle.FleetioStatus = Clip(Text(payload, "fleetioStatus"), 80) ?? vehicle.FleetioStatus;
+        vehicle.Active = Bool(payload, "active", vehicle.Active);
     }
 
     private async Task PromoteDriver(JsonElement payload, CancellationToken ct)
     {
         var employeeNumber = Text(payload, "employeeNumber") ?? Text(payload, "driverId") ?? Text(payload, "driverID") ?? Text(payload, "DriverID") ?? Text(payload, "employeeNo") ?? Text(payload, "payrollNumber");
         var displayName = Text(payload, "displayName") ?? Text(payload, "driver") ?? Text(payload, "Driver") ?? Text(payload, "name") ?? Text(payload, "driverName");
+        var tachoMasterDriverId = Clip(Text(payload, "tachoMasterDriverId") ?? Text(payload, "tachomasterDriverId") ?? Text(payload, "memberCode"), 80);
+        var tachoCardNumber = Clip(Text(payload, "tachoCardNumber") ?? Text(payload, "driverCardNumber") ?? Text(payload, "cardNumber"), 80);
+        if (string.IsNullOrWhiteSpace(employeeNumber) && !string.IsNullOrWhiteSpace(tachoMasterDriverId)) employeeNumber = $"TM-{tachoMasterDriverId}";
         if (string.IsNullOrWhiteSpace(employeeNumber) && !string.IsNullOrWhiteSpace(displayName)) employeeNumber = displayName.Trim().ToUpperInvariant().Replace(" ", "-");
-        if (string.IsNullOrWhiteSpace(employeeNumber) || string.IsNullOrWhiteSpace(displayName)) throw new JsonException("Driver payload requires employeeNumber and displayName.");
+        if (string.IsNullOrWhiteSpace(employeeNumber) || string.IsNullOrWhiteSpace(displayName)) throw new JsonException("Driver payload requires employeeNumber/displayName, or a TachoMaster member code with displayName.");
         employeeNumber = ClipRequired(employeeNumber, 40);
         displayName = ClipRequired(displayName, 160);
         var tachoName = Clip(Text(payload, "tachoName"), 160);
@@ -264,16 +262,18 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
         var northEligible = BoolOrNull(payload, "northEligible");
         var preloadEligible = BoolOrNull(payload, "preloadEligible");
         var notes = Clip(Text(payload, "notes"), 500);
-        var tachoMasterDriverId = Clip(Text(payload, "tachoMasterDriverId") ?? Text(payload, "tachomasterDriverId"), 80);
         var drivingLicenceNumber = Clip(Text(payload, "drivingLicenceNumber") ?? Text(payload, "licenceNumber"), 80);
         var licenceExpiry = DateOnlyOrNull(payload, "licenceExpiry");
         var licenceStatus = Clip(Text(payload, "licenceStatus"), 40);
-        var active = Bool(payload, "active", true);
 
-        var driver = await db.Drivers.SingleOrDefaultAsync(item => item.EmployeeNumber == employeeNumber, ct);
+        Driver? driver = null;
+        if (!string.IsNullOrWhiteSpace(tachoMasterDriverId))
+            driver = await db.Drivers.FirstOrDefaultAsync(item => item.TachoMasterDriverId == tachoMasterDriverId, ct);
+        driver ??= await db.Drivers.FirstOrDefaultAsync(item => item.EmployeeNumber == employeeNumber, ct);
+
         if (driver is null)
         {
-            db.Drivers.Add(new Driver
+            driver = new Driver
             {
                 EmployeeNumber = employeeNumber,
                 DisplayName = displayName,
@@ -282,43 +282,81 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
                 DriverType = driverType,
                 DriverGroup = driverGroup,
                 Skills = skills,
-                Coding = coding, AgencyName = agencyName, NorthEligible = northEligible, PreloadEligible = preloadEligible, Notes = notes,
-                TachoMasterDriverId = tachoMasterDriverId, DrivingLicenceNumber = drivingLicenceNumber, LicenceExpiry = licenceExpiry, LicenceStatus = licenceStatus,
-                Active = active
-            });
+                Coding = coding,
+                AgencyName = agencyName,
+                NorthEligible = northEligible,
+                PreloadEligible = preloadEligible,
+                Notes = notes,
+                TachoMasterDriverId = tachoMasterDriverId,
+                TachoCardNumber = tachoCardNumber,
+                DrivingLicenceNumber = drivingLicenceNumber,
+                LicenceExpiry = licenceExpiry,
+                LicenceStatus = licenceStatus,
+                Active = Bool(payload, "active", true)
+            };
+            db.Drivers.Add(driver);
         }
         else
         {
             driver.DisplayName = displayName;
-            driver.TachoName = tachoName;
-            driver.MobileNumber = mobileNumber;
-            driver.DriverType = driverType;
-            driver.DriverGroup = driverGroup;
-            driver.Skills = skills;
-            driver.Coding = coding; driver.AgencyName = agencyName; driver.NorthEligible = northEligible; driver.PreloadEligible = preloadEligible; driver.Notes = notes;
-            driver.TachoMasterDriverId = tachoMasterDriverId; driver.DrivingLicenceNumber = drivingLicenceNumber; driver.LicenceExpiry = licenceExpiry; driver.LicenceStatus = licenceStatus;
-            driver.Active = active;
+            driver.TachoName = tachoName ?? driver.TachoName;
+            driver.MobileNumber = mobileNumber ?? driver.MobileNumber;
+            driver.DriverType = driverType ?? driver.DriverType;
+            driver.DriverGroup = driverGroup ?? driver.DriverGroup;
+            driver.Skills = skills ?? driver.Skills;
+            driver.Coding = coding ?? driver.Coding;
+            driver.AgencyName = agencyName ?? driver.AgencyName;
+            driver.NorthEligible = northEligible ?? driver.NorthEligible;
+            driver.PreloadEligible = preloadEligible ?? driver.PreloadEligible;
+            driver.Notes = notes ?? driver.Notes;
+            driver.TachoMasterDriverId = tachoMasterDriverId ?? driver.TachoMasterDriverId;
+            driver.TachoCardNumber = tachoCardNumber ?? driver.TachoCardNumber;
+            driver.DrivingLicenceNumber = drivingLicenceNumber ?? driver.DrivingLicenceNumber;
+            driver.LicenceExpiry = licenceExpiry ?? driver.LicenceExpiry;
+            driver.LicenceStatus = licenceStatus ?? driver.LicenceStatus;
+            driver.Active = Bool(payload, "active", driver.Active);
         }
     }
 
     private async Task PromoteTrailer(JsonElement payload, CancellationToken ct)
     {
         var trailerNumber = ClipRequired(Required(payload, "trailerNumber"), 40);
-        var trailer = await db.Trailers.SingleOrDefaultAsync(item => item.TrailerNumber == trailerNumber, ct);
+        var trailer = await db.Trailers.FirstOrDefaultAsync(item => item.TrailerNumber == trailerNumber, ct);
         if (trailer is null) db.Trailers.Add(new Trailer { TrailerNumber = trailerNumber, Type = Clip(Text(payload, "type"), 80), StandardCapacity = IntOrNull(payload, "standardCapacity"), EuroCapacity = IntOrNull(payload, "euroCapacity"), Notes = Clip(Text(payload, "notes"), 500), Active = Bool(payload, "active", true) });
-        else { trailer.Type = Clip(Text(payload, "type"), 80); trailer.StandardCapacity = IntOrNull(payload, "standardCapacity"); trailer.EuroCapacity = IntOrNull(payload, "euroCapacity"); trailer.Notes = Clip(Text(payload, "notes"), 500); trailer.Active = Bool(payload, "active", true); }
+        else { trailer.Type = Clip(Text(payload, "type"), 80) ?? trailer.Type; trailer.StandardCapacity = IntOrNull(payload, "standardCapacity") ?? trailer.StandardCapacity; trailer.EuroCapacity = IntOrNull(payload, "euroCapacity") ?? trailer.EuroCapacity; trailer.Notes = Clip(Text(payload, "notes"), 500) ?? trailer.Notes; trailer.Active = Bool(payload, "active", trailer.Active); }
     }
 
     private async Task PromoteSite(JsonElement payload, CancellationToken ct)
     {
-        var externalCode = ClipRequired(Required(payload, "externalCode"), 40); var name = ClipRequired(Required(payload, "name"), 200);
+        var externalCode = ClipRequired(Required(payload, "externalCode"), 40);
+        var name = ClipRequired(Required(payload, "name"), 200);
         var customerCode = Clip(Text(payload, "customerCode"), 40);
-        var site = await db.Sites.SingleOrDefaultAsync(item => item.ExternalCode == externalCode, ct);
+        var collectionAddress = Clip(Text(payload, "collectionAddress") ?? Text(payload, "address"), 500);
+        var site = await db.Sites.FirstOrDefaultAsync(item => item.ExternalCode == externalCode, ct);
         if (site is null)
         {
-            db.Sites.Add(new Site { ExternalCode = externalCode, CustomerCode = customerCode, Name = name, DriverTextName = Clip(Text(payload, "driverTextName"), 200), CollectionAddress = Clip(Text(payload, "collectionAddress"), 500), CollectionInstructions = Clip(Text(payload, "collectionInstructions"), 1000), MapLink = Clip(Text(payload, "mapLink"), 1000), Aliases = Clip(Text(payload, "aliases"), 500), CustomField1 = Clip(Text(payload, "customField1"), 200), CustomField2 = Clip(Text(payload, "customField2"), 200), CustomField3 = Clip(Text(payload, "customField3"), 200), OperationalRegion = Clip(Text(payload, "operationalRegion") ?? Text(payload, "region"), 80), Active = Bool(payload, "active", true) });
+            var sameName = await db.Sites.Where(item => item.Name == name).ToListAsync(ct);
+            site = sameName.FirstOrDefault(item =>
+                string.IsNullOrWhiteSpace(collectionAddress) || string.IsNullOrWhiteSpace(item.CollectionAddress) ||
+                NormaliseKey(item.CollectionAddress) == NormaliseKey(collectionAddress));
         }
-        else { site.CustomerCode = customerCode; site.Name = name; site.DriverTextName = Clip(Text(payload, "driverTextName"), 200); site.CollectionAddress = Clip(Text(payload, "collectionAddress"), 500); site.CollectionInstructions = Clip(Text(payload, "collectionInstructions"), 1000); site.MapLink = Clip(Text(payload, "mapLink"), 1000); site.Aliases = Clip(Text(payload, "aliases"), 500); site.CustomField1 = Clip(Text(payload, "customField1"), 200); site.CustomField2 = Clip(Text(payload, "customField2"), 200); site.CustomField3 = Clip(Text(payload, "customField3"), 200); site.OperationalRegion = Clip(Text(payload, "operationalRegion") ?? Text(payload, "region"), 80); site.Active = Bool(payload, "active", true); }
+        if (site is null)
+        {
+            site = new Site { ExternalCode = externalCode, CustomerCode = customerCode, Name = name, Active = Bool(payload, "active", true) };
+            db.Sites.Add(site);
+        }
+        site.CustomerCode = customerCode ?? site.CustomerCode;
+        site.Name = name;
+        site.DriverTextName = Clip(Text(payload, "driverTextName"), 200) ?? site.DriverTextName;
+        site.CollectionAddress = collectionAddress ?? site.CollectionAddress;
+        site.CollectionInstructions = Clip(Text(payload, "collectionInstructions"), 1000) ?? site.CollectionInstructions;
+        site.MapLink = Clip(Text(payload, "mapLink"), 1000) ?? site.MapLink;
+        site.Aliases = Clip(Text(payload, "aliases"), 500) ?? site.Aliases;
+        site.CustomField1 = Clip(Text(payload, "customField1"), 200) ?? site.CustomField1;
+        site.CustomField2 = Clip(Text(payload, "customField2"), 200) ?? site.CustomField2;
+        site.CustomField3 = Clip(Text(payload, "customField3"), 200) ?? site.CustomField3;
+        site.OperationalRegion = Clip(Text(payload, "operationalRegion") ?? Text(payload, "region"), 80) ?? site.OperationalRegion;
+        site.Active = Bool(payload, "active", site.Active);
     }
 
     private async Task PromoteMarketContact(JsonElement payload, CancellationToken ct)
@@ -328,14 +366,28 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
         if (string.IsNullOrWhiteSpace(name)) throw new JsonException("Market contact payload requires name.");
         var standOrLocation = Clip(Text(payload, "standOrLocation") ?? Text(payload, "stallNumber"), 200);
         var marketKey = Clip(Text(payload, "marketKey"), 160);
-        var contact = !string.IsNullOrWhiteSpace(marketKey)
-            ? await db.MarketContacts.SingleOrDefaultAsync(item => item.MarketKey == marketKey, ct)
-            : await db.MarketContacts.FirstOrDefaultAsync(item => item.Market == market && item.Name == name && item.StandOrLocation == standOrLocation, ct);
+        MarketContact? contact = null;
+        if (!string.IsNullOrWhiteSpace(marketKey))
+            contact = await db.MarketContacts.FirstOrDefaultAsync(item => item.MarketKey == marketKey, ct);
+        contact ??= await db.MarketContacts.FirstOrDefaultAsync(item => item.Market == market && item.Name == name && item.StandOrLocation == standOrLocation, ct);
         var salesman = Clip(Text(payload, "salesman"), 200);
         var sender = Clip(Text(payload, "sender"), 200);
         var readOnlyMapPdfUrl = Clip(Text(payload, "readOnlyMapPdfUrl"), 1000);
-        if (contact is null) db.MarketContacts.Add(new MarketContact { MarketKey = marketKey, Market = market, Name = name, StandOrLocation = standOrLocation, Salesman = salesman, Sender = sender, ReadOnlyMapPdfUrl = readOnlyMapPdfUrl, Active = Bool(payload, "active", true) });
-        else { contact.MarketKey ??= marketKey; contact.Market = market; contact.Name = name; contact.StandOrLocation = standOrLocation; contact.Salesman = salesman; contact.Sender = sender; contact.ReadOnlyMapPdfUrl = readOnlyMapPdfUrl; contact.Active = Bool(payload, "active", true); }
+        if (contact is null)
+        {
+            db.MarketContacts.Add(new MarketContact { MarketKey = marketKey, Market = market, Name = name, StandOrLocation = standOrLocation, Salesman = salesman, Sender = sender, ReadOnlyMapPdfUrl = readOnlyMapPdfUrl, Active = Bool(payload, "active", true) });
+        }
+        else
+        {
+            contact.MarketKey ??= marketKey;
+            contact.Market = market;
+            contact.Name = name;
+            contact.StandOrLocation = standOrLocation;
+            contact.Salesman = salesman ?? contact.Salesman;
+            contact.Sender = sender ?? contact.Sender;
+            contact.ReadOnlyMapPdfUrl = readOnlyMapPdfUrl ?? contact.ReadOnlyMapPdfUrl;
+            contact.Active = Bool(payload, "active", contact.Active);
+        }
     }
 
     private async Task PromoteFuelPrice(JsonElement payload, CancellationToken ct)
@@ -345,7 +397,7 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
         if (!decimal.TryParse(Required(payload, "pricePencePerLitre"), out var pricePencePerLitre)) throw new JsonException("Fuel price payload requires a valid pricePencePerLitre.");
         var fuelPrice = await db.FuelPrices.SingleOrDefaultAsync(item => item.Provider == provider && item.WeekCommencing == weekCommencing, ct);
         if (fuelPrice is null) db.FuelPrices.Add(new FuelPrice { Provider = provider, WeekCommencing = weekCommencing, PricePencePerLitre = pricePencePerLitre, IsPricingMaximum = Bool(payload, "isPricingMaximum", false), Source = Clip(Text(payload, "source"), 200), Notes = Clip(Text(payload, "notes"), 500) });
-        else { fuelPrice.PricePencePerLitre = pricePencePerLitre; fuelPrice.IsPricingMaximum = Bool(payload, "isPricingMaximum", false); fuelPrice.Source = Clip(Text(payload, "source"), 200); fuelPrice.Notes = Clip(Text(payload, "notes"), 500); }
+        else { fuelPrice.PricePencePerLitre = pricePencePerLitre; fuelPrice.IsPricingMaximum = Bool(payload, "isPricingMaximum", fuelPrice.IsPricingMaximum); fuelPrice.Source = Clip(Text(payload, "source"), 200) ?? fuelPrice.Source; fuelPrice.Notes = Clip(Text(payload, "notes"), 500) ?? fuelPrice.Notes; }
     }
 
     private async Task PromoteOrder(StagedImport item, JsonElement payload, CancellationToken ct)
@@ -365,12 +417,7 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             : SiteTimingRuleMatcher.DeliveryWindow(masterRule, masterDeliveryDate);
         TransportOrder? existing;
         try { existing = await db.TransportOrders.SingleOrDefaultAsync(order => order.Reference == reference, ct); }
-        catch (Exception ex) when (ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase))
-        {
-            // The approved staged row is itself the durable order register on
-            // legacy production databases where DDL permissions are unavailable.
-            return;
-        }
+        catch (Exception ex) when (ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase)) { return; }
         if (existing is null)
         {
             DateOnly? deliveryDate = null;
@@ -401,14 +448,12 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
         }
     }
 
-    private async Task<(OrderMovement Movement, bool PlannerReady)> RecordOrderRevision(
-        StagedImport item, JsonElement payload, string reference, string customerCode, CancellationToken ct)
+    private async Task<(OrderMovement Movement, bool PlannerReady)> RecordOrderRevision(StagedImport item, JsonElement payload, string reference, string customerCode, CancellationToken ct)
     {
         var normalCustomer = ClipRequired(customerCode.Trim().ToUpperInvariant(), 40);
         var normalReference = new string(reference.Trim().ToUpperInvariant().Where(char.IsLetterOrDigit).ToArray());
         var stableKey = ClipRequired($"{normalCustomer}:{normalReference}", 240);
-        var movement = await db.OrderMovements.SingleOrDefaultAsync(
-            x => x.CustomerCode == normalCustomer && x.StableMovementKey == stableKey, ct);
+        var movement = await db.OrderMovements.SingleOrDefaultAsync(x => x.CustomerCode == normalCustomer && x.StableMovementKey == stableKey, ct);
         if (movement is null)
         {
             movement = new OrderMovement { CustomerCode = normalCustomer, StableMovementKey = stableKey };
@@ -422,8 +467,7 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             return (movement, movement.LifecycleStatus == OrderMovementStatus.PlannerReady);
         }
 
-        var previous = await db.OrderRevisions.Where(x => x.MovementId == movement.Id)
-            .OrderByDescending(x => x.RevisionNumber).FirstOrDefaultAsync(ct);
+        var previous = await db.OrderRevisions.Where(x => x.MovementId == movement.Id).OrderByDescending(x => x.RevisionNumber).FirstOrDefaultAsync(ct);
         var revision = new OrderRevision
         {
             MovementId = movement.Id,
@@ -441,8 +485,7 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
 
         var sourceLines = new List<JsonElement>();
         var hasExplicitSourceLines = TryGetProperty(payload, "sourceLines", out var sourceArray) && sourceArray.ValueKind == JsonValueKind.Array;
-        if (hasExplicitSourceLines)
-            sourceLines.AddRange(sourceArray.EnumerateArray().Select(x => x.Clone()));
+        if (hasExplicitSourceLines) sourceLines.AddRange(sourceArray.EnumerateArray().Select(x => x.Clone()));
         if (sourceLines.Count == 0) sourceLines.Add(payload.Clone());
 
         var plannerReady = false;
@@ -451,21 +494,14 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
             var line = sourceLines[index];
             var rawCollectionSite = Text(line, "collectionSite") ?? Text(line, "collectionLocation") ?? Text(payload, "collectionSite") ?? Text(payload, "collectionLocation") ?? Text(payload, "sellerName");
             var rawDeliverySite = Text(line, "deliverySite") ?? Text(line, "deliveryLocation") ?? Text(payload, "deliverySite") ?? Text(payload, "deliveryLocation") ?? Text(payload, "stallNumber");
-            var lineAlignment = await OrderSiteMasterAlignment.ResolveNamesAsync(
-                db, rawCollectionSite, rawDeliverySite,
-                Text(line, "collectionAddress") ?? Text(payload, "collectionAddress"),
-                Text(line, "deliveryAddress") ?? Text(payload, "deliveryAddress"),
-                Text(line, "mapLink") ?? Text(payload, "mapLink"),
-                Text(line, "driverInstructions") ?? Text(payload, "driverInstructions"), ct,
-                Text(line, "marketName") ?? Text(payload, "marketName"));
+            var lineAlignment = await OrderSiteMasterAlignment.ResolveNamesAsync(db, rawCollectionSite, rawDeliverySite, Text(line, "collectionAddress") ?? Text(payload, "collectionAddress"), Text(line, "deliveryAddress") ?? Text(payload, "deliveryAddress"), Text(line, "mapLink") ?? Text(payload, "mapLink"), Text(line, "driverInstructions") ?? Text(payload, "driverInstructions"), ct, Text(line, "marketName") ?? Text(payload, "marketName"));
             var collectionSite = lineAlignment.CollectionName ?? rawCollectionSite;
             var deliverySite = lineAlignment.DeliveryName ?? rawDeliverySite;
             var lineCollectionDate = DateOnlyOrNull(line, "collectionDate") ?? DateOnlyOrNull(payload, "collectionDate");
             var lineDeliveryDate = DateOnlyOrNull(line, "deliveryDate") ?? DateOnlyOrNull(payload, "deliveryDate");
             var pallets = IntOrNull(line, "pallets") ?? IntOrNull(line, "palletQuantity") ?? (sourceLines.Count == 1 ? IntOrNull(payload, "pallets") : null);
             var backhaul = IsBackhaul(line) || IsBackhaul(payload);
-            plannerReady |= !string.IsNullOrWhiteSpace(collectionSite) && !string.IsNullOrWhiteSpace(deliverySite)
-                && lineCollectionDate is not null && lineDeliveryDate is not null && (backhaul || pallets is > 0);
+            plannerReady |= !string.IsNullOrWhiteSpace(collectionSite) && !string.IsNullOrWhiteSpace(deliverySite) && lineCollectionDate is not null && lineDeliveryDate is not null && (backhaul || pallets is > 0);
             db.OrderSourceLines.Add(new OrderSourceLine
             {
                 RevisionId = revision.Id,
@@ -485,10 +521,8 @@ public sealed class StagingService(TmsDbContext db, SiteTimingRuleStore? timingR
         }
 
         var declaredLifecycle = Text(payload, "lifecycleStatus") ?? Text(payload, "reviewStatus");
-        if (!hasExplicitSourceLines && DateOnlyOrNull(payload, "collectionDate") is not null && (IsBackhaul(payload) || IntOrNull(payload, "pallets") is > 0))
-            plannerReady = true; // Existing single-row staging payloads and pallet-free backhauls remain promotable.
-        if (declaredLifecycle?.Contains("awaiting", StringComparison.OrdinalIgnoreCase) == true)
-            plannerReady = false;
+        if (!hasExplicitSourceLines && DateOnlyOrNull(payload, "collectionDate") is not null && (IsBackhaul(payload) || IntOrNull(payload, "pallets") is > 0)) plannerReady = true;
+        if (declaredLifecycle?.Contains("awaiting", StringComparison.OrdinalIgnoreCase) == true) plannerReady = false;
         movement.CurrentRevisionId = revision.Id;
         movement.LifecycleStatus = plannerReady ? OrderMovementStatus.PlannerReady : OrderMovementStatus.AwaitingDetails;
         movement.UpdatedAtUtc = DateTimeOffset.UtcNow;
