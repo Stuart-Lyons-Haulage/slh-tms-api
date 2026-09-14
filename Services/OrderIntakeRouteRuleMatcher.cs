@@ -70,7 +70,6 @@ public static class OrderIntakeRouteRuleMatcher
             warnings.Add(tied
                 ? "More than one SQL route rule matched with the same score; planner review retained."
                 : $"Best SQL route rule confidence was {best.Score}; planner review retained.");
-            root["plannerReady"] = false;
         }
 
         root["orderIntakeRouteRuleId"] = best.Rule.Id.ToString();
