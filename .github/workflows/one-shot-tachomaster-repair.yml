@@ -1,0 +1,95 @@
+name: One-shot TachoMaster repair
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-tachomaster-repair.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Apply TachoMaster production repair
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace(path, old, new, expected=None):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if expected is not None and count != expected:
+                  raise SystemExit(f"{path}: expected {expected} replacement(s), found {count}")
+              if count == 0:
+                  raise SystemExit(f"{path}: replacement target not found")
+              p.write_text(text.replace(old, new))
+
+          # Preserve a real false value. jq's `false // true` incorrectly evaluates to true.
+          for workflow in [
+              '.github/workflows/tachomaster-runtime.yml',
+              '.github/workflows/deploy-jobs.yml',
+          ]:
+              replace(
+                  workflow,
+                  "jq -r '.scheduledSync.stale // true'",
+                  "jq -r 'if .scheduledSync.stale == null then true else .scheduledSync.stale end'",
+                  1,
+              )
+
+          # Cardless current workers remain eligible when they have a stable TachoMaster Member Code.
+          # The old gate contradicted CanonicaliseLiveWorkers(), which intentionally retains them.
+          replace(
+              'Services/TachoDriverMasterSyncService.cs',
+              '''        var canonicalHealthy = claimedDriverIds.Count == workers.Count &&\n                               duplicateMemberGroupsAfter == 0 &&\n                               duplicateCardGroupsAfter == 0 &&\n                               workersWithoutCardAfter == 0;''',
+              '''        var canonicalHealthy = claimedDriverIds.Count == workers.Count &&\n                               duplicateMemberGroupsAfter == 0 &&\n                               duplicateCardGroupsAfter == 0 &&\n                               activeWithoutMemberAfter == 0;''',
+              1,
+          )
+          replace(
+              'Services/TachoDriverMasterSyncService.cs',
+              '''            var failureMessage = $"TachoMaster canonical Driver Master was not promoted because the resulting population failed the strict identity gate: source={workers.Count}, claimed={claimedDriverIds.Count}, active={activeAfter.Count}, duplicate members={duplicateMemberGroupsAfter}, duplicate cards={duplicateCardGroupsAfter}, source workers without card={workersWithoutCardAfter}. No partial cleanse was committed.";''',
+              '''            var failureMessage = $"TachoMaster canonical Driver Master was not promoted because the resulting population failed the strict identity gate: source={workers.Count}, claimed={claimedDriverIds.Count}, active={activeAfter.Count}, duplicate members={duplicateMemberGroupsAfter}, duplicate cards={duplicateCardGroupsAfter}, active without member code={activeWithoutMemberAfter}, source workers without card={workersWithoutCardAfter}. Cardless workers are allowed when their stable TachoMaster Member Code is present. No partial cleanse was committed.";''',
+              1,
+          )
+          replace(
+              'Services/TachoDriverMasterSyncService.cs',
+              '''        var message = $"TachoMaster canonical Driver Master: {workers.Count} driver(s) with a card read in the last six months, {activeAfter.Count} active canonical TMS driver(s), {created} created, {retired} duplicate record(s) retired and {archived} old/ineligible TMS driver(s) archived. Card-read eligibility, identity and duplicate checks passed.";''',
+              '''        var message = $"TachoMaster canonical Driver Master: {workers.Count} driver(s) with a qualifying card-read date in the last six months, {activeAfter.Count} active canonical TMS driver(s), {created} created, {retired} duplicate record(s) retired and {archived} old/ineligible TMS driver(s) archived. Identity and duplicate checks passed; {workersWithoutCardAfter} current worker(s) have no card number and remain keyed by stable TachoMaster Member Code.";''',
+              1,
+          )
+
+          deploy = Path('.github/workflows/deploy-jobs.yml')
+          text = deploy.read_text()
+          old = '''          fi\n\n          az containerapp job update \\\n            --name "$job" \\\n            --resource-group "$AZURE_RESOURCE_GROUP" \\\n            --image "$image" \\\n            --output none\n'''
+          new = '''          fi\n\n          # Reconcile the existing scheduled job from the live production API on every deployment.\n          # This prevents the job retaining stale copied credentials or environment settings after\n          # RoadTech/TachoMaster credentials are rotated or production configuration changes.\n          source_secrets="$(az containerapp secret list \\\n            --name "$AZURE_CONTAINER_APP_NAME" \\\n            --resource-group "$AZURE_RESOURCE_GROUP" \\\n            --show-values \\\n            --output json)"\n\n          secret_value() {\n            jq -r --arg name "$1" '[.[] | select(.name == $name)][0].value // empty' <<<"$source_secrets"\n          }\n\n          tms_db="$(secret_value tms-db-connection)"\n          dot_base="$(secret_value dot-base-url)"\n          dot_api="$(secret_value dot-api-key)"\n          dot_company="$(secret_value dot-company-code)"\n          dot_user="$(secret_value dot-username)"\n          dot_password="$(secret_value dot-password)"\n\n          missing=()\n          test -n "$tms_db" || missing+=(tms-db-connection)\n          test -n "$dot_base" || missing+=(dot-base-url)\n          test -n "$dot_api" || missing+=(dot-api-key)\n          test -n "$dot_user" || missing+=(dot-username)\n          test -n "$dot_password" || missing+=(dot-password)\n          if (( ${#missing[@]} > 0 )); then\n            echo "::error::Cannot reconcile TachoMaster job because production API secret(s) are unavailable: ${missing[*]}."\n            exit 1\n          fi\n\n          job_secret_args=(\n            "tms-db=$tms_db"\n            "dot-base-url=$dot_base"\n            "dot-api-key=$dot_api"\n            "dot-username=$dot_user"\n            "dot-password=$dot_password"\n          )\n          job_env_args=(\n            "TMS_JOB_KIND=tachomaster"\n            "ConnectionStrings__TmsDb=secretref:tms-db"\n            "Tracking__Dot__Enabled=true"\n            "Tracking__Dot__BaseUrl=secretref:dot-base-url"\n            "Tracking__Dot__ApiKey=secretref:dot-api-key"\n            "Tracking__Dot__Username=secretref:dot-username"\n            "Tracking__Dot__Password=secretref:dot-password"\n            "Integrations__TachoMaster__Enabled=true"\n            "Integrations__TachoMaster__BaseUrl=secretref:dot-base-url"\n            "Integrations__TachoMaster__ApiKey=secretref:dot-api-key"\n            "Integrations__TachoMaster__Username=secretref:dot-username"\n            "Integrations__TachoMaster__Password=secretref:dot-password"\n          )\n          if test -n "$dot_company"; then\n            job_secret_args+=("dot-company-code=$dot_company")\n            job_env_args+=("Tracking__Dot__CompanyCode=secretref:dot-company-code")\n          fi\n\n          az containerapp job secret set \\\n            --name "$job" \\\n            --resource-group "$AZURE_RESOURCE_GROUP" \\\n            --secrets "${job_secret_args[@]}" \\\n            --output none\n\n          az containerapp job update \\\n            --name "$job" \\\n            --resource-group "$AZURE_RESOURCE_GROUP" \\\n            --image "$image" \\\n            --set-env-vars "${job_env_args[@]}" \\\n            --output none\n'''
+          if text.count(old) != 1:
+              raise SystemExit(f'deploy-jobs.yml: expected one existing-job update block, found {text.count(old)}')
+          deploy.write_text(text.replace(old, new))
+
+      - name: Build API and scheduled jobs
+        run: |
+          set -euo pipefail
+          dotnet build Slh.Tms.Api.csproj -c Release
+          dotnet build Slh.Tms.Jobs/Slh.Tms.Jobs.csproj -c Release
+
+      - name: Commit repaired production path
+        run: |
+          set -euo pipefail
+          git config user.name "slh-tms-repair-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git rm .github/workflows/one-shot-tachomaster-repair.yml
+          git add Services/TachoDriverMasterSyncService.cs .github/workflows/tachomaster-runtime.yml .github/workflows/deploy-jobs.yml
+          git commit -m "Repair TachoMaster canonical sync and scheduled job config"
+          git push origin HEAD:main
