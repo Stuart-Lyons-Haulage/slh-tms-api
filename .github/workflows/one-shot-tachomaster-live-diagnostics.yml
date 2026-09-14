@@ -1,0 +1,63 @@
+name: One-shot TachoMaster live diagnostics
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-tachomaster-live-diagnostics.yml
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    env:
+      AZURE_RESOURCE_GROUP: slh-tms-prod-rg
+      TACHO_JOB: slh-tms-job-tachomaster
+    steps:
+      - name: Sign in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Capture latest TachoMaster job execution and console logs
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo '=== Recent executions ==='
+          az containerapp job execution list \
+            --name "$TACHO_JOB" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --output table || true
+
+          execution="$(az containerapp job execution list \
+            --name "$TACHO_JOB" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query 'sort_by([], &properties.startTime)[-1].name' \
+            --output tsv 2>/dev/null || true)"
+          echo "LATEST_EXECUTION=$execution"
+
+          if test -n "$execution"; then
+            echo '=== Latest execution JSON ==='
+            az containerapp job execution show \
+              --name "$TACHO_JOB" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --job-execution-name "$execution" \
+              --output json || true
+
+            echo '=== Azure CLI job logs command help ==='
+            az containerapp job logs show --help || true
+
+            echo '=== Latest execution console logs ==='
+            az containerapp job logs show \
+              --name "$TACHO_JOB" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --execution "$execution" \
+              --tail 300 || true
+          fi
