@@ -83,7 +83,9 @@ public static class MasterDataDuplicateConsolidation
         ILogger logger,
         CancellationToken ct)
     {
-        var vehicles = await db.Vehicles.Where(vehicle => vehicle.Active).ToListAsync(ct);
+        // Include inactive aliases as well as active vehicles. Fleetio may already have retired an
+        // older duplicate that still contains the fuel PIN/card data we need to preserve.
+        var vehicles = await db.Vehicles.ToListAsync(ct);
         var loadUse = await db.Loads.AsNoTracking()
             .Where(load => load.VehicleId != null)
             .GroupBy(load => load.VehicleId!.Value)
@@ -97,7 +99,8 @@ public static class MasterDataDuplicateConsolidation
             .Where(group => group.Key.Length > 0 && group.Count() > 1))
         {
             var canonical = group
-                .OrderByDescending(vehicle => !string.IsNullOrWhiteSpace(vehicle.FleetioId))
+                .OrderByDescending(vehicle => vehicle.Active)
+                .ThenByDescending(vehicle => !string.IsNullOrWhiteSpace(vehicle.FleetioId))
                 .ThenByDescending(vehicle => loadUse.GetValueOrDefault(vehicle.Id))
                 .ThenByDescending(VehicleCompleteness)
                 .ThenBy(vehicle => vehicle.Id)
@@ -108,6 +111,10 @@ public static class MasterDataDuplicateConsolidation
                 var hadFuelGap = HasFuelGap(canonical) && HasFuelData(duplicate);
                 PreserveVehicleDetail(canonical, duplicate);
                 if (hadFuelGap && HasFuelData(canonical)) fuelRecovered++;
+
+                // Historical inactive aliases only donate missing master detail. Active duplicate
+                // rows must also have operational references moved before they are retired.
+                if (!duplicate.Active) continue;
 
                 foreach (var load in await db.Loads.Where(load => load.VehicleId == duplicate.Id).ToListAsync(ct))
                     load.VehicleId = canonical.Id;
@@ -172,7 +179,9 @@ public static class MasterDataDuplicateConsolidation
             }
         }
 
-        if (archived > 0) await db.SaveChangesAsync(ct);
+        // Save even when no active duplicate was archived because an inactive alias may have
+        // restored fuel details onto the active canonical vehicle.
+        if (archived > 0 || fuelRecovered > 0) await db.SaveChangesAsync(ct);
         return (archived, fuelRecovered);
     }
 
