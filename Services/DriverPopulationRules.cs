@@ -29,13 +29,14 @@ public static class DriverPopulationRules
     {
         var officeStaff = IsOfficeReference(driver.EmployeeNumber) || IsOfficeRole(driver.DriverType) || IsOfficeRole(driver.DriverGroup);
 
-        // Hard rule: office/non-driver staff must never surface anywhere in operational TMS driver
-        // populations unless TachoMaster has assigned them a member number.
+        // A TachoMaster member number is an identity link, not proof that the person belongs in the
+        // operational driver population. Explicit office/non-driver evidence always wins.
         if (officeStaff)
-            return HasTachoMemberNumber(driver);
+            return false;
 
+        // Require positive driving evidence. This prevents a historic/member-only Tacho identity from
+        // making an otherwise ordinary employee appear in Planner, Dispatch or driver master views.
         return IsSubcontractor(driver) ||
-               HasTachoMemberNumber(driver) ||
                !string.IsNullOrWhiteSpace(driver.TachoCardNumber) ||
                HasDriverRole(driver.DriverType) || HasDriverRole(driver.DriverGroup) ||
                string.Equals(driver.DriverType?.Trim(), "Agency", StringComparison.OrdinalIgnoreCase) ||
@@ -51,7 +52,8 @@ public static class DriverPopulationRules
     public static bool IsSageDriver(SageHrEmployee employee, string? driverTeam, string? positionKeyword)
     {
         // Sage can retain a broad/historic Drivers team while the current role is office or management.
-        // Explicit non-driving evidence always wins; a genuine Tacho member can enter through TachoMaster sync.
+        // Explicit non-driving evidence always wins; genuine current drivers are identified by role/team
+        // here and reconciled to their TachoMaster identity separately.
         if (IsOfficeRole(employee.Team) || IsOfficeRole(employee.Position))
             return false;
 
