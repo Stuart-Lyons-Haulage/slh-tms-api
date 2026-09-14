@@ -15,6 +15,7 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
     public DbSet<Trailer> Trailers => Set<Trailer>();
     public DbSet<Site> Sites => Set<Site>();
     public DbSet<MarketContact> MarketContacts => Set<MarketContact>();
+    public DbSet<EmailSenderProfile> EmailSenderProfiles => Set<EmailSenderProfile>();
     public DbSet<StagedImport> StagedImports => Set<StagedImport>();
     public DbSet<StagedImportEvent> StagedImportEvents => Set<StagedImportEvent>();
     public DbSet<OrderMovement> OrderMovements => Set<OrderMovement>();

@@ -157,6 +157,12 @@ if (fleetioOptions.BaseUrl.EndsWith("/api/v2", StringComparison.OrdinalIgnoreCas
 builder.Services.AddSingleton(fleetioOptions);
 builder.Services.AddScoped<AzureSmsDispatchService>();
 builder.Services.AddScoped<DistributedLeaseManager>();
+builder.Services.AddScoped<EmailSenderProfileResolver>();
+builder.Services.AddScoped<RouteOptimisationService>();
+builder.Services.AddScoped<OptimisationApplicationService>();
+builder.Services.AddScoped<RouteMatrixService>();
+builder.Services.AddScoped<HardConstraintEngine>();
+builder.Services.AddScoped<SoftScoringEngine>();
 builder.Services.AddScoped<IntegrationSyncCoordinator>();
 builder.Services.AddScoped<TachoDriverMasterSyncService>();
 builder.Services.AddScoped<DriverMasterClassificationService>();

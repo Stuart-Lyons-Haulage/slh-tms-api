@@ -87,7 +87,7 @@ public sealed class Site
     [MaxLength(1000)] public string? MapLink { get; set; }
     [NotMapped] public decimal? Latitude { get; set; }
     [NotMapped] public decimal? Longitude { get; set; }
-    [NotMapped, MaxLength(500)] public string? Aliases { get; set; }
+    [MaxLength(500)] public string? Aliases { get; set; } // Comma-separated alternate names for email intake matching
     [NotMapped, MaxLength(200)] public string? CustomField1 { get; set; }
     [NotMapped, MaxLength(200)] public string? CustomField2 { get; set; }
     [NotMapped, MaxLength(200)] public string? CustomField3 { get; set; }
@@ -371,4 +371,41 @@ public sealed class DriverStatusLog
     [MaxLength(1000)] public string? Notes { get; set; }
     [MaxLength(200)] public string? CapturedBy { get; set; }
     public DateTimeOffset CapturedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
+
+// ── EmailSenderProfile ─────────────────────────────────────────────────────
+// Persisted sender→collection site mappings.
+// Replaces the hardcoded SenderDomainCollectionSites dictionary in EmailOrderIntakeService.
+// Managed via the TMS UI at /settings/email-sender-profiles.
+public sealed class EmailSenderProfile
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    /// <summary>Full email address (exact) or domain suffix (e.g. "langmeadherbs.co.uk").</summary>
+    [MaxLength(320)] public required string SenderPattern { get; set; }
+
+    /// <summary>"Email" for exact match, "Domain" for @domain suffix match.</summary>
+    [MaxLength(20)] public string PatternType { get; set; } = "Domain";
+
+    /// <summary>Canonical collection site name — matched against Site.Name / Site.Aliases.</summary>
+    [MaxLength(200)] public required string CollectionSiteName { get; set; }
+
+    /// <summary>Optional direct FK to Sites table for display linking.</summary>
+    public Guid? CollectionSiteId { get; set; }
+
+    /// <summary>Customer code typically used by this sender (e.g. "LANGMEADS").</summary>
+    [MaxLength(40)] public string? DefaultCustomerCode { get; set; }
+
+    /// <summary>
+    /// When true, orders from this sender that parse with High confidence are
+    /// automatically promoted to Approved without going through Review.
+    /// </summary>
+    public bool AutoApprove { get; set; } = false;
+
+    [MaxLength(500)] public string? Notes { get; set; }
+    public bool Active { get; set; } = true;
+    public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    [MaxLength(200)] public string? CreatedBy { get; set; }
+    public DateTimeOffset? UpdatedAtUtc { get; set; }
+    [MaxLength(200)] public string? UpdatedBy { get; set; }
 }

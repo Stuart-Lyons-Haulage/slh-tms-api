@@ -65,13 +65,19 @@ public sealed class EmailOrderIntakeService
 
     private static readonly Regex HtmlRegex = new(@"<[^>]+>", RegexOptions.Compiled);
     private static readonly Regex ReFwRegex = new(@"^(?:(?:RE|FW|FWD)\s*:\s*)+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
-    private static readonly IReadOnlyDictionary<string, string> SenderDomainCollectionSites = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    // SenderDomainCollectionSites has been replaced by the persisted EmailSenderProfiles table.
+    // EmailSenderProfileResolver (registered in DI) is now called by OrderIntakeController
+    // before Parse() and the resolved site name is passed in via resolvedCollectionSite.
+    // The static dictionary below is kept ONLY as a fallback when the DB is unreachable.
+    private static readonly IReadOnlyDictionary<string, string> FallbackSenderDomains = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
         ["summerberry.co.uk"] = "Summer Berry",
         ["langmeadherbs.co.uk"] = "Ham Farm",
         ["langmeadfarms.co.uk"] = "Ham Farm",
         ["hillsplants.com"] = "Hill Brothers",
-        ["doubleh.co.uk"] = "Double H"
+        ["doubleh.co.uk"] = "Double H",
+        ["barfoots.co.uk"] = "Barfoots",
+        ["nwfltd.co.uk"] = "NWF"
     };
 
     private static readonly IReadOnlyList<KnownIntakeSignal> KnownSignals =
@@ -93,7 +99,7 @@ public sealed class EmailOrderIntakeService
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
     }
 
-    public EmailIntakeParseResult Parse(MailboxEmailIntakeRequest request, IReadOnlyCollection<string>? masterSiteNames = null)
+    public EmailIntakeParseResult Parse(MailboxEmailIntakeRequest request, IReadOnlyCollection<string>? masterSiteNames = null, string? resolvedCollectionSite = null, bool senderAutoApprove = false)
     {
         var subject = (request.Subject ?? string.Empty).Trim();
         var sender = (request.SenderAddress ?? string.Empty).Trim();
@@ -248,7 +254,7 @@ public sealed class EmailOrderIntakeService
         var collectionTime = NormaliseTime(ExtractTime(explicitCollection) ?? ExtractMatch(CollectionTimeRegex, body, "time"));
         var deliveryTime = NormaliseTime(ExtractMatch(DeliveryDeadlineRegex, body, "time"));
         var deliveryTimeConstraint = string.IsNullOrWhiteSpace(deliveryTime) ? null : "Not later than";
-        var collectionSite = InferCollectionSiteFromSender(request.SenderAddress)
+        var collectionSite = InferCollectionSiteFromSender(request.SenderAddress, resolvedCollectionSite)
                              ?? InferCollectionSite(request.Subject, body, InferJobType(request.Subject, body));
         var destination = CleanDeliveryAddressForSite(deliveryAddress)
                           ?? InferDestination(request.Subject, body, "Delivery");
@@ -309,6 +315,7 @@ public sealed class EmailOrderIntakeService
             ["sourceReceivedAtUtc"] = request.ReceivedAtUtc,
             ["sourceWebLink"] = request.WebLink,
             ["intakeNaturalKey"] = naturalKey,
+            ["intakeMatchKey"] = matchKey,
             ["intakeConfidence"] = ConfidenceFor(warnings),
             ["intakeWarnings"] = warnings
         };
@@ -898,7 +905,11 @@ public sealed class EmailOrderIntakeService
     {
         var baseReference = rawPo ?? StableEmailReference(request.MessageId);
         var orderReference = BuildRowReference(baseReference, customer, destination, deliveryDate, 1);
+        // naturalKey includes quantity — used to detect if content changed.
+        // matchKey excludes quantity — used by SupersedeOlderPending so a corrected
+        // quantity re-send replaces the previous row rather than creating a duplicate.
         var naturalKey = $"{(request.SenderAddress ?? string.Empty).Trim().ToLowerInvariant()}|{customer}|{collectionDate:yyyy-MM-dd}|{deliveryDate:yyyy-MM-dd}|{NormaliseKey(collection)}|{NormaliseKey(destination)}|{pallets}";
+        var matchKey   = $"{(request.SenderAddress ?? string.Empty).Trim().ToLowerInvariant()}|{customer}|{collectionDate:yyyy-MM-dd}|{deliveryDate:yyyy-MM-dd}|{NormaliseKey(collection)}|{NormaliseKey(destination)}";
         var instructions = BuildInstructions(rawPo, collectionTime, null, null, request, null, warnings, jobType);
         var payload = new Dictionary<string, object?>
         {
@@ -1142,10 +1153,13 @@ public sealed class EmailOrderIntakeService
             .Where(value => !string.IsNullOrWhiteSpace(value) && value != "---")
             .ToList();
 
-    private static string? InferCollectionSiteFromSender(string? senderAddress)
+    private static string? InferCollectionSiteFromSender(string? senderAddress, string? resolvedCollectionSite = null)
     {
+        // Persisted profile resolved by EmailSenderProfileResolver takes priority
+        if (!string.IsNullOrWhiteSpace(resolvedCollectionSite)) return resolvedCollectionSite;
+        // Static fallback when DB is unreachable
         var domain = SenderDomain(senderAddress);
-        return domain is not null && SenderDomainCollectionSites.TryGetValue(domain, out var site) ? site : null;
+        return domain is not null && FallbackSenderDomains.TryGetValue(domain, out var site) ? site : null;
     }
 
     private static string? SenderDomain(string? senderAddress)

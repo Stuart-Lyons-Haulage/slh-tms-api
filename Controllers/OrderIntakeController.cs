@@ -14,7 +14,7 @@ namespace Slh.Tms.Api.Controllers;
 [ApiController]
 [Route("api/v1/order-intake")]
 [Authorize]
-public sealed class OrderIntakeController(TmsDbContext db, StagingService stagingService, ILogger<OrderIntakeController> logger) : ControllerBase
+public sealed class OrderIntakeController(TmsDbContext db, StagingService stagingService, EmailSenderProfileResolver senderResolver, ILogger<OrderIntakeController> logger) : ControllerBase
 {
     private readonly EmailOrderIntakeService emailParser = new();
     private readonly SpecialistMailboxOrderParser specialistParser = new();
@@ -53,6 +53,12 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         if (string.IsNullOrWhiteSpace(request.MessageId))
             return BadRequest(new ErrorResponse("missing_message_id", "Mailbox message ID is required so repeated flow runs remain idempotent.", HttpContext.TraceIdentifier));
 
+        // Capture whether this sender has auto-approve enabled (threaded from ParseEmail)
+        var senderAutoApprove = false;
+        {
+            var resolvedProfile = await senderResolver.ResolveAsync(request.SenderAddress, ct);
+            senderAutoApprove = resolvedProfile?.AutoApprove ?? false;
+        }
         var parsed = await ParseEmail(request, ct);
         if (parsed.IgnoredReason is not null)
         {
@@ -70,8 +76,11 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         // Supersede older pending versions by any stable alias before inserting
         // the new snapshot rows. Strong NWF references are canonicalised without
         // the planning date so corrected customer snapshots replace earlier rows.
+        // matchKeys: use intakeMatchKey (route-only, no quantity) for supersede logic.
+        // This ensures a re-sent email with a corrected quantity replaces the old row
+        // instead of creating a duplicate.
         var matchKeys = parsed.Orders
-            .SelectMany(order => ReadMatchKeys(order.Payload))
+            .SelectMany(order => ReadMatchKeysWithRouteKey(order.Payload))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         if (matchKeys.Count > 0)
@@ -96,13 +105,31 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 continue;
             }
 
-            superseded += await SupersedeOlderPending(order.NaturalKey, request.MessageId, ct);
+            // Use the route-only matchKey for supersede so quantity corrections
+            // replace old rows rather than creating duplicates.
+            var supersedeKey = ReadText(order.Payload, "intakeMatchKey") ?? order.NaturalKey;
+            superseded += await SupersedeOlderPending(supersedeKey, request.MessageId, ct);
             var stagedPayload = EnrichSourceEvidence(order.Payload, request);
             var item = stagingService.Create(new StageImportRequest(
                 "order",
                 idempotencyKey,
                 stagedPayload,
                 $"Info mailbox / {(request.SenderAddress ?? "unknown sender").Trim()}"));
+
+            // Auto-approve: known sender with AutoApprove=true + High confidence + no hard warnings
+            var isHighConfidence = string.Equals(ReadText(order.Payload, "intakeConfidence"), "High", StringComparison.OrdinalIgnoreCase);
+            var hasHardWarnings  = order.Warnings.Any(w =>
+                !w.StartsWith("Collection site inferred", StringComparison.OrdinalIgnoreCase) &&
+                !w.StartsWith("No customer PO", StringComparison.OrdinalIgnoreCase));
+            if (senderAutoApprove && isHighConfidence && !hasHardWarnings)
+            {
+                item.Status     = StagingStatus.Approved;
+                item.ReviewedBy = $"auto:{request.SenderAddress}";
+                item.ReviewedAtUtc = DateTimeOffset.UtcNow;
+                item.ReviewNote = "Auto-approved: known sender profile with High confidence.";
+                db.StagedImportEvents.Add(StagingAudit.Create(item, "AutoApproved"));
+            }
+
             db.StagedImports.Add(item);
             db.StagedImportEvents.Add(StagingAudit.Create(item, "Received"));
             await db.SaveChangesAsync(ct);
@@ -130,14 +157,26 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
     }
 
 
-    private async Task<EmailIntakeParseResult> ParseEmail(MailboxEmailIntakeRequest request, CancellationToken ct) =>
-        nwfQuantityChangeParser.TryParse(request)
-        ?? nwfCsvParser.TryParse(request)
-        ?? nwfWorkbookParser.TryParse(request)
-        ?? nwfParser.TryParse(request)
-        ?? sainsburyParser.TryParse(request)
-        ?? specialistParser.TryParse(request)
-        ?? emailParser.Parse(request, await MasterSiteNames(ct));
+    private async Task<EmailIntakeParseResult> ParseEmail(MailboxEmailIntakeRequest request, CancellationToken ct)
+    {
+        var specialist =
+            nwfQuantityChangeParser.TryParse(request)
+            ?? nwfCsvParser.TryParse(request)
+            ?? nwfWorkbookParser.TryParse(request)
+            ?? nwfParser.TryParse(request)
+            ?? sainsburyParser.TryParse(request)
+            ?? specialistParser.TryParse(request);
+        if (specialist is not null) return specialist;
+
+        // Resolve sender profile from DB — replaces hardcoded SenderDomainCollectionSites
+        var profile = await senderResolver.ResolveAsync(request.SenderAddress, ct);
+        var masterSites = await MasterSiteNames(ct);
+        return emailParser.Parse(
+            request,
+            masterSites,
+            resolvedCollectionSite: profile?.CollectionSiteName,
+            senderAutoApprove: profile?.AutoApprove ?? false);
+    }
 
     private async Task<IReadOnlyCollection<string>> MasterSiteNames(CancellationToken ct)
     {
