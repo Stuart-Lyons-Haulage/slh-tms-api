@@ -16,7 +16,7 @@ public static class OrderIntakeRouteRuleMatcher
 {
     public static async Task<EmailIntakeParseResult> ApplyAsync(TmsDbContext db, EmailIntakeParseResult parsed, CancellationToken ct)
     {
-        if (parsed.Orders.Count == 0) return parsed;
+        if (parsed.Orders.Count == 0 || !db.Database.IsRelational()) return parsed;
 
         var customerCodes = parsed.Orders
             .Select(order => Text(order.Payload, "customerCode"))
