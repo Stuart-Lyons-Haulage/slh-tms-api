@@ -135,8 +135,8 @@ public sealed class SharePointMasterDataSyncService(
         return new Dictionary<string, IReadOnlyList<Dictionary<string, object?>>>(StringComparer.OrdinalIgnoreCase)
         {
             ["customer"] = (await db.Customers.AsNoTracking().OrderBy(x => x.Code).ToListAsync(ct)).Select(x => Fields(
-                ("Title", x.Code), ("CustomerKey", x.Code), ("TradingName", x.TradingName ?? x.Name),
-                ("AccountOwner", x.AccountOwner), ("ServiceNotes", x.ServiceNotes), ("DefaultSiteCode", x.DefaultSiteCode), ("Active", x.Active))).ToArray(),
+                ("Title", x.Code), ("CustomerKey", x.Code), ("CustomerName", x.Name), ("TradingName", x.TradingName ?? x.Name),
+                ("AccountOwner", x.AccountOwner), ("ServiceNotes", x.ServiceNotes), ("DefaultSiteCode", x.DefaultSiteCode), ("SourcePayloadJson", JsonSerializer.Serialize(x)), ("Active", x.Active))).ToArray(),
             ["customercontact"] = await BuildCustomerContactRowsAsync(db, ct),
             ["site"] = await BuildSiteRowsAsync(db, ct),
             ["driver"] = await BuildDriverRowsAsync(db, drivers, ct),
@@ -147,7 +147,7 @@ public sealed class SharePointMasterDataSyncService(
                 ("FuelPinSecretName", x.FuelPinSecretName), ("FuelCardLastFour", x.FuelCardLastFour),
                 ("ShellCard", x.ShellCard), ("BpRedCard", x.BpRedCard), ("BpPlainCard", x.BpPlainCard),
                 ("Notes", x.Notes), ("FleetioId", x.FleetioId), ("FleetioName", x.FleetioName),
-                ("FleetioStatus", x.FleetioStatus), ("TmsVehicleId", x.Id.ToString()), ("Active", x.Active),
+                ("FleetioStatus", x.FleetioStatus), ("TmsVehicleId", x.Id.ToString()), ("SourcePayloadJson", JsonSerializer.Serialize(x)), ("Active", x.Active),
                 ("ComplianceStatus", x.FleetioVor == true ? "VOR" : "Unknown"))).ToArray(),
             ["fuelcard"] = vehicles.Select(x => Fields(
                 ("Title", x.Registration), ("VehicleKey", x.FleetNumber ?? x.Registration), ("Registration", x.Registration),
@@ -157,11 +157,11 @@ public sealed class SharePointMasterDataSyncService(
             ["trailer"] = (await db.Trailers.AsNoTracking().OrderBy(x => x.TrailerNumber).ToListAsync(ct)).Select(x => Fields(
                 ("Title", x.TrailerNumber), ("TrailerKey", x.TrailerNumber), ("Registration", x.TrailerNumber),
                 ("TrailerType", x.Type), ("StandardCapacity", x.StandardCapacity), ("EuroCapacity", x.EuroCapacity),
-                ("Notes", x.Notes), ("Active", x.Active))).ToArray(),
+                ("Notes", x.Notes), ("SourcePayloadJson", JsonSerializer.Serialize(x)), ("Active", x.Active))).ToArray(),
             ["marketcontact"] = (await db.MarketContacts.AsNoTracking().OrderBy(x => x.Market).ThenBy(x => x.Name).ToListAsync(ct)).Select(x => Fields(
                 ("Title", $"{x.Market} · {x.Name}"), ("Market", x.Market), ("Name", x.Name),
                 ("StandOrLocation", x.StandOrLocation), ("Salesman", x.Salesman), ("Sender", x.Sender),
-                ("ReadOnlyMapPdfUrl", x.ReadOnlyMapPdfUrl), ("Active", x.Active))).ToArray(),
+                ("ReadOnlyMapPdfUrl", x.ReadOnlyMapPdfUrl), ("SourcePayloadJson", JsonSerializer.Serialize(x)), ("Active", x.Active))).ToArray(),
             ["emailroute"] = await BuildEmailRouteRowsAsync(db, ct)
         };
     }
@@ -197,7 +197,7 @@ public sealed class SharePointMasterDataSyncService(
             ("Skills", x.Skills), ("AgencyName", x.AgencyName), ("Coding", x.Coding), ("Notes", x.Notes),
             ("LicenceNumber", x.DrivingLicenceNumber), ("LicenceExpiry", x.LicenceExpiry),
             ("TachoCardNumber", x.TachoCardNumber), ("TachoMasterDriverId", x.TachoMasterDriverId),
-            ("LastTachoSyncUtc", x.LastTachoSyncUtc), ("Active", x.Active),
+            ("LastTachoSyncUtc", x.LastTachoSyncUtc), ("SourcePayloadJson", JsonSerializer.Serialize(x)), ("Active", x.Active),
             ("ComplianceStatus", string.IsNullOrWhiteSpace(x.LicenceStatus) ? "Unknown" : x.LicenceStatus))).ToArray();
     }
 
@@ -213,7 +213,7 @@ public sealed class SharePointMasterDataSyncService(
             ("ContactName", x.Name),
             ("Email", x.Email),
             ("MobileNumber", x.MobileNumber),
-            ("ReceivesEtaUpdates", x.ReceivesEtaUpdates),
+            ("ReceivesEtaUpdates", x.ReceivesEtaUpdates), ("SourcePayloadJson", JsonSerializer.Serialize(x)),
             ("Active", x.Active))).ToArray();
     }
 
@@ -228,7 +228,7 @@ public sealed class SharePointMasterDataSyncService(
             ("Title", x.ExternalCode), ("SiteKey", x.ExternalCode), ("CustomerKey", x.CustomerCode),
             ("SiteName", x.Name), ("BuildingName", x.DriverTextName ?? x.Name), ("Address1", x.CollectionAddress),
             ("MapLink", x.MapLink), ("Aliases", x.Aliases), ("GeofenceId", geofences.GetValueOrDefault(x.Id)),
-            ("OperationalRegion", x.OperationalRegion), ("Active", x.Active), ("SyncStatus", "Synced"))).ToArray();
+            ("CollectionInstructions", x.CollectionInstructions), ("OperationalRegion", x.OperationalRegion), ("SourcePayloadJson", JsonSerializer.Serialize(x)), ("Active", x.Active), ("SyncStatus", "Synced"))).ToArray();
     }
 
     private static async Task<IReadOnlyList<Dictionary<string, object?>>> BuildEmailRouteRowsAsync(TmsDbContext db, CancellationToken ct)
@@ -243,7 +243,7 @@ public sealed class SharePointMasterDataSyncService(
                 ("CustomerKey", x.CustomerCode), ("SiteKey", x.DefaultSiteCode),
                 ("SenderEmail", x.SenderEmail), ("SenderDomain", x.SenderDomain),
                 ("SubjectContains", x.SubjectContains), ("ParserType", x.ParserType),
-                ("RequiresReview", x.RequiresReview), ("Active", x.Active))).ToArray();
+                ("RequiresReview", x.RequiresReview), ("SourcePayloadJson", JsonSerializer.Serialize(x)), ("Active", x.Active))).ToArray();
         }
         catch (Exception ex) when (ex.GetBaseException().Message.Contains("CustomerEmailRoutes", StringComparison.OrdinalIgnoreCase))
         {
@@ -447,20 +447,20 @@ public sealed class SharePointMasterDataSyncService(
     {
         "customer" =>
         [
-            TextColumn("CustomerKey", true), TextColumn("TradingName"), TextColumn("CustomerAliases"),
-            TextColumn("AccountOwner"), TextColumn("ServiceNotes", multiline: true), TextColumn("DefaultSiteCode"), BooleanColumn("Active")
+            TextColumn("CustomerKey", true), TextColumn("CustomerName"), TextColumn("TradingName"), TextColumn("CustomerAliases"),
+            TextColumn("AccountOwner"), TextColumn("ServiceNotes", multiline: true), TextColumn("DefaultSiteCode"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active")
         ],
         "customercontact" =>
         [
             TextColumn("ContactKey", true), TextColumn("CustomerKey", true), TextColumn("ContactName"),
-            TextColumn("Email"), TextColumn("MobileNumber"), BooleanColumn("ReceivesEtaUpdates"), BooleanColumn("Active")
+            TextColumn("Email"), TextColumn("MobileNumber"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("ReceivesEtaUpdates"), BooleanColumn("Active")
         ],
         "site" =>
         [
             TextColumn("SiteKey", true), TextColumn("CustomerKey"), TextColumn("SiteName"), TextColumn("BuildingName"),
             TextColumn("Address1"), TextColumn("Address2"), TextColumn("Town"), TextColumn("County"), TextColumn("Postcode"),
             TextColumn("MapLink"), TextColumn("Aliases", multiline: true), TextColumn("GeofenceId"),
-            TextColumn("OperationalRegion"), BooleanColumn("Active"), TextColumn("SyncStatus")
+            TextColumn("CollectionInstructions", multiline: true), TextColumn("OperationalRegion"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active"), TextColumn("SyncStatus")
         ],
         "driver" =>
         [
@@ -468,7 +468,7 @@ public sealed class SharePointMasterDataSyncService(
             TextColumn("Email"), TextColumn("MobileNumber"), TextColumn("GradeCode"), TextColumn("AllocatedVehicle"), TextColumn("DriverType"), TextColumn("DriverGroup"), TextColumn("Skills", multiline: true),
             TextColumn("AgencyName"), TextColumn("Coding"), TextColumn("Notes", multiline: true), TextColumn("LicenceNumber"),
             TextColumn("LicenceExpiry"), TextColumn("TachoCardNumber", true), TextColumn("TachoMasterDriverId", true),
-            TextColumn("LastTachoSyncUtc"), BooleanColumn("Active"), TextColumn("ComplianceStatus")
+            TextColumn("LastTachoSyncUtc"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active"), TextColumn("ComplianceStatus")
         ],
         "vehicle" =>
         [
@@ -476,28 +476,28 @@ public sealed class SharePointMasterDataSyncService(
             TextColumn("Abbreviation"), TextColumn("Transmission"), BooleanColumn("DvsCompliant"), TextColumn("FuelProvider"),
             TextColumn("CabMobile"), TextColumn("FuelPin"), TextColumn("FuelPinSecretName"), TextColumn("FuelCardLastFour"), TextColumn("ShellCard"),
             TextColumn("BpRedCard"), TextColumn("BpPlainCard"), TextColumn("Notes", multiline: true), TextColumn("FleetioId"),
-            TextColumn("FleetioName"), TextColumn("FleetioStatus"), TextColumn("TmsVehicleId"), BooleanColumn("Active"), TextColumn("ComplianceStatus")
+            TextColumn("FleetioName"), TextColumn("FleetioStatus"), TextColumn("TmsVehicleId"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active"), TextColumn("ComplianceStatus")
         ],
         "trailer" =>
         [
             TextColumn("TrailerKey", true), TextColumn("Registration"), TextColumn("TrailerType"),
-            NumberColumn("StandardCapacity"), NumberColumn("EuroCapacity"), TextColumn("Notes", multiline: true), BooleanColumn("Active")
+            NumberColumn("StandardCapacity"), NumberColumn("EuroCapacity"), TextColumn("Notes", multiline: true), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active")
         ],
         "fuelcard" =>
         [
             TextColumn("VehicleKey", true), TextColumn("Registration"), TextColumn("FuelProvider"), TextColumn("FuelPin"), TextColumn("FuelPinSecretName"),
-            TextColumn("FuelCardLastFour"), TextColumn("ShellCard"), TextColumn("BpRedCard"), TextColumn("BpPlainCard"), BooleanColumn("Active")
+            TextColumn("FuelCardLastFour"), TextColumn("ShellCard"), TextColumn("BpRedCard"), TextColumn("BpPlainCard"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active")
         ],
         "marketcontact" =>
         [
             TextColumn("Market"), TextColumn("Name"), TextColumn("StandOrLocation"), TextColumn("Salesman"),
-            TextColumn("Sender"), TextColumn("ReadOnlyMapPdfUrl"), BooleanColumn("Active")
+            TextColumn("Sender"), TextColumn("ReadOnlyMapPdfUrl"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active")
         ],
         "emailroute" =>
         [
             TextColumn("RouteKey", true), TextColumn("CustomerKey"), TextColumn("SiteKey"),
             TextColumn("SenderEmail"), TextColumn("SenderDomain"), TextColumn("SubjectContains"),
-            TextColumn("ParserType"), BooleanColumn("RequiresReview"), BooleanColumn("Active")
+            TextColumn("ParserType"), BooleanColumn("RequiresReview"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active")
         ],
         _ => []
     };
