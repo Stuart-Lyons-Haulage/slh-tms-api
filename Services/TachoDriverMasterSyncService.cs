@@ -893,7 +893,7 @@ internal sealed class TachoLiveWorkerDirectory(HttpClient httpClient, TachoMaste
                 result.Add(new TachoLiveWorker(
                     memberCode,
                     displayName,
-                    Text(item, "CardNoShort", "DriverCardNo", "DriverCardNumber", "CardNumber"),
+                    Text(item, "CardNoShort", "CardNo", "DriverCardNo", "DriverCardNumber", "CardNumber", "CardNumberLong", "TachoCardNumber", "TachographCardNumber", "TachographNumber", "DriverCard"),
                     Text(item, "EmployeeNumber", "PayrollNumber"),
                     Text(item, "Type", "WorkerType", "MemberType", "MemType"),
                     Text(item, "Agency", "AgencyName"),
