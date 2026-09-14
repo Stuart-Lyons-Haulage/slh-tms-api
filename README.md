@@ -325,7 +325,7 @@ guarantee that a tenant has not renamed a List.
 | Sites / geofences | site and customer keys, address/postcode/coordinates, geofence identity/radius, opening hours, collection and driver instructions, aliases, map link and operational region |
 | Drivers | employee number and display/Tacho names, email/mobile, grade, driver type/group/skills/agency/coding, licence and expiry detail, **tachograph card number**, TachoMaster member ID, last sync and current allocated vehicle |
 | Vehicles / trailers | registration/fleet number/type, abbreviation/transmission/DVS, depot, capacities, MOT/test/tacho-calibration evidence, Fleetio identifiers/status and notes |
-| Fuel cards | vehicle/registration relationship, provider, PIN or PIN secret reference, last four digits and Shell/BP red/BP plain allocation fields. These are business-required fields; protect actual PIN values and never put them in browser configuration or documentation exports. |
+| Fuel cards | vehicle/registration relationship, provider, full PIN where operations requires it, PIN secret reference, last four digits and Shell/BP red/BP plain allocation fields. Full PINs belong only in access-controlled Lists/server paths, never browser configuration, logs or ordinary exports. |
 | Markets / sender CRM | market, trader/name, stand/location, salesman, sender, optional read-only map PDF; email-route key, customer/site mapping, exact sender/domain/subject matcher, parser type, active and review-required flags |
 
 Driver identity must be treated as a reconciliation problem, not a name match.
@@ -337,6 +337,50 @@ are excluded; a card, driver role/group, agency or subcontractor evidence is
 required. Sage HR filtering is implemented as a driver-team and/or driver
 position-keyword filter, but the live Sage configuration and source data cannot
 be verified from Git.
+
+### Data-retention contract for the governed Lists
+
+The historical TMS work makes this a non-negotiable continuity requirement: a
+name-only List is a failed migration. Retain the complete operational record and
+its identity/audit metadata for every entity, with the source payload/audit link
+available to recover a field that is not yet first-class.
+
+- **Drivers:** retain email, mobile, grade/coding, employment/agency and group,
+  skills, licence/compliance dates, TachoMaster identity, tachograph card,
+  current allocation and historical keys. One active driver per normalised card
+  is the target; never merge people merely because their names match. Card-less
+  workers are reviewed exceptions, using member/employee identity only as a
+  temporary reconciliation aid.
+- **Sites:** retain each physical site as its own record—e.g. individual Aldi,
+  Amazon, Waitrose and Morrisons locations—not a single customer placeholder.
+  Preserve address, postcode, coordinates/geofence, map link, timings/cut-offs,
+  booking/collection and driver instructions, customer link and aliases. An
+  alias supplements a site; it must not collapse two locations into one.
+- **Vehicles, trailers and fuel cards:** retain registrations/fleet numbers,
+  identifiers, active/compliance/tracking state, capacities, current allocations
+  and supporting notes. Fuel Cards retain provider, allocation and—where
+  required for ongoing fuelling—the full PIN as well as secret reference, last
+  four and Shell/BP fields. Store full PINs only in access-controlled Microsoft
+  Lists and approved server-side paths: never VITE configuration, public/browser
+  payloads, logs, CI output or routine CSV/PDF exports.
+- **Customers, contacts, markets and routes:** retain trading aliases, account
+  and service detail, contact names/emails/mobiles and approved ETA-recipient
+  state; market sender/seller/stall detail; and email-route matching,
+  confidence/review and site/customer association. Inbound order senders are
+  learned candidates, not automatic ETA recipients.
+
+Every synchronised record needs stable business identity, SharePoint item ID,
+source version, active/retired state, sync status/message and audit provenance.
+The first reconciliation may seed missing List rows from a verified legacy
+projection, but must not overwrite later approved office edits. Lists-to-SQL is
+the normal master-data direction; a SQL-to-List write is an explicit governed
+publish/recovery path with audit-outbox retry handling.
+
+**Cadence note:** the inspected current background service polls Lists every ten
+minutes. Historical chat decisions describe a once-hourly office-master refresh
+while operations use the SQL projection. Treat this as an unresolved operating
+choice to confirm before changing the interval; neither cadence should make a
+live planning/dispatch request wait on SharePoint.
 
 Useful master-data controls include the operational Master Data, SharePoint
 master-data, reconciliation and Tacho driver controllers. Exact routes are
