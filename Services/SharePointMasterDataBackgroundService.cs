@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Contracts;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 
@@ -35,8 +36,6 @@ public sealed class SharePointMasterDataBackgroundService(
                 var sync = scope.ServiceProvider.GetRequiredService<SharePointMasterDataSyncService>();
                 var staging = scope.ServiceProvider.GetRequiredService<StagingService>();
 
-                // Historic one-time bootstrap: retained so existing governed Lists are never
-                // overwritten merely because the API restarted.
                 var bootstrapped = await db.StagedImports.AsNoTracking().AnyAsync(row =>
                     row.EntityType == BootstrapEntityType && row.Status == StagingStatus.Promoted, stoppingToken);
                 if (!bootstrapped)
@@ -67,9 +66,6 @@ public sealed class SharePointMasterDataBackgroundService(
                         published.ListsWritten, published.RowsWritten);
                 }
 
-                // Customer Contacts was added after the original Lists authority bootstrap. Seed
-                // that List by itself exactly once so we do not republish/overwrite deliberate
-                // edits already made to the other governed Lists.
                 var contactsBootstrapped = await db.StagedImports.AsNoTracking().AnyAsync(row =>
                     row.EntityType == CustomerContactsBootstrapEntityType && row.Status == StagingStatus.Promoted, stoppingToken);
                 if (!contactsBootstrapped)
@@ -120,12 +116,9 @@ public sealed class SharePointMasterDataBackgroundService(
 
     private static async Task ReconcileCustomerContactSnapshotAsync(
         TmsDbContext db,
-        IReadOnlyList<Contracts.StageImportRequest> requests,
+        IReadOnlyList<StageImportRequest> requests,
         CancellationToken ct)
     {
-        // ReadAsync is all-or-nothing: if it returned successfully then an empty contact set means
-        // the governed List is genuinely empty, not that Graph silently failed. Treat the List as
-        // the complete authority and retire SQL rows that are no longer represented there.
         var authoritative = requests
             .Where(request => request.EntityType.Equals("customercontact", StringComparison.OrdinalIgnoreCase))
             .Select(request => ContactIdentity(request.Payload))
