@@ -32,31 +32,6 @@ public sealed class DotTrackingTelemetryStore(
             var canonicalIdentifier = ExecutionIdentityResolver.NormaliseVehicle(rawIdentifier);
             if (canonicalIdentifier.Length == 0) continue;
 
-            if (!string.Equals(rawIdentifier, canonicalIdentifier, StringComparison.OrdinalIgnoreCase) &&
-                NormalisedProviderIdentifiers.TryAdd(rawIdentifier, 0))
-            {
-                try
-                {
-                    var floor = receivedAt.AddHours(-36);
-                    await db.VehicleTrackingEvents
-                        .Where(item =>
-                            item.ProviderName == "RoadTech Falcon" &&
-                            item.VehicleIdentifier == rawIdentifier &&
-                            item.EventTimeUtc >= floor)
-                        .ExecuteUpdateAsync(
-                            setters => setters.SetProperty(item => item.VehicleIdentifier, canonicalIdentifier),
-                            ct);
-                }
-                catch (Exception exception) when (exception is not OperationCanceledException)
-                {
-                    db.ChangeTracker.Clear();
-                    logger.LogWarning(
-                        exception,
-                        "RoadTech history identifier normalisation was skipped for {VehicleIdentifier}; live ingestion will continue.",
-                        rawIdentifier);
-                }
-            }
-
             // GetCurrentTelemetry is a receipt-time assertion that this is the vehicle's
             // current position. A provider timestamp materially in the future must never
             // poison the operating-day history or make a wallboard wait until tomorrow.
@@ -79,57 +54,48 @@ public sealed class DotTrackingTelemetryStore(
                     : eventTimeUtc;
 
             var hasGps = record.Latitude is not null && record.Longitude is not null;
-            if (hasGps)
+            if (!markAsLiveReceipt && hasGps)
             {
-                var existing = db.VehicleTrackingEvents.Local.FirstOrDefault(item =>
-                    item.ProviderName == "RoadTech Falcon" &&
-                    item.ProviderEventId == record.ProviderEventId)
-                    ?? await db.VehicleTrackingEvents.FirstOrDefaultAsync(
-                        item =>
-                            item.ProviderName == "RoadTech Falcon" &&
-                            item.ProviderEventId == record.ProviderEventId,
-                        ct);
-
-                if (existing is null)
+                // Never create breadcrumb rows. This is solely a bounded repair for
+                // legacy rows that pre-date the operational-only retention policy.
+                var legacy = await db.VehicleTrackingEvents.FirstOrDefaultAsync(item =>
+                    item.ProviderName == "RoadTech Falcon" && item.ProviderEventId == record.ProviderEventId, ct);
+                if (legacy is not null)
                 {
-                    db.VehicleTrackingEvents.Add(new VehicleTrackingEvent
-                    {
-                        ProviderName = "RoadTech Falcon",
-                        ProviderEventId = record.ProviderEventId,
-                        VehicleIdentifier = canonicalIdentifier,
-                        EventTimeUtc = eventTimeUtc,
-                        Latitude = record.Latitude!.Value,
-                        Longitude = record.Longitude!.Value,
-                        SpeedKph = record.SpeedKph,
-                        IgnitionOn = record.IgnitionOn,
-                        IsMoving = record.IsMoving,
-                        RawPayload = record.RawPayload,
-                        MatchStatus = "Received"
-                    });
-                }
-                else if (!markAsLiveReceipt || existing.EventTimeUtc > futureCeiling)
-                {
-                    // Historical replay is a repair pass, not insert-only ingestion. Also
-                    // allow the authoritative current snapshot to repair a matching row that
-                    // was previously poisoned with a future provider timestamp. Without this
-                    // exception, provider-event deduplication would preserve the bad timestamp
-                    // forever even though every subsequent current poll proves the position is
-                    // being observed now.
-                    existing.VehicleIdentifier = canonicalIdentifier;
-                    existing.EventTimeUtc = eventTimeUtc;
-                    existing.Latitude = record.Latitude!.Value;
-                    existing.Longitude = record.Longitude!.Value;
-                    existing.SpeedKph = record.SpeedKph;
-                    existing.IgnitionOn = record.IgnitionOn;
-                    existing.IsMoving = record.IsMoving;
-                    existing.RawPayload = record.RawPayload;
-                    existing.MatchStatus = "Received";
+                    legacy.VehicleIdentifier = canonicalIdentifier;
+                    legacy.EventTimeUtc = eventTimeUtc;
+                    legacy.Latitude = record.Latitude!.Value;
+                    legacy.Longitude = record.Longitude!.Value;
+                    legacy.SpeedKph = record.SpeedKph;
+                    legacy.IgnitionOn = record.IgnitionOn;
+                    legacy.IsMoving = record.IsMoving;
+                    legacy.RawPayload = record.RawPayload;
+                    legacy.MatchStatus = "LegacyClockRepaired";
                 }
             }
-
-            // Historical recovery is geofence evidence only. It must never create or
-            // refresh a live-status row. Likewise, a current Falcon row without GPS does
-            // not prove that the vehicle position itself is current.
+            else if (markAsLiveReceipt && hasGps)
+            {
+                // Repair an already-retained legacy row if it is poisoned, but never
+                // create a new breadcrumb row from the live poll.
+                var legacy = await db.VehicleTrackingEvents.FirstOrDefaultAsync(item =>
+                    item.ProviderName == "RoadTech Falcon" && item.ProviderEventId == record.ProviderEventId, ct);
+                if (legacy is not null && legacy.EventTimeUtc > futureCeiling)
+                {
+                    legacy.VehicleIdentifier = canonicalIdentifier;
+                    legacy.EventTimeUtc = eventTimeUtc;
+                    legacy.Latitude = record.Latitude!.Value;
+                    legacy.Longitude = record.Longitude!.Value;
+                    legacy.SpeedKph = record.SpeedKph;
+                    legacy.IgnitionOn = record.IgnitionOn;
+                    legacy.IsMoving = record.IsMoving;
+                    legacy.RawPayload = record.RawPayload;
+                    legacy.MatchStatus = "LegacyClockRepaired";
+                }
+            }
+            // RoadTech owns raw telemetry and breadcrumb history. The TMS deliberately
+            // does not insert a VehicleTrackingEvent for each poll; it holds one current
+            // state row and creates a GeofenceVisit only when the vehicle crosses a site.
+            // A non-live/historical call is consequently a no-op for SQL persistence.
             if (!markAsLiveReceipt || !hasGps) continue;
 
             var live = await ResolveLiveStatusAsync(rawIdentifier, canonicalIdentifier, ct);
@@ -187,7 +153,7 @@ public sealed class DotTrackingTelemetryStore(
 
         if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync(ct);
         if (batch.Count > 0)
-            logger.LogDebug("Stored {RecordCount} RoadTech telemetry record(s) for table-free geofence progression.", batch.Count);
+            logger.LogDebug("Updated current state from {RecordCount} RoadTech telemetry record(s); breadcrumb history remains in RoadTech.", batch.Count);
     }
 
     private async Task RepairFutureStoredEventsAsync(

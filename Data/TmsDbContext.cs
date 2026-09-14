@@ -251,6 +251,8 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
         b.Entity<Site>().HasIndex(x => new { x.CustomerCode, x.ExternalCode });
         b.Entity<GeofenceVisit>().HasIndex(x => new { x.VehicleIdentifier, x.ExitedAtUtc });
         b.Entity<GeofenceVisit>().HasIndex(x => new { x.LoadId, x.LoadStopId });
+        b.Entity<GeofenceVisit>().HasIndex(x => new { x.RunId, x.RunStopId });
+        b.Entity<GeofenceVisit>().HasIndex(x => new { x.VehicleIdentifier, x.GeofenceId, x.EnteredAtUtc });
         b.Entity<GeofenceVisit>().HasIndex(x => x.EnteredAtUtc);
         b.Entity<EtaSnapshot>().HasIndex(x => new { x.StopId, x.CapturedAtUtc });
         b.Entity<EtaSnapshot>().HasIndex(x => x.LoadId);

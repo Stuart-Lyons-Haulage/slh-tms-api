@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Controllers;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Models.Planning;
 using Slh.Tms.Api.Models.Tracking;
 
 namespace Slh.Tms.Api.Services;
@@ -59,7 +60,8 @@ BEGIN
     CREATE INDEX [IX_GeofenceVisits_Entered] ON [dbo].[GeofenceVisits]([EnteredAtUtc]);
 END;
 """;
-        await db.Database.ExecuteSqlRawAsync(sql, ct);
+        if (db.Database.IsRelational())
+            await db.Database.ExecuteSqlRawAsync(sql, ct);
     }
 
     public static async Task<GeofenceImportResult> ImportFalconAsync(TmsDbContext db, JsonElement root, CancellationToken ct)
@@ -143,13 +145,14 @@ END;
                     var stop = MatchNextStop(load, inside, await CompletedStopIds(db, load?.Id, ct), siteResolver);
                     openVisit = new GeofenceVisit
                     {
-                        GeofenceId = inside.Id, LoadId = load?.Id, LoadStopId = stop?.Id, VehicleId = vehicle?.Id,
+                        GeofenceId = inside.Id, SiteId = inside.SiteId, LoadId = load?.Id, LoadStopId = stop?.Id, VehicleId = vehicle?.Id,
                         VehicleIdentifier = record.VehicleIdentifier, EnteredAtUtc = record.EventTimeUtc,
                         LastInsideAtUtc = record.EventTimeUtc, Status = "Arrived", StatusReason = stop is null
                             ? $"Entered {inside.Name}; no remaining run stop could be matched safely."
                             : $"Entered {inside.Name}; matched to stop {stop.Name}."
                     };
                     db.GeofenceVisits.Add(openVisit);
+                    await LinkCanonicalRunStopAsync(db, openVisit, record.EventTimeUtc, ct);
                 }
                 else
                 {
@@ -180,6 +183,7 @@ END;
                         openVisit.StatusReason = $"Dwell is {openVisit.DwellMinutes} minutes; site threshold is {limit} minutes.";
                     }
                     openVisit.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                    await LinkCanonicalRunStopAsync(db, openVisit, record.EventTimeUtc, ct);
                 }
             }
             else if (openVisit is not null)
@@ -366,7 +370,44 @@ END;
         visit.ExitedAtUtc = at;
         visit.DwellMinutes = Math.Max(0, (int)Math.Floor((at - visit.EnteredAtUtc).TotalMinutes));
         visit.Status = status; visit.StatusReason = reason; visit.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        await LinkCanonicalRunStopAsync(db, visit, at, ct);
         if (db.ChangeTracker.HasChanges()) await db.SaveChangesAsync(ct);
+    }
+
+    private static async Task LinkCanonicalRunStopAsync(TmsDbContext db, GeofenceVisit visit, DateTimeOffset observedAtUtc, CancellationToken ct)
+    {
+        if (visit.SiteId is not Guid siteId || visit.VehicleId is not Guid vehicleId) return;
+
+        RunStop? stop = null;
+        if (visit.RunStopId is Guid existingStopId)
+            stop = await db.RunStops.SingleOrDefaultAsync(row => row.RunStopId == existingStopId, ct);
+
+        if (stop is null)
+        {
+            var day = UkOperatingDate(observedAtUtc);
+            stop = await db.RunStops
+                .Include(row => row.Run)
+                .ThenInclude(run => run.ResourceAllocation)
+                .Where(row => row.SiteId == siteId
+                    && row.Run.PlanningDate == day
+                    && row.Run.Status != RunStatus.Completed
+                    && row.Run.Status != RunStatus.Cancelled
+                    && row.Run.ResourceAllocation != null
+                    && row.Run.ResourceAllocation.VehicleId == vehicleId
+                    && row.GeofenceVisitId == null)
+                .OrderBy(row => row.Sequence)
+                .FirstOrDefaultAsync(ct);
+        }
+
+        if (stop is null) return;
+
+        visit.RunId = stop.RunId;
+        visit.RunStopId = stop.RunStopId;
+        stop.GeofenceVisitId ??= visit.Id;
+        if (stop.ActualArrival is null || visit.EnteredAtUtc < stop.ActualArrival)
+            stop.ActualArrival = visit.EnteredAtUtc;
+        if (visit.ExitedAtUtc is DateTimeOffset exitedAt && (stop.ActualDeparture is null || exitedAt > stop.ActualDeparture))
+            stop.ActualDeparture = exitedAt;
     }
 
     private static Site? MatchSite(string geofenceName, IReadOnlyCollection<Site> sites)

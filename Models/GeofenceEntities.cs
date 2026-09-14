@@ -26,6 +26,12 @@ public sealed class GeofenceVisit
     public Guid GeofenceId { get; set; }
     public Guid? LoadId { get; set; }
     public Guid? LoadStopId { get; set; }
+    // The canonical planner uses Runs/RunStops.  Keep these links alongside the
+    // legacy Load projection so RoadTech evidence is useful to both operational
+    // surfaces while that projection is retired.
+    public Guid? RunId { get; set; }
+    public Guid? RunStopId { get; set; }
+    public Guid? SiteId { get; set; }
     public Guid? VehicleId { get; set; }
     [MaxLength(80)] public required string VehicleIdentifier { get; set; }
     public DateTimeOffset EnteredAtUtc { get; set; }

@@ -85,7 +85,7 @@ public sealed class RoadTechLiveFreshnessTests
         await store.PersistAsync([recovered], CancellationToken.None, markAsLiveReceipt: false);
 
         Assert.Empty(await db.VehicleLiveStatuses.ToListAsync());
-        Assert.Single(await db.VehicleTrackingEvents.ToListAsync());
+        Assert.Empty(await db.VehicleTrackingEvents.ToListAsync());
     }
 
     [Fact]
@@ -221,6 +221,6 @@ public sealed class RoadTechLiveFreshnessTests
         Assert.Equal("AB12CDE", live.VehicleIdentifier);
         Assert.Equal(50.9m, live.Latitude);
         Assert.Equal(50, live.SpeedKph);
-        Assert.Equal(2, await db.VehicleTrackingEvents.CountAsync());
+        Assert.Equal(0, await db.VehicleTrackingEvents.CountAsync());
     }
 }
