@@ -5,6 +5,7 @@ using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Contracts;
 using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
 
 namespace Slh.Tms.Api.Services;
 
@@ -135,43 +136,70 @@ public sealed class SharePointMasterDataSyncService(
         return new Dictionary<string, IReadOnlyList<Dictionary<string, object?>>>(StringComparer.OrdinalIgnoreCase)
         {
             ["customer"] = (await db.Customers.AsNoTracking().OrderBy(x => x.Code).ToListAsync(ct)).Select(x => Fields(
-                ("Title", x.Code), ("CustomerKey", x.Code), ("TradingName", x.TradingName ?? x.Name),
-                ("AccountOwner", x.AccountOwner), ("ServiceNotes", x.ServiceNotes), ("DefaultSiteCode", x.DefaultSiteCode), ("Active", x.Active))).ToArray(),
+                ("Title", x.Code), ("CustomerKey", x.Code), ("CustomerName", x.Name), ("TradingName", x.TradingName ?? x.Name),
+                ("AccountOwner", x.AccountOwner), ("ServiceNotes", x.ServiceNotes), ("DefaultSiteCode", x.DefaultSiteCode), ("SourcePayloadJson", JsonSerializer.Serialize(x)), ("Active", x.Active))).ToArray(),
             ["customercontact"] = await BuildCustomerContactRowsAsync(db, ct),
             ["site"] = await BuildSiteRowsAsync(db, ct),
-            ["driver"] = drivers.Select(x => Fields(
-                ("Title", x.DisplayName), ("DriverKey", x.TachoCardNumber ?? x.EmployeeNumber),
-                ("DriverName", x.DisplayName), ("EmployeeNumber", x.EmployeeNumber), ("TachoName", x.TachoName),
-                ("MobileNumber", x.MobileNumber), ("DriverType", x.DriverType), ("DriverGroup", x.DriverGroup),
-                ("Skills", x.Skills), ("AgencyName", x.AgencyName), ("Coding", x.Coding), ("Notes", x.Notes),
-                ("LicenceNumber", x.DrivingLicenceNumber), ("LicenceExpiry", x.LicenceExpiry),
-                ("TachoCardNumber", x.TachoCardNumber), ("TachoMasterDriverId", x.TachoMasterDriverId),
-                ("LastTachoSyncUtc", x.LastTachoSyncUtc), ("Active", x.Active),
-                ("ComplianceStatus", string.IsNullOrWhiteSpace(x.LicenceStatus) ? "Unknown" : x.LicenceStatus))).ToArray(),
+            ["driver"] = await BuildDriverRowsAsync(db, drivers, ct),
             ["vehicle"] = vehicles.Select(x => Fields(
                 ("Title", x.Registration), ("VehicleKey", x.FleetNumber ?? x.Registration), ("Registration", x.Registration),
                 ("FleetNumber", x.FleetNumber), ("Abbreviation", x.Abbreviation), ("Transmission", x.Transmission),
-                ("DvsCompliant", x.DvsCompliant), ("FuelProvider", x.FuelProvider), ("CabMobile", x.CabMobile),
+                ("DvsCompliant", x.DvsCompliant), ("FuelProvider", x.FuelProvider), ("CabMobile", x.CabMobile), ("FuelPin", x.FuelPin),
                 ("FuelPinSecretName", x.FuelPinSecretName), ("FuelCardLastFour", x.FuelCardLastFour),
                 ("ShellCard", x.ShellCard), ("BpRedCard", x.BpRedCard), ("BpPlainCard", x.BpPlainCard),
                 ("Notes", x.Notes), ("FleetioId", x.FleetioId), ("FleetioName", x.FleetioName),
-                ("FleetioStatus", x.FleetioStatus), ("TmsVehicleId", x.Id.ToString()), ("Active", x.Active),
+                ("FleetioStatus", x.FleetioStatus), ("TmsVehicleId", x.Id.ToString()), ("SourcePayloadJson", JsonSerializer.Serialize(x)), ("Active", x.Active),
                 ("ComplianceStatus", x.FleetioVor == true ? "VOR" : "Unknown"))).ToArray(),
             ["fuelcard"] = vehicles.Select(x => Fields(
                 ("Title", x.Registration), ("VehicleKey", x.FleetNumber ?? x.Registration), ("Registration", x.Registration),
-                ("FuelProvider", x.FuelProvider), ("FuelPinSecretName", x.FuelPinSecretName),
+                ("FuelProvider", x.FuelProvider), ("FuelPin", x.FuelPin), ("FuelPinSecretName", x.FuelPinSecretName),
                 ("FuelCardLastFour", x.FuelCardLastFour), ("ShellCard", x.ShellCard),
                 ("BpRedCard", x.BpRedCard), ("BpPlainCard", x.BpPlainCard), ("Active", x.Active))).ToArray(),
             ["trailer"] = (await db.Trailers.AsNoTracking().OrderBy(x => x.TrailerNumber).ToListAsync(ct)).Select(x => Fields(
                 ("Title", x.TrailerNumber), ("TrailerKey", x.TrailerNumber), ("Registration", x.TrailerNumber),
                 ("TrailerType", x.Type), ("StandardCapacity", x.StandardCapacity), ("EuroCapacity", x.EuroCapacity),
-                ("Notes", x.Notes), ("Active", x.Active))).ToArray(),
+                ("Notes", x.Notes), ("SourcePayloadJson", JsonSerializer.Serialize(x)), ("Active", x.Active))).ToArray(),
             ["marketcontact"] = (await db.MarketContacts.AsNoTracking().OrderBy(x => x.Market).ThenBy(x => x.Name).ToListAsync(ct)).Select(x => Fields(
                 ("Title", $"{x.Market} · {x.Name}"), ("Market", x.Market), ("Name", x.Name),
                 ("StandOrLocation", x.StandOrLocation), ("Salesman", x.Salesman), ("Sender", x.Sender),
-                ("ReadOnlyMapPdfUrl", x.ReadOnlyMapPdfUrl), ("Active", x.Active))).ToArray(),
+                ("ReadOnlyMapPdfUrl", x.ReadOnlyMapPdfUrl), ("SourcePayloadJson", JsonSerializer.Serialize(x)), ("Active", x.Active))).ToArray(),
             ["emailroute"] = await BuildEmailRouteRowsAsync(db, ct)
         };
+    }
+
+    private static async Task<IReadOnlyList<Dictionary<string, object?>>> BuildDriverRowsAsync(
+        TmsDbContext db,
+        IReadOnlyList<Driver> drivers,
+        CancellationToken ct)
+    {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow.Date);
+        var vehicles = await db.Vehicles.AsNoTracking().ToDictionaryAsync(x => x.Id, ct);
+        var allocations = await db.Loads.AsNoTracking()
+            .Where(x => x.DriverId != null && x.Status != LoadStatus.Cancelled && x.Status != LoadStatus.Completed)
+            .OrderBy(x => x.PlanningDate < today ? 1 : 0)
+            .ThenBy(x => x.PlanningDate)
+            .ThenBy(x => x.Reference)
+            .ToListAsync(ct);
+
+        var allocatedByDriver = allocations
+            .Where(x => x.DriverId is not null && x.VehicleId is not null && vehicles.ContainsKey(x.VehicleId.Value))
+            .GroupBy(x => x.DriverId!.Value)
+            .ToDictionary(
+                group => group.Key,
+                group => vehicles[group.First().VehicleId!.Value].Registration,
+                EqualityComparer<Guid>.Default);
+
+        return drivers.Select(x => Fields(
+            ("Title", x.DisplayName), ("DriverKey", x.TachoCardNumber ?? x.EmployeeNumber),
+            ("DriverName", x.DisplayName), ("EmployeeNumber", x.EmployeeNumber), ("TachoName", x.TachoName),
+            ("Email", x.Email), ("MobileNumber", x.MobileNumber), ("GradeCode", x.GradeCode),
+            ("AllocatedVehicle", allocatedByDriver.GetValueOrDefault(x.Id)),
+            ("DriverType", x.DriverType), ("DriverGroup", x.DriverGroup),
+            ("Skills", x.Skills), ("AgencyName", x.AgencyName), ("Coding", x.Coding), ("Notes", x.Notes),
+            ("LicenceNumber", x.DrivingLicenceNumber), ("LicenceExpiry", x.LicenceExpiry),
+            ("TachoCardNumber", x.TachoCardNumber), ("TachoMasterDriverId", x.TachoMasterDriverId),
+            ("LastTachoSyncUtc", x.LastTachoSyncUtc), ("SourcePayloadJson", JsonSerializer.Serialize(x)), ("Active", x.Active),
+            ("ComplianceStatus", string.IsNullOrWhiteSpace(x.LicenceStatus) ? "Unknown" : x.LicenceStatus))).ToArray();
     }
 
     private static async Task<IReadOnlyList<Dictionary<string, object?>>> BuildCustomerContactRowsAsync(TmsDbContext db, CancellationToken ct)
@@ -186,7 +214,7 @@ public sealed class SharePointMasterDataSyncService(
             ("ContactName", x.Name),
             ("Email", x.Email),
             ("MobileNumber", x.MobileNumber),
-            ("ReceivesEtaUpdates", x.ReceivesEtaUpdates),
+            ("ReceivesEtaUpdates", x.ReceivesEtaUpdates), ("SourcePayloadJson", JsonSerializer.Serialize(x)),
             ("Active", x.Active))).ToArray();
     }
 
@@ -201,7 +229,7 @@ public sealed class SharePointMasterDataSyncService(
             ("Title", x.ExternalCode), ("SiteKey", x.ExternalCode), ("CustomerKey", x.CustomerCode),
             ("SiteName", x.Name), ("BuildingName", x.DriverTextName ?? x.Name), ("Address1", x.CollectionAddress),
             ("MapLink", x.MapLink), ("Aliases", x.Aliases), ("GeofenceId", geofences.GetValueOrDefault(x.Id)),
-            ("OperationalRegion", x.OperationalRegion), ("Active", x.Active), ("SyncStatus", "Synced"))).ToArray();
+            ("CollectionInstructions", x.CollectionInstructions), ("OperationalRegion", x.OperationalRegion), ("SourcePayloadJson", JsonSerializer.Serialize(x)), ("Active", x.Active), ("SyncStatus", "Synced"))).ToArray();
     }
 
     private static async Task<IReadOnlyList<Dictionary<string, object?>>> BuildEmailRouteRowsAsync(TmsDbContext db, CancellationToken ct)
@@ -216,7 +244,7 @@ public sealed class SharePointMasterDataSyncService(
                 ("CustomerKey", x.CustomerCode), ("SiteKey", x.DefaultSiteCode),
                 ("SenderEmail", x.SenderEmail), ("SenderDomain", x.SenderDomain),
                 ("SubjectContains", x.SubjectContains), ("ParserType", x.ParserType),
-                ("RequiresReview", x.RequiresReview), ("Active", x.Active))).ToArray();
+                ("RequiresReview", x.RequiresReview), ("SourcePayloadJson", JsonSerializer.Serialize(x)), ("Active", x.Active))).ToArray();
         }
         catch (Exception ex) when (ex.GetBaseException().Message.Contains("CustomerEmailRoutes", StringComparison.OrdinalIgnoreCase))
         {
@@ -420,57 +448,57 @@ public sealed class SharePointMasterDataSyncService(
     {
         "customer" =>
         [
-            TextColumn("CustomerKey", true), TextColumn("TradingName"), TextColumn("CustomerAliases"),
-            TextColumn("AccountOwner"), TextColumn("ServiceNotes", multiline: true), TextColumn("DefaultSiteCode"), BooleanColumn("Active")
+            TextColumn("CustomerKey", true), TextColumn("CustomerName"), TextColumn("TradingName"), TextColumn("CustomerAliases"),
+            TextColumn("AccountOwner"), TextColumn("ServiceNotes", multiline: true), TextColumn("DefaultSiteCode"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active")
         ],
         "customercontact" =>
         [
             TextColumn("ContactKey", true), TextColumn("CustomerKey", true), TextColumn("ContactName"),
-            TextColumn("Email"), TextColumn("MobileNumber"), BooleanColumn("ReceivesEtaUpdates"), BooleanColumn("Active")
+            TextColumn("Email"), TextColumn("MobileNumber"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("ReceivesEtaUpdates"), BooleanColumn("Active")
         ],
         "site" =>
         [
             TextColumn("SiteKey", true), TextColumn("CustomerKey"), TextColumn("SiteName"), TextColumn("BuildingName"),
             TextColumn("Address1"), TextColumn("Address2"), TextColumn("Town"), TextColumn("County"), TextColumn("Postcode"),
             TextColumn("MapLink"), TextColumn("Aliases", multiline: true), TextColumn("GeofenceId"),
-            TextColumn("OperationalRegion"), BooleanColumn("Active"), TextColumn("SyncStatus")
+            TextColumn("CollectionInstructions", multiline: true), TextColumn("OperationalRegion"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active"), TextColumn("SyncStatus")
         ],
         "driver" =>
         [
             TextColumn("DriverKey", true), TextColumn("DriverName"), TextColumn("EmployeeNumber"), TextColumn("TachoName"),
-            TextColumn("MobileNumber"), TextColumn("DriverType"), TextColumn("DriverGroup"), TextColumn("Skills", multiline: true),
+            TextColumn("Email"), TextColumn("MobileNumber"), TextColumn("GradeCode"), TextColumn("AllocatedVehicle"), TextColumn("DriverType"), TextColumn("DriverGroup"), TextColumn("Skills", multiline: true),
             TextColumn("AgencyName"), TextColumn("Coding"), TextColumn("Notes", multiline: true), TextColumn("LicenceNumber"),
             TextColumn("LicenceExpiry"), TextColumn("TachoCardNumber", true), TextColumn("TachoMasterDriverId", true),
-            TextColumn("LastTachoSyncUtc"), BooleanColumn("Active"), TextColumn("ComplianceStatus")
+            TextColumn("LastTachoSyncUtc"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active"), TextColumn("ComplianceStatus")
         ],
         "vehicle" =>
         [
             TextColumn("VehicleKey", true), TextColumn("Registration"), TextColumn("VehicleType"), TextColumn("FleetNumber"),
             TextColumn("Abbreviation"), TextColumn("Transmission"), BooleanColumn("DvsCompliant"), TextColumn("FuelProvider"),
-            TextColumn("CabMobile"), TextColumn("FuelPinSecretName"), TextColumn("FuelCardLastFour"), TextColumn("ShellCard"),
+            TextColumn("CabMobile"), TextColumn("FuelPin"), TextColumn("FuelPinSecretName"), TextColumn("FuelCardLastFour"), TextColumn("ShellCard"),
             TextColumn("BpRedCard"), TextColumn("BpPlainCard"), TextColumn("Notes", multiline: true), TextColumn("FleetioId"),
-            TextColumn("FleetioName"), TextColumn("FleetioStatus"), TextColumn("TmsVehicleId"), BooleanColumn("Active"), TextColumn("ComplianceStatus")
+            TextColumn("FleetioName"), TextColumn("FleetioStatus"), TextColumn("TmsVehicleId"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active"), TextColumn("ComplianceStatus")
         ],
         "trailer" =>
         [
             TextColumn("TrailerKey", true), TextColumn("Registration"), TextColumn("TrailerType"),
-            NumberColumn("StandardCapacity"), NumberColumn("EuroCapacity"), TextColumn("Notes", multiline: true), BooleanColumn("Active")
+            NumberColumn("StandardCapacity"), NumberColumn("EuroCapacity"), TextColumn("Notes", multiline: true), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active")
         ],
         "fuelcard" =>
         [
-            TextColumn("VehicleKey", true), TextColumn("Registration"), TextColumn("FuelProvider"), TextColumn("FuelPinSecretName"),
-            TextColumn("FuelCardLastFour"), TextColumn("ShellCard"), TextColumn("BpRedCard"), TextColumn("BpPlainCard"), BooleanColumn("Active")
+            TextColumn("VehicleKey", true), TextColumn("Registration"), TextColumn("FuelProvider"), TextColumn("FuelPin"), TextColumn("FuelPinSecretName"),
+            TextColumn("FuelCardLastFour"), TextColumn("ShellCard"), TextColumn("BpRedCard"), TextColumn("BpPlainCard"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active")
         ],
         "marketcontact" =>
         [
             TextColumn("Market"), TextColumn("Name"), TextColumn("StandOrLocation"), TextColumn("Salesman"),
-            TextColumn("Sender"), TextColumn("ReadOnlyMapPdfUrl"), BooleanColumn("Active")
+            TextColumn("Sender"), TextColumn("ReadOnlyMapPdfUrl"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active")
         ],
         "emailroute" =>
         [
             TextColumn("RouteKey", true), TextColumn("CustomerKey"), TextColumn("SiteKey"),
             TextColumn("SenderEmail"), TextColumn("SenderDomain"), TextColumn("SubjectContains"),
-            TextColumn("ParserType"), BooleanColumn("RequiresReview"), BooleanColumn("Active")
+            TextColumn("ParserType"), BooleanColumn("RequiresReview"), TextColumn("SourcePayloadJson", multiline: true), BooleanColumn("Active")
         ],
         _ => []
     };
@@ -612,7 +640,10 @@ public sealed class SharePointMasterDataSyncService(
                 Set("employeeNumber", Text("EmployeeNumber") ?? Text("DriverKey"));
                 Set("displayName", Text("DriverName") ?? Text("DriverKey"));
                 Set("tachoName", Text("TachoName"));
+                Set("email", Text("Email"));
                 Set("mobileNumber", Text("MobileNumber"));
+                Set("gradeCode", Text("GradeCode"));
+                Set("allocatedVehicle", Text("AllocatedVehicle"));
                 Set("driverType", Text("DriverType"));
                 Set("driverGroup", Text("DriverGroup"));
                 Set("skills", Text("Skills"));
@@ -633,6 +664,7 @@ public sealed class SharePointMasterDataSyncService(
                 Set("transmission", Text("Transmission"));
                 Set("dvsCompliant", Text("DvsCompliant"));
                 Set("fuelProvider", Text("FuelProvider"));
+                Set("fuelPin", Text("FuelPin"));
                 Set("cabMobile", Text("CabMobile"));
                 Set("fuelPinSecretName", Text("FuelPinSecretName"));
                 Set("fuelCardLastFour", Text("FuelCardLastFour"));
