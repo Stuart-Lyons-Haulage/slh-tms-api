@@ -43,7 +43,7 @@ public sealed class ProductionRepairController(
     {
         if (!TvWallboardAccess.IsAllowed(HttpContext, configuration)) return Unauthorized();
         var job = await driverMasterJobs.EnqueueAsync("system:production-repair", ct);
-        return Accepted(new { job.JobId, job.Status, job.EnqueuedAtUtc });
+        return Accepted(new { job.JobId, job.Status, job.RequestedAtUtc });
     }
 
     [HttpGet("driver-master/{jobId:guid}")]
