@@ -1,4 +1,4 @@
-name: One-shot permanent TachoMaster identity patch
+name: One-shot TachoMaster SQL migration patch
 
 on:
   push:
@@ -21,7 +21,7 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Add governed SQL identity migration and durable job connection wiring
+      - name: Add governed SQL identity migration
         shell: python
         run: |
           from pathlib import Path
@@ -59,27 +59,18 @@ jobs:
               raise SystemExit('Schema migration catalogue insertion point not found')
           runner.write_text(text.replace(old, new, 1))
 
-          deploy = Path('.github/workflows/deploy-jobs.yml')
-          text = deploy.read_text()
-          old = '''          tms_db="$(secret_value tms-db-connection)"\n          dot_base="$(secret_value dot-base-url)"'''
-          new = '''          tms_db="$(secret_value tms-db-connection)"\n          job_mi_client_id="$(az containerapp job show \\\n            --name "$TACHO_JOB" \\\n            --resource-group "$AZURE_RESOURCE_GROUP" \\\n            --query 'identity.userAssignedIdentities.*.clientId | [0]' \\\n            --output tsv)"\n          if test -z "$job_mi_client_id"; then\n            echo "::error::$TACHO_JOB must have a user-assigned managed identity before deployment."\n            exit 1\n          fi\n          if grep -qi 'Authentication=Active Directory Managed Identity' <<<"$tms_db"; then\n            tms_db="$(printf '%s' "$tms_db" | sed -E 's/(^|;)[[:space:]]*[Uu]ser[[:space:]]+[Ii][Dd]=[^;]*//g')"\n            tms_db="${tms_db%;};User Id=${job_mi_client_id};"\n          fi\n          dot_base="$(secret_value dot-base-url)"'''
-          if old not in text:
-              raise SystemExit('deploy-jobs identity insertion point not found')
-          deploy.write_text(text.replace(old, new, 1))
-
       - name: Validate repaired solution
         run: |
           set -euo pipefail
           dotnet build Slh.Tms.Api.csproj -c Release
           dotnet build Slh.Tms.Jobs/Slh.Tms.Jobs.csproj -c Release
-          dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj -c Release --no-build || dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj -c Release
 
-      - name: Commit permanent repair
+      - name: Commit migration repair
         run: |
           set -euo pipefail
           git config user.name "slh-tms-repair-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add Database/060_TachoMaster_Job_Managed_Identity.sql Services/SchemaMigrationRunner.cs .github/workflows/deploy-jobs.yml
+          git add Database/060_TachoMaster_Job_Managed_Identity.sql Services/SchemaMigrationRunner.cs
           git commit -m "Provision scheduled job SQL managed identity"
           git fetch origin main
           git rebase origin/main
