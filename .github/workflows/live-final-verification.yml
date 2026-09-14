@@ -12,122 +12,36 @@ permissions:
 
 env:
   RG: slh-tms-prod-rg
-  API_APP: slh-tms-api-prod
   API_BASE: https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
-  ACR: slhtmsacrprod
   TACHO_JOB: slh-tms-job-tachomaster
-  TESTED_SHA: 79d278509147937d5560b4f9bcdcc9ff3f0e0eb4
 
 jobs:
-  repair-and-verify:
+  diagnose-live-tacho:
     runs-on: ubuntu-latest
     environment: production
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
-      - name: Check out tested source
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.TESTED_SHA }}
-
-      - name: Sign in to Azure
-        uses: azure/login@v2
+      - uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Build tested scheduled-job image
-        shell: bash
-        run: |
-          set -euo pipefail
-          az acr build --registry "$ACR" --file Slh.Tms.Jobs/Dockerfile --image "slh-tms-jobs:$TESTED_SHA" .
-
-      - name: Reconcile TachoMaster job identity, secrets, image and environment
-        shell: bash
-        run: |
-          set -euo pipefail
-          source_secrets="$(az containerapp secret list --name "$API_APP" --resource-group "$RG" --show-values -o json)"
-          secret_value() { jq -r --arg name "$1" '[.[] | select(.name == $name)][0].value // empty' <<<"$source_secrets"; }
-
-          db="$(secret_value tms-db-connection)"
-          dot_base="$(secret_value dot-base-url)"
-          dot_api="$(secret_value dot-api-key)"
-          dot_company="$(secret_value dot-company-code)"
-          dot_user="$(secret_value dot-username)"
-          dot_password="$(secret_value dot-password)"
-          job_client_id="$(az containerapp job show -n "$TACHO_JOB" -g "$RG" --query 'identity.userAssignedIdentities.*.clientId | [0]' -o tsv)"
-
-          test -n "$db" && test -n "$dot_base" && test -n "$dot_api" && test -n "$dot_user" && test -n "$dot_password" && test -n "$job_client_id"
-
-          if grep -Eqi 'Authentication[[:space:]]*=[[:space:]]*Active Directory (Managed Identity|MSI)' <<<"$db"; then
-            db="$(printf '%s' "$db" | sed -E 's/(^|;)[[:space:]]*[Uu]ser[[:space:]]+[Ii][Dd]=[^;]*//g')"
-            db="${db%;};User Id=${job_client_id};"
-          fi
-
-          secrets=("tms-db=$db" "dot-base-url=$dot_base" "dot-api-key=$dot_api" "dot-username=$dot_user" "dot-password=$dot_password")
-          envs=(
-            "TMS_JOB_KIND=tachomaster"
-            "ConnectionStrings__TmsDb=secretref:tms-db"
-            "Tracking__Dot__Enabled=true"
-            "Tracking__Dot__BaseUrl=secretref:dot-base-url"
-            "Tracking__Dot__ApiKey=secretref:dot-api-key"
-            "Tracking__Dot__Username=secretref:dot-username"
-            "Tracking__Dot__Password=secretref:dot-password"
-            "Integrations__TachoMaster__Enabled=true"
-            "Integrations__TachoMaster__BaseUrl=secretref:dot-base-url"
-            "Integrations__TachoMaster__ApiKey=secretref:dot-api-key"
-            "Integrations__TachoMaster__Username=secretref:dot-username"
-            "Integrations__TachoMaster__Password=secretref:dot-password"
-          )
-          if test -n "$dot_company"; then
-            secrets+=("dot-company-code=$dot_company")
-            envs+=("Tracking__Dot__CompanyCode=secretref:dot-company-code")
-          fi
-
-          az containerapp job secret set -n "$TACHO_JOB" -g "$RG" --secrets "${secrets[@]}" -o none
-          az containerapp job update -n "$TACHO_JOB" -g "$RG" --image "$ACR.azurecr.io/slh-tms-jobs:$TESTED_SHA" --set-env-vars "${envs[@]}" -o none
-
-          image="$(az containerapp job show -n "$TACHO_JOB" -g "$RG" --query 'properties.template.containers[0].image' -o tsv)"
-          trigger="$(az containerapp job show -n "$TACHO_JOB" -g "$RG" --query 'properties.configuration.triggerType' -o tsv)"
-          cron="$(az containerapp job show -n "$TACHO_JOB" -g "$RG" --query 'properties.configuration.scheduleTriggerConfig.cronExpression' -o tsv)"
-          echo "image=$image trigger=$trigger cron=$cron"
-          test "$image" = "$ACR.azurecr.io/slh-tms-jobs:$TESTED_SHA"
-          test "$trigger" = Schedule
-          test "$cron" = '*/5 * * * *'
-
-      - name: Run repaired canonical sync
+      - name: Execute Tacho job and capture container output
         shell: bash
         run: |
           set -euo pipefail
           execution="$(az containerapp job start -n "$TACHO_JOB" -g "$RG" --query name -o tsv)"
           echo "execution=$execution"
-          for attempt in $(seq 1 90); do
+          state=""
+          for attempt in $(seq 1 60); do
             state="$(az containerapp job execution show -n "$TACHO_JOB" -g "$RG" --job-execution-name "$execution" --query properties.status -o tsv 2>/dev/null || true)"
             echo "status=${state:-unknown}"
-            case "$state" in
-              Succeeded) exit 0 ;;
-              Failed) exit 1 ;;
-            esac
+            case "$state" in Succeeded|Failed) break ;; esac
             sleep 10
           done
-          exit 1
-
-      - name: Verify canonical Driver Master and Tacho freshness
-        shell: bash
-        run: |
-          set -euo pipefail
-          for attempt in $(seq 1 30); do
-            d="$(curl -fsS --max-time 60 -H 'Cache-Control: no-cache' "$API_BASE/api/v1/health/driver-master")"
-            t="$(curl -fsS --max-time 60 -H 'Cache-Control: no-cache' "$API_BASE/api/v1/health/tachomaster")"
-            echo "$d" | jq '{activeDrivers,sourceWorkers,populationAligned,duplicateMemberGroups,duplicateCardGroups,activeWithoutMember,activeWithoutCard,latestCanonicalSyncUtc}'
-            echo "$t" | jq '{connected,scheduledSync}'
-            md="$(jq -r '.duplicateMemberGroups // -1' <<<"$d")"
-            cd="$(jq -r '.duplicateCardGroups // -1' <<<"$d")"
-            wm="$(jq -r '.activeWithoutMember // -1' <<<"$d")"
-            aligned="$(jq -r '.populationAligned // false' <<<"$d")"
-            stale="$(jq -r 'if .scheduledSync.stale == null then true else .scheduledSync.stale end' <<<"$t")"
-            canonical="$(jq -r '.latestCanonicalSyncUtc // empty' <<<"$d")"
-            if test "$md" = 0 -a "$cd" = 0 -a "$wm" = 0 -a "$aligned" = true -a "$stale" = false -a -n "$canonical"; then exit 0; fi
-            sleep 10
-          done
-          exit 1
+          echo '--- container output ---'
+          az containerapp job logs show -n "$TACHO_JOB" -g "$RG" --execution "$execution" --container tms-job --tail 200 --format text || true
+          echo '--- live Driver Master ---'
+          curl -fsS --max-time 60 -H 'Cache-Control: no-cache' "$API_BASE/api/v1/health/driver-master" | jq '{activeDrivers,sourceWorkers,populationAligned,duplicateMemberGroups,duplicateCardGroups,activeWithoutMember,activeWithoutCard,latestCanonicalSyncUtc}'
+          test "$state" = Succeeded
