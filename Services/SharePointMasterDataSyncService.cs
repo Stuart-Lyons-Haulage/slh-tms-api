@@ -143,7 +143,7 @@ public sealed class SharePointMasterDataSyncService(
             ["vehicle"] = vehicles.Select(x => Fields(
                 ("Title", x.Registration), ("VehicleKey", x.FleetNumber ?? x.Registration), ("Registration", x.Registration),
                 ("FleetNumber", x.FleetNumber), ("Abbreviation", x.Abbreviation), ("Transmission", x.Transmission),
-                ("DvsCompliant", x.DvsCompliant), ("FuelProvider", x.FuelProvider), ("CabMobile", x.CabMobile),
+                ("DvsCompliant", x.DvsCompliant), ("FuelProvider", x.FuelProvider), ("CabMobile", x.CabMobile), ("FuelPin", x.FuelPin),
                 ("FuelPinSecretName", x.FuelPinSecretName), ("FuelCardLastFour", x.FuelCardLastFour),
                 ("ShellCard", x.ShellCard), ("BpRedCard", x.BpRedCard), ("BpPlainCard", x.BpPlainCard),
                 ("Notes", x.Notes), ("FleetioId", x.FleetioId), ("FleetioName", x.FleetioName),
@@ -151,7 +151,7 @@ public sealed class SharePointMasterDataSyncService(
                 ("ComplianceStatus", x.FleetioVor == true ? "VOR" : "Unknown"))).ToArray(),
             ["fuelcard"] = vehicles.Select(x => Fields(
                 ("Title", x.Registration), ("VehicleKey", x.FleetNumber ?? x.Registration), ("Registration", x.Registration),
-                ("FuelProvider", x.FuelProvider), ("FuelPinSecretName", x.FuelPinSecretName),
+                ("FuelProvider", x.FuelProvider), ("FuelPin", x.FuelPin), ("FuelPinSecretName", x.FuelPinSecretName),
                 ("FuelCardLastFour", x.FuelCardLastFour), ("ShellCard", x.ShellCard),
                 ("BpRedCard", x.BpRedCard), ("BpPlainCard", x.BpPlainCard), ("Active", x.Active))).ToArray(),
             ["trailer"] = (await db.Trailers.AsNoTracking().OrderBy(x => x.TrailerNumber).ToListAsync(ct)).Select(x => Fields(
@@ -474,7 +474,7 @@ public sealed class SharePointMasterDataSyncService(
         [
             TextColumn("VehicleKey", true), TextColumn("Registration"), TextColumn("VehicleType"), TextColumn("FleetNumber"),
             TextColumn("Abbreviation"), TextColumn("Transmission"), BooleanColumn("DvsCompliant"), TextColumn("FuelProvider"),
-            TextColumn("CabMobile"), TextColumn("FuelPinSecretName"), TextColumn("FuelCardLastFour"), TextColumn("ShellCard"),
+            TextColumn("CabMobile"), TextColumn("FuelPin"), TextColumn("FuelPinSecretName"), TextColumn("FuelCardLastFour"), TextColumn("ShellCard"),
             TextColumn("BpRedCard"), TextColumn("BpPlainCard"), TextColumn("Notes", multiline: true), TextColumn("FleetioId"),
             TextColumn("FleetioName"), TextColumn("FleetioStatus"), TextColumn("TmsVehicleId"), BooleanColumn("Active"), TextColumn("ComplianceStatus")
         ],
@@ -485,7 +485,7 @@ public sealed class SharePointMasterDataSyncService(
         ],
         "fuelcard" =>
         [
-            TextColumn("VehicleKey", true), TextColumn("Registration"), TextColumn("FuelProvider"), TextColumn("FuelPinSecretName"),
+            TextColumn("VehicleKey", true), TextColumn("Registration"), TextColumn("FuelProvider"), TextColumn("FuelPin"), TextColumn("FuelPinSecretName"),
             TextColumn("FuelCardLastFour"), TextColumn("ShellCard"), TextColumn("BpRedCard"), TextColumn("BpPlainCard"), BooleanColumn("Active")
         ],
         "marketcontact" =>
@@ -663,6 +663,7 @@ public sealed class SharePointMasterDataSyncService(
                 Set("transmission", Text("Transmission"));
                 Set("dvsCompliant", Text("DvsCompliant"));
                 Set("fuelProvider", Text("FuelProvider"));
+                Set("fuelPin", Text("FuelPin"));
                 Set("cabMobile", Text("CabMobile"));
                 Set("fuelPinSecretName", Text("FuelPinSecretName"));
                 Set("fuelCardLastFour", Text("FuelCardLastFour"));
