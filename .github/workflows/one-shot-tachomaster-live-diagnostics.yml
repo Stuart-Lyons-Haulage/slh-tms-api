@@ -1,4 +1,4 @@
-name: One-shot TachoMaster SQL identity repair
+name: One-shot permanent TachoMaster identity patch
 
 on:
   push:
@@ -7,129 +7,80 @@ on:
       - .github/workflows/one-shot-tachomaster-live-diagnostics.yml
 
 permissions:
-  contents: read
-  id-token: write
+  contents: write
 
 jobs:
-  repair:
+  patch:
     runs-on: ubuntu-latest
-    environment:
-      name: production
-    env:
-      AZURE_RESOURCE_GROUP: slh-tms-prod-rg
-      API_APP: slh-tms-api-prod
-      API_FQDN: slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
-      TACHO_JOB: slh-tms-job-tachomaster
-      JOB_SQL_USER: slh-tms-jobs-prod-id
     steps:
-      - name: Sign in to Azure
-        uses: azure/login@v2
+      - uses: actions/checkout@v4
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
 
-      - name: Grant job identity access to TMS SQL database
-        shell: bash
+      - name: Add governed SQL identity migration and durable job connection wiring
+        shell: python
+        run: |
+          from pathlib import Path
+
+          migration = Path('Database/060_TachoMaster_Job_Managed_Identity.sql')
+          migration.write_text(r'''/*
+            Provision the governed user-assigned identity used by production Container Apps jobs.
+            Idempotent and deliberately limited to runtime DML/execute rights; no DDL/admin role.
+          */
+          SET XACT_ABORT ON;
+
+          DECLARE @JobUser sysname = N'slh-tms-jobs-prod-id';
+          DECLARE @JobObjectId uniqueidentifier = '75197000-83d6-47e5-b797-7532db12c508';
+
+          IF DATABASE_PRINCIPAL_ID(@JobUser) IS NULL
+          BEGIN
+              DECLARE @SidHex nvarchar(34) = CONVERT(nvarchar(34), CONVERT(varbinary(16), @JobObjectId), 1);
+              EXEC(N'CREATE USER [' + @JobUser + N'] WITH SID = ' + @SidHex + N', TYPE = E;');
+          END;
+
+          IF IS_ROLEMEMBER(N'db_datareader', @JobUser) <> 1
+              EXEC(N'ALTER ROLE [db_datareader] ADD MEMBER [' + @JobUser + N'];');
+
+          IF IS_ROLEMEMBER(N'db_datawriter', @JobUser) <> 1
+              EXEC(N'ALTER ROLE [db_datawriter] ADD MEMBER [' + @JobUser + N'];');
+
+          EXEC(N'GRANT EXECUTE TO [' + @JobUser + N'];');
+          ''')
+
+          runner = Path('Services/SchemaMigrationRunner.cs')
+          text = runner.read_text()
+          old = '        "059_RoadTech_Operational_Visits.sql"\n'
+          new = '        "059_RoadTech_Operational_Visits.sql",\n        "060_TachoMaster_Job_Managed_Identity.sql"\n'
+          if old not in text:
+              raise SystemExit('Schema migration catalogue insertion point not found')
+          runner.write_text(text.replace(old, new, 1))
+
+          deploy = Path('.github/workflows/deploy-jobs.yml')
+          text = deploy.read_text()
+          old = '''          tms_db="$(secret_value tms-db-connection)"\n          dot_base="$(secret_value dot-base-url)"'''
+          new = '''          tms_db="$(secret_value tms-db-connection)"\n          job_mi_client_id="$(az containerapp job show \\\n            --name "$TACHO_JOB" \\\n            --resource-group "$AZURE_RESOURCE_GROUP" \\\n            --query 'identity.userAssignedIdentities.*.clientId | [0]' \\\n            --output tsv)"\n          if test -z "$job_mi_client_id"; then\n            echo "::error::$TACHO_JOB must have a user-assigned managed identity before deployment."\n            exit 1\n          fi\n          if grep -qi 'Authentication=Active Directory Managed Identity' <<<"$tms_db"; then\n            tms_db="$(printf '%s' "$tms_db" | sed -E 's/(^|;)[[:space:]]*[Uu]ser[[:space:]]+[Ii][Dd]=[^;]*//g')"\n            tms_db="${tms_db%;};User Id=${job_mi_client_id};"\n          fi\n          dot_base="$(secret_value dot-base-url)"'''
+          if old not in text:
+              raise SystemExit('deploy-jobs identity insertion point not found')
+          deploy.write_text(text.replace(old, new, 1))
+
+      - name: Validate repaired solution
         run: |
           set -euo pipefail
-          source_secrets="$(az containerapp secret list --name "$API_APP" --resource-group "$AZURE_RESOURCE_GROUP" --show-values --output json)"
-          conn="$(jq -r '[.[] | select(.name == "tms-db-connection")][0].value // empty' <<<"$source_secrets")"
-          test -n "$conn"
+          dotnet build Slh.Tms.Api.csproj -c Release
+          dotnet build Slh.Tms.Jobs/Slh.Tms.Jobs.csproj -c Release
+          dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj -c Release --no-build || dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj -c Release
 
-          server="$(printf '%s' "$conn" | tr ';' '\n' | sed -n -E 's/^[[:space:]]*(Server|Data Source)[[:space:]]*=[[:space:]]*//Ip' | head -1)"
-          database="$(printf '%s' "$conn" | tr ';' '\n' | sed -n -E 's/^[[:space:]]*(Database|Initial Catalog)[[:space:]]*=[[:space:]]*//Ip' | head -1)"
-          server="${server#tcp:}"
-          test -n "$server"
-          test -n "$database"
-
-          job_principal_id="$(az containerapp job show \
-            --name "$TACHO_JOB" --resource-group "$AZURE_RESOURCE_GROUP" \
-            --query 'identity.userAssignedIdentities.*.principalId | [0]' --output tsv)"
-          test -n "$job_principal_id"
-
-          curl -sSL -O https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb
-          sudo dpkg -i packages-microsoft-prod.deb >/dev/null
-          sudo apt-get update -qq
-          sudo ACCEPT_EULA=Y apt-get install -y -qq msodbcsql18 unixodbc-dev >/dev/null
-          python -m pip install --quiet pyodbc
-          export SQL_SERVER="$server" SQL_DATABASE="$database" JOB_PRINCIPAL_ID="$job_principal_id"
-          python <<'PY'
-          import os, struct, subprocess, uuid
-          import pyodbc
-
-          token = subprocess.check_output([
-              'az','account','get-access-token','--resource','https://database.windows.net/',
-              '--query','accessToken','--output','tsv'
-          ], text=True).strip()
-          raw = token.encode('utf-16-le')
-          packed = struct.pack('<I', len(raw)) + raw
-          cs = (
-              'Driver={ODBC Driver 18 for SQL Server};'
-              f"Server={os.environ['SQL_SERVER']};Database={os.environ['SQL_DATABASE']};"
-              'Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;'
-          )
-          cn = pyodbc.connect(cs, attrs_before={1256: packed}, autocommit=True)
-          cur = cn.cursor()
-          name = 'slh-tms-jobs-prod-id'
-          principal = os.environ['JOB_PRINCIPAL_ID']
-          existing = cur.execute('SELECT COUNT(*) FROM sys.database_principals WHERE name = ?', name).fetchone()[0]
-          if not existing:
-              try:
-                  cur.execute(f'CREATE USER [{name}] FROM EXTERNAL PROVIDER')
-              except Exception:
-                  sid = uuid.UUID(principal).bytes_le.hex().upper()
-                  cur.execute(f'CREATE USER [{name}] WITH SID = 0x{sid}, TYPE = E')
-          for role in ('db_datareader','db_datawriter'):
-              member = cur.execute('''
-                  SELECT COUNT(*)
-                  FROM sys.database_role_members drm
-                  JOIN sys.database_principals r ON r.principal_id = drm.role_principal_id
-                  JOIN sys.database_principals m ON m.principal_id = drm.member_principal_id
-                  WHERE r.name = ? AND m.name = ?
-              ''', role, name).fetchone()[0]
-              if not member:
-                  cur.execute(f'ALTER ROLE [{role}] ADD MEMBER [{name}]')
-          cur.execute(f'GRANT EXECUTE TO [{name}]')
-          print('SQL job identity exists with db_datareader, db_datawriter and EXECUTE grants.')
-          cn.close()
-          PY
-
-      - name: Run canonical TachoMaster sync immediately
-        shell: bash
+      - name: Commit permanent repair
         run: |
           set -euo pipefail
-          execution="$(az containerapp job start --name "$TACHO_JOB" --resource-group "$AZURE_RESOURCE_GROUP" --query name --output tsv)"
-          echo "EXECUTION=$execution"
-          for attempt in {1..60}; do
-            state="$(az containerapp job execution show --name "$TACHO_JOB" --resource-group "$AZURE_RESOURCE_GROUP" --job-execution-name "$execution" --query properties.status --output tsv 2>/dev/null || true)"
-            echo "status=${state:-unknown}"
-            case "$state" in
-              Succeeded) exit 0 ;;
-              Failed)
-                timeout 30s az containerapp job logs show --name "$TACHO_JOB" --resource-group "$AZURE_RESOURCE_GROUP" --execution "$execution" --container "$TACHO_JOB" --follow false --tail 180 --format text || true
-                exit 1
-                ;;
-            esac
-            sleep 10
-          done
-          exit 1
-
-      - name: Verify canonical Driver Master
-        shell: bash
-        run: |
-          set -euo pipefail
-          for attempt in {1..30}; do
-            body="$(curl --silent --show-error --max-time 45 -H 'Cache-Control: no-cache' "https://$API_FQDN/api/v1/health/driver-master" || true)"
-            echo "$body"
-            member_dupes="$(jq -r '.duplicateMemberGroups // -1' <<<"$body" 2>/dev/null || echo -1)"
-            card_dupes="$(jq -r '.duplicateCardGroups // -1' <<<"$body" 2>/dev/null || echo -1)"
-            aligned="$(jq -r '.populationAligned // false' <<<"$body" 2>/dev/null || echo false)"
-            latest="$(jq -r '.latestCanonicalSyncUtc // empty' <<<"$body" 2>/dev/null || true)"
-            if test "$member_dupes" = "0" -a "$card_dupes" = "0" -a "$aligned" = "true" -a -n "$latest"; then
-              echo "Canonical Driver Master clean/aligned at $latest"
-              exit 0
-            fi
-            sleep 10
-          done
-          exit 1
+          git config user.name "slh-tms-repair-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add Database/060_TachoMaster_Job_Managed_Identity.sql Services/SchemaMigrationRunner.cs .github/workflows/deploy-jobs.yml
+          git commit -m "Provision scheduled job SQL managed identity"
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
