@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
+using Slh.Tms.Api.Models.Tracking;
 
 namespace Slh.Tms.Api.Services;
 
@@ -28,8 +29,6 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
 {
     public async Task<TachoCanonicalOrchestrationResult> RunAsync(string actor, CancellationToken ct)
     {
-        // The handle is released as soon as this orchestration finishes. Fifteen minutes also caps
-        // stale-writer recovery after a crashed instance instead of blocking TachoMaster for an hour.
         await using var lease = await leases.TryAcquireAsync(IntegrationLeaseNames.TachoMaster, TimeSpan.FromMinutes(15), ct);
         if (lease is null)
         {
@@ -51,10 +50,6 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
         try
         {
             await classification.ApplyAsync(actor, ct);
-
-            // Enrichment runs first so existing payroll/CRM rows gain the strongest Tacho identity
-            // before the canonical cleanse. IntegrationSyncCoordinator already matches Member Code
-            // before card, employee number and name.
             enrichment = await integration.SyncTachoMasterCoreAsync($"{actor}:identity-enrichment", ct);
             if (!enrichment.Success)
                 logger.LogWarning("TachoMaster identity-enrichment pass did not complete before canonical sync: {Message}", enrichment.Message);
@@ -71,9 +66,6 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
             if (canonicalResult.Success)
                 await classification.ApplyAsync(actor, ct);
 
-            // Site/market/vehicle repair is independent of Tacho identity health. It is deliberately
-            // conservative: Site consolidation only auto-merges high-confidence identities and puts
-            // ambiguous cases into review rather than guessing.
             try
             {
                 db.ChangeTracker.Clear();
