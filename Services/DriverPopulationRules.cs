@@ -6,11 +6,13 @@ namespace Slh.Tms.Api.Services;
 /// <summary>Controls which people are allowed to surface as operational TMS drivers.</summary>
 public static class DriverPopulationRules
 {
+    private const string OfficeRolePattern = @"\b(non[- ]?driver|office|administrator|admin|manager|management|workshop)\b";
+
     public static bool IsOfficeReference(string? employeeNumber) =>
         !string.IsNullOrWhiteSpace(employeeNumber) && employeeNumber.Trim().StartsWith("TM", StringComparison.OrdinalIgnoreCase);
 
     public static bool IsOfficeRole(string? value) => !string.IsNullOrWhiteSpace(value) &&
-        Regex.IsMatch(value, @"\b(non[- ]?driver|office|administrator|admin|manager|management|workshop)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        Regex.IsMatch(value, OfficeRolePattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     public static bool HasDriverRole(string? value) => !string.IsNullOrWhiteSpace(value) &&
         Regex.IsMatch(value, @"\bdrivers?\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) &&
@@ -46,9 +48,18 @@ public static class DriverPopulationRules
         string.Equals(worker.WorkerType?.Trim(), "Subcontractor", StringComparison.OrdinalIgnoreCase) ||
         !string.IsNullOrWhiteSpace(worker.AgencyName);
 
-    public static bool IsSageDriver(SageHrEmployee employee, string? driverTeam, string? positionKeyword) =>
-        (!string.IsNullOrWhiteSpace(driverTeam) && HasDriverRole(driverTeam) &&
-            string.Equals(employee.Team?.Trim(), driverTeam.Trim(), StringComparison.OrdinalIgnoreCase)) ||
-        (!string.IsNullOrWhiteSpace(positionKeyword) && HasDriverRole(employee.Position) &&
-            employee.Position!.Contains(positionKeyword.Trim(), StringComparison.OrdinalIgnoreCase));
+    public static bool IsSageDriver(SageHrEmployee employee, string? driverTeam, string? positionKeyword)
+    {
+        // Sage can retain a broad/historic Drivers team while the current role is office or management.
+        // Explicit non-driving evidence always wins; a genuine Tacho member can enter through TachoMaster sync.
+        if (IsOfficeRole(employee.Team) || IsOfficeRole(employee.Position))
+            return false;
+
+        var isConfiguredDriverTeam = !string.IsNullOrWhiteSpace(driverTeam) && HasDriverRole(driverTeam) &&
+            string.Equals(employee.Team?.Trim(), driverTeam.Trim(), StringComparison.OrdinalIgnoreCase);
+        var hasDriverPosition = !string.IsNullOrWhiteSpace(positionKeyword) && HasDriverRole(employee.Position) &&
+            employee.Position!.Contains(positionKeyword.Trim(), StringComparison.OrdinalIgnoreCase);
+
+        return isConfiguredDriverTeam || hasDriverPosition;
+    }
 }
