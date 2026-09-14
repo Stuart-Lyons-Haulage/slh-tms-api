@@ -31,6 +31,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          container="$(az containerapp job show -n "$TACHO_JOB" -g "$RG" --query 'properties.template.containers[0].name' -o tsv)"
+          image="$(az containerapp job show -n "$TACHO_JOB" -g "$RG" --query 'properties.template.containers[0].image' -o tsv)"
+          echo "container=$container image=$image"
           execution="$(az containerapp job start -n "$TACHO_JOB" -g "$RG" --query name -o tsv)"
           echo "execution=$execution"
           state=""
@@ -40,8 +43,11 @@ jobs:
             case "$state" in Succeeded|Failed) break ;; esac
             sleep 10
           done
+          echo '--- execution shape ---'
+          az containerapp job execution show -n "$TACHO_JOB" -g "$RG" --job-execution-name "$execution" -o json | jq '{name,properties:{status:.properties.status,startTime:.properties.startTime,endTime:.properties.endTime,template:.properties.template}}'
           echo '--- container output ---'
-          az containerapp job logs show -n "$TACHO_JOB" -g "$RG" --execution "$execution" --container tms-job --tail 200 --format text || true
+          az config set extension.dynamic_install_allow_preview=true >/dev/null
+          az containerapp job logs show -n "$TACHO_JOB" -g "$RG" --execution "$execution" --container "$container" --tail 200 --format text || true
           echo '--- live Driver Master ---'
           curl -fsS --max-time 60 -H 'Cache-Control: no-cache' "$API_BASE/api/v1/health/driver-master" | jq '{activeDrivers,sourceWorkers,populationAligned,duplicateMemberGroups,duplicateCardGroups,activeWithoutMember,activeWithoutCard,latestCanonicalSyncUtc}'
           test "$state" = Succeeded
