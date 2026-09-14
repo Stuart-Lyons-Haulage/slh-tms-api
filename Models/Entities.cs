@@ -70,6 +70,9 @@ public sealed class Driver
     [MaxLength(160)] public required string DisplayName { get; set; }
     [MaxLength(160)] public string? TachoName { get; set; }
     [MaxLength(40)] public string? MobileNumber { get; set; }
+    [NotMapped, MaxLength(320)] public string? Email { get; set; }
+    [NotMapped, MaxLength(80)] public string? GradeCode { get; set; }
+    [NotMapped, MaxLength(160)] public string? AllocatedVehicle { get; set; }
     [MaxLength(80)] public string? DriverType { get; set; }
     [MaxLength(80)] public string? DriverGroup { get; set; }
     [MaxLength(160)] public string? Skills { get; set; }
