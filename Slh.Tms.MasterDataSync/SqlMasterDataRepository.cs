@@ -30,10 +30,7 @@ public sealed class SqlMasterDataRepository(IOptions<SyncOptions> options, ILogg
             catch (Exception ex)
             {
                 summary.Failed++;
-                try
-                {
-                    await deadLetter(item, ex);
-                }
+                try { await deadLetter(item, ex); }
                 catch (Exception deadLetterException)
                 {
                     logger.LogError(deadLetterException, "Could not dead-letter {ListName} item {ItemId}.", definition.ListName, item.Id);
@@ -123,7 +120,7 @@ END";
         if (column is "GeofenceRadiusMetres" or "StandardCapacity" or "EuroCapacity")
             return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var integer)
                 ? integer : throw new FormatException($"{column} is not an integer.");
-        if (column is "DvsCompliant" or "IsActive" or "IsPricingMaximum")
+        if (column is "DvsCompliant" or "IsActive" or "IsPricingMaximum" or "ReceivesEtaUpdates")
             return bool.TryParse(value, out var boolean)
                 ? boolean : throw new FormatException($"{column} is not true/false.");
         if (column.EndsWith("Expiry", StringComparison.OrdinalIgnoreCase) || column == "WeekCommencing")
