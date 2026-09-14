@@ -1,0 +1,33 @@
+name: Diagnostic Intake Tests
+
+on:
+  push:
+    branches: [perf/intake-batch-queue-v2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  intake-test-diagnostic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Capture test output
+        shell: bash
+        run: |
+          set +e
+          dotnet test Slh.Tms.Api.Tests/Slh.Tms.Api.Tests.csproj -c Release > test.log 2>&1
+          result=$?
+          cat test.log
+          echo "$result" > test.exit
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: intake-test-diagnostic-final
+          path: |
+            test.log
+            test.exit
