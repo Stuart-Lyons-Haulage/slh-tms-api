@@ -17,6 +17,7 @@ jobs:
       name: production
     env:
       AZURE_RESOURCE_GROUP: slh-tms-prod-rg
+      API_APP: slh-tms-api-prod
       TACHO_JOB: slh-tms-job-tachomaster
     steps:
       - name: Sign in to Azure
@@ -26,38 +27,18 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Capture latest TachoMaster job execution and console logs
+      - name: Inspect production SQL identity wiring
         shell: bash
         run: |
-          set -uo pipefail
-          echo '=== Recent executions ==='
-          az containerapp job execution list \
-            --name "$TACHO_JOB" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --output table || true
+          set -euo pipefail
+          echo '=== API identity ==='
+          az containerapp show --name "$API_APP" --resource-group "$AZURE_RESOURCE_GROUP" --query identity --output json
+          echo '=== Tacho job identity ==='
+          az containerapp job show --name "$TACHO_JOB" --resource-group "$AZURE_RESOURCE_GROUP" --query identity --output json
 
-          execution="$(az containerapp job execution list \
-            --name "$TACHO_JOB" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --query 'sort_by([], &properties.startTime)[-1].name' \
-            --output tsv 2>/dev/null || true)"
-          echo "LATEST_EXECUTION=$execution"
-
-          if test -n "$execution"; then
-            echo '=== Latest execution JSON ==='
-            az containerapp job execution show \
-              --name "$TACHO_JOB" \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --job-execution-name "$execution" \
-              --output json || true
-
-            echo '=== Latest execution console logs ==='
-            timeout 35s az containerapp job logs show \
-              --name "$TACHO_JOB" \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --execution "$execution" \
-              --container "$TACHO_JOB" \
-              --follow false \
-              --tail 300 \
-              --format text || true
-          fi
+          source_secrets="$(az containerapp secret list --name "$API_APP" --resource-group "$AZURE_RESOURCE_GROUP" --show-values --output json)"
+          conn="$(jq -r '[.[] | select(.name == "tms-db-connection")][0].value // empty' <<<"$source_secrets")"
+          auth="$(sed -n 's/.*[Aa]uthentication=\([^;]*\).*/\1/p' <<<"$conn")"
+          userid="$(sed -n 's/.*[Uu]ser [Ii][Dd]=\([^;]*\).*/\1/p' <<<"$conn")"
+          echo "SQL_AUTH_MODE=${auth:-not-explicit}"
+          if test -n "$userid"; then echo "SQL_CONNECTION_HAS_USER_ID=true"; else echo "SQL_CONNECTION_HAS_USER_ID=false"; fi
