@@ -174,4 +174,79 @@ public sealed class SpecialistMailboxOrderParserTests
         Assert.Equal("2026-08-26", sameDay.GetProperty("deliveryDate").GetString());
         Assert.Equal("Selsey", sameDay.GetProperty("stallNumber").GetString());
     }
+
+    [Fact]
+    public void WaitroseHallHunterBody_StagesSingleCollectionAndDeliveryMovement()
+    {
+        var result = parser.TryParse(new MailboxEmailIntakeRequest(
+            "waitrose-hhp-1", null, "info@lyonshaulage.com", "chris.benning@primafruit.co.uk", "Chris Benning",
+            "HHP WAITROSE DIRECT DEPOT DELIVERY Wednesday 16/09/26", DateTimeOffset.Parse("2026-09-15T07:58:00Z"),
+            """
+            Good morning,
+
+            Please collect 3 pallets from Hall Hunter today Tuesday 15/09/2026.
+
+            *   Leyland 3 pallets
+
+            For Delivery date Wednesday 16/09/2026.
+
+            PO number: A65026. 119 cases of Berries.
+            """, null, null, null));
+
+        var order = Assert.Single(result!.Orders);
+        Assert.Equal("WAITROSE", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("A65026", order.Payload.GetProperty("customerPo").GetString());
+        Assert.Equal("2026-09-15", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal("2026-09-16", order.Payload.GetProperty("deliveryDate").GetString());
+        Assert.Equal("Hall Hunter", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Leyland", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal(3, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.True(order.Payload.GetProperty("plannerReady").GetBoolean());
+    }
+
+    [Fact]
+    public void ApsDoleSubwayBody_UsesDdAsDeliveryDateAndDestinationAddress()
+    {
+        var result = parser.TryParse(new MailboxEmailIntakeRequest(
+            "aps-dole-1", null, "info@lyonshaulage.com", "Katarzyna.Jalowiec@apsgroup.uk.com", "Kasia Jalowiec",
+            "Oliver Kay D.D. 16.09.2026", DateTimeOffset.Parse("2026-09-15T06:43:00Z"),
+            """
+            Good morning,
+
+            Please see address for Dole Subway:
+
+            Oliver Kay Hoddesdon
+            Bingley Road
+            Unit A
+            HODDESDON
+            EN11 0NX
+            UNITED KINGDOM
+
+            For D.D. 16.09.2026 will be 4 pallets.
+            """, null, null, null));
+
+        var order = Assert.Single(result!.Orders);
+        Assert.Equal("APS", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("APS Produce", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Oliver Kay Hoddesdon", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal("2026-09-16", order.Payload.GetProperty("deliveryDate").GetString());
+        Assert.Equal(4, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.True(order.Payload.GetProperty("plannerReady").GetBoolean());
+    }
+
+    [Fact]
+    public void CoopAttachmentOnlyEmail_DoesNotStageZeroPalletPlaceholder()
+    {
+        var result = parser.TryParse(new MailboxEmailIntakeRequest(
+            "coop-attachment-1", null, "info@lyonshaulage.com", "Mariela.Popova@barfoots.co.uk", "Mariela Popova",
+            "Confirmed COOP pallet booking", DateTimeOffset.Parse("2026-09-15T06:54:00Z"),
+            "Good morning,\n\nPlease find attached the confirmed COOP pallet booking for delivery tomorrow.",
+            null, null,
+            [new MailboxAttachmentRequest(null, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", null, false)]));
+
+        Assert.NotNull(result);
+        Assert.Empty(result!.Orders);
+        Assert.NotNull(result.IgnoredReason);
+        Assert.Contains("attachment", result.IgnoredReason, StringComparison.OrdinalIgnoreCase);
+    }
 }
