@@ -27,7 +27,7 @@ public sealed class SpecialistMailboxOrderParser
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex NumericDateRegex = new(
-        @"\b(?<day>0?[1-9]|[12]\d|3[01])[./-](?<month>0?[1-9]|1[0-2])[./-](?<year>20\d{2})\b",
+        @"\b(?<day>0?[1-9]|[12]\d|3[01])[./-](?<month>0?[1-9]|1[0-2])(?:[./-](?<year>20\d{2}|\d{2}))?\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex NamedDateRegex = new(
@@ -54,6 +54,14 @@ public sealed class SpecialistMailboxOrderParser
         @"(?m)^IFCO\s*\|(?<fields>.+)$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    private static readonly Regex WaitroseDirectDepotRegex = new(
+        @"please\s+collect\s+(?<qty>\d{1,3})\s+pallets?\s+from\s+(?<collection>[^\r\n.]+?)\s+(?:today\s+)?(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)?\s*(?<collectionDate>\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?).*?^[\s*•-]*(?<destination>[A-Za-z][A-Za-z0-9 .&'()/-]{2,80}?)\s+(?<destQty>\d{1,3})\s+pallets?.*?delivery\s+date\s+(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)?\s*(?<deliveryDate>\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?).*?PO\s+number\s*[:#.-]?\s*(?<po>[A-Z0-9/-]+)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.Multiline);
+
+    private static readonly Regex ApsDoleSubwayRegex = new(
+        @"address\s+for\s+Dole\s+Subway\s*:\s*(?<address>.*?)(?:\bFor\s+D\.?D\.?\s*(?<deliveryDate>\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)\s+will\s+be\s+(?<qty>\d{1,3})\s+pallets?)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.Singleline);
+
     public EmailIntakeParseResult? TryParse(MailboxEmailIntakeRequest request)
     {
         var subject = (request.Subject ?? string.Empty).Trim();
@@ -67,6 +75,15 @@ public sealed class SpecialistMailboxOrderParser
                 ["Cancellation email detected. It was deliberately not created as a new transport order."],
                 "Cancellation/amendment detected. Review against the existing order rather than creating a duplicate.");
         }
+
+        var waitroseDirect = ParseWaitroseDirectDepot(request, subject, body);
+        if (waitroseDirect is not null) return waitroseDirect;
+
+        var apsDoleSubway = ParseApsDoleSubway(request, subject, body);
+        if (apsDoleSubway is not null) return apsDoleSubway;
+
+        var attachmentOnly = ParseAttachmentOnlyBookingNotice(request, subject, body);
+        if (attachmentOnly is not null) return attachmentOnly;
 
         var marketLines = ParsePmTransportMarketLines(request, subject, body);
         if (marketLines is not null) return marketLines;
@@ -101,14 +118,95 @@ public sealed class SpecialistMailboxOrderParser
         return null;
     }
 
+    private static EmailIntakeParseResult? ParseWaitroseDirectDepot(MailboxEmailIntakeRequest request, string subject, string body)
+    {
+        if (!subject.Contains("WAITROSE", StringComparison.OrdinalIgnoreCase) && !body.Contains("PO number", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var received = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
+        var match = WaitroseDirectDepotRegex.Match(body);
+        if (!match.Success) return null;
+
+        var pallets = int.Parse(match.Groups["qty"].Value, CultureInfo.InvariantCulture);
+        var destinationPallets = int.Parse(match.Groups["destQty"].Value, CultureInfo.InvariantCulture);
+        var collectionDate = ParseFlexibleNumericDate(match.Groups["collectionDate"].Value, received.Year);
+        var deliveryDate = ParseFlexibleNumericDate(match.Groups["deliveryDate"].Value, received.Year);
+        var collection = CleanDropName(match.Groups["collection"].Value);
+        var destination = CleanDropName(match.Groups["destination"].Value);
+        var po = CleanReference(match.Groups["po"].Value);
+
+        if (collectionDate is null || deliveryDate is null || pallets <= 0 || string.IsNullOrWhiteSpace(destination))
+            return null;
+
+        var warnings = new List<string>();
+        if (destinationPallets != pallets)
+            warnings.Add("Collection and destination pallet quantities differ in the source email; check before approval.");
+
+        var reference = BuildReference(po, destination);
+        var naturalKey = NaturalKey(request, "WAITROSE", destination, collectionDate.Value, po);
+        var payload = BasePayload(request, reference, po, "WAITROSE", collectionDate.Value, deliveryDate.Value, pallets,
+            collection, destination, "Hall Hunter direct depot delivery", null, warnings, "HHP Waitrose direct depot body email");
+        return new EmailIntakeParseResult([new ParsedEmailOrder("waitrose-direct-depot-1", naturalKey, payload, warnings)], [], null);
+    }
+
+    private static EmailIntakeParseResult? ParseApsDoleSubway(MailboxEmailIntakeRequest request, string subject, string body)
+    {
+        var combined = $"{subject}\n{body}";
+        if (!combined.Contains("Dole Subway", StringComparison.OrdinalIgnoreCase) ||
+            !combined.Contains("D.D", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var received = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
+        var match = ApsDoleSubwayRegex.Match(body);
+        if (!match.Success) return null;
+
+        var deliveryDate = ParseFlexibleNumericDate(match.Groups["deliveryDate"].Value, received.Year);
+        if (deliveryDate is null) return null;
+        var pallets = int.Parse(match.Groups["qty"].Value, CultureInfo.InvariantCulture);
+        var addressBlock = CleanAddressBlock(match.Groups["address"].Value);
+        var destination = DestinationFromAddress(addressBlock) ?? "Oliver Kay Hoddesdon";
+        var warnings = new List<string>();
+
+        var collectionDate = LocalDate(received);
+        var customer = "APS";
+        var reference = BuildReference(StableEmailReference(request.MessageId), destination);
+        var naturalKey = NaturalKey(request, customer, destination, collectionDate, null);
+        var payload = BasePayload(request, reference, null, customer, collectionDate, deliveryDate.Value, pallets,
+            "APS Produce", destination, "Dole Subway depot delivery", null, warnings, "APS Dole Subway body email");
+        var fields = JsonSerializer.Deserialize<Dictionary<string, object?>>(payload.GetRawText())!;
+        fields["deliveryAddress"] = addressBlock;
+        fields["emailContextCandidates"] = new[] { "APS Produce", "Dole Subway", destination, addressBlock };
+        return new EmailIntakeParseResult([new ParsedEmailOrder("aps-dole-subway-1", naturalKey, JsonSerializer.SerializeToElement(fields), warnings)], [], null);
+    }
+
+    private static EmailIntakeParseResult? ParseAttachmentOnlyBookingNotice(MailboxEmailIntakeRequest request, string subject, string body)
+    {
+        var hasRealAttachments = (request.Attachments ?? []).Any(attachment => attachment.IsInline != true);
+        if (!hasRealAttachments) return null;
+
+        var combined = $"{subject}\n{body}";
+        var looksCoopBooking = combined.Contains("COOP", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("CO-OP", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("CO OP", StringComparison.OrdinalIgnoreCase);
+        var saysAttached = combined.Contains("attached", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("attachment", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("booking", StringComparison.OrdinalIgnoreCase);
+        var hasBodyOrder = GenericPalletRegex.IsMatch(body) && NumericDateRegex.IsMatch(body);
+
+        if (!looksCoopBooking || !saysAttached || hasBodyOrder) return null;
+
+        return new EmailIntakeParseResult(
+            [],
+            ["CO-OP booking email depends on attachment content. No body-only transport order was staged, preventing a zero-pallet placeholder."],
+            "CO-OP booking details are attachment-only. Parse the attachment content or review the source email before staging an order.");
+    }
+
     private static EmailIntakeParseResult? ParsePmTransportMarketLines(
         MailboxEmailIntakeRequest request, string subject, string body)
     {
         if (!(request.SenderAddress ?? string.Empty).EndsWith("@pmtransport.co.uk", StringComparison.OrdinalIgnoreCase) ||
             !subject.Contains("market", StringComparison.OrdinalIgnoreCase)) return null;
 
-        // Quoted instructions and planner replies must not create a second set of drops.
-        // Leave those to the existing amendment/manual-review handling.
         if (Regex.IsMatch(subject, @"^(RE|FW|FWD)\s*:", RegexOptions.IgnoreCase)) return null;
 
         var collection = Regex.Match(body, @"(?im)^\s*Please\s+collect\w*\s+(?<total>\d+)\s*(?:pt|p|pallets?)\s+from\s+(?<site>.+?)\s+today\b",
@@ -119,7 +217,7 @@ public sealed class SpecialistMailboxOrderParser
         if (rows.Count == 0) return null;
 
         var received = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
-        var date = DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeBySystemTimeZoneId(received, "Europe/London").DateTime);
+        var date = LocalDate(received);
         var total = int.Parse(collection.Groups["total"].Value, CultureInfo.InvariantCulture);
         var parsedTotal = rows.Sum(row => int.Parse(row.Groups["qty"].Value, CultureInfo.InvariantCulture));
         if (total != parsedTotal)
@@ -139,35 +237,27 @@ public sealed class SpecialistMailboxOrderParser
             var payload = BasePayload(request, BuildReference(StableEmailReference(request.MessageId), destinationKey),
                 null, "PMTRANSPORT", date, date, pallets, CleanDropName(collection.Groups["site"].Value), stall,
                 "Market delivery", null, warnings, "PM Transport market body lines");
-            var fields = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(payload.GetRawText())!;
-            fields["marketName"] = JsonSerializer.SerializeToElement(market);
-            fields["plannerReady"] = JsonSerializer.SerializeToElement(false);
-            fields["intakeStatus"] = JsonSerializer.SerializeToElement("PendingReview");
+            var fields = JsonSerializer.Deserialize<Dictionary<string, object?>>(payload.GetRawText())!;
+            fields["marketName"] = market;
+            fields["plannerReady"] = false;
+            fields["intakeStatus"] = "PendingReview";
             var key = NaturalKey(request, "PMTRANSPORT", destinationKey, date, null);
-            fields["intakeNaturalKey"] = JsonSerializer.SerializeToElement(key);
+            fields["intakeNaturalKey"] = key;
             orders.Add(new ParsedEmailOrder($"market-body-{orders.Count + 1}", key, JsonSerializer.SerializeToElement(fields), warnings));
         }
         return new EmailIntakeParseResult(orders, [], null);
     }
 
-    private static EmailIntakeParseResult ParseAmazon(
-        MailboxEmailIntakeRequest request,
-        string subject,
-        string body)
+    private static EmailIntakeParseResult ParseAmazon(MailboxEmailIntakeRequest request, string subject, string body)
     {
         var received = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
         var bookingRef = Match(BookingReferenceRegex, body, "ref") ?? StableEmailReference(request.MessageId);
-        var collectionDate = DateAfterKeyword(body, "Collection", received.Year)
-            ?? EarliestDate(body, received.Year);
-        var deliveryDate = FirstNumericDate(body)
-            ?? DateAfterKeyword(body, "Delivery", received.Year)
-            ?? LatestDate($"{subject}\n{body}", received.Year)
-            ?? collectionDate;
+        var collectionDate = DateAfterKeyword(body, "Collection", received.Year) ?? EarliestDate(body, received.Year);
+        var deliveryDate = FirstNumericDate(body) ?? DateAfterKeyword(body, "Delivery", received.Year) ?? LatestDate($"{subject}\n{body}", received.Year) ?? collectionDate;
         var availableTime = Match(CollectionTimeRegex, body, "time");
         var pallets = FirstPalletQuantity(body);
         var collectionSite = FirstLineAfterHeader(body, "Collection") ?? "APS Produce";
-        if (collectionSite.Contains("Tuesday", StringComparison.OrdinalIgnoreCase) ||
-            collectionSite.Contains("Wednesday", StringComparison.OrdinalIgnoreCase))
+        if (collectionSite.Contains("Tuesday", StringComparison.OrdinalIgnoreCase) || collectionSite.Contains("Wednesday", StringComparison.OrdinalIgnoreCase))
             collectionSite = "APS Produce";
         var destination = FirstLineAfterHeader(body, "Delivery") ?? "Amazon delivery";
         var warnings = new List<string>();
@@ -176,85 +266,43 @@ public sealed class SpecialistMailboxOrderParser
         if (pallets is null) warnings.Add("Pallet quantity was not identified.");
         if (destination.Equals("Amazon delivery", StringComparison.OrdinalIgnoreCase)) warnings.Add("Amazon destination requires confirmation.");
 
-        var workingDate = collectionDate ?? deliveryDate ?? DateOnly.FromDateTime(received.Date);
+        var workingDate = collectionDate ?? deliveryDate ?? LocalDate(received);
         var reference = BuildReference(bookingRef, destination);
         var naturalKey = NaturalKey(request, "AMAZON", destination, workingDate, bookingRef);
-        var payload = BasePayload(
-            request,
-            reference,
-            bookingRef,
-            "AMAZON",
-            collectionDate ?? workingDate,
-            deliveryDate ?? workingDate,
-            pallets,
-            collectionSite,
-            destination,
-            "Delivery",
-            availableTime,
-            warnings,
-            "APS/Amazon body email");
+        var payload = BasePayload(request, reference, bookingRef, "AMAZON", collectionDate ?? workingDate, deliveryDate ?? workingDate,
+            pallets, collectionSite, destination, "Delivery", availableTime, warnings, "APS/Amazon body email");
 
-        return new EmailIntakeParseResult(
-            [new ParsedEmailOrder("amazon-body-1", naturalKey, payload, warnings)],
-            [],
-            null);
+        return new EmailIntakeParseResult([new ParsedEmailOrder("amazon-body-1", naturalKey, payload, warnings)], [], null);
     }
 
-    private static EmailIntakeParseResult ParseCoventGarden(
-        MailboxEmailIntakeRequest request,
-        string subject,
-        string body)
+    private static EmailIntakeParseResult ParseCoventGarden(MailboxEmailIntakeRequest request, string subject, string body)
     {
         var received = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
         var dates = AllDates($"{subject}\n{body}", received.Year).Distinct().OrderBy(date => date).ToList();
-        var collectionDate = DateAfterKeyword(body, "Collection", received.Year)
-            ?? dates.FirstOrDefault();
-        if (collectionDate == default) collectionDate = DateOnly.FromDateTime(received.Date);
+        var collectionDate = DateAfterKeyword(body, "Collection", received.Year) ?? dates.FirstOrDefault();
+        if (collectionDate == default) collectionDate = LocalDate(received);
         var deliveryDate = dates.Count > 1 ? dates.Last() : collectionDate;
         var availableTime = Match(CollectionTimeRegex, body, "time");
         var drops = CoventDropRegex.Matches(body)
             .Cast<Match>()
-            .Select(match => new
-            {
-                Name = CleanDropName(match.Groups["name"].Value),
-                Pallets = int.TryParse(match.Groups["qty"].Value, out var qty) ? qty : 0
-            })
+            .Select(match => new { Name = CleanDropName(match.Groups["name"].Value), Pallets = int.TryParse(match.Groups["qty"].Value, out var qty) ? qty : 0 })
             .Where(drop => drop.Pallets > 0 && !string.IsNullOrWhiteSpace(drop.Name))
             .ToList();
 
         if (drops.Count == 0)
-        {
-            return new EmailIntakeParseResult(
-                [],
-                ["Covent Garden email detected but no individual pallet lines could be parsed."],
+            return new EmailIntakeParseResult([], ["Covent Garden email detected but no individual pallet lines could be parsed."],
                 "Covent Garden format needs manual review because no delivery rows were identified.");
-        }
 
         var baseReference = StableEmailReference(request.MessageId);
         var orders = new List<ParsedEmailOrder>();
         for (var index = 0; index < drops.Count; index++)
         {
             var drop = drops[index];
-            var warnings = new List<string>
-            {
-                "Delivery instruction spans the evening/overnight period; exact delivery time was not stated in the email."
-            };
+            var warnings = new List<string> { "Delivery instruction spans the evening/overnight period; exact delivery time was not stated in the email." };
             var reference = BuildReference(baseReference, drop.Name);
             var naturalKey = NaturalKey(request, "COVENTGARDEN", drop.Name, collectionDate, null);
-            var payload = BasePayload(
-                request,
-                reference,
-                null,
-                "COVENTGARDEN",
-                collectionDate,
-                deliveryDate,
-                drop.Pallets,
-                "APS Produce",
-                drop.Name,
-                "Market delivery",
-                availableTime,
-                warnings,
-                "APS/Covent Garden multi-drop body email");
+            var payload = BasePayload(request, reference, null, "COVENTGARDEN", collectionDate, deliveryDate, drop.Pallets,
+                "APS Produce", drop.Name, "Market delivery", availableTime, warnings, "APS/Covent Garden multi-drop body email");
             orders.Add(new ParsedEmailOrder($"covent-drop-{index + 1}", naturalKey, payload, warnings));
         }
 
@@ -270,12 +318,8 @@ public sealed class SpecialistMailboxOrderParser
 
         foreach (Match match in IfcoRowRegex.Matches(body))
         {
-            var fields = match.Groups["fields"].Value
-                .Split('|')
-                .Select(CleanField)
-                .ToList();
-            if (fields.Count < 10)
-                continue;
+            var fields = match.Groups["fields"].Value.Split('|').Select(CleanField).ToList();
+            if (fields.Count < 10) continue;
 
             rowNumber++;
             var transportPo = NullIfTbc(fields.ElementAtOrDefault(0));
@@ -309,20 +353,8 @@ public sealed class SpecialistMailboxOrderParser
             var reference = BuildReference(sourceRef, destination);
             var naturalKey = NaturalKey(request, "IFCO", destination, collectionDate.Value, transportPo ?? cratePo ?? loadReference);
             var matchKeys = BuildIfcoMatchKeys(collectionDate.Value, transportPo, cratePo, loadReference, collectionDepot, returningTo);
-            var payload = BuildIfcoPayload(
-                request,
-                reference,
-                transportPo,
-                cratePo,
-                loadReference,
-                collectionDate.Value,
-                deliveryDate.Value,
-                quantity,
-                collection,
-                destination,
-                notes,
-                rowWarnings,
-                matchKeys);
+            var payload = BuildIfcoPayload(request, reference, transportPo, cratePo, loadReference, collectionDate.Value,
+                deliveryDate.Value, quantity, collection, destination, notes, rowWarnings, matchKeys);
 
             orders.Add(new ParsedEmailOrder($"ifco-row-{rowNumber}", naturalKey, payload, rowWarnings));
         }
@@ -331,19 +363,13 @@ public sealed class SpecialistMailboxOrderParser
         return new EmailIntakeParseResult(orders, warnings, null);
     }
 
-    private static EmailIntakeParseResult ParseTransfer(
-        MailboxEmailIntakeRequest request,
-        Match transfer,
-        string body)
+    private static EmailIntakeParseResult ParseTransfer(MailboxEmailIntakeRequest request, Match transfer, string body)
     {
         var received = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
         var collection = transfer.Groups["from"].Value.Trim();
         var destination = transfer.Groups["to"].Value.Trim();
-        var date = ParseFlexibleNumericDate(transfer.Groups["date"].Value, received.Year)
-            ?? DateOnly.FromDateTime(received.Date);
-        var transportRef = transfer.Groups["ref"].Success
-            ? transfer.Groups["ref"].Value.Trim()
-            : StableEmailReference(request.MessageId);
+        var date = ParseFlexibleNumericDate(transfer.Groups["date"].Value, received.Year) ?? LocalDate(received);
+        var transportRef = transfer.Groups["ref"].Success ? transfer.Groups["ref"].Value.Trim() : StableEmailReference(request.MessageId);
         var pallets = FirstPalletQuantity(body);
         var combined = $"{request.Subject}\n{body}";
         var customer = InferTransferCustomer(request, combined, collection, destination);
@@ -351,25 +377,10 @@ public sealed class SpecialistMailboxOrderParser
         if (pallets is null) warnings.Add("Pallet quantity was not identified.");
         var reference = BuildReference(transportRef, destination);
         var naturalKey = NaturalKey(request, customer, destination, date, transportRef);
-        var payload = BasePayload(
-            request,
-            reference,
-            transportRef,
-            customer,
-            date,
-            date,
-            pallets,
-            collection,
-            destination,
-            "Collection transfer",
-            null,
-            warnings,
-            "Route stated in email subject");
+        var payload = BasePayload(request, reference, transportRef, customer, date, date, pallets,
+            collection, destination, "Collection transfer", null, warnings, "Route stated in email subject");
 
-        return new EmailIntakeParseResult(
-            [new ParsedEmailOrder("transfer-body-1", naturalKey, payload, warnings)],
-            [],
-            null);
+        return new EmailIntakeParseResult([new ParsedEmailOrder("transfer-body-1", naturalKey, payload, warnings)], [], null);
     }
 
     private static JsonElement BuildIfcoPayload(
@@ -449,6 +460,7 @@ public sealed class SpecialistMailboxOrderParser
         IReadOnlyList<string> warnings,
         string parser)
     {
+        var coreReady = pallets is > 0 && !string.IsNullOrWhiteSpace(collection) && !string.IsNullOrWhiteSpace(destination);
         var instructions = string.Join(" · ", new[]
         {
             $"Order type: {jobType}",
@@ -473,6 +485,8 @@ public sealed class SpecialistMailboxOrderParser
             ["jobType"] = jobType,
             ["availableTime"] = availableTime,
             ["driverInstructions"] = instructions.Length <= 1000 ? instructions : instructions[..1000],
+            ["plannerReady"] = coreReady,
+            ["intakeStatus"] = coreReady ? null : "PendingReview",
             ["sourceMessageId"] = request.MessageId,
             ["sourceInternetMessageId"] = request.InternetMessageId,
             ["sourceSender"] = request.SenderAddress,
@@ -481,9 +495,10 @@ public sealed class SpecialistMailboxOrderParser
             ["sourceReceivedAtUtc"] = request.ReceivedAtUtc,
             ["sourceWebLink"] = request.WebLink,
             ["intakeNaturalKey"] = NaturalKey(request, customer, destination, collectionDate, customerPo),
-            ["intakeConfidence"] = warnings.Count == 0 ? "High" : "Medium",
+            ["intakeConfidence"] = coreReady && warnings.Count == 0 ? "High" : "Medium",
             ["intakeWarnings"] = warnings,
-            ["intakeParser"] = parser
+            ["intakeParser"] = parser,
+            ["emailContextCandidates"] = new[] { collection, destination, customer }.Where(value => !string.IsNullOrWhiteSpace(value)).ToArray()
         };
         return JsonSerializer.SerializeToElement(payload);
     }
@@ -565,7 +580,9 @@ public sealed class SpecialistMailboxOrderParser
 
     private static DateOnly? SafeDate(string dayText, string monthText, string yearText)
     {
-        if (!int.TryParse(dayText, out var day) || !int.TryParse(monthText, out var month) || !int.TryParse(yearText, out var year)) return null;
+        if (!int.TryParse(dayText, out var day) || !int.TryParse(monthText, out var month)) return null;
+        var year = int.TryParse(yearText, out var parsedYear) ? parsedYear : DateTime.UtcNow.Year;
+        if (year < 100) year += 2000;
         try { return new DateOnly(year, month, day); }
         catch (ArgumentOutOfRangeException) { return null; }
     }
@@ -592,11 +609,33 @@ public sealed class SpecialistMailboxOrderParser
         return match.Success ? match.Groups[group].Value.Trim() : null;
     }
 
-    private static string CleanDropName(string value) =>
-        Regex.Replace(value.Trim(' ', '*'), @"\s+", " ");
+    private static string CleanDropName(string value) => Regex.Replace(value.Trim(' ', '*'), @"\s+", " ");
 
-    private static string CleanField(string value) =>
-        Regex.Replace(value.Trim(' ', '*'), @"\s+", " ");
+    private static string CleanField(string? value) => Regex.Replace((value ?? string.Empty).Trim(' ', '*'), @"\s+", " ");
+
+    private static string CleanReference(string value) => Regex.Replace(value.Trim(), @"\s+", string.Empty).ToUpperInvariant();
+
+    private static string CleanAddressBlock(string value)
+    {
+        var lines = value.Replace("\r\n", "\n").Replace('\r', '\n')
+            .Split('\n')
+            .Select(line => CleanDropName(line))
+            .Where(line => line.Length > 0)
+            .Where(line => !line.StartsWith("Kind regards", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        return string.Join("\n", lines);
+    }
+
+    private static string? DestinationFromAddress(string addressBlock)
+    {
+        var lines = addressBlock.Split('\n').Select(line => line.Trim()).Where(line => line.Length > 0).ToList();
+        if (lines.Count == 0) return null;
+        var name = lines[0];
+        var town = lines.FirstOrDefault(line => line.Equals("HODDESDON", StringComparison.OrdinalIgnoreCase))
+            ?? lines.Skip(1).FirstOrDefault(line => Regex.IsMatch(line, @"^[A-Z][A-Z -]{2,}$"));
+        if (!string.IsNullOrWhiteSpace(town) && name.Contains(town, StringComparison.OrdinalIgnoreCase)) town = null;
+        return CleanDropName(string.Join(" ", new[] { name, town }.Where(value => !string.IsNullOrWhiteSpace(value))));
+    }
 
     private static string? NullIfTbc(string? value)
     {
@@ -604,13 +643,7 @@ public sealed class SpecialistMailboxOrderParser
         return clean is null || clean.Equals("TBC", StringComparison.OrdinalIgnoreCase) ? null : clean;
     }
 
-    private static IReadOnlyList<string> BuildIfcoMatchKeys(
-        DateOnly collectionDate,
-        string? transportPo,
-        string? cratePo,
-        string? loadReference,
-        string? collectionDepot,
-        string? returningTo)
+    private static IReadOnlyList<string> BuildIfcoMatchKeys(DateOnly collectionDate, string? transportPo, string? cratePo, string? loadReference, string? collectionDepot, string? returningTo)
     {
         var keys = new List<string>();
         AddKey(keys, collectionDate, "TRANSPORT", transportPo);
@@ -648,12 +681,7 @@ public sealed class SpecialistMailboxOrderParser
         return clean[..Math.Min(max, clean.Length)];
     }
 
-    private static string NaturalKey(
-        MailboxEmailIntakeRequest request,
-        string customer,
-        string destination,
-        DateOnly collectionDate,
-        string? customerPo)
+    private static string NaturalKey(MailboxEmailIntakeRequest request, string customer, string destination, DateOnly collectionDate, string? customerPo)
     {
         var subject = Regex.Replace(request.Subject ?? string.Empty, @"^(?:(?:RE|FW|FWD)\s*:\s*)+", string.Empty, RegexOptions.IgnoreCase).Trim().ToUpperInvariant();
         return string.Join("|", new[]
@@ -667,6 +695,18 @@ public sealed class SpecialistMailboxOrderParser
         });
     }
 
+    private static DateOnly LocalDate(DateTimeOffset receivedAt)
+    {
+        try
+        {
+            return DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeBySystemTimeZoneId(receivedAt, "Europe/London").DateTime);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return DateOnly.FromDateTime(receivedAt.ToOffset(TimeSpan.FromHours(1)).DateTime);
+        }
+    }
+
     private static string SenderCustomer(string? sender)
     {
         var domain = (sender ?? string.Empty).Split('@').LastOrDefault() ?? "EMAIL";
@@ -677,8 +717,7 @@ public sealed class SpecialistMailboxOrderParser
 
     private static string InferTransferCustomer(MailboxEmailIntakeRequest request, string combined, string collection, string destination)
     {
-        if (combined.Contains("IFCO", StringComparison.OrdinalIgnoreCase))
-            return "IFCO";
+        if (combined.Contains("IFCO", StringComparison.OrdinalIgnoreCase)) return "IFCO";
 
         var route = $"{combined} {collection} {destination}";
         if (route.Contains("NWF", StringComparison.OrdinalIgnoreCase) ||
