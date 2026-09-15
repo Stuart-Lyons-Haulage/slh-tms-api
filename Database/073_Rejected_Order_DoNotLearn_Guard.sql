@@ -10,6 +10,7 @@
 */
 
 SET XACT_ABORT ON;
+
 BEGIN TRANSACTION;
 
 /*
@@ -72,6 +73,26 @@ BEGIN
 END;
 
 /*
+   Optional hardening: if a future process stages a master-data learning row and marks
+   it as being sourced from a rejected staged order, keep it in review by default.
+*/
+IF OBJECT_ID(N'dbo.StagedImports', N'U') IS NOT NULL
+BEGIN
+    UPDATE dbo.StagedImports
+       SET ReviewNote = CONCAT(COALESCE(NULLIF(ReviewNote, N''), N''),
+           CASE WHEN COALESCE(NULLIF(ReviewNote, N''), N'') = N'' THEN N'' ELSE N' | ' END,
+           N'Master-data learning suppressed because source was rejected.')
+     WHERE EntityType IN (N'customer', N'customercontact', N'emailroute', N'site', N'marketcontact')
+       AND Status = 0 /* PendingReview */
+       AND ISJSON(PayloadJson) = 1
+       AND COALESCE(JSON_VALUE(PayloadJson, '$.sourceRejected'), N'false') IN (N'true', N'True', N'1')
+       AND COALESCE(JSON_VALUE(PayloadJson, '$.doNotLearn'), N'false') IN (N'true', N'True', N'1');
+END;
+
+COMMIT TRANSACTION;
+GO
+
+/*
    Future-proof the rejection path in SQL as well as the API. When a staged order or
    communication is rejected, stamp the payload before any later replay/reporting job
    can mistake it for learnable evidence.
@@ -131,24 +152,3 @@ BEGIN
            );
 END;
 GO
-
-BEGIN TRANSACTION;
-
-/*
-   Optional hardening: if a future process stages a master-data learning row and marks
-   it as being sourced from a rejected staged order, keep it in review by default.
-*/
-IF OBJECT_ID(N'dbo.StagedImports', N'U') IS NOT NULL
-BEGIN
-    UPDATE dbo.StagedImports
-       SET ReviewNote = CONCAT(COALESCE(NULLIF(ReviewNote, N''), N''),
-           CASE WHEN COALESCE(NULLIF(ReviewNote, N''), N'') = N'' THEN N'' ELSE N' | ' END,
-           N'Master-data learning suppressed because source was rejected.')
-     WHERE EntityType IN (N'customer', N'customercontact', N'emailroute', N'site', N'marketcontact')
-       AND Status = 0 /* PendingReview */
-       AND ISJSON(PayloadJson) = 1
-       AND COALESCE(JSON_VALUE(PayloadJson, '$.sourceRejected'), N'false') IN (N'true', N'True', N'1')
-       AND COALESCE(JSON_VALUE(PayloadJson, '$.doNotLearn'), N'false') IN (N'true', N'True', N'1');
-END;
-
-COMMIT TRANSACTION;
