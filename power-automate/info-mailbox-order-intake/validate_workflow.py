@@ -55,10 +55,14 @@ def validate(workflow):
     if missing:
         errors.append("request evidence fields missing: " + ", ".join(missing))
 
+    # Intake must still stage the source email when Outlook cannot list/fetch an attachment.
+    # Scope_Receive_Source records explicit contentUnavailable metadata for those failures, so
+    # submitting after Succeeded/Failed/TimedOut preserves the body and evidence for planner review
+    # instead of silently dropping the entire order email.
     submit_scope = actions.get("Scope_Submit_To_TMS", {})
     receive_run_after = set(submit_scope.get("runAfter", {}).get("Scope_Receive_Source", []))
-    if receive_run_after != {"Succeeded"}:
-        errors.append("TMS submission must run only after attachment retrieval succeeds")
+    if receive_run_after != {"Succeeded", "Failed", "TimedOut"}:
+        errors.append("TMS submission must stage source email after receive success/failure/timeout so attachment failures are retained for review")
 
     for node in _walk(actions):
         if not isinstance(node, dict) or "runtimeConfiguration" not in node:
