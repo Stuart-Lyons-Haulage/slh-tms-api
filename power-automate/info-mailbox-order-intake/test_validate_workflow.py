@@ -58,13 +58,13 @@ class WorkflowValidationTests(unittest.TestCase):
         errors = validate(workflow)
         self.assertTrue(any("trigger attachments string" in item for item in errors))
 
-    def test_rejects_tms_submit_after_attachment_failure(self):
+    def test_rejects_dropping_email_when_attachment_receive_fails(self):
         workflow = json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
         workflow["properties"]["definition"]["actions"]["Scope_Submit_To_TMS"]["runAfter"] = {
-            "Scope_Receive_Source": ["Succeeded", "Failed"]
+            "Scope_Receive_Source": ["Succeeded"]
         }
         errors = validate(workflow)
-        self.assertTrue(any("only after attachment retrieval succeeds" in item for item in errors))
+        self.assertTrue(any("attachment failures are retained" in item for item in errors))
 
 
 if __name__ == "__main__":
