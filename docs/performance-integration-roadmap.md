@@ -19,7 +19,7 @@ This roadmap defines the recommended, implementation and test structure for redu
 - TachoMaster driver, duty and legal-hours enrichment.
 - Fleetio walkround imports.
 - Sage HR synchronisation.
-- SharePoint master-data exports.
+- SQL master-data audit and downstream export processing.
 - Email attachment parsing and intake enrichment.
 - SMS delivery and delivery-status polling.
 - Reporting exports and non-operational analytics.

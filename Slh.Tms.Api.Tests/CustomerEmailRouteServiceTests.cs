@@ -97,6 +97,7 @@ public sealed class CustomerEmailRouteServiceTests : IClassFixture<CustomWebFact
         Assert.False(resultPayload.GetProperty("plannerReady").GetBoolean());
         Assert.True(resultPayload.GetProperty("emailRouteRequiresReview").GetBoolean());
         Assert.Contains(result.Warnings, warning => warning.Contains("conflicting CRM routes", StringComparison.OrdinalIgnoreCase));
+        Assert.False(await CustomerEmailRouteService.HasApprovedRouteAsync(db, Request(sender, "Order"), CancellationToken.None));
     }
 
     [Fact]

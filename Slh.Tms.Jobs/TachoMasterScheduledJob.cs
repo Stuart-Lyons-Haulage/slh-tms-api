@@ -25,7 +25,7 @@ public sealed class TachoMasterScheduledJob(
         var observed = await observedDrivers.SyncAsync("system:aca-job:tachomaster-live-identity", ct);
         var sync = await integration.SyncTachoMasterAsync("system:aca-job:tachomaster", ct);
         var message = observed.Created > 0
-            ? $"{sync.Message} Live Tacho evidence created {observed.Created} previously unseen driver record(s) from SLH vehicles; SharePoint CRM mirror queued through the master-data audit outbox."
+            ? $"{sync.Message} Live Tacho evidence created {observed.Created} previously unseen driver record(s) in the SQL Driver Master; the change was recorded in the master-data audit outbox."
             : sync.Message;
         return new JobExecutionResult(sync.Success, message, sync.Changed + observed.Created);
     }

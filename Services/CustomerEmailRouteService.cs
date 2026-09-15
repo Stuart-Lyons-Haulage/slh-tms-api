@@ -23,7 +23,7 @@ public static class CustomerEmailRouteService
     public static async Task<bool> HasApprovedRouteAsync(TmsDbContext db, MailboxEmailIntakeRequest request, CancellationToken ct)
     {
         var match = await FindRouteAsync(db, request, ct);
-        return match is { RequiresReview: false };
+        return match is { RequiresReview: false, Conflicting: false };
     }
 
     public static void InvalidateCache() => RouteCache.Clear();
