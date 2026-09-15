@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -77,12 +76,12 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             var late = firstRunCreated is not null && order.CreatedAtUtc > firstRunCreated.Value.AddMinutes(15);
             if (late) lateCount++;
 
-            destinations.Add(destination);
+            var consolidatedLane = $"{group} → {destination}";
+            destinations.Add(consolidatedLane);
             if (!matrixRows.TryGetValue(planningSection, out var byGroup))
                 matrixRows[planningSection] = byGroup = new Dictionary<string, CellAccumulator>(StringComparer.OrdinalIgnoreCase);
-            var cellKey = $"{group}|||{destination}";
-            if (!byGroup.TryGetValue(cellKey, out var cell))
-                byGroup[cellKey] = cell = new CellAccumulator(planningSection, group, destination);
+            if (!byGroup.TryGetValue(consolidatedLane, out var cell))
+                byGroup[consolidatedLane] = cell = new CellAccumulator(planningSection, planningSection, consolidatedLane);
             cell.Ordered += ordered;
             cell.Planned += planned;
             cell.OrderIds.Add(order.Id);
@@ -105,8 +104,9 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                 outstandingPallets = outstanding,
                 overplannedPallets = overplanned,
                 collection,
-                destination,
-                planningGroup = group,
+                destination = consolidatedLane,
+                originalDestination = destination,
+                planningGroup = planningSection,
                 planningSection,
                 planningWindow = planningWindow.PlanningWindow,
                 suggestedPlanningWindow = planningWindow.PlanningWindow,
@@ -179,7 +179,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                 runs = loads.Count(x => x.Status != LoadStatus.Cancelled)
             },
             planningSections = new[] { "AM Runs", "PM Work" },
-            planningGroups = matrixRows.Values.SelectMany(section => section.Values.Select(cell => cell.Group)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList(),
+            planningGroups = new[] { "AM Runs", "PM Work" }.Where(section => matrixRows.ContainsKey(section)).ToList(),
             destinations = orderedDestinations,
             cells,
             orders = orderRows,
