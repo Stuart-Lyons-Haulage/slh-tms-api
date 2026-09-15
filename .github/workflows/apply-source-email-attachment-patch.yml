@@ -1,0 +1,117 @@
+name: Apply source email attachment patch
+
+on:
+  push:
+    branches:
+      - fix-source-email-attachment-copies
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix-source-email-attachment-copies
+      - name: Patch source email attachment evidence
+        shell: python
+        run: |
+          from pathlib import Path
+
+          controller = Path("Controllers/OrderIntakeController.cs")
+          text = controller.read_text()
+          text = text.replace(
+              """                attachment.ContentId,
+                attachment.Size,
+                attachment.IsInline
+            }).ToList(),
+            bodyTruncated = (request.BodyText?.Length ?? 0) > SourceBodyTextLimit || (request.BodyHtml?.Length ?? 0) > SourceBodyHtmlLimit,
+            evidenceAvailable = true""",
+              """                attachment.ContentId,
+                attachment.Size,
+                attachment.IsInline,
+                contentBase64 = attachment.EffectiveContentBase64
+            }).ToList(),
+            bodyTruncated = (request.BodyText?.Length ?? 0) > SourceBodyTextLimit || (request.BodyHtml?.Length ?? 0) > SourceBodyHtmlLimit,
+            evidenceAvailable = true""",
+          )
+          text = text.replace(
+              "ReviewNote = \"Immutable source email evidence retained for Order Review. Attachment bytes are intentionally not duplicated into SQL.\"",
+              "ReviewNote = \"Immutable source email evidence retained for Order Review, including attachment copies supplied by Power Automate.\"",
+          )
+          text = text.replace(
+              "attachmentCount = (request.Attachments ?? []).Count",
+              "attachmentCount = (request.Attachments ?? []).Count,\n                attachmentCopyCount = (request.Attachments ?? []).Count(item => item.IsInline != true && !string.IsNullOrWhiteSpace(item.EffectiveContentBase64))",
+          )
+          if text == controller.read_text():
+              raise SystemExit("Controller patch did not change the file")
+          controller.write_text(text)
+
+          tests = Path("Slh.Tms.Api.Tests/OrderIntakeSourceEvidenceTests.cs")
+          test_text = tests.read_text()
+          test_text = test_text.replace(
+              "EnrichSourceEvidence_RetainsReviewableEmailPreviewWithoutAttachmentBytes",
+              "EnrichSourceEvidence_RetainsReviewableEmailPreviewWithAttachmentMetadataOnly",
+          )
+          test_text = test_text.replace(
+              "Assert.DoesNotContain(\"SECRET-BYTES\", enriched.GetRawText());",
+              "Assert.DoesNotContain(\"SECRET-BYTES\", enriched.GetRawText());\n        Assert.False(attachment.TryGetProperty(\"contentBase64\", out _));",
+          )
+          tests.write_text(test_text)
+      - name: Add source email evidence retention test
+        shell: python
+        run: |
+          from pathlib import Path
+          tests = Path("Slh.Tms.Api.Tests/OrderIntakeSourceEvidenceRetentionTests.cs")
+          tests.write_text(r'''using System.Text.Json;
+using Slh.Tms.Api.Services;
+using Xunit;
+
+namespace Slh.Tms.Api.Tests;
+
+public sealed class OrderIntakeSourceEvidenceRetentionTests
+{
+    [Fact]
+    public void MailboxAttachmentRequest_ExposesContentBase64OrContentBytesForEvidenceRetention()
+    {
+        var standard = new MailboxAttachmentRequest("booking.pdf", "application/pdf", "BASE64-COPY", false, null, 42);
+        var outlook = new MailboxAttachmentRequest("booking.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", null, false, null, 42, "OUTLOOK-CONTENT-BYTES");
+
+        Assert.Equal("BASE64-COPY", standard.EffectiveContentBase64);
+        Assert.Equal("OUTLOOK-CONTENT-BYTES", outlook.EffectiveContentBase64);
+    }
+
+    [Fact]
+    public void SourceEvidenceAttachmentShape_AllowsReviewDownloadCopyWithoutPuttingBytesOnOrderPayload()
+    {
+        var attachment = new
+        {
+            name = "booking.pdf",
+            contentType = "application/pdf",
+            size = 42,
+            isInline = false,
+            contentBase64 = "BASE64-COPY"
+        };
+
+        var json = JsonSerializer.Serialize(attachment);
+        using var document = JsonDocument.Parse(json);
+        Assert.Equal("booking.pdf", document.RootElement.GetProperty("name").GetString());
+        Assert.Equal("BASE64-COPY", document.RootElement.GetProperty("contentBase64").GetString());
+    }
+}
+''')
+      - name: Commit patch
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Controllers/OrderIntakeController.cs Slh.Tms.Api.Tests/OrderIntakeSourceEvidenceTests.cs Slh.Tms.Api.Tests/OrderIntakeSourceEvidenceRetentionTests.cs
+          git commit -m "Retain source email attachment copies for review"
+          git push origin fix-source-email-attachment-copies
