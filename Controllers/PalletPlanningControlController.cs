@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -66,6 +67,8 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             var collection = Collection(detail, order);
             var group = collection;
             var destination = Destination(detail, order);
+            var planningWindow = ResolvePlanningWindow(detail, order, collection, destination);
+            var planningSection = PlanningSection(planningWindow.PlanningWindow);
             var temperature = detail?.Temperature;
             var lineUnitTypes = orderSourceLines.Select(x => x.PalletType).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             var sourceUnitType = detail?.PalletType ?? (lineUnitTypes.Count == 1 ? lineUnitTypes[0] : lineUnitTypes.Count > 1 ? "Mixed" : null);
@@ -75,10 +78,11 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             if (late) lateCount++;
 
             destinations.Add(destination);
-            if (!matrixRows.TryGetValue(group, out var byDestination))
-                matrixRows[group] = byDestination = new Dictionary<string, CellAccumulator>(StringComparer.OrdinalIgnoreCase);
-            if (!byDestination.TryGetValue(destination, out var cell))
-                byDestination[destination] = cell = new CellAccumulator(group, destination);
+            if (!matrixRows.TryGetValue(planningSection, out var byGroup))
+                matrixRows[planningSection] = byGroup = new Dictionary<string, CellAccumulator>(StringComparer.OrdinalIgnoreCase);
+            var cellKey = $"{group}|||{destination}";
+            if (!byGroup.TryGetValue(cellKey, out var cell))
+                byGroup[cellKey] = cell = new CellAccumulator(planningSection, group, destination);
             cell.Ordered += ordered;
             cell.Planned += planned;
             cell.OrderIds.Add(order.Id);
@@ -103,6 +107,14 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                 collection,
                 destination,
                 planningGroup = group,
+                planningSection,
+                planningWindow = planningWindow.PlanningWindow,
+                suggestedPlanningWindow = planningWindow.PlanningWindow,
+                runsOvernight = planningWindow.RunsOvernight,
+                suggestedRouteType = planningWindow.SuggestedRouteType,
+                planningWindowConfidence = planningWindow.Confidence,
+                planningWindowReason = planningWindow.Reason,
+                pmCandidate = planningSection == "PM Work",
                 temperature,
                 palletType,
                 loadUnitType = handling.LoadUnitType,
@@ -142,6 +154,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         var orderedDestinations = destinations.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
         var cells = matrixRows.Values.SelectMany(x => x.Values).Select(cell => new
         {
+            planningSection = cell.Section,
             planningGroup = cell.Group,
             destination = cell.Destination,
             ordered = cell.Ordered,
@@ -165,7 +178,8 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                 orders = orderRows.Count,
                 runs = loads.Count(x => x.Status != LoadStatus.Cancelled)
             },
-            planningGroups = matrixRows.Keys.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList(),
+            planningSections = new[] { "AM Runs", "PM Work" },
+            planningGroups = matrixRows.Values.SelectMany(section => section.Values.Select(cell => cell.Group)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList(),
             destinations = orderedDestinations,
             cells,
             orders = orderRows,
@@ -319,7 +333,11 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                 var palletType = Text(root, "unitType", "capacityType", "palletType", "palletName", "palletFormat", "pallet");
                 var pallets = Int(root, "pallets", "palletQty", "palletQuantity", "quantity");
                 var amended = row.ReviewNote?.Contains("Amended from Manage Jobs", StringComparison.OrdinalIgnoreCase) == true;
-                result[Normalise(reference)] = new OrderDetail(reference, collection, destination, group, temperature, palletType, pallets, row.Source, row.ReviewedAtUtc ?? row.ReceivedAtUtc, amended);
+                var planningWindow = Text(root, "planningWindow", "suggestedPlanningWindow");
+                var routeType = Text(root, "suggestedRouteType", "routeTiming");
+                var planningReason = Text(root, "planningWindowReason", "pmReason");
+                var runsOvernight = Bool(root, "runsOvernight", "overnightRoute");
+                result[Normalise(reference)] = new OrderDetail(reference, collection, destination, group, temperature, palletType, pallets, row.Source, row.ReviewedAtUtc ?? row.ReceivedAtUtc, amended, planningWindow, routeType, planningReason, runsOvernight);
             }
             catch (JsonException) { }
         }
@@ -514,6 +532,46 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         return Math.Max(value ?? 0, 0);
     }
 
+    private static PlanningWindowClassification ResolvePlanningWindow(OrderDetail? detail, TransportOrder order, string collection, string destination)
+    {
+        if (!string.IsNullOrWhiteSpace(detail?.PlanningWindow))
+        {
+            var window = CanonicalPlanningWindow(detail.PlanningWindow);
+            var runsOvernight = detail.RunsOvernight ?? (order.DeliveryDate is DateOnly delivery && delivery > order.CollectionDate);
+            var routeType = !string.IsNullOrWhiteSpace(detail.SuggestedRouteType)
+                ? detail.SuggestedRouteType!
+                : window == "PM" && runsOvernight ? "PM Overnight" : window;
+            return new PlanningWindowClassification(window, runsOvernight, routeType, "High", detail.PlanningWindowReason ?? "Planning window supplied by staged order", false);
+        }
+
+        var payload = JsonSerializer.SerializeToElement(new
+        {
+            customerCode = order.CustomerCode,
+            collectionDate = order.CollectionDate.ToString("yyyy-MM-dd"),
+            deliveryDate = order.DeliveryDate?.ToString("yyyy-MM-dd"),
+            sellerName = collection,
+            stallNumber = destination,
+            driverInstructions = order.DriverInstructions,
+            marketName = order.MarketName
+        }, JsonOptions);
+        return OrderPlanningWindowClassifier.Classify(payload);
+    }
+
+    private static string PlanningSection(string planningWindow)
+    {
+        var window = CanonicalPlanningWindow(planningWindow);
+        return window == "AM" ? "AM Runs" : "PM Work";
+    }
+
+    private static string CanonicalPlanningWindow(string? value)
+    {
+        var normal = Normalise(value);
+        if (normal.Contains("MARKET", StringComparison.OrdinalIgnoreCase)) return "Market";
+        if (normal.Contains("PM", StringComparison.OrdinalIgnoreCase) || normal.Contains("OVERNIGHT", StringComparison.OrdinalIgnoreCase)) return "PM";
+        if (normal.Contains("TRANSFER", StringComparison.OrdinalIgnoreCase)) return "PM";
+        return "AM";
+    }
+
     private static string PlanningGroup(OrderDetail? detail, TransportOrder order)
     {
         if (!string.IsNullOrWhiteSpace(detail?.Group)) return detail.Group!;
@@ -567,10 +625,11 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
     }
 
     private static int? Int(JsonElement root, params string[] names) => int.TryParse(Text(root, names), out var value) ? value : null;
+    private static bool? Bool(JsonElement root, params string[] names) => bool.TryParse(Text(root, names), out var value) ? value : null;
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
     private static bool SchemaUnavailable(Exception ex) => ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || ex.GetBaseException().Message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
 
-    private sealed record OrderDetail(string Reference, string? Collection, string? Destination, string? Group, string? Temperature, string? PalletType, int? Pallets, string? Source, DateTimeOffset UpdatedAtUtc, bool Amended);
+    private sealed record OrderDetail(string Reference, string? Collection, string? Destination, string? Group, string? Temperature, string? PalletType, int? Pallets, string? Source, DateTimeOffset UpdatedAtUtc, bool Amended, string? PlanningWindow, string? SuggestedRouteType, string? PlanningWindowReason, bool? RunsOvernight);
     private async Task<Dictionary<Guid, List<OrderSourceLine>>> ReadCurrentSourceLines(IReadOnlyCollection<TransportOrder> orders, CancellationToken ct)
     {
         var movementByOrder = orders.Where(x => x.SourceMovementId is not null).ToDictionary(x => x.SourceMovementId!.Value, x => x.Id);
@@ -597,8 +656,9 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
     private sealed record AllocationState(Guid OrderId, Guid LoadId, int Pallets, DateOnly Date, DateTimeOffset UpdatedAtUtc, string? UpdatedBy, Guid? SourceLineId = null);
     public sealed record PalletAllocationRequest(Guid OrderId, Guid LoadId, DateOnly Date, int Pallets, string? Note, Guid? SourceLineId = null);
 
-    private sealed class CellAccumulator(string group, string destination)
+    private sealed class CellAccumulator(string section, string group, string destination)
     {
+        public string Section { get; } = section;
         public string Group { get; } = group;
         public string Destination { get; } = destination;
         public int Ordered { get; set; }
