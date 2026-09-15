@@ -16,7 +16,7 @@
     },
     "definition": {
       "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
-      "contentVersion": "1.0.0.0",
+      "contentVersion": "1.0.1.0",
       "parameters": {
         "$connections": { "defaultValue": {}, "type": "Object" },
         "SLH_InfoMailboxUPN": { "defaultValue": "info@lyonshaulage.com", "type": "String" }
@@ -32,7 +32,7 @@
             },
             "parameters": {
               "mailboxAddress": "@parameters('SLH_InfoMailboxUPN')",
-              "folderId": "TMS Intake",
+              "folderId": "Inbox",
               "importance": "Any",
               "includeAttachments": true
             }
@@ -75,6 +75,21 @@
               },
               "runtimeConfiguration": { "retryPolicy": { "type": "exponential", "count": 4, "interval": "PT10S", "minimumInterval": "PT10S", "maximumInterval": "PT2M" } }
             },
+            "Record_Attachment_List_Failure": {
+              "type": "AppendToArrayVariable",
+              "runAfter": { "Get_Attachment_List": ["Failed", "TimedOut"] },
+              "inputs": {
+                "name": "varAttachments",
+                "value": {
+                  "name": "ATTACHMENT_LIST_UNAVAILABLE",
+                  "contentType": "application/octet-stream",
+                  "contentBase64": "",
+                  "isInline": false,
+                  "contentUnavailable": true,
+                  "failureReason": "Outlook attachment listing failed or timed out after retries; source email still submitted to TMS review."
+                }
+              }
+            },
             "For_Each_Source_Attachment": {
               "type": "Foreach",
               "runAfter": { "Get_Attachment_List": ["Succeeded"] },
@@ -114,6 +129,23 @@
                       "size": "@items('For_Each_Source_Attachment')?['size']"
                     }
                   }
+                },
+                "Append_Failed_Attachment_Metadata": {
+                  "type": "AppendToArrayVariable",
+                  "runAfter": { "Get_Attachment_Content": ["Failed", "TimedOut"] },
+                  "inputs": {
+                    "name": "varAttachments",
+                    "value": {
+                      "name": "@coalesce(items('For_Each_Source_Attachment')?['name'],items('For_Each_Source_Attachment')?['displayName'],items('For_Each_Source_Attachment')?['id'],'unnamed-attachment')",
+                      "contentType": "@coalesce(items('For_Each_Source_Attachment')?['contentType'],'application/octet-stream')",
+                      "contentBase64": "",
+                      "isInline": "@coalesce(items('For_Each_Source_Attachment')?['isInline'],false)",
+                      "contentId": "@items('For_Each_Source_Attachment')?['contentId']",
+                      "size": "@items('For_Each_Source_Attachment')?['size']",
+                      "contentUnavailable": true,
+                      "failureReason": "Outlook attachment content fetch failed or timed out after retries; source email still submitted to TMS review."
+                    }
+                  }
                 }
               }
             }
@@ -121,7 +153,7 @@
         },
         "Scope_Submit_To_TMS": {
           "type": "Scope",
-          "runAfter": { "Scope_Receive_Source": ["Succeeded"] },
+          "runAfter": { "Scope_Receive_Source": ["Succeeded", "Failed", "TimedOut"] },
           "actions": {
             "POST_To_TMS_Staging": {
               "type": "OpenApiConnection",
