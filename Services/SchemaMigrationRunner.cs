@@ -117,7 +117,9 @@ public static class SchemaMigrationRunner
         "059_RoadTech_Operational_Visits.sql",
         "060_TachoMaster_Job_Managed_Identity.sql",
         "061_Email_Intake_Mapping_V2.sql",
-        "062_Distributed_Integration_Lease_Heartbeat.sql"
+        "062_Distributed_Integration_Lease_Heartbeat.sql",
+        "071_InfoMailbox_Market_Waitrose_Coop_MasterData.sql",
+        "072_Rescue_Aldi_Atherstone_Morrisons_Sittingbourne_PreOrders.sql"
     ];
 
     internal const string HistoryTableSql = """
