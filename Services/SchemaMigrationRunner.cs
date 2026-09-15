@@ -119,7 +119,8 @@ public static class SchemaMigrationRunner
         "061_Email_Intake_Mapping_V2.sql",
         "062_Distributed_Integration_Lease_Heartbeat.sql",
         "071_InfoMailbox_Market_Waitrose_Coop_MasterData.sql",
-        "072_Rescue_Aldi_Atherstone_Morrisons_Sittingbourne_PreOrders.sql"
+        "072_Rescue_Aldi_Atherstone_Morrisons_Sittingbourne_PreOrders.sql",
+        "073_Rejected_Order_DoNotLearn_Guard.sql"
     ];
 
     internal const string HistoryTableSql = """
