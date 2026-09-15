@@ -7,6 +7,11 @@ namespace Slh.Tms.Api.Services;
 
 public static class OrderSiteMasterAlignment
 {
+    private static readonly TimeSpan SiteCacheDuration = TimeSpan.FromSeconds(45);
+    private static readonly SemaphoreSlim SiteCacheLock = new(1, 1);
+    private static DateTimeOffset SiteCacheExpiresAtUtc;
+    private static IReadOnlyList<Site>? SiteCache;
+
     public sealed record Alignment(
         string? CollectionName,
         string? CollectionAddress,
@@ -50,8 +55,7 @@ public static class OrderSiteMasterAlignment
         List<Site> sites;
         try
         {
-            sites = await db.Sites.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
-            await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
+            sites = await LoadActiveSitesAsync(db, ct);
         }
         catch (Exception ex) when (SchemaUnavailable(ex))
         {
@@ -102,6 +106,55 @@ public static class OrderSiteMasterAlignment
             marketContext?.Stand,
             marketContext?.Salesman);
     }
+
+    private static async Task<List<Site>> LoadActiveSitesAsync(TmsDbContext db, CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var cached = SiteCache;
+        if (cached is not null && SiteCacheExpiresAtUtc > now)
+            return CloneSites(cached);
+
+        await SiteCacheLock.WaitAsync(ct);
+        try
+        {
+            now = DateTimeOffset.UtcNow;
+            cached = SiteCache;
+            if (cached is not null && SiteCacheExpiresAtUtc > now)
+                return CloneSites(cached);
+
+            var sites = await db.Sites.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
+            await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
+            SiteCache = CloneSites(sites);
+            SiteCacheExpiresAtUtc = now.Add(SiteCacheDuration);
+            return CloneSites(SiteCache);
+        }
+        finally
+        {
+            SiteCacheLock.Release();
+        }
+    }
+
+    private static List<Site> CloneSites(IEnumerable<Site> sites) => sites.Select(CloneSite).ToList();
+
+    private static Site CloneSite(Site site) => new()
+    {
+        Id = site.Id,
+        ExternalCode = site.ExternalCode,
+        CustomerCode = site.CustomerCode,
+        Name = site.Name,
+        DriverTextName = site.DriverTextName,
+        CollectionAddress = site.CollectionAddress,
+        CollectionInstructions = site.CollectionInstructions,
+        MapLink = site.MapLink,
+        Latitude = site.Latitude,
+        Longitude = site.Longitude,
+        Aliases = site.Aliases,
+        CustomField1 = site.CustomField1,
+        CustomField2 = site.CustomField2,
+        CustomField3 = site.CustomField3,
+        OperationalRegion = site.OperationalRegion,
+        Active = site.Active
+    };
 
     private static async Task<MarketContext?> MatchMarketContextAsync(TmsDbContext db, string? marketName, string? destination, CancellationToken ct)
     {
