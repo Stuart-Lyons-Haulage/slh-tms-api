@@ -7,6 +7,26 @@ namespace Slh.Tms.Api.Tests;
 public sealed class StagingQueueProjectionTests
 {
     [Fact]
+    public void StagingQueuePage_preserves_paged_queue_contract()
+    {
+        var page = new StagingQueuePage(
+            page: 1,
+            pageSize: 100,
+            total: 215,
+            hasMore: true,
+            records: new object[] { new { id = "staged-1" } });
+
+        var json = JsonSerializer.Serialize(page);
+
+        Assert.Contains("\"page\":1", json);
+        Assert.Contains("\"pageSize\":100", json);
+        Assert.Contains("\"total\":215", json);
+        Assert.Contains("\"hasMore\":true", json);
+        Assert.Contains("\"records\":[", json);
+        Assert.DoesNotContain("\"items\"", json);
+    }
+
+    [Fact]
     public void BuildPayloadSummary_keeps_review_fields_and_drops_heavy_email_evidence()
     {
         var payload = JsonSerializer.Serialize(new
