@@ -90,9 +90,6 @@ public sealed class StagingAmendmentController(TmsDbContext db) : ControllerBase
 
             if (changed)
             {
-                db.Sites.Attach(selected);
-                db.Entry(selected).Property(site => site.Aliases).IsModified = true;
-
                 db.MasterDataAudits.Add(new MasterDataAudit
                 {
                     EntityType = "Site",
