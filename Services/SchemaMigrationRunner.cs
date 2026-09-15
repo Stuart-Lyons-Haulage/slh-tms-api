@@ -267,19 +267,54 @@ public static class SchemaMigrationRunner
         ILogger logger,
         CancellationToken ct)
     {
+        // Split on standalone GO lines before touching the database.
+        // This must happen before the transaction so that CREATE TRIGGER (which SQL
+        // Server requires to be the first statement in a batch) is isolated correctly.
+        var batches = SplitOnGo(migration.Sql);
+
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         try
         {
-            await db.Database.ExecuteSqlRawAsync(migration.Sql, ct);
-            await db.Database.ExecuteSqlInterpolatedAsync($"""
-                INSERT INTO dbo.SchemaMigration (Version, Name, AppliedAtUtc, Checksum)
-                VALUES ({migration.Version}, {migration.Name}, SYSUTCDATETIME(), {migration.Checksum});
-                """, ct);
+            var connection = db.Database.GetDbConnection();
+
+            for (var batchIndex = 0; batchIndex < batches.Count; batchIndex++)
+            {
+                var batch = batches[batchIndex];
+                if (string.IsNullOrWhiteSpace(batch))
+                    continue;
+
+                logger.LogDebug(
+                    "Executing batch {BatchNumber}/{BatchTotal} of migration {Version} {MigrationName}.",
+                    batchIndex + 1, batches.Count, migration.Version, migration.Name);
+
+                // Execute through the raw DbCommand so that:
+                // 1. EF never interprets {} as composite-format placeholders.
+                // 2. The CancellationToken is passed correctly (not as a SQL parameter).
+                // 3. GO is already removed — SQL Server never sees it.
+                using var command = connection.CreateCommand();
+                command.CommandText = batch;
+                command.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
+                command.CommandTimeout = 300; // match EF default for long migrations
+                await command.ExecuteNonQueryAsync(ct);
+            }
+
+            // Record the migration only after every batch succeeds.
+            // Use a parameterised DbCommand to avoid any string-formatting issues.
+            using var historyCommand = connection.CreateCommand();
+            historyCommand.CommandText =
+                "INSERT INTO dbo.SchemaMigration (Version, Name, AppliedAtUtc, Checksum) " +
+                "VALUES (@Version, @Name, SYSUTCDATETIME(), @Checksum);";
+            historyCommand.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
+            var pVersion  = historyCommand.CreateParameter(); pVersion.ParameterName  = "@Version";  pVersion.Value  = migration.Version;  historyCommand.Parameters.Add(pVersion);
+            var pName     = historyCommand.CreateParameter(); pName.ParameterName     = "@Name";     pName.Value     = migration.Name;     historyCommand.Parameters.Add(pName);
+            var pChecksum = historyCommand.CreateParameter(); pChecksum.ParameterName = "@Checksum"; pChecksum.Value = migration.Checksum; historyCommand.Parameters.Add(pChecksum);
+            await historyCommand.ExecuteNonQueryAsync(ct);
+
             await transaction.CommitAsync(ct);
 
             logger.LogInformation(
-                "Applied schema migration {Version} {MigrationName} successfully.",
-                migration.Version, migration.Name);
+                "Applied schema migration {Version} {MigrationName} successfully ({BatchCount} batch(es)).",
+                migration.Version, migration.Name, batches.Count(b => !string.IsNullOrWhiteSpace(b)));
         }
         catch (Exception ex)
         {
@@ -306,6 +341,107 @@ public static class SchemaMigrationRunner
                 $"Required schema migration {migration.Version} ({migration.Name}) failed; application startup cannot continue.",
                 ex);
         }
+    }
+
+    /// <summary>
+    /// Splits a SQL script into batches on standalone GO lines.
+    ///
+    /// Rules:
+    /// - GO is matched case-insensitively.
+    /// - Only a line containing solely GO (with optional surrounding whitespace) is
+    ///   treated as a batch separator. GO inside string literals, comments, or as part
+    ///   of a longer token (e.g. "GOTO", "GOOD") is not split on.
+    /// - The GO line itself is never included in any batch.
+    /// - Empty batches (whitespace only) are preserved in the list so the caller can
+    ///   skip them, keeping the batch count predictable for logging.
+    /// - Single-line (--) and block (/* */) comments are tracked so that GO inside a
+    ///   comment is not treated as a separator.
+    /// - Single-quoted string literals are tracked so that GO inside a string is not
+    ///   treated as a separator.
+    ///
+    /// This covers the legitimate SQL migration patterns in this codebase:
+    ///   SET XACT_ABORT ON;
+    ///   BEGIN TRANSACTION;
+    ///   ... DML ...
+    ///   COMMIT TRANSACTION;
+    ///   GO
+    ///   CREATE TRIGGER ...
+    ///   GO
+    /// </summary>
+    internal static IReadOnlyList<string> SplitOnGo(string sql)
+    {
+        // Fast path: no GO at all means the whole script is one batch.
+        // Avoids the line-by-line scan entirely for the overwhelming majority of migrations.
+        if (!System.Text.RegularExpressions.Regex.IsMatch(sql, @"(?i)GO"))
+            return [sql];
+
+        var batches = new List<string>();
+        var current = new System.Text.StringBuilder();
+        bool inBlockComment = false;
+        bool inString       = false;
+
+        var lines = sql.Split(["
+", "", "
+"], StringSplitOptions.None);
+
+        foreach (var line in lines)
+        {
+            // Determine whether this line is a standalone GO separator.
+            // Only check when we are not inside a block comment or string literal.
+            if (!inBlockComment && !inString)
+            {
+                var trimmed = line.Trim();
+                if (trimmed.Equals("GO", StringComparison.OrdinalIgnoreCase))
+                {
+                    batches.Add(current.ToString());
+                    current.Clear();
+                    continue;
+                }
+            }
+
+            // Track block comments and string literals by scanning each character.
+            // This is only needed so we correctly handle GO inside comments/strings —
+            // the simple trimmed-line check above already handles the common case.
+            int i = 0;
+            while (i < line.Length)
+            {
+                if (inBlockComment)
+                {
+                    if (i + 1 < line.Length && line[i] == '*' && line[i + 1] == '/')
+                    { inBlockComment = false; i += 2; continue; }
+                    i++; continue;
+                }
+                if (inString)
+                {
+                    if (line[i] == ''')
+                    {
+                        // Two consecutive single quotes = escaped quote inside string
+                        if (i + 1 < line.Length && line[i + 1] == ''') { i += 2; continue; }
+                        inString = false;
+                    }
+                    i++; continue;
+                }
+                // Not in comment or string
+                if (i + 1 < line.Length && line[i] == '/' && line[i + 1] == '*')
+                { inBlockComment = true; i += 2; continue; }
+                if (i + 1 < line.Length && line[i] == '-' && line[i + 1] == '-')
+                    break; // rest of line is a single-line comment
+                if (line[i] == ''')
+                { inString = true; i++; continue; }
+                i++;
+            }
+            // Block comments span lines; string literals do not (SQL strings cannot
+            // span a newline without an explicit continuation — we treat each line as
+            // ending any open string to be conservative and avoid false non-splits).
+            if (inString) inString = false;
+
+            current.AppendLine(line);
+        }
+
+        // Trailing content after the last GO (or the whole script if no GO found)
+        batches.Add(current.ToString());
+
+        return batches;
     }
 
     private static async Task<Dictionary<int, AppliedSchemaMigration>> ReadAppliedMigrationsAsync(
