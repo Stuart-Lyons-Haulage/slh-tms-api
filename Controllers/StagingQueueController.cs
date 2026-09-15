@@ -50,16 +50,21 @@ public sealed class StagingQueueController(TmsDbContext db) : ControllerBase
             .ToListAsync(ct);
 
         var records = rows.Select(StagingQueueProjection.ToSummary).ToList();
-        return Ok(new
-        {
+        return Ok(new StagingQueuePage(
             page,
             pageSize,
             total,
-            hasMore = offset + rows.Count < total,
-            records
-        });
+            offset + rows.Count < total,
+            records));
     }
 }
+
+internal sealed record StagingQueuePage(
+    int page,
+    int pageSize,
+    int total,
+    bool hasMore,
+    IReadOnlyList<object> records);
 
 internal sealed record StagingQueueRawRow(
     Guid Id,
