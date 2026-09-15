@@ -29,7 +29,7 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
 {
     public async Task<TachoCanonicalOrchestrationResult> RunAsync(string actor, CancellationToken ct)
     {
-        await using var lease = await leases.TryAcquireAsync(IntegrationLeaseNames.TachoMaster, TimeSpan.FromMinutes(15), ct);
+        await using var lease = await leases.TryAcquireAsync(IntegrationLeaseNames.TachoMaster, TimeSpan.FromMinutes(2), ct);
         if (lease is null)
         {
             var now = DateTimeOffset.UtcNow;
@@ -38,7 +38,8 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
             var enrichment = new IntegrationSyncResult("TachoMaster", false, now, canonicalResult.Message);
             return new TachoCanonicalOrchestrationResult(false, canonicalResult, enrichment, now, canonicalResult.Message);
         }
-        return await RunCoreAsync(actor, ct);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, lease.LostToken);
+        return await RunCoreAsync(actor, linked.Token);
     }
 
     private async Task<TachoCanonicalOrchestrationResult> RunCoreAsync(string actor, CancellationToken ct)

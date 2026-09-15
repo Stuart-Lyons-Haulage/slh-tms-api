@@ -11,6 +11,7 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class TachoMasterHealthController(
     TmsDbContext? db,
     TachoMasterClient tachoMasterClient,
+    DistributedLeaseManager? leases,
     ILogger<TachoMasterHealthController> logger) : ControllerBase
 {
     private const double LiveJobAgeMinutes = 15;
@@ -21,7 +22,7 @@ public sealed class TachoMasterHealthController(
     internal TachoMasterHealthController(
         TachoMasterClient tachoMasterClient,
         ILogger<TachoMasterHealthController> logger)
-        : this(null, tachoMasterClient, logger)
+        : this(null, tachoMasterClient, null, logger)
     {
     }
 
@@ -52,12 +53,16 @@ public sealed class TachoMasterHealthController(
                 : db.Drivers.AsNoTracking()
                     .Where(driver => driver.LastTachoSyncUtc != null)
                     .MaxAsync(driver => driver.LastTachoSyncUtc, cancellationToken);
+            var leaseTask = db is null || leases is null
+                ? Task.FromResult<DistributedLeaseStatus?>(null)
+                : leases.GetStatusAsync(IntegrationLeaseNames.TachoMaster, cancellationToken);
 
-            await Task.WhenAll(profilesTask, openDutiesTask, dayDutiesTask, latestPersistedSyncTask);
+            await Task.WhenAll(profilesTask, openDutiesTask, dayDutiesTask, latestPersistedSyncTask, leaseTask);
             var profiles = await profilesTask;
             var duties = await openDutiesTask;
             var dayDuties = await dayDutiesTask;
             var latestPersistedSyncUtc = await latestPersistedSyncTask;
+            var lease = await leaseTask;
             var lastSuccessfulPollUtc = DateTimeOffset.UtcNow;
             var openDuties = duties.Values.SelectMany(items => items).ToList();
 
@@ -120,6 +125,7 @@ public sealed class TachoMasterHealthController(
                         ? "The scheduled TachoMaster synchronisation has not refreshed persisted driver data within 30 minutes. Check the slh-tms-job-tachomaster Container Apps Job execution history and deployed jobs image."
                         : (string?)null
                 },
+                lease = lease is null ? null : new { owner = lease.OwnerInstanceId, runId = lease.RunId, acquiredAtUtc = lease.AcquiredAtUtc, heartbeatUtc = lease.HeartbeatUtc, expiresAtUtc = lease.ExpiresAtUtc, stale = lease.IsStale },
                 metricsFreshness,
                 newestMetricsTimestampUtc = newestMetric == default ? (DateTimeOffset?)null : newestMetric,
                 metricsAgeMinutes,

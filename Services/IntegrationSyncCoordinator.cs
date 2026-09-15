@@ -20,13 +20,15 @@ public sealed class IntegrationSyncCoordinator(
 {
     public async Task<IntegrationSyncResult> SyncTachoMasterAsync(string actor, CancellationToken ct)
     {
-        await using var lease = await leases.TryAcquireAsync(IntegrationLeaseNames.TachoMaster, TimeSpan.FromMinutes(30), ct);
+        await using var lease = await leases.TryAcquireAsync(IntegrationLeaseNames.TachoMaster, TimeSpan.FromMinutes(2), ct);
         if (lease is null)
             return new("TachoMaster", false, DateTimeOffset.UtcNow, "TachoMaster sync skipped because another distributed writer currently holds the integration lease.");
-        return await SyncTachoMasterCoreAsync(actor, ct);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, lease.LostToken);
+        return await SyncTachoMasterCoreAsync(actor, linked.Token);
     }
 
-    internal async Task<IntegrationSyncResult> SyncTachoMasterCoreAsync(string actor, CancellationToken ct)
+    /// <summary>Only for callers that already hold <see cref="IntegrationLeaseNames.TachoMaster"/>.</summary>
+    public async Task<IntegrationSyncResult> SyncTachoMasterCoreAsync(string actor, CancellationToken ct)
     {
         if (!tachoMaster.IsConfigured)
             return new("TachoMaster", false, DateTimeOffset.UtcNow, $"TachoMaster is not configured: {string.Join(", ", tachoMaster.MissingSettings)}.");

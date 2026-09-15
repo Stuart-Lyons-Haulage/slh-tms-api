@@ -14,7 +14,7 @@ namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/integrations")]
 [Authorize]
-public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptions tracking, DotTrackingClient dotTracking, TachoMasterClient tachoMaster, DriverSmsDispatchService sms, AzureSmsDispatchService azureSms, TextBeeOptions textBee, FleetioOptions fleetio, FleetioClient fleetioClient, AssistantOptions assistant, IConfiguration configuration, TmsDbContext db, ILogger<IntegrationsController> logger) : ControllerBase
+public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptions tracking, DotTrackingClient dotTracking, TachoMasterClient tachoMaster, DriverSmsDispatchService sms, AzureSmsDispatchService azureSms, TextBeeOptions textBee, FleetioOptions fleetio, FleetioClient fleetioClient, AssistantOptions assistant, IConfiguration configuration, TmsDbContext db, IntegrationSyncCoordinator coordinator, ILogger<IntegrationsController> logger) : ControllerBase
 {
     [HttpGet("status")]
     public async Task<IActionResult> Status(CancellationToken ct)
@@ -75,6 +75,11 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
     [HttpPost("tachomaster/sync-drivers"), Authorize(Policy = "TmsWrite")]
     public async Task<IActionResult> SyncTachoMasterDrivers(CancellationToken ct)
     {
+        // This historical endpoint used to write Driver Master outside the integration lease.
+        // Route it through the single, Member-Code-first coordinator so manual and scheduled
+        // requests obey exactly the same owner-qualified lease.
+        return Ok(await coordinator.SyncTachoMasterAsync(User.Identity?.Name ?? "admin:manual", ct));
+#pragma warning disable CS0162 // retained below temporarily for a low-risk endpoint-contract transition
         if (!tachoMaster.IsConfigured)
             return BadRequest(new { configured = false, matched = 0, missingSettings = tachoMaster.MissingSettings, message = "TachoMaster is not configured." });
         try
@@ -110,6 +115,7 @@ public sealed class IntegrationsController(SageHrClient sageHr, DotTrackingOptio
             return Ok(new { configured = true, connected = false, sourceDrivers = 0, matched = 0, unmatched = 0, syncedAtUtc = DateTimeOffset.UtcNow,
                 message = $"TachoMaster driver sync failed: {exception.GetBaseException().Message}. No master driver records were changed." });
         }
+#pragma warning restore CS0162
     }
 
     [HttpGet("roadtech/status")]

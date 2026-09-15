@@ -65,11 +65,12 @@ public sealed class TachoDriverMasterSyncService(
 
     public async Task<TachoDriverMasterSyncResult> SyncAsync(string actor, CancellationToken ct)
     {
-        await using var lease = await leases.TryAcquireAsync(IntegrationLeaseNames.TachoMaster, TimeSpan.FromMinutes(60), ct);
+        await using var lease = await leases.TryAcquireAsync(IntegrationLeaseNames.TachoMaster, TimeSpan.FromMinutes(2), ct);
         if (lease is null)
             return new(false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 "TachoMaster Driver Master sync skipped because another distributed writer currently holds the integration lease.", DateTimeOffset.UtcNow);
-        return await SyncCoreAsync(actor, ct);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, lease.LostToken);
+        return await SyncCoreAsync(actor, linked.Token);
     }
 
     internal async Task<TachoDriverMasterSyncResult> SyncCoreAsync(string actor, CancellationToken ct)
