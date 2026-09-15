@@ -64,6 +64,23 @@ def validate(workflow):
     if receive_run_after != {"Succeeded", "Failed", "TimedOut"}:
         errors.append("TMS submission must stage source email after receive success/failure/timeout so attachment failures are retained for review")
 
+    receive_actions = actions.get("Scope_Receive_Source", {}).get("actions", {})
+    attachment_loop = receive_actions.get("For_Each_Source_Attachment", {})
+    attachment_actions = attachment_loop.get("actions", {})
+    get_attachment = attachment_actions.get("Get_Attachment_Content", {})
+    get_attachment_operation = get_attachment.get("inputs", {}).get("host", {}).get("operationId")
+    if get_attachment_operation != "GetAttachment_V2":
+        errors.append("Get_Attachment_Content must call Outlook GetAttachment_V2")
+
+    append_attachment = attachment_actions.get("Append_Original_Attachment", {})
+    append_value = append_attachment.get("inputs", {}).get("value", {})
+    content_expression = str(append_value.get("contentBase64", ""))
+    if "Get_Attachment_Content" not in content_expression or "contentBytes" not in content_expression:
+        errors.append("source attachment bytes must be mapped from Get_Attachment_Content body/contentBytes into contentBase64")
+
+    if body.get("attachments") != "@variables('varAttachments')":
+        errors.append("TMS staging request must submit the varAttachments array containing retained attachment copies")
+
     for node in _walk(actions):
         if not isinstance(node, dict) or "runtimeConfiguration" not in node:
             continue
