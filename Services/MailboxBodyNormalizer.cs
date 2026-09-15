@@ -9,7 +9,7 @@ public static class MailboxBodyNormalizer
     public static string Normalize(string? bodyText, string? bodyHtml)
     {
         if (string.IsNullOrWhiteSpace(bodyHtml))
-            return bodyText?.Trim() ?? string.Empty;
+            return RemoveDuplicateStandaloneTownLines(bodyText?.Trim() ?? string.Empty);
 
         // Preserve rows and cell boundaries so HTML tables and multi-drop lists
         // remain parseable. Do not concatenate the preview: it duplicates rows.
@@ -21,6 +21,40 @@ public static class MailboxBodyNormalizer
         text = WebUtility.HtmlDecode(text).Replace('\u00a0', ' ');
         text = Regex.Replace(text, @"[ \t]+", " ");
         text = Regex.Replace(text, @"[ \t]*\r?\n[ \t]*", "\n").Trim();
-        return string.IsNullOrWhiteSpace(text) ? bodyText?.Trim() ?? string.Empty : text;
+        return string.IsNullOrWhiteSpace(text) ? RemoveDuplicateStandaloneTownLines(bodyText?.Trim() ?? string.Empty) : RemoveDuplicateStandaloneTownLines(text);
     }
+
+    private static string RemoveDuplicateStandaloneTownLines(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+
+        var lines = value.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+        var kept = new List<string>();
+
+        foreach (var line in lines)
+        {
+            var trimmed = line.Trim();
+            if (IsStandaloneCountryLine(trimmed))
+                continue;
+
+            var isStandaloneTown = trimmed.Length >= 3
+                && trimmed.Length <= 40
+                && Regex.IsMatch(trimmed, @"^[A-Z][A-Z -]+$");
+
+            if (isStandaloneTown && kept.TakeLast(6).Any(previous => previous.Contains(trimmed, StringComparison.OrdinalIgnoreCase)))
+                continue;
+
+            kept.Add(line);
+        }
+
+        return string.Join("\n", kept).Trim();
+    }
+
+    private static bool IsStandaloneCountryLine(string value) =>
+        value.Equals("UNITED KINGDOM", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("UK", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("GREAT BRITAIN", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("ENGLAND", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("SCOTLAND", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("WALES", StringComparison.OrdinalIgnoreCase);
 }

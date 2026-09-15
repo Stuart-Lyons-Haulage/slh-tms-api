@@ -633,6 +633,7 @@ public sealed class SpecialistMailboxOrderParser
         var name = lines[0];
         var town = lines.FirstOrDefault(line => line.Equals("HODDESDON", StringComparison.OrdinalIgnoreCase))
             ?? lines.Skip(1).FirstOrDefault(line => Regex.IsMatch(line, @"^[A-Z][A-Z -]{2,}$"));
+        if (!string.IsNullOrWhiteSpace(town) && name.Contains(town, StringComparison.OrdinalIgnoreCase)) town = null;
         return CleanDropName(string.Join(" ", new[] { name, town }.Where(value => !string.IsNullOrWhiteSpace(value))));
     }
 
