@@ -10,7 +10,7 @@ public static class OrderPlanningWindowClassifier
 
     public static JsonElement Enrich(JsonElement payload)
     {
-        var node = JsonNode.Parse(payload.GetRawText())?.AsObject() ?? [];
+        var node = JsonNode.Parse(payload.GetRawText())?.AsObject() ?? new JsonObject();
         var result = Classify(payload);
 
         node["planningWindow"] = result.PlanningWindow;
