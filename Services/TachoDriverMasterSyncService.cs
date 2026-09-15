@@ -156,11 +156,24 @@ public sealed class TachoDriverMasterSyncService(
                 .ToList();
             var cardKey = TachoDriverIdentityRules.NormaliseIdentifier(worker.CardNumber);
             var cardIsUnique = cardKey.Length > 0 && liveCardCounts.GetValueOrDefault(cardKey) == 1;
+
+            // SageHrEmployeeNumber bridge: when TachoMaster sends a PayrollNumber that matches
+            // a driver's SageHrEmployeeNumber, treat it as a strong identity — same confidence
+            // as card, weaker than member code.
+            var tachoPayrollKey = TachoDriverIdentityRules.NormaliseIdentifier(worker.EmployeeNumber);
+            var payrollMatches = !string.IsNullOrWhiteSpace(tachoPayrollKey)
+                ? drivers.Where(driver =>
+                    !string.IsNullOrWhiteSpace(driver.SageHrEmployeeNumber) &&
+                    TachoDriverIdentityRules.NormaliseIdentifier(driver.SageHrEmployeeNumber) == tachoPayrollKey).ToList()
+                : [];
+
             var strong = memberMatches.Count > 0
                 ? memberMatches
-                : cardIsUnique
-                    ? drivers.Where(driver => TachoDriverIdentityRules.CardsMatch(driver.TachoCardNumber, worker.CardNumber)).ToList()
-                    : [];
+                : payrollMatches.Count == 1
+                    ? payrollMatches   // SageHR payroll bridge — unique match only
+                    : cardIsUnique
+                        ? drivers.Where(driver => TachoDriverIdentityRules.CardsMatch(driver.TachoCardNumber, worker.CardNumber)).ToList()
+                        : [];
 
             Driver? canonical = null;
             if (strong.Count > 0)
@@ -391,12 +404,19 @@ public sealed class TachoDriverMasterSyncService(
             !TachoDriverIdentityRules.MemberMatches(driver.TachoMasterDriverId, worker.MemberCode.ToString(CultureInfo.InvariantCulture))) return false;
         if (!string.IsNullOrWhiteSpace(driver.TachoCardNumber) && !string.IsNullOrWhiteSpace(worker.CardNumber) &&
             !TachoDriverIdentityRules.CardsMatch(driver.TachoCardNumber, worker.CardNumber)) return false;
+        // If the driver has a known SageHR number and TachoMaster sends a different PayrollNumber,
+        // they are not compatible (prevents wrong name merges when payroll numbers differ).
+        if (!string.IsNullOrWhiteSpace(driver.SageHrEmployeeNumber) &&
+            !string.IsNullOrWhiteSpace(worker.EmployeeNumber) &&
+            TachoDriverIdentityRules.NormaliseIdentifier(driver.SageHrEmployeeNumber) !=
+            TachoDriverIdentityRules.NormaliseIdentifier(worker.EmployeeNumber)) return false;
         return true;
     }
 
     private async Task MergeDuplicateAsync(Driver canonical, Driver duplicate, IReadOnlyCollection<StagedImport> detailRows, string actor, CancellationToken ct)
     {
         canonical.MobileNumber ??= duplicate.MobileNumber;
+        canonical.SageHrEmployeeNumber ??= duplicate.SageHrEmployeeNumber;
         canonical.DriverType ??= duplicate.DriverType;
         canonical.DriverGroup ??= duplicate.DriverGroup;
         canonical.Skills ??= duplicate.Skills;
@@ -528,6 +548,10 @@ public sealed class TachoDriverMasterSyncService(
         driver.TachoMasterDriverId = worker.MemberCode.ToString(CultureInfo.InvariantCulture);
         driver.TachoCardNumber = Clean(worker.CardNumber);
         driver.AgencyName = Clean(worker.AgencyName) ?? driver.AgencyName;
+        // If TachoMaster provides a PayrollNumber/EmployeeNumber AND the driver has no
+        // SageHrEmployeeNumber yet, populate it as the bridge identity for future syncs.
+        if (!string.IsNullOrWhiteSpace(worker.EmployeeNumber) && string.IsNullOrWhiteSpace(driver.SageHrEmployeeNumber))
+            driver.SageHrEmployeeNumber = Clip(worker.EmployeeNumber, 40);
         if (string.IsNullOrWhiteSpace(driver.DriverType) ||
             string.Equals(driver.DriverType, "Agency", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(driver.DriverType, "Casual", StringComparison.OrdinalIgnoreCase))

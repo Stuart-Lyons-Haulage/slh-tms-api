@@ -129,16 +129,22 @@ public sealed class IntegrationSyncCoordinator(
                 var id = Guid.NewGuid();
                 string? tachoName = null;
                 string? skills = null;
+                // SageHrEmployeeNumber stores the Sage HR payroll number separately from the
+                // TMS EmployeeNumber key. This allows the TachoMaster sync to use it as a
+                // bridge identity when TachoMaster's PayrollNumber matches Sage HR's number.
                 await db.Database.ExecuteSqlInterpolatedAsync($@"
-                    INSERT INTO dbo.Drivers (Id, EmployeeNumber, DisplayName, TachoName, MobileNumber, DriverType, DriverGroup, Skills, Active)
-                    VALUES ({id}, {employeeNumber}, {displayName}, {tachoName}, {mobileNumber}, {driverType}, {driverGroup}, {skills}, {true})", ct);
+                    INSERT INTO dbo.Drivers (Id, EmployeeNumber, DisplayName, TachoName, MobileNumber, DriverType, DriverGroup, Skills, SageHrEmployeeNumber, Active)
+                    VALUES ({id}, {employeeNumber}, {displayName}, {tachoName}, {mobileNumber}, {driverType}, {driverGroup}, {skills}, {employeeNumber}, {true})", ct);
                 existingNumbers.Add(employeeNumber);
                 created++;
             }
             else
             {
                 await db.Database.ExecuteSqlInterpolatedAsync($@"
-                    UPDATE dbo.Drivers SET DisplayName = {displayName}, MobileNumber = {mobileNumber}, DriverType = {driverType}, DriverGroup = {driverGroup}, Active = {true}
+                    UPDATE dbo.Drivers
+                    SET DisplayName = {displayName}, MobileNumber = {mobileNumber}, DriverType = {driverType},
+                        DriverGroup = {driverGroup}, Active = {true},
+                        SageHrEmployeeNumber = COALESCE(SageHrEmployeeNumber, {employeeNumber})
                     WHERE EmployeeNumber = {employeeNumber}", ct);
                 updated++;
             }

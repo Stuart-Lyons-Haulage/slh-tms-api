@@ -50,19 +50,26 @@ public sealed class Driver
     [MaxLength(80)] public string? DriverType { get; set; }
     [MaxLength(80)] public string? DriverGroup { get; set; }
     [MaxLength(160)] public string? Skills { get; set; }
-    [NotMapped, MaxLength(80)] public string? Coding { get; set; }
-    [NotMapped, MaxLength(160)] public string? AgencyName { get; set; }
     [NotMapped] public bool? NorthEligible { get; set; }
     [NotMapped] public bool? PreloadEligible { get; set; }
-    [NotMapped, MaxLength(500)] public string? Notes { get; set; }
     [MaxLength(80)] public string? TachoMasterDriverId { get; set; }
-    [NotMapped, MaxLength(80)] public string? TachoCardNumber { get; set; }
-    [NotMapped] public int? TachoDriveAvailableTodayMinutes { get; set; }
-    [NotMapped] public int? TachoDriveAvailableWeekMinutes { get; set; }
-    [NotMapped] public int? TachoWorkAvailableWeekMinutes { get; set; }
-    [NotMapped, MaxLength(80)] public string? DrivingLicenceNumber { get; set; }
-    [NotMapped] public DateOnly? LicenceExpiry { get; set; }
-    [NotMapped, MaxLength(40)] public string? LicenceStatus { get; set; }
+    // Promoted from [NotMapped] — real column as of migration 49
+    [MaxLength(80)] public string? TachoCardNumber { get; set; }
+    /// <summary>
+    /// Sage HR payroll/employee number. Separate from TachoMaster MemberCode.
+    /// Used as the bridge identity when a driver's Sage HR number and TachoMaster
+    /// MemberCode differ. Populated by the Sage HR sync job.
+    /// </summary>
+    [MaxLength(40)] public string? SageHrEmployeeNumber { get; set; }
+    [MaxLength(80)] public string? Coding { get; set; }
+    [MaxLength(160)] public string? AgencyName { get; set; }
+    [MaxLength(500)] public string? Notes { get; set; }
+    public int? TachoDriveAvailableTodayMinutes { get; set; }
+    public int? TachoDriveAvailableWeekMinutes { get; set; }
+    public int? TachoWorkAvailableWeekMinutes { get; set; }
+    [MaxLength(80)] public string? DrivingLicenceNumber { get; set; }
+    public DateOnly? LicenceExpiry { get; set; }
+    [MaxLength(40)] public string? LicenceStatus { get; set; }
     public DateTimeOffset? LastTachoSyncUtc { get; set; }
     public bool Active { get; set; } = true;
 }
