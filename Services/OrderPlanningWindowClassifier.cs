@@ -5,7 +5,7 @@ namespace Slh.Tms.Api.Services;
 
 public static class OrderPlanningWindowClassifier
 {
-    private static readonly string[] PmWords = [" pm ", "afternoon", "evening", "night", "overnight", "backhaul", "backload", "back haul", "back load", "pm load", "pm route"];
+    private static readonly string[] PmWords = ["pm", "afternoon", "evening", "night", "overnight", "backhaul", "backload", "back haul", "back load", "pm load", "pm route"];
     private static readonly string[] MarketWords = ["market", "covent", "spitalfields", "spit", "western international"];
 
     public static JsonElement Enrich(JsonElement payload)
@@ -123,8 +123,9 @@ public static class OrderPlanningWindowClassifier
     }
 
     private static bool HasCollectionAndDelivery(JsonElement payload) => DateOnlyOrNull(payload, "collectionDate") is not null && DateOnlyOrNull(payload, "deliveryDate") is not null;
-    private static bool ContainsAny(string value, IEnumerable<string> needles) => needles.Any(needle => value.Contains(Normalise(needle), StringComparison.Ordinal));
+    private static bool ContainsAny(string value, IEnumerable<string> needles) => needles.Any(needle => value.Contains(NormaliseToken(needle), StringComparison.Ordinal));
     private static string Normalise(string? value) => $" {new string((value ?? string.Empty).ToLowerInvariant().Select(ch => char.IsLetterOrDigit(ch) ? ch : ' ').ToArray())} ";
+    private static string NormaliseToken(string value) => $" {new string(value.ToLowerInvariant().Select(ch => char.IsLetterOrDigit(ch) ? ch : ' ').ToArray()).Trim()} ";
     private static string? Text(JsonElement payload, string name)
     {
         if (!TryGetProperty(payload, name, out var value)) return null;
