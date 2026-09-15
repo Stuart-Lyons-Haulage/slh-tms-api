@@ -16,7 +16,7 @@ public sealed class StagingQueueProjectionTests
             hasMore: true,
             records: new object[] { new { id = "staged-1" } });
 
-        var json = JsonSerializer.Serialize(page);
+        var json = JsonSerializer.Serialize(page, new JsonSerializerOptions(JsonSerializerDefaults.Web));
 
         Assert.Contains("\"page\":1", json);
         Assert.Contains("\"pageSize\":100", json);
