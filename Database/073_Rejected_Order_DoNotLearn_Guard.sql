@@ -24,7 +24,7 @@ BEGIN
              JSON_MODIFY(
                JSON_MODIFY(
                  JSON_MODIFY(
-                   CASE WHEN ISJSON(PayloadJson) = 1 THEN PayloadJson ELSE N'{}' END,
+                   CASE WHEN ISJSON(PayloadJson) = 1 THEN PayloadJson ELSE N'{{}}' END,
                    '$.doNotLearn', CAST(1 AS bit)),
                  '$.badParseExample', CAST(1 AS bit)),
                '$.learningEligible', CAST(0 AS bit)),
@@ -53,7 +53,7 @@ BEGIN
            JSON_MODIFY(
              JSON_MODIFY(
                JSON_MODIFY(
-                 CASE WHEN ISJSON(item.PayloadJson) = 1 THEN item.PayloadJson ELSE N'{}' END,
+                 CASE WHEN ISJSON(item.PayloadJson) = 1 THEN item.PayloadJson ELSE N'{{}}' END,
                  '$.doNotLearn', CAST(1 AS bit)),
                '$.badParseExample', CAST(1 AS bit)),
              '$.learningEligible', CAST(0 AS bit)),
@@ -112,7 +112,7 @@ BEGIN
              JSON_MODIFY(
                JSON_MODIFY(
                  JSON_MODIFY(
-                   CASE WHEN ISJSON(target.PayloadJson) = 1 THEN target.PayloadJson ELSE N'{}' END,
+                   CASE WHEN ISJSON(target.PayloadJson) = 1 THEN target.PayloadJson ELSE N'{{}}' END,
                    '$.doNotLearn', CAST(1 AS bit)),
                  '$.badParseExample', CAST(1 AS bit)),
                '$.learningEligible', CAST(0 AS bit)),
