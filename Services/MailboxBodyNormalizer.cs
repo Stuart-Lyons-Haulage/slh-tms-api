@@ -34,6 +34,9 @@ public static class MailboxBodyNormalizer
         foreach (var line in lines)
         {
             var trimmed = line.Trim();
+            if (IsStandaloneCountryLine(trimmed))
+                continue;
+
             var isStandaloneTown = trimmed.Length >= 3
                 && trimmed.Length <= 40
                 && Regex.IsMatch(trimmed, @"^[A-Z][A-Z -]+$");
@@ -46,4 +49,12 @@ public static class MailboxBodyNormalizer
 
         return string.Join("\n", kept).Trim();
     }
+
+    private static bool IsStandaloneCountryLine(string value) =>
+        value.Equals("UNITED KINGDOM", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("UK", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("GREAT BRITAIN", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("ENGLAND", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("SCOTLAND", StringComparison.OrdinalIgnoreCase) ||
+        value.Equals("WALES", StringComparison.OrdinalIgnoreCase);
 }
