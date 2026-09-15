@@ -9,8 +9,7 @@ public static class OrderSiteMasterAlignment
 {
     private static readonly TimeSpan SiteCacheDuration = TimeSpan.FromSeconds(45);
     private static readonly SemaphoreSlim SiteCacheLock = new(1, 1);
-    private static DateTimeOffset SiteCacheExpiresAtUtc;
-    private static IReadOnlyList<Site>? SiteCache;
+    private static readonly Dictionary<string, SiteCacheEntry> SiteCaches = new(StringComparer.Ordinal);
 
     public sealed record Alignment(
         string? CollectionName,
@@ -24,6 +23,7 @@ public static class OrderSiteMasterAlignment
         string? MarketSalesman = null);
 
     private sealed record MarketContext(string Market, string Customer, string? Stand, string? Salesman);
+    private sealed record SiteCacheEntry(DateTimeOffset ExpiresAtUtc, IReadOnlyList<Site> Sites);
 
     public static async Task<Alignment> ResolveAsync(TmsDbContext db, JsonElement payload, CancellationToken ct)
     {
@@ -109,29 +109,38 @@ public static class OrderSiteMasterAlignment
 
     private static async Task<List<Site>> LoadActiveSitesAsync(TmsDbContext db, CancellationToken ct)
     {
+        var cacheKey = SiteCacheKey(db);
         var now = DateTimeOffset.UtcNow;
-        var cached = SiteCache;
-        if (cached is not null && SiteCacheExpiresAtUtc > now)
-            return CloneSites(cached);
+        if (SiteCaches.TryGetValue(cacheKey, out var cached) && cached.ExpiresAtUtc > now)
+            return CloneSites(cached.Sites);
 
         await SiteCacheLock.WaitAsync(ct);
         try
         {
             now = DateTimeOffset.UtcNow;
-            cached = SiteCache;
-            if (cached is not null && SiteCacheExpiresAtUtc > now)
-                return CloneSites(cached);
+            if (SiteCaches.TryGetValue(cacheKey, out cached) && cached.ExpiresAtUtc > now)
+                return CloneSites(cached.Sites);
 
             var sites = await db.Sites.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
             await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
-            SiteCache = CloneSites(sites);
-            SiteCacheExpiresAtUtc = now.Add(SiteCacheDuration);
-            return CloneSites(SiteCache);
+            SiteCaches[cacheKey] = new SiteCacheEntry(now.Add(SiteCacheDuration), CloneSites(sites));
+            return CloneSites(SiteCaches[cacheKey].Sites);
         }
         finally
         {
             SiteCacheLock.Release();
         }
+    }
+
+    private static string SiteCacheKey(TmsDbContext db)
+    {
+        if (db.Database.IsRelational())
+            return $"relational:{db.Database.GetConnectionString() ?? db.Database.ProviderName ?? "unknown"}";
+
+        // Non-relational providers are mostly test hosts. Do not share cache across isolated
+        // in-memory contexts because that can make one test/order resolve against another
+        // database's temporary sites.
+        return $"context:{db.ContextId.InstanceId}";
     }
 
     private static List<Site> CloneSites(IEnumerable<Site> sites) => sites.Select(CloneSite).ToList();
