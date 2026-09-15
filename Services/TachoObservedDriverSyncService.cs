@@ -52,11 +52,7 @@ public sealed class TachoObservedDriverSyncService(
             .ThenBy(item => item.DriverName, StringComparer.OrdinalIgnoreCase))
         {
             var vehicleKey = NormaliseIdentifier(status.VehicleCode);
-            if (vehicleKey.Length == 0 || !knownVehicleKeys.Contains(vehicleKey))
-            {
-                skippedUnknownVehicle++;
-                continue;
-            }
+            var vehicleKnown = vehicleKey.Length > 0 && knownVehicleKeys.Contains(vehicleKey);
 
             var member = status.MemberCode > 0
                 ? status.MemberCode.ToString(System.Globalization.CultureInfo.InvariantCulture)
@@ -78,6 +74,13 @@ public sealed class TachoObservedDriverSyncService(
 
             if (driver is not null)
             {
+                if (!vehicleKnown)
+                {
+                    logger.LogWarning(
+                        "TachoMaster observed existing driver {Driver} in vehicle {Vehicle}, but that vehicle code did not match the active Vehicle Master aliases. Updating the known driver identity and skipping new-driver creation for this vehicle alias.",
+                        driver.DisplayName, status.VehicleCode);
+                }
+
                 if (!string.IsNullOrWhiteSpace(member)) driver.TachoMasterDriverId = member;
                 if (cardKey.Length > 0) driver.TachoCardNumber = status.CardNumber;
                 driver.TachoName = string.IsNullOrWhiteSpace(status.DriverName) ? driver.TachoName : status.DriverName.Trim();
@@ -87,6 +90,12 @@ public sealed class TachoObservedDriverSyncService(
                 driver.LastTachoSyncUtc = now;
                 await MasterDetailStore.SaveAsync(db, "driver", driver.EmployeeNumber, JsonSerializer.Serialize(driver), "TachoMaster live vehicle identity", actor, ct);
                 existing++;
+                continue;
+            }
+
+            if (!vehicleKnown)
+            {
+                skippedUnknownVehicle++;
                 continue;
             }
 
