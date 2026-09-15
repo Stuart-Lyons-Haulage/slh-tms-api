@@ -37,6 +37,7 @@ public static class MasterDataDuplicateReviewService
         if (type is "site" or "sites") return await FindSiteCandidatesAsync(db, ct);
         if (type is "driver" or "drivers") return await FindDriverCandidatesAsync(db, ct);
         if (type is "vehicle" or "vehicles") return await FindVehicleCandidatesAsync(db, ct);
+        if (type is "trailer" or "trailers") return await FindTrailerCandidatesAsync(db, ct);
         if (type is "market" or "markets") return await FindMarketCandidatesAsync(db, ct);
         return [];
     }
@@ -63,6 +64,7 @@ public static class MasterDataDuplicateReviewService
             "site" or "sites" => await MergeSitesAsync(db, request, actor, ct),
             "driver" or "drivers" => await MergeDriversAsync(db, request, actor, ct),
             "vehicle" or "vehicles" => await MergeVehiclesAsync(db, request, actor, ct),
+            "trailer" or "trailers" => await MergeTrailersAsync(db, request, actor, ct),
             "market" or "markets" => await MergeMarketsAsync(db, request, actor, ct),
             _ => new MasterDataDuplicateMergeResult(0, 0, [$"Unsupported duplicate entity type '{entityType}'."])
         };
@@ -125,6 +127,18 @@ public static class MasterDataDuplicateReviewService
             .Select(x => x.ToList())
             .ToList();
         return groups.Select(BuildVehicleCandidate).OrderByDescending(x => x.Confidence).ToList();
+    }
+
+    private static async Task<IReadOnlyList<MasterDataDuplicateCandidate>> FindTrailerCandidatesAsync(TmsDbContext db, CancellationToken ct)
+    {
+        var rows = await db.Trailers.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
+        var groups = rows
+            .Where(x => NormaliseRegistration(x.TrailerNumber).Length > 0)
+            .GroupBy(x => NormaliseRegistration(x.TrailerNumber), StringComparer.OrdinalIgnoreCase)
+            .Where(x => x.Count() > 1)
+            .Select(x => x.ToList())
+            .ToList();
+        return groups.Select(BuildTrailerCandidate).OrderByDescending(x => x.Confidence).ToList();
     }
 
     private static async Task<IReadOnlyList<MasterDataDuplicateCandidate>> FindMarketCandidatesAsync(TmsDbContext db, CancellationToken ct)
@@ -205,6 +219,23 @@ public static class MasterDataDuplicateReviewService
         return new MasterDataDuplicateMergeResult(duplicates.Count, duplicates.Count + 1, [$"Merged {duplicates.Count} vehicle duplicate(s) into {canonical.Registration}; fuel/card fields were preserved where available."]);
     }
 
+    private static async Task<MasterDataDuplicateMergeResult> MergeTrailersAsync(TmsDbContext db, MasterDataDuplicateMergeRequest request, string actor, CancellationToken ct)
+    {
+        var canonical = await db.Trailers.FirstOrDefaultAsync(x => x.Id == request.CanonicalId, ct);
+        if (canonical is null) return new MasterDataDuplicateMergeResult(0, 0, ["Canonical trailer was not found."]);
+        var duplicates = await db.Trailers.Where(x => request.DuplicateIds.Contains(x.Id) && x.Id != canonical.Id).ToListAsync(ct);
+        foreach (var duplicate in duplicates)
+        {
+            canonical.Type = Preserve(canonical.Type, duplicate.Type);
+            canonical.StandardCapacity ??= duplicate.StandardCapacity;
+            canonical.EuroCapacity ??= duplicate.EuroCapacity;
+            duplicate.Active = false;
+        }
+        db.MasterDataAudits.Add(new MasterDataAudit { EntityType = "Trailer", EntityId = canonical.Id, Action = "DuplicateMerge", ChangedBy = actor, ChangesJson = JsonSerializer.Serialize(new { canonical = canonical.TrailerNumber, merged = duplicates.Select(x => x.TrailerNumber), request.Note }) });
+        await db.SaveChangesAsync(ct);
+        return new MasterDataDuplicateMergeResult(duplicates.Count, duplicates.Count + 1, [$"Merged {duplicates.Count} trailer duplicate(s) into {canonical.TrailerNumber}; type and capacity fields were preserved where available."]);
+    }
+
     private static async Task<MasterDataDuplicateMergeResult> MergeMarketsAsync(TmsDbContext db, MasterDataDuplicateMergeRequest request, string actor, CancellationToken ct)
     {
         var canonical = await db.MarketContacts.FirstOrDefaultAsync(x => x.Id == request.CanonicalId, ct);
@@ -256,6 +287,13 @@ public static class MasterDataDuplicateReviewService
         return new MasterDataDuplicateCandidate(CandidateId($"vehicle:{canonical.Id}:{string.Join(',', duplicates.Select(x => x.Id))}"), "vehicles", 99, "Same normalised vehicle registration.", true, VehicleRecord(canonical), duplicates.Select(VehicleRecord).ToList(), ["fleetNumber", "abbreviation", "fuelProvider", "cabMobile", "fuelPin", "fuel cards"]);
     }
 
+    private static MasterDataDuplicateCandidate BuildTrailerCandidate(IReadOnlyList<Trailer> group)
+    {
+        var canonical = group.OrderByDescending(x => new object?[] { x.Type, x.StandardCapacity, x.EuroCapacity }.Count(v => v is not null && !string.IsNullOrWhiteSpace(v.ToString()))).ThenBy(x => x.TrailerNumber).First();
+        var duplicates = group.Where(x => x.Id != canonical.Id).ToList();
+        return new MasterDataDuplicateCandidate(CandidateId($"trailer:{canonical.Id}:{string.Join(',', duplicates.Select(x => x.Id))}"), "trailers", 99, "Same normalised trailer number.", true, TrailerRecord(canonical), duplicates.Select(TrailerRecord).ToList(), ["type", "standardCapacity", "euroCapacity"]);
+    }
+
     private static MasterDataDuplicateCandidate BuildMarketCandidate(IReadOnlyList<MarketContact> group)
     {
         var canonical = group.OrderByDescending(x => new[] { x.StandOrLocation, x.Salesman, x.Sender }.Count(v => !string.IsNullOrWhiteSpace(v))).ThenBy(x => x.Name).First();
@@ -297,6 +335,7 @@ public static class MasterDataDuplicateReviewService
     private static MasterDataDuplicateRecord SiteRecord(Site site) => new(site.Id, site.ExternalCode, site.Name, site.CollectionAddress, ExtractPostcode(site.CollectionAddress), site.Active, new Dictionary<string, object?> { ["driverTextName"] = site.DriverTextName, ["collectionInstructions"] = site.CollectionInstructions, ["mapLink"] = site.MapLink, ["latitude"] = site.Latitude, ["longitude"] = site.Longitude, ["aliases"] = site.Aliases, ["region"] = site.OperationalRegion });
     private static MasterDataDuplicateRecord DriverRecord(Driver row) => new(row.Id, row.EmployeeNumber, row.DisplayName, null, null, row.Active, new Dictionary<string, object?> { ["tachoMasterDriverId"] = row.TachoMasterDriverId, ["mobileNumber"] = row.MobileNumber, ["driverType"] = row.DriverType, ["driverGroup"] = row.DriverGroup, ["skills"] = row.Skills });
     private static MasterDataDuplicateRecord VehicleRecord(Vehicle row) => new(row.Id, row.Registration, row.Registration, null, null, row.Active, new Dictionary<string, object?> { ["fleetNumber"] = row.FleetNumber, ["abbreviation"] = row.Abbreviation, ["fuelProvider"] = row.FuelProvider, ["cabMobile"] = row.CabMobile, ["fuelPin"] = row.FuelPin, ["shellCard"] = row.ShellCard, ["bpRedCard"] = row.BpRedCard, ["bpPlainCard"] = row.BpPlainCard });
+    private static MasterDataDuplicateRecord TrailerRecord(Trailer row) => new(row.Id, row.TrailerNumber, row.TrailerNumber, null, null, row.Active, new Dictionary<string, object?> { ["type"] = row.Type, ["standardCapacity"] = row.StandardCapacity, ["euroCapacity"] = row.EuroCapacity });
     private static MasterDataDuplicateRecord MarketRecord(MarketContact row) => new(row.Id, row.MarketKey ?? row.Id.ToString("N"), $"{row.Market} / {row.Name}", null, null, row.Active, new Dictionary<string, object?> { ["market"] = row.Market, ["standOrLocation"] = row.StandOrLocation, ["salesman"] = row.Salesman, ["sender"] = row.Sender });
     private static int SiteCompleteness(Site site) => new object?[] { site.CollectionAddress, site.MapLink, site.Latitude, site.Longitude, site.CollectionInstructions, site.DriverTextName, site.Aliases, site.OperationalRegion }.Count(x => x is not null && !string.IsNullOrWhiteSpace(x.ToString()));
     private static string MergeAliases(Site canonical, IReadOnlyCollection<Site> duplicates) => string.Join(", ", new[] { canonical.Name, canonical.DriverTextName, canonical.Aliases }.Concat(duplicates.SelectMany(x => new[] { x.Name, x.DriverTextName, x.Aliases, x.ExternalCode })).Where(x => !string.IsNullOrWhiteSpace(x)).SelectMany(x => x!.Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)).Distinct(StringComparer.OrdinalIgnoreCase));
