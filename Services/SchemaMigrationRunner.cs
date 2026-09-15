@@ -267,19 +267,54 @@ public static class SchemaMigrationRunner
         ILogger logger,
         CancellationToken ct)
     {
+        var batches = SplitOnGo(migration.Sql);
+
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
         try
         {
-            await db.Database.ExecuteSqlRawAsync(migration.Sql, ct);
-            await db.Database.ExecuteSqlInterpolatedAsync($"""
-                INSERT INTO dbo.SchemaMigration (Version, Name, AppliedAtUtc, Checksum)
-                VALUES ({migration.Version}, {migration.Name}, SYSUTCDATETIME(), {migration.Checksum});
-                """, ct);
+            var connection = db.Database.GetDbConnection();
+
+            for (var batchIndex = 0; batchIndex < batches.Count; batchIndex++)
+            {
+                var batch = batches[batchIndex];
+                if (string.IsNullOrWhiteSpace(batch))
+                    continue;
+
+                logger.LogDebug(
+                    "Executing batch {BatchNumber}/{BatchTotal} of migration {Version} {MigrationName}.",
+                    batchIndex + 1, batches.Count, migration.Version, migration.Name);
+
+                using var command = connection.CreateCommand();
+                command.CommandText = batch;
+                command.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
+                command.CommandTimeout = 300;
+                await command.ExecuteNonQueryAsync(ct);
+            }
+
+            using var historyCommand = connection.CreateCommand();
+            historyCommand.CommandText =
+                "INSERT INTO dbo.SchemaMigration (Version, Name, AppliedAtUtc, Checksum) " +
+                "VALUES (@Version, @Name, SYSUTCDATETIME(), @Checksum);";
+            historyCommand.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
+            var pVersion = historyCommand.CreateParameter();
+            pVersion.ParameterName = "@Version";
+            pVersion.Value = migration.Version;
+            historyCommand.Parameters.Add(pVersion);
+            var pName = historyCommand.CreateParameter();
+            pName.ParameterName = "@Name";
+            pName.Value = migration.Name;
+            historyCommand.Parameters.Add(pName);
+            var pChecksum = historyCommand.CreateParameter();
+            pChecksum.ParameterName = "@Checksum";
+            pChecksum.Value = migration.Checksum;
+            historyCommand.Parameters.Add(pChecksum);
+            await historyCommand.ExecuteNonQueryAsync(ct);
+
             await transaction.CommitAsync(ct);
 
             logger.LogInformation(
-                "Applied schema migration {Version} {MigrationName} successfully.",
-                migration.Version, migration.Name);
+                "Applied schema migration {Version} {MigrationName} successfully ({BatchCount} batch(es)).",
+                migration.Version, migration.Name, batches.Count(b => !string.IsNullOrWhiteSpace(b)));
         }
         catch (Exception ex)
         {
@@ -306,6 +341,95 @@ public static class SchemaMigrationRunner
                 $"Required schema migration {migration.Version} ({migration.Name}) failed; application startup cannot continue.",
                 ex);
         }
+    }
+
+    /// <summary>
+    /// Splits a SQL script into batches on standalone GO lines while ignoring GO inside
+    /// string literals and comments.
+    /// </summary>
+    internal static IReadOnlyList<string> SplitOnGo(string sql)
+    {
+        if (!System.Text.RegularExpressions.Regex.IsMatch(sql, @"(?i)\bGO\b"))
+            return [sql];
+
+        var batches = new List<string>();
+        var current = new StringBuilder();
+        var inBlockComment = false;
+        var inString = false;
+
+        var lines = sql.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
+
+        foreach (var line in lines)
+        {
+            if (!inBlockComment && !inString &&
+                line.Trim().Equals("GO", StringComparison.OrdinalIgnoreCase))
+            {
+                batches.Add(current.ToString());
+                current.Clear();
+                continue;
+            }
+
+            var i = 0;
+            while (i < line.Length)
+            {
+                if (inBlockComment)
+                {
+                    if (i + 1 < line.Length && line[i] == '*' && line[i + 1] == '/')
+                    {
+                        inBlockComment = false;
+                        i += 2;
+                        continue;
+                    }
+
+                    i++;
+                    continue;
+                }
+
+                if (inString)
+                {
+                    if (line[i] == '\'')
+                    {
+                        if (i + 1 < line.Length && line[i + 1] == '\'')
+                        {
+                            i += 2;
+                            continue;
+                        }
+
+                        inString = false;
+                    }
+
+                    i++;
+                    continue;
+                }
+
+                if (i + 1 < line.Length && line[i] == '/' && line[i + 1] == '*')
+                {
+                    inBlockComment = true;
+                    i += 2;
+                    continue;
+                }
+
+                if (i + 1 < line.Length && line[i] == '-' && line[i + 1] == '-')
+                    break;
+
+                if (line[i] == '\'')
+                {
+                    inString = true;
+                    i++;
+                    continue;
+                }
+
+                i++;
+            }
+
+            if (inString)
+                inString = false;
+
+            current.AppendLine(line);
+        }
+
+        batches.Add(current.ToString());
+        return batches;
     }
 
     private static async Task<Dictionary<int, AppliedSchemaMigration>> ReadAppliedMigrationsAsync(
