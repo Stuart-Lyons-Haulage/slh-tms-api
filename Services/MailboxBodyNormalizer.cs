@@ -34,29 +34,6 @@ public static class MailboxBodyNormalizer
         foreach (var line in lines)
         {
             var trimmed = line.Trim();
-            var isStandaloneTown = trimmed.Length >= 3
-                && trimmed.Length <= 40
-                && Regex.IsMatch(trimmed, @"^[A-Z][A-Z -]+$");
-
-            if (isStandaloneTown && kept.TakeLast(6).Any(previous => previous.Contains(trimmed, StringComparison.OrdinalIgnoreCase)))
-                continue;
-
-            kept.Add(line);
-        }
-
-        return string.Join("\n", kept).Trim();
-    }
-
-    private static string RemoveDuplicateStandaloneTownLines(string value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
-
-        var lines = value.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
-        var kept = new List<string>();
-
-        foreach (var line in lines)
-        {
-            var trimmed = line.Trim();
             if (IsStandaloneCountryLine(trimmed))
                 continue;
 
