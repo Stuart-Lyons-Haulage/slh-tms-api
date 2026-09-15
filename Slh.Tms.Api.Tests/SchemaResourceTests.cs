@@ -31,6 +31,9 @@ public sealed class SchemaResourceTests
         Assert.Contains("Slh.Tms.Api.Database.000_Operational_Storage_Recovery.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.060_TachoMaster_Job_Managed_Identity.sql", resources);
         Assert.Contains("Slh.Tms.Api.Database.061_Email_Intake_Mapping_V2.sql", resources);
+        Assert.Contains("Slh.Tms.Api.Database.071_InfoMailbox_Market_Waitrose_Coop_MasterData.sql", resources);
+        Assert.Contains("Slh.Tms.Api.Database.072_Rescue_Aldi_Atherstone_Morrisons_Sittingbourne_PreOrders.sql", resources);
+        Assert.Contains("Slh.Tms.Api.Database.073_Rejected_Order_DoNotLearn_Guard.sql", resources);
     }
 
     [Fact]
@@ -43,33 +46,41 @@ public sealed class SchemaResourceTests
         var migrations = SchemaMigrationRunner.GetMigrations();
 
         Assert.Equal(resources.Length, migrations.Count);
-        Assert.Equal(62, migrations.Count);
+        Assert.Equal(65, migrations.Count);
         Assert.Equal(Enumerable.Range(1, migrations.Count), migrations.Select(migration => migration.Version));
         Assert.Equal(
             resources,
             migrations.Select(migration => migration.ResourceName).OrderBy(name => name, StringComparer.Ordinal));
         Assert.All(migrations, migration => Assert.Matches("^[0-9A-F]{64}$", migration.Checksum));
-        Assert.Equal("037_Driver_Tacho_Identity.sql", migrations[^21].Name);
-        Assert.Equal("038_Driver_Tacho_Identity_Repair.sql", migrations[^20].Name);
-        Assert.Equal("039_Canonical_Relational_Planning.sql", migrations[^19].Name);
-        Assert.Equal("040_Audit_Outbox.sql", migrations[^18].Name);
-        Assert.Equal("041_Distributed_Integration_Lease.sql", migrations[^17].Name);
-        Assert.Equal("042_Operational_Read_Performance_Indexes.sql", migrations[^16].Name);
-        Assert.Equal("043_Customer_Site_Crm_Links.sql", migrations[^15].Name);
-        Assert.Equal("044_Market_Read_Only_Map.sql", migrations[^14].Name);
-        Assert.Equal("045_Customer_Contacts_Master_Projection.sql", migrations[^13].Name);
-        Assert.Equal("046_Driver_Card_Read_And_Source_Detail.sql", migrations[^12].Name);
-        Assert.Equal("047_Market_Seller_Stand_Duplicates.sql", migrations[^11].Name);
-        Assert.Equal("048_Customer_Email_Route_Market_Key.sql", migrations[^10].Name);
-        Assert.Equal("049_Market_Contact_Stable_Key_And_Stands.sql", migrations[^9].Name);
-        Assert.Equal("050_Master_Vehicle_Source_Detail.sql", migrations[^8].Name);
-        Assert.Equal("051_Vehicle_Source_Detail.sql", migrations[^7].Name);
-        Assert.Equal("052_Email_Intake_Fast_Path.sql", migrations[^6].Name);
-        Assert.Equal("058_Operational_Compliance_Fields.sql", migrations[^5].Name);
-        Assert.Equal("059_RoadTech_Operational_Visits.sql", migrations[^4].Name);
-        Assert.Equal("060_TachoMaster_Job_Managed_Identity.sql", migrations[^3].Name);
-        Assert.Equal("061_Email_Intake_Mapping_V2.sql", migrations[^2].Name);
-        Assert.Equal("062_Distributed_Integration_Lease_Heartbeat.sql", migrations[^1].Name);
+
+        var expectedTail = new[]
+        {
+            "037_Driver_Tacho_Identity.sql",
+            "038_Driver_Tacho_Identity_Repair.sql",
+            "039_Canonical_Relational_Planning.sql",
+            "040_Audit_Outbox.sql",
+            "041_Distributed_Integration_Lease.sql",
+            "042_Operational_Read_Performance_Indexes.sql",
+            "043_Customer_Site_Crm_Links.sql",
+            "044_Market_Read_Only_Map.sql",
+            "045_Customer_Contacts_Master_Projection.sql",
+            "046_Driver_Card_Read_And_Source_Detail.sql",
+            "047_Market_Seller_Stand_Duplicates.sql",
+            "048_Customer_Email_Route_Market_Key.sql",
+            "049_Market_Contact_Stable_Key_And_Stands.sql",
+            "050_Master_Vehicle_Source_Detail.sql",
+            "051_Vehicle_Source_Detail.sql",
+            "052_Email_Intake_Fast_Path.sql",
+            "058_Operational_Compliance_Fields.sql",
+            "059_RoadTech_Operational_Visits.sql",
+            "060_TachoMaster_Job_Managed_Identity.sql",
+            "061_Email_Intake_Mapping_V2.sql",
+            "062_Distributed_Integration_Lease_Heartbeat.sql",
+            "071_InfoMailbox_Market_Waitrose_Coop_MasterData.sql",
+            "072_Rescue_Aldi_Atherstone_Morrisons_Sittingbourne_PreOrders.sql",
+            "073_Rejected_Order_DoNotLearn_Guard.sql"
+        };
+        Assert.Equal(expectedTail, migrations.TakeLast(expectedTail.Length).Select(migration => migration.Name));
     }
 
     [Fact]
