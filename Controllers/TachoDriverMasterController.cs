@@ -15,9 +15,23 @@ public sealed class TachoDriverMasterController(
     [Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> Sync(CancellationToken ct)
     {
-        var actor = User.Identity?.Name ?? "TMS user";
+        var actor = User.Identity?.Name ?? User.FindFirst("preferred_username")?.Value ?? "TMS user";
+        var recovered = await jobs.RecoverInterruptedAsync($"manual:{actor}", ct);
         var job = await jobs.EnqueueAsync(actor, ct);
-        return AcceptedAtAction(nameof(SyncStatus), new { jobId = job.JobId }, job);
+        var response = new
+        {
+            job.JobId,
+            job.Status,
+            job.RequestedAtUtc,
+            job.StartedAtUtc,
+            job.CompletedAtUtc,
+            Message = recovered > 0
+                ? $"Recovered {recovered} stale TachoMaster Driver Master sync job(s) and queued a fresh reconcile."
+                : job.Message,
+            job.Result,
+            recoveredStaleJobs = recovered
+        };
+        return AcceptedAtAction(nameof(SyncStatus), new { jobId = job.JobId }, response);
     }
 
     [HttpGet("tachomaster/sync/{jobId:guid}")]
