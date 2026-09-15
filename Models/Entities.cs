@@ -23,6 +23,8 @@ public sealed class CustomerEmailRoute
     [MaxLength(200)] public string? SubjectContains { get; set; }
     [MaxLength(120)] public string? ParserType { get; set; }
     [MaxLength(80)] public string? DefaultSiteCode { get; set; }
+    [MaxLength(80)] public string? DefaultDeliverySiteCode { get; set; }
+    [MaxLength(160)] public string? MarketKey { get; set; }
     public bool RequiresReview { get; set; } = true;
     public bool Active { get; set; } = true;
 }
@@ -40,6 +42,9 @@ public sealed class Vehicle
 {
     public Guid Id { get; set; } = Guid.NewGuid();
     [MaxLength(20)] public required string Registration { get; set; }
+    [MaxLength(40)] public string? VIN { get; set; }
+    [MaxLength(80)] public string? OwnerType { get; set; }
+    [MaxLength(160)] public string? VehicleSite { get; set; }
     [MaxLength(40)] public string? FleetNumber { get; set; }
     [MaxLength(20)] public string? Abbreviation { get; set; }
     [MaxLength(20)] public string? Transmission { get; set; }
@@ -53,6 +58,9 @@ public sealed class Vehicle
     [MaxLength(500)] public string? Notes { get; set; }
     [MaxLength(120)] public string? FuelPinSecretName { get; set; }
     [MaxLength(4)] public string? FuelCardLastFour { get; set; }
+    public DateOnly? MOTExpiry { get; set; }
+    public DateOnly? TachoCalibrationExpiry { get; set; }
+    public DateOnly? VehicleTestExpiry { get; set; }
     [MaxLength(80)] public string? FleetioId { get; set; }
     [MaxLength(160)] public string? FleetioName { get; set; }
     [MaxLength(80)] public string? FleetioStatus { get; set; }
@@ -86,8 +94,11 @@ public sealed class Driver
     [NotMapped] public int? TachoDriveAvailableTodayMinutes { get; set; }
     [NotMapped] public int? TachoDriveAvailableWeekMinutes { get; set; }
     [NotMapped] public int? TachoWorkAvailableWeekMinutes { get; set; }
-    [NotMapped, MaxLength(80)] public string? DrivingLicenceNumber { get; set; }
-    [NotMapped] public DateOnly? LicenceExpiry { get; set; }
+    [MaxLength(80)] public string? DrivingLicenceNumber { get; set; }
+    public DateOnly? LicenceExpiry { get; set; }
+    public DateOnly? CPCExpiry { get; set; }
+    public DateOnly? DigitalTachoCardExpiry { get; set; }
+    public DateOnly? MedicalExpiry { get; set; }
     [NotMapped, MaxLength(40)] public string? LicenceStatus { get; set; }
     public DateTimeOffset? LastTachoSyncUtc { get; set; }
     public bool Active { get; set; } = true;
@@ -124,6 +135,7 @@ public sealed class Site
 public sealed class MarketContact
 {
     public Guid Id { get; set; } = Guid.NewGuid();
+    [MaxLength(160)] public string? MarketKey { get; set; }
     [MaxLength(80)] public required string Market { get; set; }
     [MaxLength(200)] public required string Name { get; set; }
     [MaxLength(200)] public string? StandOrLocation { get; set; }

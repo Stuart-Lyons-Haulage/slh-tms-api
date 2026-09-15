@@ -1,0 +1,53 @@
+name: One-shot - Final production integration verification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/live-final-verification.yml'
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  RG: slh-tms-prod-rg
+  API_BASE: https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+  TACHO_JOB: slh-tms-job-tachomaster
+
+jobs:
+  diagnose-live-tacho:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 15
+    steps:
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Execute Tacho job and capture container output
+        shell: bash
+        run: |
+          set -euo pipefail
+          container="$(az containerapp job show -n "$TACHO_JOB" -g "$RG" --query 'properties.template.containers[0].name' -o tsv)"
+          image="$(az containerapp job show -n "$TACHO_JOB" -g "$RG" --query 'properties.template.containers[0].image' -o tsv)"
+          echo "container=$container image=$image"
+          execution="$(az containerapp job start -n "$TACHO_JOB" -g "$RG" --query name -o tsv)"
+          echo "execution=$execution"
+          state=""
+          for attempt in $(seq 1 60); do
+            state="$(az containerapp job execution show -n "$TACHO_JOB" -g "$RG" --job-execution-name "$execution" --query properties.status -o tsv 2>/dev/null || true)"
+            echo "status=${state:-unknown}"
+            case "$state" in Succeeded|Failed) break ;; esac
+            sleep 10
+          done
+          echo '--- execution shape ---'
+          az containerapp job execution show -n "$TACHO_JOB" -g "$RG" --job-execution-name "$execution" -o json | jq '{name,properties:{status:.properties.status,startTime:.properties.startTime,endTime:.properties.endTime,template:.properties.template}}'
+          echo '--- container output ---'
+          az config set extension.dynamic_install_allow_preview=true >/dev/null
+          az containerapp job logs show -n "$TACHO_JOB" -g "$RG" --execution "$execution" --container "$container" --tail 200 --format text || true
+          echo '--- live Driver Master ---'
+          curl -fsS --max-time 60 -H 'Cache-Control: no-cache' "$API_BASE/api/v1/health/driver-master" | jq '{activeDrivers,sourceWorkers,populationAligned,duplicateMemberGroups,duplicateCardGroups,activeWithoutMember,activeWithoutCard,latestCanonicalSyncUtc}'
+          test "$state" = Succeeded

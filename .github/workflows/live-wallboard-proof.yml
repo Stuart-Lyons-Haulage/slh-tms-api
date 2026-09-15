@@ -1,0 +1,70 @@
+name: One-shot - Production wallboard proof
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/live-wallboard-proof.yml'
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  RG: slh-tms-prod-rg
+  API_APP: slh-tms-api-prod
+  API_BASE: https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+
+jobs:
+  wallboard-proof:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Exercise live board feeds across operating dates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics
+          secrets="$(az containerapp secret list -n "$API_APP" -g "$RG" --show-values -o json)"
+          key="$(jq -r '[.[]|select(.name=="tv-wallboard-access-key")][0].value // empty' <<<"$secrets")"
+          test ${#key} -ge 24
+          base="$(TZ=Europe/London date +%F)"
+          tmp="$(mktemp -d)"
+          echo '[]' > "$tmp/dates.json"
+          call() { curl -sS --max-time 90 -H 'Cache-Control: no-cache' -H "X-TMS-TV-Key: $key" -H "X-TV-Display-Key: $key" "$API_BASE$1"; }
+          for offset in -3 -2 -1 0 1 2 3; do
+            d="$(date -d "$base $offset day" +%F)"
+            call "/api/v1/operations/wallboard-source-health?date=$d" > "$tmp/source.json"
+            call "/api/v1/tv-display/planned-runs?date=$d" > "$tmp/planned.json"
+            call "/api/v1/tv-display/route-progress?date=$d" > "$tmp/route.json"
+            call "/api/v1/run-timing?date=$d" > "$tmp/timing.json"
+            call "/api/v1/health/run-evidence?date=$d" > "$tmp/evidence.json"
+            jq --arg d "$d" --slurpfile src "$tmp/source.json" --slurpfile p "$tmp/planned.json" --slurpfile r "$tmp/route.json" --slurpfile t "$tmp/timing.json" --slurpfile e "$tmp/evidence.json" \
+              '. + [{date:$d,importedPlanRuns:($src[0].importedPlanRuns//-1),wallboardRuns:($src[0].wallboardRuns//-1),allImportedRunsVisible:($src[0].allImportedRunsVisible//false),plannedRunCount:(if ($p[0]|type)=="array" then ($p[0]|length) else (($p[0].runs//[])|length) end),routeProgressRunCount:(($r[0].runs//[])|length),runTimingRecordCount:(($t[0].records//[])|length),latestTrackingUtc:($r[0].latestTrackingUtc//null),tachoWarning:($r[0].tachoWarning//null),plannedVehicleCount:($e[0].tracking.plannedVehicleCount//0),vehiclesWithRecentSamples:($e[0].tracking.vehiclesWithRecentSamples//0),vehiclesWithNoSamples:($e[0].tracking.vehiclesWithNoSamples//0),plannedStops:($e[0].geofences.plannedStops//0),linkedStops:($e[0].geofences.linkedStopCount//0),configuredLinkedRunCount:($e[0].geofences.configuredLinkedRunCount//0),evidenceGapCount:($e[0].evidenceGapCount//0)}]' "$tmp/dates.json" > "$tmp/next.json"
+            mv "$tmp/next.json" "$tmp/dates.json"
+          done
+          jq -n --arg checked "$(date -u +%FT%TZ)" --slurpfile dates "$tmp/dates.json" '{checkedAtUtc:$checked,dates:$dates[0]}' > diagnostics/live-wallboard-proof.json
+          # We require at least one nearby operating date with imported runs and full wallboard visibility/feed parity.
+          active_ok="$(jq '[.dates[] | select(.importedPlanRuns>0 and .allImportedRunsVisible==true and .plannedRunCount>0 and .routeProgressRunCount>0 and .runTimingRecordCount>0)] | length' diagnostics/live-wallboard-proof.json)"
+          test "$active_ok" -gt 0
+      - name: Commit wallboard evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f diagnostics/live-wallboard-proof.json || exit 0
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add diagnostics/live-wallboard-proof.json
+          git commit -m 'Record production wallboard route summary proof' || exit 0
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main

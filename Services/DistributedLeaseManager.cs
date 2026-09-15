@@ -16,6 +16,8 @@ public static class IntegrationLeaseNames
 /// crash recovery; release is owner-qualified so an expired/reacquired lease cannot be
 /// accidentally removed by the previous owner finishing late.
 /// </summary>
+public sealed record DistributedLeaseStatus(string LeaseId, string OwnerInstanceId, string RunId, DateTimeOffset AcquiredAtUtc, DateTimeOffset HeartbeatUtc, DateTimeOffset ExpiresAtUtc, bool IsStale);
+
 public sealed class DistributedLeaseManager(TmsDbContext db, ILogger<DistributedLeaseManager> logger)
 {
     private readonly string _instanceId = $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.NewGuid():N}";
@@ -23,6 +25,7 @@ public sealed class DistributedLeaseManager(TmsDbContext db, ILogger<Distributed
     public async Task<DistributedLeaseHandle?> TryAcquireAsync(string leaseId, TimeSpan duration, CancellationToken ct)
     {
         Validate(leaseId, duration);
+        var runId = Guid.NewGuid().ToString("N");
         var connection = db.Database.GetDbConnection();
         var openedHere = connection.State != ConnectionState.Open;
         if (openedHere) await connection.OpenAsync(ct);
@@ -40,10 +43,12 @@ DECLARE @acquired bit = 0;
 
 UPDATE dbo.DistributedLease WITH (UPDLOCK, HOLDLOCK)
 SET AcquiredAt = @now,
+    HeartbeatAt = @now,
     ExpiresAt = @expires,
-    InstanceId = @instanceId
+    InstanceId = @instanceId,
+    RunId = @runId
 WHERE LeaseId = @leaseId
-  AND (ExpiresAt <= @now OR InstanceId = @instanceId);
+  AND ExpiresAt <= @now;
 
 IF @@ROWCOUNT = 1
 BEGIN
@@ -51,8 +56,8 @@ BEGIN
 END
 ELSE IF NOT EXISTS (SELECT 1 FROM dbo.DistributedLease WITH (UPDLOCK, HOLDLOCK) WHERE LeaseId = @leaseId)
 BEGIN
-    INSERT dbo.DistributedLease (LeaseId, AcquiredAt, ExpiresAt, InstanceId)
-    VALUES (@leaseId, @now, @expires, @instanceId);
+    INSERT dbo.DistributedLease (LeaseId, AcquiredAt, HeartbeatAt, ExpiresAt, InstanceId, RunId)
+    VALUES (@leaseId, @now, @now, @expires, @instanceId, @runId);
     SET @acquired = 1;
 END;
 
@@ -61,6 +66,7 @@ SELECT @acquired;
 """;
             AddParameter(command, "@leaseId", leaseId);
             AddParameter(command, "@instanceId", _instanceId);
+            AddParameter(command, "@runId", runId);
             AddParameter(command, "@leaseSeconds", checked((int)Math.Ceiling(duration.TotalSeconds)));
             var result = await command.ExecuteScalarAsync(ct);
             var acquired = result is not null && result != DBNull.Value && Convert.ToBoolean(result);
@@ -72,7 +78,7 @@ SELECT @acquired;
 
             logger.LogInformation("DistributedLeaseAcquired LeaseId={LeaseId} InstanceId={InstanceId} DurationSeconds={DurationSeconds}",
                 leaseId, _instanceId, duration.TotalSeconds);
-            return new DistributedLeaseHandle(this, leaseId, _instanceId);
+            return new DistributedLeaseHandle(this, leaseId, _instanceId, runId, duration);
         }
         finally
         {
@@ -80,7 +86,7 @@ SELECT @acquired;
         }
     }
 
-    internal async Task ReleaseAsync(string leaseId, string instanceId, CancellationToken ct)
+    public async Task<DistributedLeaseStatus?> GetStatusAsync(string leaseId, CancellationToken ct)
     {
         var connection = db.Database.GetDbConnection();
         var openedHere = connection.State != ConnectionState.Open;
@@ -88,9 +94,42 @@ SELECT @acquired;
         try
         {
             await using var command = connection.CreateCommand();
-            command.CommandText = "DELETE FROM dbo.DistributedLease WHERE LeaseId = @leaseId AND InstanceId = @instanceId;";
+            command.CommandText = "SELECT LeaseId, InstanceId, RunId, AcquiredAt, HeartbeatAt, ExpiresAt, CASE WHEN ExpiresAt <= SYSUTCDATETIME() THEN CAST(1 AS bit) ELSE CAST(0 AS bit) END FROM dbo.DistributedLease WHERE LeaseId = @leaseId;";
+            AddParameter(command, "@leaseId", leaseId);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct)) return null;
+            return new DistributedLeaseStatus(reader.GetString(0), reader.GetString(1), reader.GetString(2), new DateTimeOffset(reader.GetDateTime(3), TimeSpan.Zero), new DateTimeOffset(reader.GetDateTime(4), TimeSpan.Zero), new DateTimeOffset(reader.GetDateTime(5), TimeSpan.Zero), reader.GetBoolean(6));
+        }
+        finally { if (openedHere) await connection.CloseAsync(); }
+    }
+
+    internal async Task<bool> RenewAsync(string leaseId, string instanceId, string runId, TimeSpan duration, CancellationToken ct)
+    {
+        var connection = db.Database.GetDbConnection();
+        var openedHere = connection.State != ConnectionState.Open;
+        if (openedHere) await connection.OpenAsync(ct);
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "DECLARE @now datetime2(7) = SYSUTCDATETIME(); UPDATE dbo.DistributedLease SET HeartbeatAt = @now, ExpiresAt = DATEADD(SECOND, @leaseSeconds, @now) WHERE LeaseId = @leaseId AND InstanceId = @instanceId AND RunId = @runId AND ExpiresAt > @now;";
+            AddParameter(command, "@leaseId", leaseId); AddParameter(command, "@instanceId", instanceId); AddParameter(command, "@runId", runId); AddParameter(command, "@leaseSeconds", checked((int)Math.Ceiling(duration.TotalSeconds)));
+            return await command.ExecuteNonQueryAsync(ct) == 1;
+        }
+        finally { if (openedHere) await connection.CloseAsync(); }
+    }
+
+    internal async Task ReleaseAsync(string leaseId, string instanceId, string runId, CancellationToken ct)
+    {
+        var connection = db.Database.GetDbConnection();
+        var openedHere = connection.State != ConnectionState.Open;
+        if (openedHere) await connection.OpenAsync(ct);
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "DELETE FROM dbo.DistributedLease WHERE LeaseId = @leaseId AND InstanceId = @instanceId AND RunId = @runId;";
             AddParameter(command, "@leaseId", leaseId);
             AddParameter(command, "@instanceId", instanceId);
+            AddParameter(command, "@runId", runId);
             var released = await command.ExecuteNonQueryAsync(ct);
             logger.LogInformation("DistributedLeaseReleased LeaseId={LeaseId} InstanceId={InstanceId} ReleasedRows={ReleasedRows}",
                 leaseId, instanceId, released);
@@ -123,19 +162,53 @@ public sealed class DistributedLeaseHandle : IAsyncDisposable
     private readonly DistributedLeaseManager _manager;
     private readonly string _leaseId;
     private readonly string _instanceId;
+    private readonly string _runId;
+    private readonly TimeSpan _duration;
+    private readonly CancellationTokenSource _lost = new();
+    private readonly CancellationTokenSource _renewalStop = new();
+    private readonly Task _renewal;
     private int _released;
 
-    internal DistributedLeaseHandle(DistributedLeaseManager manager, string leaseId, string instanceId)
+    internal DistributedLeaseHandle(DistributedLeaseManager manager, string leaseId, string instanceId, string runId, TimeSpan duration)
     {
         _manager = manager;
         _leaseId = leaseId;
         _instanceId = instanceId;
+        _runId = runId;
+        _duration = duration;
+        _renewal = RenewUntilReleasedAsync();
+    }
+
+    /// <summary>Cancelled if SQL refuses a conditional heartbeat; callers must stop work promptly.</summary>
+    public CancellationToken LostToken => _lost.Token;
+
+    private async Task RenewUntilReleasedAsync()
+    {
+        var interval = TimeSpan.FromSeconds(Math.Max(5, Math.Min(30, _duration.TotalSeconds / 3)));
+        try
+        {
+            while (!_renewalStop.IsCancellationRequested)
+            {
+                await Task.Delay(interval, _renewalStop.Token);
+                if (!await _manager.RenewAsync(_leaseId, _instanceId, _runId, _duration, _renewalStop.Token))
+                {
+                    _lost.Cancel();
+                    return;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (_renewalStop.IsCancellationRequested) { }
+        catch { _lost.Cancel(); }
     }
 
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _released, 1) != 0) return;
-        try { await _manager.ReleaseAsync(_leaseId, _instanceId, CancellationToken.None); }
+        _renewalStop.Cancel();
+        try { await _renewal; } catch { }
+        try { await _manager.ReleaseAsync(_leaseId, _instanceId, _runId, CancellationToken.None); }
         catch { /* Expiry still guarantees recovery if release cannot reach SQL. */ }
+        _renewalStop.Dispose();
+        _lost.Dispose();
     }
 }

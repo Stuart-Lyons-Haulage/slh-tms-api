@@ -39,14 +39,19 @@ public static class SchemaMigrationRunner
 {
     private const string ResourcePrefix = "Slh.Tms.Api.Database.";
     private const string MigrationLockResource = "SLH.TMS.SchemaMigration";
-    // These migrations are additive CRM/read-model maintenance. They must not prevent
-    // the API from starting when SQL permissions or lock duration make the change
-    // unsuitable for the deployment readiness window. They remain registered and
-    // checksum-protected, but are applied by the maintenance runner.
+    internal const string MarketContactsStableKeyPreparationSql = """
+        IF OBJECT_ID(N'dbo.MarketContacts', N'U') IS NOT NULL
+           AND COL_LENGTH(N'dbo.MarketContacts', N'MarketKey') IS NULL
+        BEGIN
+            ALTER TABLE dbo.MarketContacts ADD MarketKey nvarchar(160) NULL;
+        END;
+        """;
+    private const string MarketContactsStableKeyMigration = "049_Market_Contact_Stable_Key_And_Stands.sql";
     private static readonly IReadOnlySet<string> DeferredStartupMigrations = new HashSet<string>(StringComparer.Ordinal)
     {
         "042_Operational_Read_Performance_Indexes.sql",
-        "043_Customer_Site_Crm_Links.sql"
+        "043_Customer_Site_Crm_Links.sql",
+        "060_TachoMaster_Job_Managed_Identity.sql"
     };
 
     private static readonly string[] OrderedMigrationFiles =
@@ -100,7 +105,19 @@ public static class SchemaMigrationRunner
         "042_Operational_Read_Performance_Indexes.sql",
         "043_Customer_Site_Crm_Links.sql",
         "044_Market_Read_Only_Map.sql",
-        "045_Customer_Contacts_Master_Projection.sql"
+        "045_Customer_Contacts_Master_Projection.sql",
+        "046_Driver_Card_Read_And_Source_Detail.sql",
+        "047_Market_Seller_Stand_Duplicates.sql",
+        "048_Customer_Email_Route_Market_Key.sql",
+        "049_Market_Contact_Stable_Key_And_Stands.sql",
+        "050_Master_Vehicle_Source_Detail.sql",
+        "051_Vehicle_Source_Detail.sql",
+        "052_Email_Intake_Fast_Path.sql",
+        "058_Operational_Compliance_Fields.sql",
+        "059_RoadTech_Operational_Visits.sql",
+        "060_TachoMaster_Job_Managed_Identity.sql",
+        "061_Email_Intake_Mapping_V2.sql",
+        "062_Distributed_Integration_Lease_Heartbeat.sql"
     ];
 
     internal const string HistoryTableSql = """
@@ -192,11 +209,6 @@ public static class SchemaMigrationRunner
                         continue;
                     }
 
-                    // Index builds over large live tracking/operational tables are online maintenance,
-                    // not a prerequisite for correctness. Running them synchronously during API process
-                    // startup can keep a zero-traffic candidate revision unhealthy until Azure rolls it
-                    // back. Preserve the immutable catalogue/checksum so environments where it already
-                    // completed still validate, but defer a pending copy to a maintenance window/job.
                     if (DeferredStartupMigrations.Contains(migration.Name))
                     {
                         logger.LogWarning(
@@ -208,6 +220,14 @@ public static class SchemaMigrationRunner
                     logger.LogInformation(
                         "Applying required schema migration {Version} {MigrationName} ({Checksum}).",
                         migration.Version, migration.Name, migration.Checksum);
+
+                    if (string.Equals(migration.Name, MarketContactsStableKeyMigration, StringComparison.Ordinal))
+                    {
+                        logger.LogInformation(
+                            "Applying additive MarketContacts.MarketKey compatibility preparation before migration {Version}.",
+                            migration.Version);
+                        await db.Database.ExecuteSqlRawAsync(MarketContactsStableKeyPreparationSql, ct);
+                    }
 
                     await ApplySingleMigrationAsync(db, migration, logger, ct);
                     appliedCount++;
@@ -315,11 +335,6 @@ public static class SchemaMigrationRunner
         {
             if (!applied.ContainsKey(version))
             {
-                // Migration 042 is deliberately deferred from API startup: it
-                // builds non-essential indexes on live operational tables. A
-                // later, required migration may therefore be registered while
-                // this maintenance item remains pending. That is an intentional
-                // and auditable gap, not out-of-order schema application.
                 if (migrationByVersion.TryGetValue(version, out var missingMigration) &&
                     DeferredStartupMigrations.Contains(missingMigration.Name))
                     continue;
@@ -328,39 +343,42 @@ public static class SchemaMigrationRunner
             }
         }
 
-        foreach (var history in applied.Values.OrderBy(item => item.Version))
+        foreach (var pair in applied.OrderBy(pair => pair.Key))
         {
-            if (!migrationByVersion.TryGetValue(history.Version, out var migration))
+            if (!migrationByVersion.TryGetValue(pair.Key, out var expected))
                 throw new InvalidOperationException(
-                    $"Database contains schema migration version {history.Version} ({history.Name}) which is unknown to this application build. " +
-                    "The database is newer than, or incompatible with, this build.");
+                    $"SchemaMigration history contains unknown version {pair.Key} ({pair.Value.Name}).");
 
-            if (!string.Equals(history.Name, migration.Name, StringComparison.Ordinal))
+            var actual = pair.Value;
+            if (!string.Equals(actual.Name, expected.Name, StringComparison.Ordinal))
                 throw new InvalidOperationException(
-                    $"Schema migration version {history.Version} name mismatch. Database has '{history.Name}', application expects '{migration.Name}'.");
+                    $"SchemaMigration version {pair.Key} name mismatch. Database has {actual.Name}; application expects {expected.Name}.");
 
-            if (!string.Equals(history.Checksum, migration.Checksum, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(actual.Checksum, expected.Checksum, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException(
-                    $"Schema migration version {history.Version} ({history.Name}) checksum mismatch. " +
-                    $"Database has {history.Checksum}, application expects {migration.Checksum}. Applied migrations are immutable.");
+                    $"SchemaMigration version {pair.Key} checksum mismatch for {expected.Name}. Database has {actual.Checksum}; application expects {expected.Checksum}.");
         }
     }
 
     private static async Task AcquireMigrationLockAsync(DbConnection connection, CancellationToken ct)
     {
         using var command = connection.CreateCommand();
-        command.CommandText = $"""
+        command.CommandText = """
             DECLARE @result int;
             EXEC @result = sys.sp_getapplock
-                @Resource = N'{MigrationLockResource}',
-                @LockMode = N'Exclusive',
-                @LockOwner = N'Session',
-                @LockTimeout = 60000;
+                @Resource = @resource,
+                @LockMode = 'Exclusive',
+                @LockOwner = 'Session',
+                @LockTimeout = 30000;
             SELECT @result;
             """;
+        var resourceParameter = command.CreateParameter();
+        resourceParameter.ParameterName = "@resource";
+        resourceParameter.Value = MigrationLockResource;
+        command.Parameters.Add(resourceParameter);
         var result = Convert.ToInt32(await command.ExecuteScalarAsync(ct));
         if (result < 0)
-            throw new InvalidOperationException($"Could not acquire SQL schema migration lock '{MigrationLockResource}'. Result: {result}.");
+            throw new InvalidOperationException($"Unable to acquire schema migration lock {MigrationLockResource}; sp_getapplock returned {result}.");
     }
 
     private static async Task ReleaseMigrationLockAsync(DbConnection connection, ILogger logger, CancellationToken ct)
@@ -368,16 +386,16 @@ public static class SchemaMigrationRunner
         try
         {
             using var command = connection.CreateCommand();
-            command.CommandText = $"""
-                EXEC sys.sp_releaseapplock
-                    @Resource = N'{MigrationLockResource}',
-                    @LockOwner = N'Session';
-                """;
+            command.CommandText = "EXEC sys.sp_releaseapplock @Resource = @resource, @LockOwner = 'Session';";
+            var parameter = command.CreateParameter();
+            parameter.ParameterName = "@resource";
+            parameter.Value = MigrationLockResource;
+            command.Parameters.Add(parameter);
             await command.ExecuteNonQueryAsync(ct);
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Failed to release SQL schema migration lock {MigrationLockResource}.", MigrationLockResource);
+            logger.LogWarning(ex, "Failed to release schema migration lock {MigrationLockResource}; SQL will release it when the connection closes.", MigrationLockResource);
         }
     }
 }

@@ -32,6 +32,7 @@ jobs:
       AZURE_RESOURCE_GROUP: slh-tms-prod-rg
       AZURE_CONTAINER_APP_NAME: slh-tms-api-prod
       AZURE_CONTAINER_APP_FQDN: slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+      TACHO_JOB: slh-tms-job-tachomaster
       DEPLOY_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.sha || github.event.workflow_run.head_sha }}
     steps:
       - name: Validate source revision
@@ -72,226 +73,160 @@ jobs:
             --image "slh-tms-jobs:$DEPLOY_SHA" \
             .
 
-      - name: Ensure TachoMaster scheduled job exists
+      - name: Reconcile TachoMaster scheduled job from production
         run: |
           set -euo pipefail
-          job="slh-tms-job-tachomaster"
           image="$AZURE_CONTAINER_REGISTRY.azurecr.io/slh-tms-jobs:$DEPLOY_SHA"
 
-          if az containerapp job show --name "$job" --resource-group "$AZURE_RESOURCE_GROUP" --output none 2>/dev/null; then
-            echo "$job already exists; retaining its governed configuration."
-          else
-            echo "$job is missing. Provisioning it from the live production API configuration."
-
-            api_json="$(az containerapp show \
-              --name "$AZURE_CONTAINER_APP_NAME" \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --output json)"
-            environment_id="$(jq -r '.properties.managedEnvironmentId // .properties.environmentId // empty' <<<"$api_json")"
-            identity_id="$(jq -r '(.identity.userAssignedIdentities // {}) | keys | first // empty' <<<"$api_json")"
-            identity_needs_acr_pull=false
-
-            if test -z "$environment_id"; then
-              echo "::error::Unable to resolve the production Container Apps environment from $AZURE_CONTAINER_APP_NAME."
-              exit 1
-            fi
-            if test -z "$identity_id"; then
-              identity_name="slh-tms-jobs-prod-id"
-              echo "$AZURE_CONTAINER_APP_NAME has no user-assigned identity. Ensuring dedicated scheduled-jobs identity $identity_name."
-              if ! az identity show --name "$identity_name" --resource-group "$AZURE_RESOURCE_GROUP" --output none 2>/dev/null; then
-                az identity create --name "$identity_name" --resource-group "$AZURE_RESOURCE_GROUP" --output none
-              fi
-              identity_id="$(az identity show --name "$identity_name" --resource-group "$AZURE_RESOURCE_GROUP" --query id --output tsv)"
-              identity_principal="$(az identity show --name "$identity_name" --resource-group "$AZURE_RESOURCE_GROUP" --query principalId --output tsv)"
-              registry_id="$(az acr show --name "$AZURE_CONTAINER_REGISTRY" --resource-group "$AZURE_RESOURCE_GROUP" --query id --output tsv)"
-              identity_needs_acr_pull=true
-            fi
-
-            # Reuse the already-governed production values. --show-values is captured only
-            # in-memory and is never echoed, written to GITHUB_ENV or persisted as an artifact.
-            source_secrets="$(az containerapp secret list \
-              --name "$AZURE_CONTAINER_APP_NAME" \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --show-values \
-              --output json)"
-
-            secret_value() {
-              jq -r --arg name "$1" '[.[] | select(.name == $name)][0].value // empty' <<<"$source_secrets"
-            }
-
-            registry_auth_args=(--registry-identity "$identity_id")
-            if test "$identity_needs_acr_pull" = true && ! az role assignment create \
-              --assignee-object-id "$identity_principal" \
-              --assignee-principal-type ServicePrincipal \
-              --role AcrPull \
-              --scope "$registry_id" \
-              --output none; then
-              echo "::warning::Deployment identity cannot grant AcrPull. Reusing the production API's governed ACR credentials."
-              registry_username="$(jq -r --arg server "$AZURE_CONTAINER_REGISTRY.azurecr.io" \
-                '[.properties.configuration.registries[]? | select(.server == $server)][0].username // empty' <<<"$api_json")"
-              registry_password_ref="$(jq -r --arg server "$AZURE_CONTAINER_REGISTRY.azurecr.io" \
-                '[.properties.configuration.registries[]? | select(.server == $server)][0].passwordSecretRef // empty' <<<"$api_json")"
-              registry_password="$(secret_value "$registry_password_ref")"
-
-              if test -z "$registry_username" || test -z "$registry_password"; then
-                registry_credentials="$(az acr credential show --name "$AZURE_CONTAINER_REGISTRY" --output json)"
-                registry_username="$(jq -r '.username // empty' <<<"$registry_credentials")"
-                registry_password="$(jq -r '.passwords[0].value // empty' <<<"$registry_credentials")"
-              fi
-
-              if test -z "$registry_username" || test -z "$registry_password"; then
-                echo "::error::Unable to configure ACR image pull: AcrPull cannot be assigned and governed registry credentials are unavailable."
-                exit 1
-              fi
-              registry_auth_args=(--registry-username "$registry_username" --registry-password "$registry_password")
-            fi
-
-            tms_db="$(secret_value tms-db-connection)"
-            dot_base="$(secret_value dot-base-url)"
-            dot_api="$(secret_value dot-api-key)"
-            dot_company="$(secret_value dot-company-code)"
-            dot_user="$(secret_value dot-username)"
-            dot_password="$(secret_value dot-password)"
-
-            missing=()
-            test -n "$tms_db" || missing+=(tms-db-connection)
-            test -n "$dot_base" || missing+=(dot-base-url)
-            test -n "$dot_api" || missing+=(dot-api-key)
-            test -n "$dot_user" || missing+=(dot-username)
-            test -n "$dot_password" || missing+=(dot-password)
-            if (( ${#missing[@]} > 0 )); then
-              echo "::error::Cannot provision TachoMaster job because production API secret(s) are unavailable: ${missing[*]}."
-              exit 1
-            fi
-
-            secret_args=(
-              "tms-db=$tms_db"
-              "dot-base-url=$dot_base"
-              "dot-api-key=$dot_api"
-              "dot-username=$dot_user"
-              "dot-password=$dot_password"
-            )
-            env_args=(
-              "TMS_JOB_KIND=tachomaster"
-              "ConnectionStrings__TmsDb=secretref:tms-db"
-              "Tracking__Dot__Enabled=true"
-              "Tracking__Dot__BaseUrl=secretref:dot-base-url"
-              "Tracking__Dot__ApiKey=secretref:dot-api-key"
-              "Tracking__Dot__Username=secretref:dot-username"
-              "Tracking__Dot__Password=secretref:dot-password"
-              "Integrations__TachoMaster__Enabled=true"
-              "Integrations__TachoMaster__BaseUrl=secretref:dot-base-url"
-              "Integrations__TachoMaster__ApiKey=secretref:dot-api-key"
-              "Integrations__TachoMaster__Username=secretref:dot-username"
-              "Integrations__TachoMaster__Password=secretref:dot-password"
-            )
-            if test -n "$dot_company"; then
-              secret_args+=("dot-company-code=$dot_company")
-              env_args+=("Tracking__Dot__CompanyCode=secretref:dot-company-code")
-            fi
-
-            az containerapp job create \
-              --name "$job" \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --environment "$environment_id" \
-              --trigger-type Schedule \
-              --cron-expression "*/5 * * * *" \
-              --replica-timeout 4200 \
-              --replica-retry-limit 1 \
-              --replica-completion-count 1 \
-              --parallelism 1 \
-              --image "$image" \
-              --cpu 0.5 \
-              --memory 1Gi \
-              --mi-user-assigned "$identity_id" \
-              --registry-server "$AZURE_CONTAINER_REGISTRY.azurecr.io" \
-              "${registry_auth_args[@]}" \
-              --secrets "${secret_args[@]}" \
-              --env-vars "${env_args[@]}" \
-              --output none
+          if ! az containerapp job show --name "$TACHO_JOB" --resource-group "$AZURE_RESOURCE_GROUP" --output none 2>/dev/null; then
+            echo "::error::$TACHO_JOB does not exist. Provision it before deploying; this workflow will not create an ungoverned production job."
+            exit 1
           fi
 
+          # Production API is the governed source for runtime integration credentials.
+          # Re-read them on every deployment so the scheduled job cannot drift after a
+          # TachoMaster/RoadTech credential rotation or environment configuration change.
+          source_secrets="$(az containerapp secret list \
+            --name "$AZURE_CONTAINER_APP_NAME" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --show-values \
+            --output json)"
+
+          secret_value() {
+            jq -r --arg name "$1" '[.[] | select(.name == $name)][0].value // empty' <<<"$source_secrets"
+          }
+
+          tms_db="$(secret_value tms-db-connection)"
+          job_mi_client_id="$(az containerapp job show \
+            --name "$TACHO_JOB" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query 'identity.userAssignedIdentities.*.clientId | [0]' \
+            --output tsv)"
+          if test -z "$job_mi_client_id"; then
+            echo "::error::$TACHO_JOB must have a user-assigned managed identity before deployment."
+            exit 1
+          fi
+          if grep -qi 'Authentication=Active Directory Managed Identity' <<<"$tms_db"; then
+            tms_db="$(printf '%s' "$tms_db" | sed -E 's/(^|;)[[:space:]]*[Uu]ser[[:space:]]+[Ii][Dd]=[^;]*//g')"
+            tms_db="${tms_db%;};User Id=${job_mi_client_id};"
+          fi
+          dot_base="$(secret_value dot-base-url)"
+          dot_api="$(secret_value dot-api-key)"
+          dot_company="$(secret_value dot-company-code)"
+          dot_user="$(secret_value dot-username)"
+          dot_password="$(secret_value dot-password)"
+
+          missing=()
+          test -n "$tms_db" || missing+=(tms-db-connection)
+          test -n "$dot_base" || missing+=(dot-base-url)
+          test -n "$dot_api" || missing+=(dot-api-key)
+          test -n "$dot_user" || missing+=(dot-username)
+          test -n "$dot_password" || missing+=(dot-password)
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Cannot reconcile TachoMaster job because production API secret(s) are unavailable: ${missing[*]}."
+            exit 1
+          fi
+
+          secret_args=(
+            "tms-db=$tms_db"
+            "dot-base-url=$dot_base"
+            "dot-api-key=$dot_api"
+            "dot-username=$dot_user"
+            "dot-password=$dot_password"
+          )
+          env_args=(
+            "TMS_JOB_KIND=tachomaster"
+            "ConnectionStrings__TmsDb=secretref:tms-db"
+            "Tracking__Dot__Enabled=true"
+            "Tracking__Dot__BaseUrl=secretref:dot-base-url"
+            "Tracking__Dot__ApiKey=secretref:dot-api-key"
+            "Tracking__Dot__Username=secretref:dot-username"
+            "Tracking__Dot__Password=secretref:dot-password"
+            "Integrations__TachoMaster__Enabled=true"
+            "Integrations__TachoMaster__BaseUrl=secretref:dot-base-url"
+            "Integrations__TachoMaster__ApiKey=secretref:dot-api-key"
+            "Integrations__TachoMaster__Username=secretref:dot-username"
+            "Integrations__TachoMaster__Password=secretref:dot-password"
+          )
+          if test -n "$dot_company"; then
+            secret_args+=("dot-company-code=$dot_company")
+            env_args+=("Tracking__Dot__CompanyCode=secretref:dot-company-code")
+          fi
+
+          az containerapp job secret set \
+            --name "$TACHO_JOB" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --secrets "${secret_args[@]}" \
+            --output none
+
           az containerapp job update \
-            --name "$job" \
+            --name "$TACHO_JOB" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --image "$image" \
+            --set-env-vars "${env_args[@]}" \
             --output none
 
-          deployed_image="$(az containerapp job show \
-            --name "$job" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --query 'properties.template.containers[0].image' \
-            --output tsv)"
-          test "$deployed_image" = "$image"
-          echo "$job -> $deployed_image"
-
-          # Start immediately so a repaired deployment proves the canonical path now rather
-          # than waiting for the next five-minute trigger. The job itself retains its lease,
-          # daily canonical gate and transactional rollback protections.
-          az containerapp job start \
-            --name "$job" \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --output none
-
-      - name: Update other scheduled jobs when provisioned
-        run: |
-          set -euo pipefail
-          image="$AZURE_CONTAINER_REGISTRY.azurecr.io/slh-tms-jobs:$DEPLOY_SHA"
-          for job in slh-tms-job-fleetio slh-tms-job-sagehr slh-tms-job-eta; do
-            if az containerapp job show --name "$job" --resource-group "$AZURE_RESOURCE_GROUP" --output none 2>/dev/null; then
-              az containerapp job update \
-                --name "$job" \
-                --resource-group "$AZURE_RESOURCE_GROUP" \
-                --image "$image" \
-                --output none
-              echo "$job updated to $image"
-            else
-              echo "::notice::$job is not currently provisioned; leaving it unchanged rather than failing the TachoMaster deployment."
-            fi
-          done
-
-      - name: Verify TachoMaster five-minute schedule
-        run: |
-          set -euo pipefail
-          trigger="$(az containerapp job show \
-            --name slh-tms-job-tachomaster \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --query properties.configuration.triggerType \
-            --output tsv)"
-          cron="$(az containerapp job show \
-            --name slh-tms-job-tachomaster \
-            --resource-group "$AZURE_RESOURCE_GROUP" \
-            --query properties.configuration.scheduleTriggerConfig.cronExpression \
-            --output tsv)"
+          trigger="$(az containerapp job show --name "$TACHO_JOB" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.configuration.triggerType --output tsv)"
+          cron="$(az containerapp job show --name "$TACHO_JOB" --resource-group "$AZURE_RESOURCE_GROUP" --query properties.configuration.scheduleTriggerConfig.cronExpression --output tsv)"
           test "$trigger" = "Schedule"
           test "$cron" = "*/5 * * * *"
-          echo "TachoMaster trigger=$trigger cron=$cron"
+          echo "Reconciled $TACHO_JOB with production secrets/environment and its managed identity client ID; trigger=$trigger cron=$cron image=$image"
 
-      - name: Prove a fresh TachoMaster scheduled sync reaches production
+      - name: Run canonical TachoMaster sync immediately
         run: |
           set -euo pipefail
-          success=false
-          for attempt in {1..40}; do
+          execution="$(az containerapp job start \
+            --name "$TACHO_JOB" \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query name \
+            --output tsv)"
+          echo "Started $execution"
+
+          for attempt in {1..48}; do
+            state="$(az containerapp job execution show \
+              --name "$TACHO_JOB" \
+              --resource-group "$AZURE_RESOURCE_GROUP" \
+              --job-execution-name "$execution" \
+              --query properties.status \
+              --output tsv 2>/dev/null || true)"
+            echo "TachoMaster execution $execution status=${state:-unknown}"
+            case "$state" in
+              Succeeded) exit 0 ;;
+              Failed) exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "::error::Timed out waiting for immediate TachoMaster canonical sync."
+          exit 1
+
+      - name: Verify canonical Driver Master cleanse
+        run: |
+          set -euo pipefail
+          for attempt in {1..24}; do
             body="$(curl --silent --show-error --max-time 45 \
               -H 'Cache-Control: no-cache' \
-              "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/tachomaster" || true)"
+              "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/driver-master" || true)"
             echo "$body"
-            status="$(jq -r '.status // empty' <<<"$body" 2>/dev/null || true)"
-            job_stale="$(jq -r '.scheduledSync.stale // true' <<<"$body" 2>/dev/null || true)"
-            job_age="$(jq -r '.scheduledSync.ageMinutes // empty' <<<"$body" 2>/dev/null || true)"
-            if test "$status" != "upstream-failure" -a "$job_stale" = "false"; then
-              echo "Fresh TachoMaster scheduled sync proven; age=${job_age:-unknown} minutes."
-              success=true
-              break
+            member_dupes="$(jq -r '.duplicateMemberGroups // -1' <<<"$body" 2>/dev/null || echo -1)"
+            card_dupes="$(jq -r '.duplicateCardGroups // -1' <<<"$body" 2>/dev/null || echo -1)"
+            without_member="$(jq -r '.activeWithoutMember // -1' <<<"$body" 2>/dev/null || echo -1)"
+            aligned="$(jq -r '.populationAligned // false' <<<"$body" 2>/dev/null || echo false)"
+            latest="$(jq -r '.latestCanonicalSyncUtc // empty' <<<"$body" 2>/dev/null || true)"
+            if test "$member_dupes" = "0" -a "$card_dupes" = "0" -a "$without_member" = "0" -a "$aligned" = "true" -a -n "$latest"; then
+              echo "Canonical Driver Master is clean and aligned at $latest."
+              exit 0
             fi
             sleep 15
           done
+          echo "::error::Canonical Driver Master did not reach clean/aligned state."
+          exit 1
 
-          if test "$success" != "true"; then
-            echo "::error::TachoMaster did not produce a fresh persisted sync within the production verification window."
-            az containerapp job execution list \
-              --name slh-tms-job-tachomaster \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --output table || true
-            exit 1
-          fi
+      - name: Verify scheduled sync freshness Boolean
+        run: |
+          set -euo pipefail
+          body="$(curl --fail --silent --show-error --max-time 45 \
+            -H 'Cache-Control: no-cache' \
+            "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/tachomaster")"
+          echo "$body"
+          stale="$(jq -r 'if .scheduledSync.stale == null then true else .scheduledSync.stale end' <<<"$body")"
+          test "$stale" = "false"

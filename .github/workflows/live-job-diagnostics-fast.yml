@@ -1,0 +1,67 @@
+name: One-shot - Fast production job diagnostics
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/live-job-diagnostics-fast.yml'
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  RG: slh-tms-prod-rg
+  TACHO: slh-tms-job-tachomaster
+  ETA: slh-tms-job-eta
+  EXEC: slh-tms-job-tachomaster-r32gbyc
+
+jobs:
+  diagnose-fast:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Capture diagnostic facts
+        shell: bash
+        run: |
+          set -u
+          mkdir -p diagnostics
+          out=diagnostics/live-job-diagnostics-fast.txt
+          : > "$out"
+          red() { sed -E -e 's/(Password|ApiKey|ConnectionString|secret|token)([=: ]+)[^ ,;\"]+/\1\2[REDACTED]/Ig'; }
+          echo '=== JOBS ===' >> "$out"
+          az containerapp job list -g "$RG" --query '[].{name:name,state:properties.provisioningState,trigger:properties.configuration.triggerType,cron:properties.configuration.scheduleTriggerConfig.cronExpression,image:properties.template.containers[0].image}' -o json 2>&1 | red >> "$out" || true
+          echo '=== TACHO EXECUTION ===' >> "$out"
+          az containerapp job execution show -g "$RG" -n "$TACHO" --job-execution-name "$EXEC" --query '{name:name,status:properties.status,start:properties.startTime,end:properties.endTime}' -o json 2>&1 | red >> "$out" || true
+          echo '=== CONSOLE LOG ATTEMPT ===' >> "$out"
+          timeout 25s az containerapp job logs show -g "$RG" -n "$TACHO" --execution "$EXEC" --container tms-job --tail 150 --format text 2>&1 | red >> "$out" || true
+          echo '=== LOG ANALYTICS ===' >> "$out"
+          env_id="$(az containerapp job show -g "$RG" -n "$TACHO" --query properties.environmentId -o tsv 2>/dev/null || true)"
+          ws=""
+          if test -n "$env_id"; then
+            ws="$(az containerapp env show --ids "$env_id" --query properties.appLogsConfiguration.logAnalyticsConfiguration.customerId -o tsv 2>/dev/null || true)"
+          fi
+          if test -n "$ws"; then
+            az monitor log-analytics query --workspace "$ws" --timespan P1D --analytics-query "ContainerAppConsoleLogs_CL | where ContainerGroupName_s contains '$EXEC' or Log_s contains 'TachoMaster' | project TimeGenerated, ContainerGroupName_s, Log_s | order by TimeGenerated desc | take 200" -o tsv 2>&1 | red >> "$out" || true
+          else
+            echo 'No Log Analytics workspace id resolved.' >> "$out"
+          fi
+      - name: Commit diagnostic facts
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add diagnostics/live-job-diagnostics-fast.txt
+          git commit -m 'Record fast production job diagnostics' || exit 0
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main

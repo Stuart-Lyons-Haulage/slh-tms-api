@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
@@ -21,7 +22,7 @@ public static class MasterDetailStore
             row = new StagedImport { EntityType = type, IdempotencyKey = idempotencyKey, PayloadJson = "{}", Source = source ?? "SLH master detail" };
             db.StagedImports.Add(row);
         }
-        row.PayloadJson = payloadJson;
+        row.PayloadJson = MergePopulatedFields(row.PayloadJson, payloadJson);
         row.Status = StagingStatus.Promoted;
         row.ReviewedAtUtc = DateTimeOffset.UtcNow;
         row.ReviewedBy = user;
@@ -71,7 +72,10 @@ public static class MasterDetailStore
                 driver.TachoDriveAvailableWeekMinutes = Int(payload, "tachoDriveAvailableWeekMinutes");
                 driver.TachoWorkAvailableWeekMinutes = Int(payload, "tachoWorkAvailableWeekMinutes");
                 driver.DrivingLicenceNumber = Text(payload, "drivingLicenceNumber") ?? Text(payload, "licenceNumber");
-                driver.LicenceExpiry = DateOnly.TryParse(Text(payload, "licenceExpiry"), out var expiry) ? expiry : null;
+                driver.LicenceExpiry = DateOnly.TryParse(Text(payload, "licenceExpiry"), out var expiry) ? expiry : driver.LicenceExpiry;
+                driver.CPCExpiry = DateOnly.TryParse(Text(payload, "cpcExpiry"), out var cpcExpiry) ? cpcExpiry : driver.CPCExpiry;
+                driver.DigitalTachoCardExpiry = DateOnly.TryParse(Text(payload, "digitalTachoCardExpiry"), out var cardExpiry) ? cardExpiry : driver.DigitalTachoCardExpiry;
+                driver.MedicalExpiry = DateOnly.TryParse(Text(payload, "medicalExpiry"), out var medicalExpiry) ? medicalExpiry : driver.MedicalExpiry;
                 driver.LicenceStatus = Text(payload, "licenceStatus");
                 driver.LastTachoSyncUtc = DateTimeOffset.TryParse(Text(payload, "lastTachoSyncUtc"), out var sync) ? sync : null;
             }
@@ -206,6 +210,27 @@ public static class MasterDetailStore
     }
 
     private static string NormaliseKey(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+
+    private static string MergePopulatedFields(string currentJson, string incomingJson)
+    {
+        var current = JsonNode.Parse(currentJson) as JsonObject ?? new JsonObject();
+        var incoming = JsonNode.Parse(incomingJson) as JsonObject;
+        if (incoming is null) return incomingJson;
+
+        foreach (var (incomingName, incomingValue) in incoming)
+        {
+            if (incomingValue is null || incomingValue is JsonValue jsonValue &&
+                jsonValue.TryGetValue<string>(out var text) && string.IsNullOrWhiteSpace(text))
+                continue;
+
+            var existingName = current.Select(pair => pair.Key)
+                .FirstOrDefault(name => name.Equals(incomingName, StringComparison.OrdinalIgnoreCase));
+            current[existingName ?? incomingName] = incomingValue.DeepClone();
+        }
+
+        return current.ToJsonString();
+    }
+
     private static string? Text(JsonElement payload, string name)
     {
         foreach (var property in payload.EnumerateObject())

@@ -1,0 +1,63 @@
+name: One-shot - Diagnose current Tacho canonical failure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/tacho-current-execution-diagnostic.yml'
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  RG: slh-tms-prod-rg
+  JOB: slh-tms-job-tachomaster
+  EXEC: slh-tms-job-tachomaster-urk42jf
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Capture current execution logs
+        shell: bash
+        run: |
+          set -u
+          mkdir -p diagnostics
+          out=diagnostics/tacho-current-execution-diagnostic.txt
+          : > "$out"
+          red() { sed -E -e 's/(Password|ApiKey|ConnectionString|secret|token)([=: ]+)[^ ,;\"]+/\1\2[REDACTED]/Ig'; }
+          echo '=== EXECUTION ===' >> "$out"
+          az containerapp job execution show -g "$RG" -n "$JOB" --job-execution-name "$EXEC" --query '{name:name,status:properties.status,start:properties.startTime,end:properties.endTime,containers:properties.template.containers[].name}' -o json 2>&1 | red >> "$out" || true
+          echo '=== JOB LOGS ===' >> "$out"
+          az config set extension.dynamic_install_allow_preview=true >/dev/null 2>&1 || true
+          timeout 35s az containerapp job logs show -g "$RG" -n "$JOB" --execution "$EXEC" --container slh-tms-job-tachomaster --tail 300 --format text 2>&1 | red >> "$out" || true
+          echo '=== LOG ANALYTICS ===' >> "$out"
+          env_id="$(az containerapp job show -g "$RG" -n "$JOB" --query properties.environmentId -o tsv 2>/dev/null || true)"
+          ws=""
+          test -z "$env_id" || ws="$(az containerapp env show --ids "$env_id" --query properties.appLogsConfiguration.logAnalyticsConfiguration.customerId -o tsv 2>/dev/null || true)"
+          if test -n "$ws"; then
+            az monitor log-analytics query --workspace "$ws" --timespan PT15M --analytics-query "ContainerAppConsoleLogs_CL | where TimeGenerated between(datetime(2026-09-14T19:18:20Z)..datetime(2026-09-14T19:20:00Z)) | where ContainerGroupName_s contains 'tachomaster' or ContainerName_s contains 'tachomaster' or Log_s contains 'canonical' or Log_s contains 'Tacho' | project TimeGenerated,ContainerGroupName_s,ContainerName_s,Log_s | order by TimeGenerated asc" -o tsv 2>&1 | red >> "$out" || true
+            echo '=== SYSTEM LOGS ===' >> "$out"
+            az monitor log-analytics query --workspace "$ws" --timespan PT15M --analytics-query "ContainerAppSystemLogs_CL | where TimeGenerated between(datetime(2026-09-14T19:18:20Z)..datetime(2026-09-14T19:20:00Z)) | where Reason_s contains 'Job' or Log_s contains 'tachomaster' or ContainerGroupName_s contains 'tachomaster' | project TimeGenerated,ContainerGroupName_s,Reason_s,Log_s | order by TimeGenerated asc" -o tsv 2>&1 | red >> "$out" || true
+          fi
+      - name: Commit diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add diagnostics/tacho-current-execution-diagnostic.txt
+          git commit -m 'Record current Tacho canonical failure diagnostic' || exit 0
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main

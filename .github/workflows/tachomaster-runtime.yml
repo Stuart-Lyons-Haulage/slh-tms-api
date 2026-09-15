@@ -94,7 +94,7 @@ jobs:
               -H 'Cache-Control: no-cache' \
               "https://$AZURE_CONTAINER_APP_FQDN/api/v1/health/tachomaster" || true)"
             echo "$body"
-            stale="$(jq -r '.scheduledSync.stale // true' <<<"$body" 2>/dev/null || true)"
+            stale="$(jq -r 'if .scheduledSync.stale == null then true else .scheduledSync.stale end' <<<"$body" 2>/dev/null || true)"
             age="$(jq -r '.scheduledSync.ageMinutes // empty' <<<"$body" 2>/dev/null || true)"
             if test "$stale" = "false"; then
               echo "Scheduled TachoMaster sync is fresh; age=${age:-unknown} minutes."

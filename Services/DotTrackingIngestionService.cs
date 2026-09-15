@@ -49,66 +49,8 @@ public sealed class DotTrackingIngestionService(IServiceScopeFactory scopeFactor
                     logger.LogWarning(exception, "Site Master geofence hit processing failed for current RoadTech telemetry; tracking ingestion will continue.");
                 }
 
-                if (now >= nextRecoveryAtUtc)
-                {
-                    try
-                    {
-                        foreach (var recoveryDay in operatingDays)
-                        {
-                            var recovered = NormaliseHistoricalEventTimes(
-                                (await client.GetHistoricalVehicleEventsAsync(recoveryDay, stoppingToken))
-                                    .Select(DotTelemetryRecord.FromProvider),
-                                records,
-                                recoveryDay,
-                                DateTimeOffset.UtcNow);
-                            await store.PersistAsync(recovered, stoppingToken, markAsLiveReceipt: false);
-
-                            // Historical Falcon pages can use provider vehicle keys that differ
-                            // in formatting from the latest/live key. Teach the canonical identity
-                            // resolver every uniquely matchable exact key before geofence replay,
-                            // so a newly recognised registration can inherit earlier retained
-                            // tracking/geofence evidence instead of starting only from "now".
-                            await TryRepairProviderVehicleMappingsAsync(
-                                db,
-                                recovered.Select(record => record.VehicleIdentifier),
-                                $"history {recoveryDay:yyyy-MM-dd}",
-                                stoppingToken);
-
-                            projectionDays.Add(recoveryDay);
-                            logger.LogInformation(
-                                "DOT historical recovery persisted {RecordCount} RoadTech record(s) for {RecoveryDay}.",
-                                recovered.Count,
-                                recoveryDay);
-                        }
-                    }
-                    catch (Exception exception) when (!stoppingToken.IsCancellationRequested)
-                    {
-                        // Historical recovery is supplementary. Do not let a provider/history
-                        // fault suppress current RoadTech ingestion or live Site Master hits.
-                        logger.LogWarning(exception, "DOT historical tracking recovery failed; continuing with current live geofence processing.");
-                    }
-                    finally
-                    {
-                        nextRecoveryAtUtc = now.Add(recoveryInterval);
-                    }
-                }
-
-                try
-                {
-                    // Rebuild the durable GeofenceVisits projection from the stored RoadTech
-                    // event stream on every current-day cycle and for both recovery days after
-                    // a history refresh. EmbeddedGeofenceEngine now reads the active SQL Site
-                    // Master polygons first, so this safely backfills records captured before
-                    // the geofence interpretation was corrected instead of limiting projection
-                    // to the old no-SQL-fences fallback case.
-                    await EmbeddedGeofenceSqlProjection.RefreshOperatingDaysAsync(db, projectionDays, stoppingToken);
-                }
-                catch (Exception exception) when (!stoppingToken.IsCancellationRequested)
-                {
-                    // Projection failure must be visible but must not interrupt current RoadTech
-                    // GPS ingestion. The next poll will retry from the persisted event stream.
-                    logger.LogWarning(exception, "Geofence history projection failed; current tracking remains available and stored RoadTech history will retry next poll.");
-                }
+                // RoadTech retains historical journeys. Do not fetch or replay them into SQL;
+                // current polls above create only operational enter/exit events.
             }
             catch (InvalidOperationException exception) { logger.LogDebug(exception, "DOT tracking ingestion is not configured."); }
             catch (Exception exception) when (!stoppingToken.IsCancellationRequested) { logger.LogWarning(exception, "DOT tracking ingestion failed; retrying in {Minutes} minute(s).", pollInterval.TotalMinutes); }

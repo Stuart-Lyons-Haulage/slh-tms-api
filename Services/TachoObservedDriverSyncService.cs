@@ -9,10 +9,10 @@ public sealed record TachoObservedDriverSyncResult(int Observed, int Existing, i
 
 /// <summary>
 /// Reconciles the live/open TachoMaster duty feed with Driver Master on every scheduled Tacho poll.
-/// A physical tachograph card is the primary identity. A previously unseen card is only allowed to
-/// create a driver when TachoMaster shows it in a vehicle that exists in the SLH Vehicle Master.
-/// The MasterDataAudit generated here is captured by the audit outbox, which mirrors the new driver
-/// to the governed Microsoft Lists CRM without making the five-minute Tacho job depend on Graph.
+/// TachoMaster Member Code is the primary driver identity. The tachograph card is supporting evidence
+/// and is only used as a fallback when the live status does not contain a valid Member Code.
+/// A previously unseen driver is only allowed to be created when TachoMaster shows them in a vehicle
+/// that exists in the SLH Vehicle Master.
 /// </summary>
 public sealed class TachoObservedDriverSyncService(
     TmsDbContext db,
@@ -58,31 +58,28 @@ public sealed class TachoObservedDriverSyncService(
                 continue;
             }
 
+            var member = status.MemberCode > 0
+                ? status.MemberCode.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : null;
             var cardKey = NormaliseIdentifier(status.CardNumber);
-            if (cardKey.Length == 0)
-            {
-                skippedWithoutCard++;
-                continue;
-            }
 
-            var driver = drivers.FirstOrDefault(candidate =>
-                NormaliseIdentifier(candidate.TachoCardNumber) == cardKey);
-
-            // A member-code match means this is an existing person whose card detail was not yet
-            // persisted locally. Enrich that row instead of creating a duplicate driver.
-            if (driver is null && status.MemberCode > 0)
+            Driver? driver = null;
+            if (!string.IsNullOrWhiteSpace(member))
             {
-                var member = status.MemberCode.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 driver = drivers.FirstOrDefault(candidate =>
                     string.Equals(candidate.TachoMasterDriverId?.Trim(), member, StringComparison.OrdinalIgnoreCase));
             }
 
+            if (driver is null && cardKey.Length > 0)
+            {
+                driver = drivers.FirstOrDefault(candidate =>
+                    NormaliseIdentifier(candidate.TachoCardNumber) == cardKey);
+            }
+
             if (driver is not null)
             {
-                driver.TachoCardNumber = status.CardNumber;
-                driver.TachoMasterDriverId = status.MemberCode > 0
-                    ? status.MemberCode.ToString(System.Globalization.CultureInfo.InvariantCulture)
-                    : driver.TachoMasterDriverId;
+                if (!string.IsNullOrWhiteSpace(member)) driver.TachoMasterDriverId = member;
+                if (cardKey.Length > 0) driver.TachoCardNumber = status.CardNumber;
                 driver.TachoName = string.IsNullOrWhiteSpace(status.DriverName) ? driver.TachoName : status.DriverName.Trim();
                 driver.TachoDriveAvailableTodayMinutes = status.DriveAvailableTodayMinutes ?? driver.TachoDriveAvailableTodayMinutes;
                 driver.TachoDriveAvailableWeekMinutes = status.DriveAvailableWeekMinutes ?? driver.TachoDriveAvailableWeekMinutes;
@@ -93,9 +90,17 @@ public sealed class TachoObservedDriverSyncService(
                 continue;
             }
 
-            var employeeNumber = UniqueReference(cardKey, drivers);
+            if (string.IsNullOrWhiteSpace(member) && cardKey.Length == 0)
+            {
+                skippedWithoutCard++;
+                continue;
+            }
+
+            var employeeNumber = UniqueReference(member, cardKey, drivers);
             var displayName = string.IsNullOrWhiteSpace(status.DriverName)
-                ? $"Tacho driver {cardKey[^Math.Min(6, cardKey.Length)..]}"
+                ? !string.IsNullOrWhiteSpace(member)
+                    ? $"Tacho driver {member}"
+                    : $"Tacho driver {cardKey[^Math.Min(6, cardKey.Length)..]}"
                 : status.DriverName.Trim();
 
             driver = new Driver
@@ -103,10 +108,8 @@ public sealed class TachoObservedDriverSyncService(
                 EmployeeNumber = employeeNumber,
                 DisplayName = Clip(displayName, 160),
                 TachoName = Clip(displayName, 160),
-                TachoMasterDriverId = status.MemberCode > 0
-                    ? status.MemberCode.ToString(System.Globalization.CultureInfo.InvariantCulture)
-                    : null,
-                TachoCardNumber = status.CardNumber,
+                TachoMasterDriverId = member,
+                TachoCardNumber = cardKey.Length > 0 ? status.CardNumber : null,
                 TachoDriveAvailableTodayMinutes = status.DriveAvailableTodayMinutes,
                 TachoDriveAvailableWeekMinutes = status.DriveAvailableWeekMinutes,
                 TachoWorkAvailableWeekMinutes = status.WorkAvailableWeekMinutes,
@@ -117,12 +120,12 @@ public sealed class TachoObservedDriverSyncService(
 
             db.Drivers.Add(driver);
             drivers.Add(driver);
-            await MasterDetailStore.SaveAsync(db, "driver", driver.EmployeeNumber, JsonSerializer.Serialize(driver), "Created from live TachoMaster vehicle identity", actor, ct);
+            await MasterDetailStore.SaveAsync(db, "driver", driver.EmployeeNumber, JsonSerializer.Serialize(driver), "Created from live TachoMaster member identity", actor, ct);
             db.MasterDataAudits.Add(new MasterDataAudit
             {
                 EntityType = "Driver",
                 EntityId = driver.Id,
-                Action = "CreatedFromLiveTachoCard",
+                Action = "CreatedFromLiveTachoMember",
                 ChangedBy = actor,
                 ChangesJson = JsonSerializer.Serialize(new
                 {
@@ -137,8 +140,8 @@ public sealed class TachoObservedDriverSyncService(
             created++;
 
             logger.LogWarning(
-                "Created Driver Master record {Driver} ({EmployeeNumber}) because previously unseen Tacho card {Card} was observed in SLH vehicle {Vehicle}.",
-                driver.DisplayName, driver.EmployeeNumber, status.CardNumber, status.VehicleCode);
+                "Created Driver Master record {Driver} ({EmployeeNumber}) because previously unseen TachoMaster member {MemberCode} was observed in SLH vehicle {Vehicle}.",
+                driver.DisplayName, driver.EmployeeNumber, status.MemberCode, status.VehicleCode);
         }
 
         if (existing > 0 || created > 0)
@@ -147,20 +150,21 @@ public sealed class TachoObservedDriverSyncService(
         return new(observed.Count, existing, created, skippedUnknownVehicle, skippedWithoutCard);
     }
 
-    private static string UniqueReference(string cardKey, IReadOnlyCollection<Driver> drivers)
+    private static string UniqueReference(string? member, string cardKey, IReadOnlyCollection<Driver> drivers)
     {
-        var suffix = cardKey.Length <= 12 ? cardKey : cardKey[^12..];
-        var candidate = Clip($"TACHO-{suffix}", 40);
         var used = drivers.Select(driver => driver.EmployeeNumber).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        if (!used.Contains(candidate)) return candidate;
+        var root = !string.IsNullOrWhiteSpace(member)
+            ? Clip($"TM-{member}", 40)
+            : Clip($"TACHO-{(cardKey.Length <= 12 ? cardKey : cardKey[^12..])}", 40);
+        if (!used.Contains(root)) return root;
 
         for (var index = 2; index < 1000; index++)
         {
-            candidate = Clip($"TACHO-{suffix}-{index}", 40);
+            var candidate = Clip($"{root}-{index}", 40);
             if (!used.Contains(candidate)) return candidate;
         }
 
-        return Clip($"TACHO-{Guid.NewGuid():N}", 40);
+        return Clip($"TM-{Guid.NewGuid():N}", 40);
     }
 
     private static string NormaliseIdentifier(string? value) =>

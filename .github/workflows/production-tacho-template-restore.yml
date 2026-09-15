@@ -1,0 +1,182 @@
+name: One-shot - Restore Tacho template and execute production jobs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/production-tacho-template-restore.yml'
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  RG: slh-tms-prod-rg
+  API_APP: slh-tms-api-prod
+  API_BASE: https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+  TACHO: slh-tms-job-tachomaster
+  ETA: slh-tms-job-eta
+  IMAGE: slhtmsacrprod.azurecr.io/slh-tms-jobs:1e97a0e7b241f1c917f94c527f805b59728fa581
+
+jobs:
+  restore-and-run:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Restore full Tacho job container template safely
+        shell: bash
+        run: |
+          set -euo pipefail
+          api_secrets="$(az containerapp secret list -n "$API_APP" -g "$RG" --show-values -o json)"
+          sval() { jq -r --arg n "$1" '[.[]|select(.name==$n)][0].value // empty' <<<"$api_secrets"; }
+          db="$(sval tms-db-connection)"
+          dot_base="$(sval dot-base-url)"
+          dot_api="$(sval dot-api-key)"
+          dot_company="$(sval dot-company-code)"
+          dot_user="$(sval dot-username)"
+          dot_pass="$(sval dot-password)"
+          test -n "$db" -a -n "$dot_base" -a -n "$dot_api" -a -n "$dot_user" -a -n "$dot_pass"
+
+          src="$(az containerapp job show -n "$TACHO" -g "$RG" -o json)"
+          oldsecrets="$(az containerapp job secret list -n "$TACHO" -g "$RG" --show-values -o json)"
+          regref="$(jq -r '.properties.configuration.registries[0].passwordSecretRef // empty' <<<"$src")"
+          regval=""
+          if test -n "$regref"; then
+            regval="$(jq -r --arg n "$regref" '[.[]|select(.name==$n)][0].value // empty' <<<"$oldsecrets")"
+            test -n "$regval"
+          fi
+
+          mi_client="$(jq -r '.identity.userAssignedIdentities | to_entries[0].value.clientId // empty' <<<"$src")"
+          if grep -qi 'Authentication=Active Directory Managed Identity' <<<"$db" && test -n "$mi_client"; then
+            db="$(printf '%s' "$db" | sed -E 's/(^|;)[[:space:]]*[Uu]ser[[:space:]]+[Ii][Dd]=[^;]*//g')"
+            db="${db%;};User Id=${mi_client};"
+          fi
+
+          sec="$(jq -n --arg db "$db" --arg base "$dot_base" --arg api "$dot_api" --arg user "$dot_user" --arg pass "$dot_pass" '[
+            {name:"tms-db",value:$db},
+            {name:"dot-base-url",value:$base},
+            {name:"dot-api-key",value:$api},
+            {name:"dot-username",value:$user},
+            {name:"dot-password",value:$pass}
+          ]')"
+          if test -n "$dot_company"; then sec="$(jq --arg v "$dot_company" '. + [{name:"dot-company-code",value:$v}]' <<<"$sec")"; fi
+          if test -n "$regref"; then sec="$(jq --arg n "$regref" --arg v "$regval" '. + [{name:$n,value:$v}]' <<<"$sec")"; fi
+
+          envs='[
+            {"name":"TMS_JOB_KIND","value":"tachomaster"},
+            {"name":"ConnectionStrings__TmsDb","secretRef":"tms-db"},
+            {"name":"Tracking__Dot__Enabled","value":"true"},
+            {"name":"Tracking__Dot__BaseUrl","secretRef":"dot-base-url"},
+            {"name":"Tracking__Dot__ApiKey","secretRef":"dot-api-key"},
+            {"name":"Tracking__Dot__Username","secretRef":"dot-username"},
+            {"name":"Tracking__Dot__Password","secretRef":"dot-password"},
+            {"name":"Integrations__TachoMaster__Enabled","value":"true"},
+            {"name":"Integrations__TachoMaster__BaseUrl","secretRef":"dot-base-url"},
+            {"name":"Integrations__TachoMaster__ApiKey","secretRef":"dot-api-key"},
+            {"name":"Integrations__TachoMaster__Username","secretRef":"dot-username"},
+            {"name":"Integrations__TachoMaster__Password","secretRef":"dot-password"}
+          ]'
+          if test -n "$dot_company"; then envs="$(jq '. + [{name:"Tracking__Dot__CompanyCode",secretRef:"dot-company-code"},{name:"Integrations__TachoMaster__CompanyCode",secretRef:"dot-company-code"}]' <<<"$envs")"; fi
+
+          sub="$(az account show --query id -o tsv)"
+          url="https://management.azure.com/subscriptions/$sub/resourceGroups/$RG/providers/Microsoft.App/jobs/$TACHO?api-version=2024-03-01"
+          body="$(jq -n --argjson src "$src" --argjson sec "$sec" --argjson envs "$envs" --arg image "$IMAGE" '
+            {
+              location:$src.location,
+              identity:{type:$src.identity.type,userAssignedIdentities:($src.identity.userAssignedIdentities|with_entries(.value={}))},
+              properties:{
+                environmentId:$src.properties.environmentId,
+                workloadProfileName:$src.properties.workloadProfileName,
+                configuration:{
+                  triggerType:"Schedule",
+                  replicaTimeout:600,
+                  replicaRetryLimit:1,
+                  scheduleTriggerConfig:{cronExpression:"*/5 * * * *",parallelism:1,replicaCompletionCount:1},
+                  registries:$src.properties.configuration.registries,
+                  secrets:$sec
+                },
+                template:{containers:[{
+                  name:"slh-tms-job-tachomaster",
+                  image:$image,
+                  resources:($src.properties.template.containers[0].resources // {cpu:0.5,memory:"1Gi"}),
+                  env:$envs
+                }]}
+              }
+            }')"
+          az rest --method put --url "$url" --body "$body" -o none
+          az containerapp job show -n "$TACHO" -g "$RG" --query '{state:properties.provisioningState,image:properties.template.containers[0].image,cron:properties.configuration.scheduleTriggerConfig.cronExpression,envNames:properties.template.containers[0].env[].name}' -o json
+
+      - name: Execute Tacho then ETA and wait for completion
+        id: execute
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics
+          run_job() {
+            local job="$1" exec state
+            exec="$(az containerapp job start -n "$job" -g "$RG" --query name -o tsv)"
+            printf '%s' "$exec" > "diagnostics/${job}-execution.txt"
+            echo "Started $job $exec"
+            for n in $(seq 1 120); do
+              state="$(az containerapp job execution show -n "$job" -g "$RG" --job-execution-name "$exec" --query properties.status -o tsv 2>/dev/null || true)"
+              echo "$job=${state:-unknown}"
+              case "$state" in Succeeded) return 0;; Failed) return 1;; esac
+              sleep 10
+            done
+            return 2
+          }
+          run_job "$TACHO"
+          run_job "$ETA"
+
+      - name: Capture final live state
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          mkdir -p diagnostics
+          driver="$(curl -sS --max-time 90 -H 'Cache-Control: no-cache' "$API_BASE/api/v1/health/driver-master" || echo '{}')"
+          tacho="$(curl -sS --max-time 90 -H 'Cache-Control: no-cache' "$API_BASE/api/v1/health/tachomaster" || echo '{}')"
+          tj="$(az containerapp job show -n "$TACHO" -g "$RG" --query '{state:properties.provisioningState,image:properties.template.containers[0].image,cron:properties.configuration.scheduleTriggerConfig.cronExpression,envNames:properties.template.containers[0].env[].name}' -o json 2>/dev/null || echo '{}')"
+          ej="$(az containerapp job show -n "$ETA" -g "$RG" --query '{state:properties.provisioningState,image:properties.template.containers[0].image,cron:properties.configuration.scheduleTriggerConfig.cronExpression,envNames:properties.template.containers[0].env[].name}' -o json 2>/dev/null || echo '{}')"
+          texec="$(cat diagnostics/${TACHO}-execution.txt 2>/dev/null || true)"; eexec="$(cat diagnostics/${ETA}-execution.txt 2>/dev/null || true)"
+          ts=""; es=""
+          test -z "$texec" || ts="$(az containerapp job execution show -n "$TACHO" -g "$RG" --job-execution-name "$texec" --query properties.status -o tsv 2>/dev/null || true)"
+          test -z "$eexec" || es="$(az containerapp job execution show -n "$ETA" -g "$RG" --job-execution-name "$eexec" --query properties.status -o tsv 2>/dev/null || true)"
+          jq -n --arg checked "$(date -u +%FT%TZ)" --arg tn "$texec" --arg ts "$ts" --arg en "$eexec" --arg es "$es" --argjson driver "$driver" --argjson tacho "$tacho" --argjson tj "$tj" --argjson ej "$ej" '{checkedAtUtc:$checked,tachoExecution:{name:$tn,status:$ts},etaExecution:{name:$en,status:$es},driverMaster:$driver,tachomaster:$tacho,tachoJob:$tj,etaJob:$ej}' > diagnostics/production-live-final-state.json
+          jq '{checkedAtUtc,tachoExecution,etaExecution,driverMaster:{activeDrivers:.driverMaster.activeDrivers,sourceWorkers:.driverMaster.sourceWorkers,populationAligned:.driverMaster.populationAligned,duplicateMemberGroups:.driverMaster.duplicateMemberGroups,duplicateCardGroups:.driverMaster.duplicateCardGroups,activeWithoutMember:.driverMaster.activeWithoutMember,activeWithoutCard:.driverMaster.activeWithoutCard,latestCanonicalSyncUtc:.driverMaster.latestCanonicalSyncUtc},scheduledSync:.tachomaster.scheduledSync,tachoJob,etaJob}' diagnostics/production-live-final-state.json
+
+      - name: Commit production live state
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f diagnostics/production-live-final-state.json || exit 0
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add diagnostics/production-live-final-state.json
+          git commit -m 'Record restored production job execution state' || exit 0
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
+
+      - name: Gate production canonical health
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          f=diagnostics/production-live-final-state.json
+          test "$(jq -r '.tachoExecution.status' "$f")" = Succeeded
+          test "$(jq -r '.etaExecution.status' "$f")" = Succeeded
+          test "$(jq -r '.driverMaster.duplicateMemberGroups // -1' "$f")" = 0
+          test "$(jq -r '.driverMaster.duplicateCardGroups // -1' "$f")" = 0
+          test "$(jq -r '.driverMaster.activeWithoutMember // -1' "$f")" = 0
+          test "$(jq -r '.driverMaster.populationAligned // false' "$f")" = true

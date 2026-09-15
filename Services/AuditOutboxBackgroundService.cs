@@ -20,8 +20,7 @@ public sealed class AuditOutboxBackgroundService(
                 await using var scope = scopeFactory.CreateAsyncScope();
                 var processor = new AuditOutboxProcessor(
                     scope.ServiceProvider.GetRequiredService<TmsDbContext>(),
-                    scope.ServiceProvider.GetRequiredService<ILogger<AuditOutboxProcessor>>(),
-                    scope.ServiceProvider.GetRequiredService<SharePointMasterDataSyncService>());
+                    scope.ServiceProvider.GetRequiredService<ILogger<AuditOutboxProcessor>>());
                 await processor.ProcessPendingAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -47,8 +46,7 @@ public sealed class AuditOutboxBackgroundService(
 
 public sealed class AuditOutboxProcessor(
     TmsDbContext db,
-    ILogger<AuditOutboxProcessor> logger,
-    SharePointMasterDataSyncService? sharePoint = null)
+    ILogger<AuditOutboxProcessor> logger)
 {
     internal const int MaximumRetries = 5;
     internal const int BatchSize = 50;
@@ -79,18 +77,9 @@ public sealed class AuditOutboxProcessor(
             .AsNoTracking()
             .Where(x => x.ProcessedAt == null && x.FailedAt == null)
             .OrderBy(x => x.CreatedAt)
-            .Select(x => new { x.OutboxId, x.EventType })
+            .Select(x => new { x.OutboxId })
             .Take(BatchSize)
             .ToListAsync(ct);
-
-        // Master writes have already committed to SQL. Mirror one complete, idempotent snapshot
-        // for the batch before acknowledging its outbox events. If Graph is unavailable the
-        // events stay pending and the background worker retries without failing the API request.
-        if (sharePoint?.IsEnabled == true &&
-            pending.Any(x => string.Equals(x.EventType, AuditOutboxEventTypes.MasterDataAudit, StringComparison.Ordinal)))
-        {
-            await sharePoint.PublishFromSqlAsync(db, ct);
-        }
 
         var processed = 0;
         foreach (var item in pending)
@@ -112,18 +101,6 @@ public sealed class AuditOutboxProcessor(
 
         try
         {
-            if (string.Equals(item.EventType, AuditOutboxEventTypes.SharePointSiteAliasSync, StringComparison.Ordinal))
-            {
-                if (sharePoint is null) throw new InvalidOperationException("SharePoint alias sync processor was not configured.");
-                using var document = JsonDocument.Parse(item.Payload);
-                var siteKey = document.RootElement.GetProperty("ExternalCode").GetString();
-                var aliases = document.RootElement.TryGetProperty("Aliases", out var aliasesValue) ? aliasesValue.GetString() : null;
-                if (string.IsNullOrWhiteSpace(siteKey)) throw new InvalidOperationException("Alias sync event has no site key.");
-                await sharePoint.PublishSiteAliasesAsync(siteKey, aliases, ct);
-                item.ProcessedAt = DateTimeOffset.UtcNow;
-                await db.SaveAuditReplayChangesAsync(ct);
-                return true;
-            }
             if (!string.Equals(item.EventType, AuditOutboxEventTypes.MasterDataAudit, StringComparison.Ordinal))
                 throw new InvalidOperationException($"Unsupported audit outbox event type '{item.EventType}'.");
 
@@ -147,9 +124,6 @@ public sealed class AuditOutboxProcessor(
             logger.LogWarning(ex, "Audit outbox event {OutboxId} failed to replay.", outboxId);
             db.ChangeTracker.Clear();
 
-            // Another API replica may have committed the same deterministic audit Id after
-            // this worker checked for it. Treat that as successful idempotent replay rather
-            // than consuming retries on a duplicate primary-key insert.
             if (auditId.HasValue && await db.MasterDataAudits.AsNoTracking().AnyAsync(x => x.Id == auditId.Value, ct))
             {
                 var concurrentlyProcessed = await db.AuditOutboxes.SingleOrDefaultAsync(x => x.OutboxId == outboxId, ct);
@@ -166,9 +140,7 @@ public sealed class AuditOutboxProcessor(
                 return false;
 
             failed.RetryCount++;
-            // Learned aliases must not be discarded because SharePoint is temporarily unavailable.
-            // They remain pending and are retried by the outbox worker until the CRM accepts them.
-            if (failed.RetryCount >= MaximumRetries && !string.Equals(failed.EventType, AuditOutboxEventTypes.SharePointSiteAliasSync, StringComparison.Ordinal))
+            if (failed.RetryCount >= MaximumRetries)
             {
                 failed.FailedAt = DateTimeOffset.UtcNow;
                 logger.LogError(

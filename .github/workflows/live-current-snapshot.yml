@@ -1,0 +1,69 @@
+name: One-shot - Current production integration snapshot
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/live-current-snapshot.yml'
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  AZURE_RESOURCE_GROUP: slh-tms-prod-rg
+  AZURE_CONTAINER_APP_NAME: slh-tms-api-prod
+  API_BASE: https://slh-tms-api-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io
+  TACHO_JOB: slh-tms-job-tachomaster
+  ETA_JOB: slh-tms-job-eta
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Capture production state
+        shell: bash
+        run: |
+          set -u
+          mkdir -p diagnostics
+          tmp="$(mktemp -d)"
+          date_local="$(TZ=Europe/London date +%F)"
+          secrets_json="$(az containerapp secret list --name "$AZURE_CONTAINER_APP_NAME" --resource-group "$AZURE_RESOURCE_GROUP" --show-values -o json 2>/dev/null || echo '[]')"
+          tv_key="$(jq -r '[.[]|select(.name=="tv-wallboard-access-key")][0].value // empty' <<<"$secrets_json")"
+          get() { curl -sS --max-time 90 -H 'Cache-Control: no-cache' -H "X-TMS-TV-Key: $tv_key" -H "X-TV-Display-Key: $tv_key" "$API_BASE$1" 2>/dev/null || echo '{}'; }
+          get /api/v1/health/driver-master > "$tmp/driver.json"
+          get /api/v1/health/tachomaster > "$tmp/tacho.json"
+          get "/api/v1/health/geofence-links" > "$tmp/geo.json"
+          get "/api/v1/health/run-evidence?date=$date_local" > "$tmp/evidence.json"
+          get "/api/v1/operations/wallboard-source-health?date=$date_local" > "$tmp/wallboard.json"
+          get "/api/v1/tv-display/planned-runs?date=$date_local" > "$tmp/planned.json"
+          get "/api/v1/tv-display/route-progress?date=$date_local" > "$tmp/route.json"
+          get "/api/v1/run-timing?date=$date_local" > "$tmp/timing.json"
+          tacho_execs="$(az containerapp job execution list --name "$TACHO_JOB" --resource-group "$AZURE_RESOURCE_GROUP" --query '[0:5].{name:name,status:properties.status,start:properties.startTime,end:properties.endTime}' -o json 2>/dev/null || echo '[]')"
+          eta_execs="$(az containerapp job execution list --name "$ETA_JOB" --resource-group "$AZURE_RESOURCE_GROUP" --query '[0:5].{name:name,status:properties.status,start:properties.startTime,end:properties.endTime}' -o json 2>/dev/null || echo '[]')"
+          jq -n \
+            --arg checkedAtUtc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg planningDate "$date_local" \
+            --argjson tachoExecutions "$tacho_execs" \
+            --argjson etaExecutions "$eta_execs" \
+            --slurpfile driver "$tmp/driver.json" --slurpfile tacho "$tmp/tacho.json" --slurpfile geo "$tmp/geo.json" --slurpfile evidence "$tmp/evidence.json" --slurpfile wallboard "$tmp/wallboard.json" --slurpfile planned "$tmp/planned.json" --slurpfile route "$tmp/route.json" --slurpfile timing "$tmp/timing.json" \
+            '{checkedAtUtc:$checkedAtUtc,planningDate:$planningDate,tachoExecutions:$tachoExecutions,etaExecutions:$etaExecutions,driverMaster:$driver[0],tachomaster:$tacho[0],geofenceLinks:$geo[0],runEvidence:$evidence[0],wallboardSource:$wallboard[0],wallboardFeeds:{plannedRunCount:(if ($planned[0]|type)=="array" then ($planned[0]|length) else (($planned[0].runs//[])|length) end),routeProgressRunCount:(($route[0].runs//[])|length),runTimingRecordCount:(($timing[0].records//[])|length),latestTrackingUtc:($route[0].latestTrackingUtc//null),tachoWarning:($route[0].tachoWarning//null)}}' > diagnostics/live-current-snapshot.json
+      - name: Commit snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add diagnostics/live-current-snapshot.json
+          git commit -m 'Record current production integration snapshot' || exit 0
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main

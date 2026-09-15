@@ -107,9 +107,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # The Container Apps control plane can briefly rate-limit requests while
-          # revisions are being retired or a new build has just completed. Retry
-          # those transient responses rather than abandoning a safe deployment.
           az_retry() {
             local attempt=1
             local status=0
@@ -185,8 +182,6 @@ jobs:
             echo "Current production revision $previous_revision is already active; continuing."
           fi
 
-          # Replace any latest-revision traffic rule with an explicit production revision.
-          # This guarantees that creating the candidate revision cannot receive user traffic.
           az_retry az containerapp ingress traffic set \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -225,12 +220,6 @@ jobs:
             "Integrations__SageHr__DriverTeamName=Drivers"
             "Integrations__SageHr__DriverPositionKeyword=Driver"
             "TvWallboard__AccessKey=secretref:tv-wallboard-access-key"
-            "Integrations__SharePointMasterData__ClientSecret=secretref:sharepoint-master-data-client-secret"
-            "Integrations__SharePointMasterData__Enabled=true"
-            "Integrations__SharePointMasterData__TenantId=5aec48a1-c3c7-4cfd-a073-b38ae50041b1"
-            "Integrations__SharePointMasterData__ClientId=e52218ab-0a5a-459a-84b2-423a83152582"
-            "Integrations__SharePointMasterData__Hostname=stuartlyonshaulage.sharepoint.com"
-            "Integrations__SharePointMasterData__SitePath=/"
             "Cors__AllowedOrigins__0=https://slh-tms-portal-prod.gentlepond-08dba66b.uksouth.azurecontainerapps.io"
             "Deployment__Revision=$DEPLOY_SHA"
           )
@@ -244,8 +233,6 @@ jobs:
             --set-env-vars "${env_vars[@]}" \
             --output none
 
-          # latestRevisionName can lag an update. Resolve the revision requested
-          # by this deployment and verify its image before touching its traffic.
           target_revision="${AZURE_CONTAINER_APP_NAME}--${revision_suffix}"
           candidate_image=""
           for attempt in {1..24}; do
@@ -266,7 +253,6 @@ jobs:
 
           echo "TARGET_REVISION=$target_revision" >> "$GITHUB_ENV"
 
-          # Keep the previous revision pinned at 100% and explicitly register the candidate at 0%.
           az containerapp ingress traffic set \
             --name "$AZURE_CONTAINER_APP_NAME" \
             --resource-group "$AZURE_RESOURCE_GROUP" \
@@ -293,9 +279,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # The API runs its schema migration/initialisation during process startup.
-          # Calling the revision-specific readiness endpoint starts the candidate (if scaled to zero)
-          # and keeps all migration work isolated from production traffic.
           target_ready=false
           for attempt in {1..72}; do
             target_fqdn="$(timeout 20s az containerapp revision show \
@@ -325,9 +308,6 @@ jobs:
               break
             fi
 
-            # An unhealthy revision cannot recover by repeating HTTP probes. Surface
-            # the replica and application diagnostics immediately so a deployment
-            # failure is actionable rather than spending another ~30 minutes polling.
             if test "$health_state" = "Unhealthy"; then
               echo "::error::Candidate revision became unhealthy before readiness."
               echo "Candidate replica state:"

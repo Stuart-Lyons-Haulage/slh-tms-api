@@ -37,6 +37,19 @@ public sealed class MasterDetailStoreTests
     }
 
     [Fact]
+    public async Task Sparse_refresh_does_not_erase_previously_retained_master_fields()
+    {
+        await using var db = CreateDb();
+        await MasterDetailStore.SaveAsync(db, "driver", "D-17", """{"employeeNumber":"D-17","notes":"Keep this note","tachoMasterDriverId":"TM17"}""", "test", "tester", CancellationToken.None);
+        await MasterDetailStore.SaveAsync(db, "driver", "D-17", """{"employeeNumber":"D-17","notes":"","tachoMasterDriverId":null,"email":"driver@example.com"}""", "test", "tester", CancellationToken.None);
+
+        using var document = System.Text.Json.JsonDocument.Parse((await db.StagedImports.SingleAsync()).PayloadJson);
+        Assert.Equal("Keep this note", document.RootElement.GetProperty("notes").GetString());
+        Assert.Equal("TM17", document.RootElement.GetProperty("tachoMasterDriverId").GetString());
+        Assert.Equal("driver@example.com", document.RootElement.GetProperty("email").GetString());
+    }
+
+    [Fact]
     public async Task FleetioPlaceholderVehiclesAreQuarantined()
     {
         await using var db = CreateDb();

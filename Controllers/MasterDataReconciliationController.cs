@@ -154,7 +154,7 @@ public sealed class MasterDataReconciliationController(TmsDbContext db, StagingS
                 var rows = await db.MarketContacts.AsNoTracking().OrderBy(x => x.Market).ThenBy(x => x.Name).Take(10000).ToListAsync(ct);
                 return rows.Select(x => JsonObjectOf(new
                 {
-                    x.Id, x.Market, x.Name, x.StandOrLocation, x.Salesman, x.Sender, x.Active
+                    x.Id, x.MarketKey, x.Market, x.Name, x.StandOrLocation, x.Salesman, x.Sender, x.Active
                 })).ToList();
             }
             case "sitetimingrule":
@@ -191,16 +191,43 @@ public sealed class MasterDataReconciliationController(TmsDbContext db, StagingS
     {
         return entityType.ToLowerInvariant() switch
         {
-            "driver" => Same(Value(current, "employeeNumber"), Value(incoming, "employeeNumber")) ||
-                        (string.IsNullOrWhiteSpace(Value(incoming, "employeeNumber")) && Same(Value(current, "displayName"), Value(incoming, "displayName"))),
+            "driver" => DriverIdentityMatches(current, incoming),
             "vehicle" => SameCompact(Value(current, "registration"), Value(incoming, "registration")),
             "trailer" => Same(Value(current, "trailerNumber"), Value(incoming, "trailerNumber")),
-            "site" => Same(Value(current, "externalCode"), Value(incoming, "externalCode")) ||
-                      (string.IsNullOrWhiteSpace(Value(incoming, "externalCode")) && Same(Value(current, "name"), Value(incoming, "name"))),
-            "marketcontact" => Same(Value(current, "market"), Value(incoming, "market")) &&
-                               Same(Value(current, "name"), Value(incoming, "name")),
+            "site" => SiteIdentityMatches(current, incoming),
+            "marketcontact" => MarketIdentityMatches(current, incoming),
             _ => false
         };
+    }
+
+    private static bool DriverIdentityMatches(JsonObject current, JsonObject incoming)
+    {
+        var incomingMember = Value(incoming, "tachoMasterDriverId") ?? Value(incoming, "tachomasterDriverId");
+        if (!string.IsNullOrWhiteSpace(incomingMember))
+            return Same(Value(current, "tachoMasterDriverId"), incomingMember);
+
+        return Same(Value(current, "employeeNumber"), Value(incoming, "employeeNumber")) ||
+               (string.IsNullOrWhiteSpace(Value(incoming, "employeeNumber")) && Same(Value(current, "displayName"), Value(incoming, "displayName")));
+    }
+
+    private static bool SiteIdentityMatches(JsonObject current, JsonObject incoming)
+    {
+        if (Same(Value(current, "externalCode"), Value(incoming, "externalCode"))) return true;
+        if (!Same(Value(current, "name"), Value(incoming, "name"))) return false;
+
+        var incomingAddress = Value(incoming, "collectionAddress") ?? Value(incoming, "address");
+        var currentAddress = Value(current, "collectionAddress") ?? Value(current, "address");
+        return string.IsNullOrWhiteSpace(incomingAddress) || string.IsNullOrWhiteSpace(currentAddress) || SameCompact(currentAddress, incomingAddress);
+    }
+
+    private static bool MarketIdentityMatches(JsonObject current, JsonObject incoming)
+    {
+        var incomingKey = Value(incoming, "marketKey");
+        if (!string.IsNullOrWhiteSpace(incomingKey) && Same(Value(current, "marketKey"), incomingKey)) return true;
+
+        return Same(Value(current, "market"), Value(incoming, "market")) &&
+               Same(Value(current, "name"), Value(incoming, "name")) &&
+               Same(Value(current, "standOrLocation"), Value(incoming, "standOrLocation"));
     }
 
     private async Task UpsertSiteTimingRuleAsync(JsonElement payload, string? source, CancellationToken ct)
@@ -252,7 +279,7 @@ public sealed class MasterDataReconciliationController(TmsDbContext db, StagingS
         string.Equals(left.Trim(), right.Trim(), StringComparison.OrdinalIgnoreCase);
 
     private static bool SameCompact(string? left, string? right) =>
-        Same(left?.Replace(" ", ""), right?.Replace(" ", ""));
+        Same(left is null ? null : Normalise(left), right is null ? null : Normalise(right));
 
     private static string Normalise(string value) =>
         new(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
