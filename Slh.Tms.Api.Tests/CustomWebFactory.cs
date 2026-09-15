@@ -29,7 +29,13 @@ public class CustomWebFactory : WebApplicationFactory<Program>
         });
         builder.ConfigureTestServices(services =>
         {
-            var dbRegistrations = services.Where(descriptor => descriptor.ServiceType == typeof(DbContextOptions<TmsDbContext>) || descriptor.ServiceType == typeof(TmsDbContext)).ToList();
+            var dbRegistrations = services.Where(descriptor =>
+                descriptor.ServiceType == typeof(TmsDbContext) ||
+                descriptor.ServiceType == typeof(DbContextOptions<TmsDbContext>) ||
+                descriptor.ServiceType == typeof(DbContextOptions) ||
+                (descriptor.ServiceType.IsGenericType &&
+                 descriptor.ServiceType.GetGenericTypeDefinition().FullName == "Microsoft.EntityFrameworkCore.Infrastructure.IDbContextOptionsConfiguration`1" &&
+                 descriptor.ServiceType.GenericTypeArguments.Contains(typeof(TmsDbContext)))).ToList();
             foreach (var registration in dbRegistrations) services.Remove(registration);
             services.AddDbContext<TmsDbContext>(options => options.UseInMemoryDatabase(_databaseName));
 
