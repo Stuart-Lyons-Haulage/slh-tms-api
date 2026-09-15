@@ -50,11 +50,8 @@ public static class OrderSiteMasterAlignment
         List<Site> sites;
         try
         {
-            // Approval can call ResolveNamesAsync once per source line. Do not hydrate
-            // Site Master detail JSON here; that makes a single approval scale with the
-            // whole Site Master repeatedly and can push the request behind the 504 gateway
-            // timeout. This path only needs active site identity fields for matching.
             sites = await db.Sites.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
+            await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
         }
         catch (Exception ex) when (SchemaUnavailable(ex))
         {
