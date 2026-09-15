@@ -23,6 +23,13 @@ public sealed class StagingQueueProjectionTests
             intakeStatus = "Ready",
             intakeConfidence = "High",
             intakeWarnings = new[] { "Check booking time" },
+            emailRouteMatched = true,
+            emailRouteRequiresReview = false,
+            orderIntakeRouteRuleId = "f558caaa-7f7b-4caa-9e95-cc4dc343cd4f",
+            orderIntakeRouteConfidenceScore = 95,
+            orderIntakeRouteMatchedDimensions = 3,
+            orderIntakeRouteExplanation = new[] { "Customer NWF matched.", "retailer matched ALDI." },
+            orderIntakeRouteAlternatives = new[] { new { score = 95, customerCode = "NWF" } },
             sourceMessageId = "message-123",
             sourceInternetMessageId = "<message-123@example.com>",
             sourceSubject = "NWAY pallet order",
@@ -43,6 +50,10 @@ public sealed class StagingQueueProjectionTests
         Assert.Equal(12, root.GetProperty("pallets").GetInt32());
         Assert.Equal("message-123", root.GetProperty("sourceMessageId").GetString());
         Assert.Equal("orders.xlsx", root.GetProperty("sourceAttachmentName").GetString());
+        Assert.True(root.GetProperty("emailRouteMatched").GetBoolean());
+        Assert.Equal(95, root.GetProperty("orderIntakeRouteConfidenceScore").GetInt32());
+        Assert.Equal(3, root.GetProperty("orderIntakeRouteMatchedDimensions").GetInt32());
+        Assert.Equal("NWF", root.GetProperty("orderIntakeRouteAlternatives")[0].GetProperty("customerCode").GetString());
         Assert.False(root.TryGetProperty("sourceBodyText", out _));
         Assert.False(root.TryGetProperty("sourceBodyHtml", out _));
         Assert.False(root.TryGetProperty("sourceToRecipients", out _));

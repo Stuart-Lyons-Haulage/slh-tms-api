@@ -81,6 +81,9 @@ internal static class StagingQueueProjection
         "customerCode", "collectionDate", "deliveryDate", "pallets", "sellerName", "stallNumber",
         "requestedTime", "overnightRoute", "wave", "routeTiming", "jobType", "driverInstructions",
         "plannerReady", "intakeStatus", "intakeConfidence", "intakeWarnings", "intakeParser",
+        "emailRouteMatched", "emailRouteId", "emailRouteSender", "emailRouteIdentityOnly", "emailRouteRequiresReview",
+        "orderIntakeRouteRuleId", "orderIntakeRouteConfidenceScore", "orderIntakeRouteMatchedDimensions",
+        "orderIntakeRouteRequiresReview", "orderIntakeRouteExplanation", "orderIntakeRouteAlternatives",
         "sourceSubject", "sourceEmailSubject", "sourceMessageId", "sourceEmailMessageId",
         "sourceInternetMessageId", "sourceReceivedAtUtc", "sourceEmailReceivedAt", "sourceWebLink",
         "sourceEmailWebLink", "sourceAttachmentName"
