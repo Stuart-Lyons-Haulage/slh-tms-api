@@ -11,18 +11,15 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class TachoMasterHealthController(
     TmsDbContext? db,
     TachoMasterClient tachoMasterClient,
-    DistributedLeaseManager? leases,
     ILogger<TachoMasterHealthController> logger) : ControllerBase
 {
     private const double LiveJobAgeMinutes = 15;
     private const double StaleJobAgeMinutes = 30;
 
-    // Existing unit tests construct the controller directly. Keep that test-only path
-    // while production DI uses the public constructor above and always supplies TmsDbContext.
     internal TachoMasterHealthController(
         TachoMasterClient tachoMasterClient,
         ILogger<TachoMasterHealthController> logger)
-        : this(null, tachoMasterClient, null, logger)
+        : this(null, tachoMasterClient, logger)
     {
     }
 
@@ -45,24 +42,24 @@ public sealed class TachoMasterHealthController(
         {
             var now = DateTimeOffset.UtcNow;
             var today = UkOperatingDate(now);
+
+            // TachoMaster upstream calls may run together, but SQL work on this scoped DbContext
+            // is deliberately kept out of Task.WhenAll. This health endpoint must work with the
+            // normal production connection string and must never require MultipleActiveResultSets.
             var profilesTask = tachoMasterClient.GetDriverProfilesAsync(cancellationToken);
             var openDutiesTask = tachoMasterClient.GetOpenDriverStatusesByVehicleAsync(today, cancellationToken);
             var dayDutiesTask = tachoMasterClient.GetDriverDutyStatusesAsync(today, cancellationToken);
-            var latestPersistedSyncTask = db is null
-                ? Task.FromResult<DateTimeOffset?>(null)
-                : db.Drivers.AsNoTracking()
-                    .Where(driver => driver.LastTachoSyncUtc != null)
-                    .MaxAsync(driver => driver.LastTachoSyncUtc, cancellationToken);
-            var leaseTask = db is null || leases is null
-                ? Task.FromResult<DistributedLeaseStatus?>(null)
-                : leases.GetStatusAsync(IntegrationLeaseNames.TachoMaster, cancellationToken);
+            await Task.WhenAll(profilesTask, openDutiesTask, dayDutiesTask);
 
-            await Task.WhenAll(profilesTask, openDutiesTask, dayDutiesTask, latestPersistedSyncTask, leaseTask);
             var profiles = await profilesTask;
             var duties = await openDutiesTask;
             var dayDuties = await dayDutiesTask;
-            var latestPersistedSyncUtc = await latestPersistedSyncTask;
-            var lease = await leaseTask;
+            var latestPersistedSyncUtc = db is null
+                ? null
+                : await db.Drivers.AsNoTracking()
+                    .Where(driver => driver.LastTachoSyncUtc != null)
+                    .MaxAsync(driver => driver.LastTachoSyncUtc, cancellationToken);
+
             var lastSuccessfulPollUtc = DateTimeOffset.UtcNow;
             var openDuties = duties.Values.SelectMany(items => items).ToList();
 
@@ -125,7 +122,6 @@ public sealed class TachoMasterHealthController(
                         ? "The scheduled TachoMaster synchronisation has not refreshed persisted driver data within 30 minutes. Check the slh-tms-job-tachomaster Container Apps Job execution history and deployed jobs image."
                         : (string?)null
                 },
-                lease = lease is null ? null : new { owner = lease.OwnerInstanceId, runId = lease.RunId, acquiredAtUtc = lease.AcquiredAtUtc, heartbeatUtc = lease.HeartbeatUtc, expiresAtUtc = lease.ExpiresAtUtc, stale = lease.IsStale },
                 metricsFreshness,
                 newestMetricsTimestampUtc = newestMetric == default ? (DateTimeOffset?)null : newestMetric,
                 metricsAgeMinutes,
