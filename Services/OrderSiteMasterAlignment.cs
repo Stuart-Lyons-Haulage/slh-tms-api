@@ -7,6 +7,10 @@ namespace Slh.Tms.Api.Services;
 
 public static class OrderSiteMasterAlignment
 {
+    private static readonly TimeSpan SiteCacheDuration = TimeSpan.FromSeconds(45);
+    private static readonly SemaphoreSlim SiteCacheLock = new(1, 1);
+    private static readonly Dictionary<string, SiteCacheEntry> SiteCaches = new(StringComparer.Ordinal);
+
     public sealed record Alignment(
         string? CollectionName,
         string? CollectionAddress,
@@ -19,6 +23,7 @@ public static class OrderSiteMasterAlignment
         string? MarketSalesman = null);
 
     private sealed record MarketContext(string Market, string Customer, string? Stand, string? Salesman);
+    private sealed record SiteCacheEntry(DateTimeOffset ExpiresAtUtc, IReadOnlyList<Site> Sites);
 
     public static async Task<Alignment> ResolveAsync(TmsDbContext db, JsonElement payload, CancellationToken ct)
     {
@@ -50,8 +55,7 @@ public static class OrderSiteMasterAlignment
         List<Site> sites;
         try
         {
-            sites = await db.Sites.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
-            await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
+            sites = await LoadActiveSitesAsync(db, ct);
         }
         catch (Exception ex) when (SchemaUnavailable(ex))
         {
@@ -102,6 +106,64 @@ public static class OrderSiteMasterAlignment
             marketContext?.Stand,
             marketContext?.Salesman);
     }
+
+    private static async Task<List<Site>> LoadActiveSitesAsync(TmsDbContext db, CancellationToken ct)
+    {
+        var cacheKey = SiteCacheKey(db);
+        var now = DateTimeOffset.UtcNow;
+        if (SiteCaches.TryGetValue(cacheKey, out var cached) && cached.ExpiresAtUtc > now)
+            return CloneSites(cached.Sites);
+
+        await SiteCacheLock.WaitAsync(ct);
+        try
+        {
+            now = DateTimeOffset.UtcNow;
+            if (SiteCaches.TryGetValue(cacheKey, out cached) && cached.ExpiresAtUtc > now)
+                return CloneSites(cached.Sites);
+
+            var sites = await db.Sites.AsNoTracking().Where(x => x.Active).ToListAsync(ct);
+            await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
+            SiteCaches[cacheKey] = new SiteCacheEntry(now.Add(SiteCacheDuration), CloneSites(sites));
+            return CloneSites(SiteCaches[cacheKey].Sites);
+        }
+        finally
+        {
+            SiteCacheLock.Release();
+        }
+    }
+
+    private static string SiteCacheKey(TmsDbContext db)
+    {
+        if (db.Database.IsRelational())
+            return $"relational:{db.Database.GetConnectionString() ?? db.Database.ProviderName ?? "unknown"}";
+
+        // Non-relational providers are mostly test hosts. Do not share cache across isolated
+        // in-memory contexts because that can make one test/order resolve against another
+        // database's temporary sites.
+        return $"context:{db.ContextId.InstanceId}";
+    }
+
+    private static List<Site> CloneSites(IEnumerable<Site> sites) => sites.Select(CloneSite).ToList();
+
+    private static Site CloneSite(Site site) => new()
+    {
+        Id = site.Id,
+        ExternalCode = site.ExternalCode,
+        CustomerCode = site.CustomerCode,
+        Name = site.Name,
+        DriverTextName = site.DriverTextName,
+        CollectionAddress = site.CollectionAddress,
+        CollectionInstructions = site.CollectionInstructions,
+        MapLink = site.MapLink,
+        Latitude = site.Latitude,
+        Longitude = site.Longitude,
+        Aliases = site.Aliases,
+        CustomField1 = site.CustomField1,
+        CustomField2 = site.CustomField2,
+        CustomField3 = site.CustomField3,
+        OperationalRegion = site.OperationalRegion,
+        Active = site.Active
+    };
 
     private static async Task<MarketContext?> MatchMarketContextAsync(TmsDbContext db, string? marketName, string? destination, CancellationToken ct)
     {
