@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -46,8 +47,11 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
 
             try
             {
+                if (request.AcknowledgeReviewFlags)
+                    MarkPlannerApproved(item, request.Date);
+
                 var note = request.AcknowledgeReviewFlags
-                    ? $"Explicitly selected and approved from Order Control for {request.Date:yyyy-MM-dd}; any visible review flags were acknowledged by the planner."
+                    ? $"Explicitly selected and approved from Order Control for {request.Date:yyyy-MM-dd}; visible review flags, pre-order status and planner-ready warnings were acknowledged by the planner."
                     : $"Approved from Order Control for {request.Date:yyyy-MM-dd}. Clean, planner-ready order.";
                 var promoted = await stagingService.ReviewAndPromote(item.Id, true, note, User, ct);
                 if (promoted.Status != StagingStatus.Promoted)
@@ -105,9 +109,10 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
             var pallets = Int(payload, "pallets", "palletQty", "palletQuantity", "quantity");
             if (!IsBackhaul(payload) && (pallets is null or <= 0)) return "Zero or missing pallet quantity.";
 
-            if (Bool(payload, "plannerReady") == false) return "Order is not planner-ready.";
-            if (string.Equals(Text(payload, "intakeStatus"), "PreOrder", StringComparison.OrdinalIgnoreCase))
-                return "Pre-order awaiting customer instruction.";
+            var isPreOrder = string.Equals(Text(payload, "intakeStatus"), "PreOrder", StringComparison.OrdinalIgnoreCase);
+            var notPlannerReady = Bool(payload, "plannerReady") == false;
+            if ((notPlannerReady || isPreOrder) && !acknowledgeReviewFlags)
+                return isPreOrder ? "Pre-order awaiting customer instruction." : "Order is not planner-ready.";
 
             if (!acknowledgeReviewFlags)
             {
@@ -123,6 +128,20 @@ public sealed class BulkOrderApprovalController(TmsDbContext db, StagingService 
         {
             return "Staged payload is not valid JSON.";
         }
+    }
+
+    private static void MarkPlannerApproved(StagedImport item, DateOnly requestedDate)
+    {
+        var root = JsonNode.Parse(item.PayloadJson)?.AsObject() ?? new JsonObject();
+        var warnings = root["intakeWarnings"] as JsonArray ?? [];
+        warnings.Add($"Planner explicitly approved this order for {requestedDate:yyyy-MM-dd}; pre-order/not planner-ready status was treated as a review flag, not a blocker.");
+        root["intakeWarnings"] = warnings;
+        root["plannerReady"] = true;
+        if (string.Equals(root["intakeStatus"]?.GetValue<string>(), "PreOrder", StringComparison.OrdinalIgnoreCase))
+            root["intakeStatus"] = "PlannerApproved";
+        root["plannerApprovedAtUtc"] = DateTimeOffset.UtcNow;
+        root["plannerApprovalOverride"] = true;
+        item.PayloadJson = root.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
     }
 
     private static bool IsPmOvernightCarryIn(JsonElement payload, DateOnly collectionDate, DateOnly requestedDate)
