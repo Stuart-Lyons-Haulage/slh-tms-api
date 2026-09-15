@@ -749,7 +749,8 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 attachment.ContentType,
                 attachment.ContentId,
                 attachment.Size,
-                attachment.IsInline
+                attachment.IsInline,
+                contentBase64 = attachment.EffectiveContentBase64
             }).ToList(),
             bodyTruncated = (request.BodyText?.Length ?? 0) > SourceBodyTextLimit || (request.BodyHtml?.Length ?? 0) > SourceBodyHtmlLimit,
             evidenceAvailable = true
@@ -766,7 +767,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             ReceivedAtUtc = request.ReceivedAtUtc ?? now,
             ReviewedAtUtc = now,
             ReviewedBy = "Info mailbox intake",
-            ReviewNote = "Immutable source email evidence retained for Order Review. Attachment bytes are intentionally not duplicated into SQL."
+            ReviewNote = "Immutable source email evidence retained for Order Review, including attachment copies supplied by Power Automate."
         };
         db.StagedImports.Add(evidence);
         db.StagedImportEvents.Add(new StagedImportEvent
@@ -781,7 +782,8 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
                 request.InternetMessageId,
                 request.Subject,
                 request.ReceivedAtUtc,
-                attachmentCount = (request.Attachments ?? []).Count
+                attachmentCount = (request.Attachments ?? []).Count,
+                attachmentCopyCount = (request.Attachments ?? []).Count(item => item.IsInline != true && !string.IsNullOrWhiteSpace(item.EffectiveContentBase64))
             }),
             Note = evidence.ReviewNote,
             Actor = evidence.ReviewedBy,
