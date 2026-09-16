@@ -299,17 +299,21 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
         foreach (var row in rows)
         {
             var tachoId = row.Text("tachomasterdriverid", "tacho master driver id", "member code", "tacho member");
+            var tachoCard = row.Text("tachocardnumber", "tacho card number", "card number", "driver card", "digicard");
             var employee = row.Text("employee number", "employee no", "driverid", "driver id", "payroll number");
             var name = row.Text("display name", "driver", "driver name", "name");
-            if (string.IsNullOrWhiteSpace(tachoId) && string.IsNullOrWhiteSpace(employee) && string.IsNullOrWhiteSpace(name)) continue;
+            if (string.IsNullOrWhiteSpace(tachoId) && string.IsNullOrWhiteSpace(tachoCard))
+            {
+                result.Rows.Add(new WorkbookRowResult("Drivers", row.RowNumber, name ?? employee ?? "driver", "skipped", "No TachoMaster Member Code or DB Tacho card number was supplied. Workbook driver rows never match by name or employee number.", 30) { ActionTaken = "not written" });
+                continue;
+            }
 
-            var driver = drivers.FirstOrDefault(item => !string.IsNullOrWhiteSpace(tachoId) && string.Equals(item.TachoMasterDriverId, tachoId, StringComparison.OrdinalIgnoreCase))
-                ?? drivers.FirstOrDefault(item => !string.IsNullOrWhiteSpace(employee) && string.Equals(item.EmployeeNumber, employee, StringComparison.OrdinalIgnoreCase))
-                ?? drivers.FirstOrDefault(item => !string.IsNullOrWhiteSpace(name) && string.Equals(SiteMasterIdentityResolver.Normalise(item.DisplayName), SiteMasterIdentityResolver.Normalise(name), StringComparison.OrdinalIgnoreCase));
+            var driver = drivers.FirstOrDefault(item => !string.IsNullOrWhiteSpace(tachoId) && TachoDriverIdentityRules.MemberMatches(item.TachoMasterDriverId, tachoId))
+                ?? drivers.FirstOrDefault(item => !string.IsNullOrWhiteSpace(tachoCard) && TachoDriverIdentityRules.CardsMatch(item.TachoCardNumber, tachoCard));
 
             if (driver is null)
             {
-                result.Rows.Add(new WorkbookRowResult("Drivers", row.RowNumber, name ?? employee ?? tachoId!, "skipped", "No existing live driver matched. Workbook driver rows are update-only and cannot create drivers.", 30) { ActionTaken = "not written" });
+                result.Rows.Add(new WorkbookRowResult("Drivers", row.RowNumber, name ?? employee ?? tachoId ?? tachoCard!, "skipped", "No existing live driver matched by TachoMaster Member Code or DB Tacho card number. Workbook driver rows are update-only and cannot create drivers.", 30) { ActionTaken = "not written" });
                 continue;
             }
 
@@ -323,6 +327,8 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                 {
                     employeeNumber = driver.EmployeeNumber,
                     displayName = driver.DisplayName,
+                    tachoMasterDriverId = driver.TachoMasterDriverId,
+                    tachoCardNumber = driver.TachoCardNumber,
                     phoneNumber = driver.MobileNumber,
                     email = row.Text("email", "email address"),
                     coding = row.Text("coding", "code", "driver code"),
@@ -334,9 +340,9 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                     notes = row.Text("notes"),
                     sourceWorkbookSheet = row.SheetName
                 };
-                await MasterDetailStore.SaveAsync(db, "driver", driver.EmployeeNumber, SiteMasterIdentityResolver.ToJson(payload), "SLH master workbook driver overlay", User.Identity?.Name, ct);
+                await MasterDetailStore.SaveAsync(db, "driver", driver.EmployeeNumber ?? driver.Id.ToString(), SiteMasterIdentityResolver.ToJson(payload), "SLH master workbook driver overlay", User.Identity?.Name, ct);
             }
-            result.Rows.Add(new WorkbookRowResult("Drivers", row.RowNumber, driver.DisplayName, commit ? "updated" : "matched", "Matched existing live driver; operational overlay only.", 90) { ActionTaken = commit ? "updated driver overlay" : "would update driver overlay" });
+            result.Rows.Add(new WorkbookRowResult("Drivers", row.RowNumber, driver.DisplayName, commit ? "updated" : "matched", "Matched existing live driver by TachoMaster Member Code or DB Tacho card number; operational overlay only.", 95) { ActionTaken = commit ? "updated driver overlay" : "would update driver overlay" });
         }
         if (commit) await db.SaveChangesAsync(ct);
     }
