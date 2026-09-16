@@ -1,15 +1,31 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Contracts;
+using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
 
 [ApiController, Route("api/v1/master-data")]
 [Authorize]
-public sealed class MasterDataController(StagingService staging) : ControllerBase
+public sealed class MasterDataController(StagingService staging, TmsDbContext db) : ControllerBase
 {
-    private static readonly HashSet<string> DirectTypes = new(StringComparer.OrdinalIgnoreCase) { "customer", "customercontact", "emailroute", "vehicle", "driver", "trailer", "site", "marketcontact", "fuelprice" };
+    private static readonly HashSet<string> DirectTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "customer",
+        "customercontact",
+        "emailroute",
+        "vehicle",
+        "driver",
+        "trailer",
+        "site",
+        "marketcontact",
+        "fuelprice",
+        "sitetimingrule"
+    };
 
     [HttpPost("apply"), Authorize(Policy = "TmsApprove")]
     public async Task<IActionResult> Apply(List<StageImportRequest> requests, CancellationToken ct)
@@ -20,13 +36,14 @@ public sealed class MasterDataController(StagingService staging) : ControllerBas
             {
                 "customer" => 0,
                 "site" => 1,
-                "customercontact" => 2,
-                "emailroute" => 3,
-                "driver" => 4,
-                "vehicle" => 5,
-                "trailer" => 6,
-                "marketcontact" => 7,
-                "fuelprice" => 8,
+                "sitetimingrule" => 2,
+                "customercontact" => 3,
+                "emailroute" => 4,
+                "driver" => 5,
+                "vehicle" => 6,
+                "trailer" => 7,
+                "marketcontact" => 8,
+                "fuelprice" => 9,
                 _ => 99
             })
             .ToList();
@@ -45,7 +62,11 @@ public sealed class MasterDataController(StagingService staging) : ControllerBas
 
             try
             {
-                await staging.PromoteDirect(request.EntityType, request.Payload, ct);
+                if (IsSiteTimingRule(request.EntityType))
+                    await ApplySiteTimingRule(request, ct);
+                else
+                    await staging.PromoteDirect(request.EntityType, request.Payload, ct);
+
                 applied++;
                 results.Add(new { request.EntityType, request.IdempotencyKey, applied = true });
             }
@@ -83,6 +104,87 @@ public sealed class MasterDataController(StagingService staging) : ControllerBas
         batchSize = Math.Clamp(batchSize <= 0 ? 100 : batchSize, 1, 200);
         var linked = await staging.LinkRegistered(batchSize, ct);
         return Ok(new { linked, batchSize, message = linked == 0 ? "No registered rows could be linked yet." : $"Linked {linked} registered rows into the live master tables. Run again if more recovery rows remain." });
+    }
+
+    private async Task ApplySiteTimingRule(StageImportRequest request, CancellationToken ct)
+    {
+        var payload = request.Payload;
+        var routeCombination = Text(payload, "routeCombination")
+            ?? JoinRoute(Text(payload, "collectionSite") ?? Text(payload, "collection") ?? Text(payload, "from"),
+                Text(payload, "deliverySite") ?? Text(payload, "delivery") ?? Text(payload, "to"));
+
+        if (string.IsNullOrWhiteSpace(routeCombination))
+            throw new JsonException("Site timing rule requires routeCombination or collectionSite and deliverySite.");
+
+        var normalised = new
+        {
+            routeCombination = routeCombination.Trim(),
+            collectionSite = Text(payload, "collectionSite") ?? Text(payload, "collection") ?? Text(payload, "from"),
+            deliverySite = Text(payload, "deliverySite") ?? Text(payload, "delivery") ?? Text(payload, "to"),
+            palletType = Text(payload, "palletType") ?? Text(payload, "palletsType") ?? Text(payload, "palletFormat"),
+            lastDespatch = Text(payload, "lastDespatch") ?? Text(payload, "lastDispatch") ?? Text(payload, "lastStart") ?? Text(payload, "lastStartTime"),
+            collectFrom = Text(payload, "collectFrom") ?? Text(payload, "collectionFrom"),
+            collectTo = Text(payload, "collectTo") ?? Text(payload, "collectionTo") ?? Text(payload, "collectionDeadline"),
+            depotDeadline = Text(payload, "depotDeadline") ?? Text(payload, "deliveryDeadline") ?? Text(payload, "deliveryCutoff") ?? Text(payload, "cutoff"),
+            etaMinutes = Text(payload, "etaMinutes") ?? Text(payload, "durationMinutes") ?? Text(payload, "travelMinutes"),
+            notes = Text(payload, "notes") ?? Text(payload, "instructions")
+        };
+
+        var json = JsonSerializer.Serialize(normalised);
+        var key = $"sitetimingrule:{Key(normalised.routeCombination)}:{Key(normalised.palletType)}";
+        var existing = await db.StagedImports.FirstOrDefaultAsync(item =>
+            item.EntityType == "masterdetail:sitetimingrule" && item.IdempotencyKey == key, ct);
+
+        if (existing is null)
+        {
+            db.StagedImports.Add(new StagedImport
+            {
+                EntityType = "masterdetail:sitetimingrule",
+                IdempotencyKey = key,
+                PayloadJson = json,
+                Source = request.Source ?? "Master data CSV · Run Times",
+                Status = StagingStatus.Promoted,
+                ReviewedAtUtc = DateTimeOffset.UtcNow,
+                ReviewNote = "Imported as a promoted site timing rule for dispatch/order timing."
+            });
+        }
+        else
+        {
+            existing.PayloadJson = json;
+            existing.Source = request.Source ?? existing.Source;
+            existing.Status = StagingStatus.Promoted;
+            existing.ReviewedAtUtc = DateTimeOffset.UtcNow;
+            existing.ReviewNote = "Updated from Master data CSV · Run Times.";
+        }
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    private static bool IsSiteTimingRule(string entityType) =>
+        entityType.Equals("sitetimingrule", StringComparison.OrdinalIgnoreCase)
+        || entityType.Equals("siteTimingRule", StringComparison.OrdinalIgnoreCase)
+        || entityType.Equals("site-timing-rule", StringComparison.OrdinalIgnoreCase);
+
+    private static string? JoinRoute(string? collection, string? delivery) =>
+        string.IsNullOrWhiteSpace(collection) || string.IsNullOrWhiteSpace(delivery) ? null : $"{collection.Trim()} to {delivery.Trim()}";
+
+    private static string Key(string? value) =>
+        new string((value ?? string.Empty).Trim().ToLowerInvariant().Select(character => char.IsLetterOrDigit(character) ? character : '-').ToArray()).Trim('-');
+
+    private static string? Text(JsonElement payload, string name)
+    {
+        foreach (var property in payload.EnumerateObject())
+        {
+            if (!property.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) continue;
+            return property.Value.ValueKind switch
+            {
+                JsonValueKind.Null or JsonValueKind.Undefined => null,
+                JsonValueKind.String => string.IsNullOrWhiteSpace(property.Value.GetString()) ? null : property.Value.GetString()!.Trim(),
+                _ => property.Value.ToString()
+            };
+        }
+
+        return null;
     }
 
     private static bool IsDatabaseUnavailable(Exception exception)
