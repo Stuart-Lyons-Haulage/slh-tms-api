@@ -1,5 +1,8 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
@@ -8,6 +11,7 @@ namespace Slh.Tms.Api.Controllers;
 [Route("api/v1/driver-master")]
 [Authorize]
 public sealed class TachoDriverMasterController(
+    TmsDbContext db,
     TachoDriverMasterSyncJobService jobs,
     TachoDriverMasterSyncService sync) : ControllerBase
 {
@@ -43,12 +47,45 @@ public sealed class TachoDriverMasterController(
 
     [HttpGet("tachomaster/quality")]
     public async Task<IActionResult> Quality(CancellationToken ct)
-        => Ok(await sync.QualityAsync(ct));
+    {
+        var quality = await sync.QualityAsync(ct);
+        var latestCompletedCanonicalJob = await db.StagedImports.AsNoTracking()
+            .Where(item =>
+                item.Status == StagingStatus.Promoted &&
+                (item.EntityType == "tachodrivermastersync" ||
+                 item.EntityType == "tachodrivermasterorchestration" ||
+                 item.EntityType == TachoDriverMasterSyncJobService.EntityType))
+            .OrderByDescending(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc)
+            .Select(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc)
+            .FirstOrDefaultAsync(ct);
+
+        var latestCanonicalSyncUtc = Latest(quality.LatestCanonicalSyncUtc, latestCompletedCanonicalJob);
+        return Ok(new TachoDriverMasterQuality(
+            quality.ActiveDrivers,
+            quality.ActiveWithMember,
+            quality.ActiveWithCard,
+            quality.DuplicateMemberGroups,
+            quality.DuplicateCardGroups,
+            quality.ActiveWithoutMember,
+            quality.ActiveWithoutCard,
+            latestCanonicalSyncUtc)
+        {
+            DuplicateMembers = quality.DuplicateMembers,
+            DuplicateCards = quality.DuplicateCards
+        });
+    }
 
     [HttpGet("{driverId:guid}/tachomaster-profile")]
     public async Task<IActionResult> Profile(Guid driverId, CancellationToken ct)
     {
         var profile = await sync.ProfileAsync(driverId, ct);
         return profile is null ? NotFound() : Ok(profile);
+    }
+
+    private static DateTimeOffset? Latest(DateTimeOffset? left, DateTimeOffset? right)
+    {
+        if (left is null) return right;
+        if (right is null) return left;
+        return left >= right ? left : right;
     }
 }
