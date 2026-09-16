@@ -106,14 +106,18 @@ public static class MasterDataDuplicateReviewService
             .Take(500)
             .ToListAsync(ct);
 
+        if (rejectedPayloads.Count == 0) return candidates;
+
         var rejectedIds = rejectedPayloads
             .Select(RejectedCandidateId)
             .Where(id => !string.IsNullOrWhiteSpace(id))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        return rejectedIds.Count == 0
-            ? candidates
-            : candidates.Where(candidate => !rejectedIds.Contains(candidate.CandidateId)).ToList();
+        return candidates
+            .Where(candidate =>
+                !rejectedIds.Contains(candidate.CandidateId) &&
+                !rejectedPayloads.Any(payload => payload?.Contains(candidate.CandidateId, StringComparison.OrdinalIgnoreCase) == true))
+            .ToList();
     }
 
     private static string? RejectedCandidateId(string? json)
