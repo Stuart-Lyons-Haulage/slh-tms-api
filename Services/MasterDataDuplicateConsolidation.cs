@@ -9,7 +9,9 @@ public sealed record MasterDataDuplicateConsolidationResult(
     SiteMasterConsolidationResult Sites,
     int MarketDuplicatesArchived,
     int VehicleDuplicatesArchived,
-    int VehicleFuelDetailsRecovered);
+    int VehicleFuelDetailsRecovered,
+    int DriverDuplicatesArchived,
+    int TrailerDuplicatesArchived);
 
 public static class MasterDataDuplicateConsolidation
 {
@@ -20,9 +22,118 @@ public static class MasterDataDuplicateConsolidation
         CancellationToken ct)
     {
         var sites = await SiteMasterConsolidation.ReconcileAsync(db, actor, ct);
+        var drivers = await ConsolidateDriversAsync(db, actor, logger, ct);
         var markets = await ConsolidateMarketsAsync(db, actor, ct);
         var (vehicles, fuelRecovered) = await ConsolidateVehiclesAsync(db, actor, logger, ct);
-        return new MasterDataDuplicateConsolidationResult(sites, markets, vehicles, fuelRecovered);
+        var trailers = await ConsolidateTrailersAsync(db, actor, logger, ct);
+        return new MasterDataDuplicateConsolidationResult(sites, markets, vehicles, fuelRecovered, drivers, trailers);
+    }
+
+    private static async Task<int> ConsolidateDriversAsync(
+        TmsDbContext db,
+        string actor,
+        ILogger logger,
+        CancellationToken ct)
+    {
+        var drivers = await db.Drivers.ToListAsync(ct);
+        await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
+
+        var loadUse = await db.Loads.AsNoTracking()
+            .Where(load => load.DriverId != null)
+            .GroupBy(load => load.DriverId!.Value)
+            .Select(group => new { DriverId = group.Key, Count = group.Count() })
+            .ToDictionaryAsync(item => item.DriverId, item => item.Count, ct);
+
+        var archived = 0;
+        foreach (var group in DuplicateGroupsByKeys(
+            drivers.Where(driver => driver.Active).ToList(),
+            driver => driver.Id,
+            driver => new[]
+            {
+                IdentityKey("member", driver.TachoMasterDriverId),
+                IdentityKey("employee", driver.EmployeeNumber),
+                IdentityKey("licence", driver.DrivingLicenceNumber),
+                NameMobileKey(driver.DisplayName, driver.MobileNumber)
+            }))
+        {
+            var canonical = group
+                .OrderByDescending(driver => !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId))
+                .ThenByDescending(driver => loadUse.GetValueOrDefault(driver.Id))
+                .ThenByDescending(DriverCompleteness)
+                .ThenBy(driver => driver.DisplayName)
+                .First();
+
+            foreach (var duplicate in group.Where(driver => driver.Id != canonical.Id))
+            {
+                PreserveDriverDetail(canonical, duplicate);
+
+                foreach (var load in await db.Loads.Where(load => load.DriverId == duplicate.Id).ToListAsync(ct))
+                    load.DriverId = canonical.Id;
+
+                try
+                {
+                    foreach (var run in await db.PlanProposalRuns.Where(run => run.DriverId == duplicate.Id).ToListAsync(ct))
+                        run.DriverId = canonical.Id;
+                    await ReassignDriverProposalCandidatesAsync(db, duplicate.Id, canonical.Id, ct);
+                }
+                catch (Exception ex) when (SchemaUnavailable(ex))
+                {
+                    logger.LogWarning(ex, "Optional planning driver references could not be reassigned while consolidating {DriverId}.", duplicate.Id);
+                }
+
+                try
+                {
+                    foreach (var allocation in await db.RunResourceAllocations.Where(allocation => allocation.DriverId == duplicate.Id).ToListAsync(ct))
+                        allocation.DriverId = canonical.Id;
+                }
+                catch (Exception ex) when (SchemaUnavailable(ex))
+                {
+                    logger.LogWarning(ex, "Run allocation driver references could not be reassigned while consolidating {DriverId}.", duplicate.Id);
+                }
+
+                try
+                {
+                    foreach (var statusLog in await db.DriverStatusLogs.Where(log => log.DriverId == duplicate.Id).ToListAsync(ct))
+                        statusLog.DriverId = canonical.Id;
+                }
+                catch (Exception ex) when (SchemaUnavailable(ex))
+                {
+                    logger.LogWarning(ex, "Driver status references could not be reassigned while consolidating {DriverId}.", duplicate.Id);
+                }
+
+                try
+                {
+                    foreach (var mapping in await db.IntegrationMappings.Where(mapping => mapping.TmsEntityType == "Driver" && mapping.TmsEntityId == duplicate.Id).ToListAsync(ct))
+                        mapping.TmsEntityId = canonical.Id;
+                }
+                catch (Exception ex) when (SchemaUnavailable(ex))
+                {
+                    logger.LogWarning(ex, "Driver integration mappings could not be reassigned while consolidating {DriverId}.", duplicate.Id);
+                }
+
+                duplicate.Active = false;
+                archived++;
+                db.MasterDataAudits.Add(new MasterDataAudit
+                {
+                    EntityType = "Driver",
+                    EntityId = canonical.Id,
+                    Action = "MergedDuplicateDriverIdentity",
+                    ChangedBy = actor,
+                    ChangesJson = JsonSerializer.Serialize(new
+                    {
+                        canonicalDriverId = canonical.Id,
+                        canonicalEmployeeNumber = canonical.EmployeeNumber,
+                        canonicalTachoMasterDriverId = canonical.TachoMasterDriverId,
+                        duplicateDriverId = duplicate.Id,
+                        duplicateEmployeeNumber = duplicate.EmployeeNumber,
+                        duplicateTachoMasterDriverId = duplicate.TachoMasterDriverId
+                    })
+                });
+            }
+        }
+
+        if (archived > 0) await db.SaveChangesAsync(ct);
+        return archived;
     }
 
     private static async Task<int> ConsolidateMarketsAsync(TmsDbContext db, string actor, CancellationToken ct)
@@ -88,9 +199,15 @@ public static class MasterDataDuplicateConsolidation
 
         var archived = 0;
         var fuelRecovered = 0;
-        foreach (var group in vehicles
-            .GroupBy(vehicle => Normalise(vehicle.Registration), StringComparer.OrdinalIgnoreCase)
-            .Where(group => group.Key.Length > 0 && group.Count() > 1))
+        foreach (var group in DuplicateGroupsByKeys(
+            vehicles.Where(vehicle => vehicle.Active).ToList(),
+            vehicle => vehicle.Id,
+            vehicle => new[]
+            {
+                IdentityKey("registration", vehicle.Registration),
+                IdentityKey("fleetio", vehicle.FleetioId),
+                IdentityKey("vin", vehicle.VIN)
+            }))
         {
             var canonical = group
                 .OrderByDescending(vehicle => vehicle.Active)
@@ -106,8 +223,6 @@ public static class MasterDataDuplicateConsolidation
                 PreserveVehicleDetail(canonical, duplicate);
                 if (hadFuelGap && HasFuelData(canonical)) fuelRecovered++;
 
-                if (!duplicate.Active) continue;
-
                 foreach (var load in await db.Loads.Where(load => load.VehicleId == duplicate.Id).ToListAsync(ct))
                     load.VehicleId = canonical.Id;
 
@@ -115,16 +230,7 @@ public static class MasterDataDuplicateConsolidation
                 {
                     foreach (var run in await db.PlanProposalRuns.Where(run => run.VehicleId == duplicate.Id).ToListAsync(ct))
                         run.VehicleId = canonical.Id;
-                    foreach (var candidate in await db.PlanProposalCandidates.Where(candidate => candidate.VehicleId == duplicate.Id).ToListAsync(ct))
-                    {
-                        var conflict = await db.PlanProposalCandidates.AnyAsync(existing =>
-                            existing.Id != candidate.Id &&
-                            existing.ProposalRunId == candidate.ProposalRunId &&
-                            existing.VehicleId == canonical.Id &&
-                            existing.DriverId == candidate.DriverId, ct);
-                        if (conflict) db.PlanProposalCandidates.Remove(candidate);
-                        else candidate.VehicleId = canonical.Id;
-                    }
+                    await ReassignVehicleProposalCandidatesAsync(db, duplicate.Id, canonical.Id, ct);
                 }
                 catch (Exception ex) when (SchemaUnavailable(ex))
                 {
@@ -175,6 +281,143 @@ public static class MasterDataDuplicateConsolidation
         return (archived, fuelRecovered);
     }
 
+    private static async Task<int> ConsolidateTrailersAsync(
+        TmsDbContext db,
+        string actor,
+        ILogger logger,
+        CancellationToken ct)
+    {
+        var trailers = await db.Trailers.ToListAsync(ct);
+        var loadUse = await db.Loads.AsNoTracking()
+            .Where(load => load.TrailerId != null)
+            .GroupBy(load => load.TrailerId!.Value)
+            .Select(group => new { TrailerId = group.Key, Count = group.Count() })
+            .ToDictionaryAsync(item => item.TrailerId, item => item.Count, ct);
+
+        var archived = 0;
+        foreach (var group in DuplicateGroupsByKeys(
+            trailers.Where(trailer => trailer.Active).ToList(),
+            trailer => trailer.Id,
+            trailer => new[]
+            {
+                IdentityKey("trailer", trailer.TrailerNumber),
+                TrailerAliasKey(trailer.TrailerNumber)
+            }))
+        {
+            var canonical = group
+                .OrderByDescending(trailer => loadUse.GetValueOrDefault(trailer.Id))
+                .ThenByDescending(TrailerCompleteness)
+                .ThenBy(trailer => trailer.TrailerNumber)
+                .First();
+
+            foreach (var duplicate in group.Where(trailer => trailer.Id != canonical.Id))
+            {
+                canonical.Type ??= duplicate.Type;
+                canonical.StandardCapacity ??= duplicate.StandardCapacity;
+                canonical.EuroCapacity ??= duplicate.EuroCapacity;
+
+                foreach (var load in await db.Loads.Where(load => load.TrailerId == duplicate.Id).ToListAsync(ct))
+                    load.TrailerId = canonical.Id;
+
+                try
+                {
+                    foreach (var run in await db.PlanProposalRuns.Where(run => run.TrailerId == duplicate.Id).ToListAsync(ct))
+                        run.TrailerId = canonical.Id;
+                }
+                catch (Exception ex) when (SchemaUnavailable(ex))
+                {
+                    logger.LogWarning(ex, "Optional planning trailer references could not be reassigned while consolidating {TrailerId}.", duplicate.Id);
+                }
+
+                try
+                {
+                    foreach (var allocation in await db.RunResourceAllocations.Where(allocation => allocation.TrailerId == duplicate.Id).ToListAsync(ct))
+                        allocation.TrailerId = canonical.Id;
+                }
+                catch (Exception ex) when (SchemaUnavailable(ex))
+                {
+                    logger.LogWarning(ex, "Run allocation trailer references could not be reassigned while consolidating {TrailerId}.", duplicate.Id);
+                }
+
+                try
+                {
+                    foreach (var mapping in await db.IntegrationMappings.Where(mapping => mapping.TmsEntityType == "Trailer" && mapping.TmsEntityId == duplicate.Id).ToListAsync(ct))
+                        mapping.TmsEntityId = canonical.Id;
+                }
+                catch (Exception ex) when (SchemaUnavailable(ex))
+                {
+                    logger.LogWarning(ex, "Trailer integration mappings could not be reassigned while consolidating {TrailerId}.", duplicate.Id);
+                }
+
+                duplicate.Active = false;
+                archived++;
+                db.MasterDataAudits.Add(new MasterDataAudit
+                {
+                    EntityType = "Trailer",
+                    EntityId = canonical.Id,
+                    Action = "MergedDuplicateTrailerIdentity",
+                    ChangedBy = actor,
+                    ChangesJson = JsonSerializer.Serialize(new
+                    {
+                        canonicalTrailerId = canonical.Id,
+                        canonicalTrailerNumber = canonical.TrailerNumber,
+                        duplicateTrailerId = duplicate.Id,
+                        duplicateTrailerNumber = duplicate.TrailerNumber
+                    })
+                });
+            }
+        }
+
+        if (archived > 0) await db.SaveChangesAsync(ct);
+        return archived;
+    }
+
+    private static async Task ReassignDriverProposalCandidatesAsync(TmsDbContext db, Guid duplicateId, Guid canonicalId, CancellationToken ct)
+    {
+        var rows = await db.PlanProposalCandidates.Where(candidate => candidate.DriverId == duplicateId).ToListAsync(ct);
+        foreach (var row in rows)
+        {
+            var conflict = await db.PlanProposalCandidates.AnyAsync(existing =>
+                existing.Id != row.Id &&
+                existing.ProposalRunId == row.ProposalRunId &&
+                existing.DriverId == canonicalId &&
+                existing.VehicleId == row.VehicleId, ct);
+            if (conflict) db.PlanProposalCandidates.Remove(row);
+            else row.DriverId = canonicalId;
+        }
+    }
+
+    private static async Task ReassignVehicleProposalCandidatesAsync(TmsDbContext db, Guid duplicateId, Guid canonicalId, CancellationToken ct)
+    {
+        var rows = await db.PlanProposalCandidates.Where(candidate => candidate.VehicleId == duplicateId).ToListAsync(ct);
+        foreach (var row in rows)
+        {
+            var conflict = await db.PlanProposalCandidates.AnyAsync(existing =>
+                existing.Id != row.Id &&
+                existing.ProposalRunId == row.ProposalRunId &&
+                existing.DriverId == row.DriverId &&
+                existing.VehicleId == canonicalId, ct);
+            if (conflict) db.PlanProposalCandidates.Remove(row);
+            else row.VehicleId = canonicalId;
+        }
+    }
+
+    private static void PreserveDriverDetail(Driver target, Driver source)
+    {
+        target.TachoMasterDriverId ??= source.TachoMasterDriverId;
+        target.TachoName ??= source.TachoName;
+        target.MobileNumber ??= source.MobileNumber;
+        target.DriverType ??= source.DriverType;
+        target.DriverGroup ??= source.DriverGroup;
+        target.Skills ??= source.Skills;
+        target.DrivingLicenceNumber ??= source.DrivingLicenceNumber;
+        target.LicenceExpiry ??= source.LicenceExpiry;
+        target.CPCExpiry ??= source.CPCExpiry;
+        target.DigitalTachoCardExpiry ??= source.DigitalTachoCardExpiry;
+        target.MedicalExpiry ??= source.MedicalExpiry;
+        target.LastTachoSyncUtc ??= source.LastTachoSyncUtc;
+    }
+
     private static void PreserveVehicleDetail(Vehicle target, Vehicle source)
     {
         target.FleetNumber ??= source.FleetNumber;
@@ -198,6 +441,67 @@ public static class MasterDataDuplicateConsolidation
         target.FleetioStatus ??= source.FleetioStatus;
     }
 
+    private static IReadOnlyList<IReadOnlyList<T>> DuplicateGroupsByKeys<T>(IReadOnlyList<T> rows, Func<T, Guid> id, Func<T, IEnumerable<string?>> keys) where T : notnull
+    {
+        var groupsByKey = new Dictionary<string, List<T>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in rows)
+        {
+            foreach (var key in keys(row).Where(key => !string.IsNullOrWhiteSpace(key)).Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                if (!groupsByKey.TryGetValue(key!, out var group)) groupsByKey[key!] = group = [];
+                group.Add(row);
+            }
+        }
+
+        var remaining = rows.ToDictionary(id);
+        var result = new List<IReadOnlyList<T>>();
+        foreach (var seed in rows)
+        {
+            if (!remaining.Remove(id(seed))) continue;
+            var group = new List<T> { seed };
+            var queue = new Queue<T>();
+            queue.Enqueue(seed);
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+                foreach (var key in keys(current).Where(key => !string.IsNullOrWhiteSpace(key)).Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    if (!groupsByKey.TryGetValue(key!, out var matches)) continue;
+                    foreach (var match in matches.ToList())
+                    {
+                        if (!remaining.Remove(id(match))) continue;
+                        group.Add(match);
+                        queue.Enqueue(match);
+                    }
+                }
+            }
+            if (group.Count > 1) result.Add(group);
+        }
+
+        return result;
+    }
+
+    private static string? IdentityKey(string prefix, string? value)
+    {
+        var normalised = Normalise(value);
+        return normalised.Length == 0 ? null : $"{prefix}:{normalised}";
+    }
+
+    private static string? NameMobileKey(string? name, string? mobile)
+    {
+        var normalisedName = Normalise(name);
+        var normalisedMobile = Normalise(mobile);
+        return normalisedName.Length < 8 || normalisedMobile.Length < 6 ? null : $"name-mobile:{normalisedName}|{normalisedMobile}";
+    }
+
+    private static string? TrailerAliasKey(string? trailerNumber)
+    {
+        var normalised = Normalise(trailerNumber);
+        if (normalised.StartsWith("SLH", StringComparison.OrdinalIgnoreCase)) normalised = normalised[3..];
+        normalised = normalised.TrimStart('0');
+        return normalised.Length == 0 ? null : $"trailer-alias:{normalised}";
+    }
+
     private static bool HasFuelData(Vehicle vehicle) =>
         !string.IsNullOrWhiteSpace(vehicle.FuelPin) ||
         !string.IsNullOrWhiteSpace(vehicle.ShellCard) ||
@@ -210,12 +514,25 @@ public static class MasterDataDuplicateConsolidation
         string.IsNullOrWhiteSpace(vehicle.FuelPin) ||
         (string.IsNullOrWhiteSpace(vehicle.ShellCard) && string.IsNullOrWhiteSpace(vehicle.BpRedCard) && string.IsNullOrWhiteSpace(vehicle.BpPlainCard));
 
+    private static int DriverCompleteness(Driver driver) => new string?[]
+    {
+        driver.TachoMasterDriverId, driver.TachoName, driver.MobileNumber, driver.DriverType,
+        driver.DriverGroup, driver.Skills, driver.DrivingLicenceNumber
+    }.Count(value => !string.IsNullOrWhiteSpace(value)) +
+    new object?[] { driver.LicenceExpiry, driver.CPCExpiry, driver.DigitalTachoCardExpiry, driver.MedicalExpiry, driver.LastTachoSyncUtc }
+        .Count(value => value is not null);
+
     private static int VehicleCompleteness(Vehicle vehicle) => new string?[]
     {
         vehicle.FleetNumber, vehicle.VIN, vehicle.VehicleSite, vehicle.CabMobile,
         vehicle.FuelProvider, vehicle.FuelPin, vehicle.ShellCard, vehicle.BpRedCard,
         vehicle.BpPlainCard, vehicle.FleetioId, vehicle.Notes
     }.Count(value => !string.IsNullOrWhiteSpace(value));
+
+    private static int TrailerCompleteness(Trailer trailer) => new object?[]
+    {
+        trailer.Type, trailer.StandardCapacity, trailer.EuroCapacity
+    }.Count(value => value is not null && !string.IsNullOrWhiteSpace(value.ToString()));
 
     private static int MarketCompleteness(MarketContact row) => new string?[]
     {
