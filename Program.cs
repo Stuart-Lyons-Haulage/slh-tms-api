@@ -194,6 +194,7 @@ builder.Services.AddScoped<AzureSmsDispatchService>();
 builder.Services.AddScoped<DistributedLeaseManager>();
 builder.Services.AddScoped<IntegrationSyncCoordinator>();
 builder.Services.AddScoped<TachoDriverMasterSyncService>();
+builder.Services.AddScoped<TachoDriverHoursRefreshService>();
 builder.Services.AddScoped<DriverMasterClassificationService>();
 builder.Services.AddScoped<TachoCanonicalDriverMasterOrchestrator>();
 builder.Services.AddScoped<TachoDriverMasterSyncJobService>();
@@ -234,6 +235,7 @@ builder.Services.Configure<HostOptions>(options =>
 
 builder.Services.AddHostedService<DotTrackingIngestionService>();
 builder.Services.AddHostedService<TachoDriverMasterSyncJobWorker>();
+builder.Services.AddHostedService<TachoDriverHoursRefreshWorker>();
 builder.Services.AddHostedService<DriverMasterClassificationBackgroundService>();
 builder.Services.AddHostedService<AuditOutboxBackgroundService>();
 builder.Services.AddHostedService<BackloadTriggerHostedService>();
