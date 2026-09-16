@@ -94,7 +94,7 @@ public sealed class TachoDriverMasterController(
         {
             "updated" => Ok(result),
             "not_found" => NotFound(result),
-            "inactive" or "missing_member_code" or "not_configured" => BadRequest(result),
+            "inactive" or "missing_tacho_identity" or "not_configured" => BadRequest(result),
             "lease_busy" or "lease_lost" => StatusCode(StatusCodes.Status409Conflict, result),
             "profile_not_found" => StatusCode(StatusCodes.Status502BadGateway, result),
             _ => StatusCode(StatusCodes.Status500InternalServerError, result)
