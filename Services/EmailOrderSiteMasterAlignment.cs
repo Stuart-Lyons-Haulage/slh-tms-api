@@ -7,7 +7,8 @@ namespace Slh.Tms.Api.Services;
 /// <summary>
 /// Canonicalises every parsed mailbox order against Site Master before it is shown in
 /// Order Review or written to staging. Source wording is retained as evidence, while
-/// planner-facing fields use the canonical Site/driver wording.
+/// planner-facing fields use the canonical Site/driver wording. Master Data is enrichment-only:
+/// it must never reject a plausible order where a site, sender or run rule is missing/ambiguous.
 /// </summary>
 public static class EmailOrderSiteMasterAlignment
 {
@@ -43,14 +44,15 @@ public static class EmailOrderSiteMasterAlignment
 
     private static void AlignObject(JsonObject root, PlannerSourceMasterDataResolver resolver)
     {
-        var rawCollection = FirstText(root, "collectionSite", "collectionLocation", "sellerName");
-        var rawDelivery = FirstText(root, "deliverySite", "deliveryLocation", "stallNumber", "destination");
+        var rawCollection = FirstText(root, "collectionSite", "collectionLocation", "sellerName", "origin", "pickupSite", "pickupLocation");
+        var rawDelivery = FirstText(root, "deliverySite", "deliveryLocation", "stallNumber", "destination", "dropSite", "dropLocation");
         var rawDepot = FirstText(root, "depot", "depotName", "marketName");
 
         var collection = resolver.Resolve(rawCollection);
         var delivery = resolver.Resolve(rawDelivery);
         var depot = resolver.Resolve(rawDepot);
         var evidence = new JsonArray();
+        var warnings = EnsureWarningArray(root);
         var marketInternalDestination = IsMarketDepot(rawDepot)
             && !IsMarketDepot(rawDelivery)
             && depot.SiteMatched
@@ -67,7 +69,16 @@ public static class EmailOrderSiteMasterAlignment
             root["collectionSiteCode"] = collection.SiteNumber;
             root["collectionGeofenceId"] = collection.GeofenceId?.ToString();
             root["collectionGeofenceName"] = collection.GeofenceName;
+            if (!string.IsNullOrWhiteSpace(collection.Address))
+            {
+                root["masterCollectionAddress"] = collection.Address;
+                root["collectionAddress"] ??= collection.Address;
+            }
             evidence.Add($"Collection: {collection.EvidenceNote}");
+        }
+        else if (!string.IsNullOrWhiteSpace(rawCollection))
+        {
+            warnings.Add($"Collection site needs review: {rawCollection}");
         }
 
         if (delivery.SiteMatched && !string.IsNullOrWhiteSpace(delivery.SiteName))
@@ -86,8 +97,16 @@ public static class EmailOrderSiteMasterAlignment
             root["deliverySiteCode"] = delivery.SiteNumber;
             root["deliveryGeofenceId"] = delivery.GeofenceId?.ToString();
             root["deliveryGeofenceName"] = delivery.GeofenceName;
-            if (!string.IsNullOrWhiteSpace(delivery.Address)) root["masterDeliveryAddress"] = delivery.Address;
+            if (!string.IsNullOrWhiteSpace(delivery.Address))
+            {
+                root["masterDeliveryAddress"] = delivery.Address;
+                root["deliveryAddress"] ??= delivery.Address;
+            }
             evidence.Add($"Destination: {delivery.EvidenceNote}");
+        }
+        else if (!string.IsNullOrWhiteSpace(rawDelivery))
+        {
+            warnings.Add($"Delivery site needs review: {rawDelivery}");
         }
 
         if (depot.SiteMatched && !string.IsNullOrWhiteSpace(depot.SiteName))
@@ -118,7 +137,50 @@ public static class EmailOrderSiteMasterAlignment
         {
             root["masterDataAligned"] = true;
             root["masterDataAlignmentEvidence"] = evidence;
+            root["masterDataMode"] = "enrichment-only";
         }
+
+        EnrichLooseTimingHints(root, collection, delivery, depot, evidence);
+        if (warnings.Count > 0)
+        {
+            root["masterDataReviewRequired"] = true;
+            root["plannerReady"] ??= false;
+        }
+    }
+
+    private static void EnrichLooseTimingHints(JsonObject root, PlannerSourceSiteResolution collection, PlannerSourceSiteResolution delivery, PlannerSourceSiteResolution depot, JsonArray evidence)
+    {
+        // Timings/ETAs from the newer workbook can arrive under several names depending on
+        // which importer created the payload. Copy them into stable driver-dispatch hint
+        // names, but never treat them as validation failures.
+        CopyFirst(root, "dispatchLastStartTime", "lastStartTime", "latestStartTime", "routeLastStartTime", "runLastStartTime");
+        CopyFirst(root, "dispatchEta", "eta", "plannedEta", "routeEta", "masterEta");
+        CopyFirst(root, "collectionWindow", "collectionTime", "collectionTiming", "collectionCutOff", "collectionCutoff");
+        CopyFirst(root, "deliveryWindow", "deliveryTime", "deliveryTiming", "deliveryCutOff", "deliveryCutoff");
+        CopyFirst(root, "palletType", "masterPalletType", "runPalletType", "expectedPalletType");
+        CopyFirst(root, "runTimingRule", "timingRule", "routeTimingRule", "planningRule");
+
+        if (FindNode(root, "dispatchTimingHints") is null)
+        {
+            var hints = new JsonObject
+            {
+                ["lastStartTime"] = CloneText(root, "dispatchLastStartTime"),
+                ["eta"] = CloneText(root, "dispatchEta"),
+                ["collectionWindow"] = CloneText(root, "collectionWindow"),
+                ["deliveryWindow"] = CloneText(root, "deliveryWindow"),
+                ["palletType"] = CloneText(root, "palletType"),
+                ["runTimingRule"] = CloneText(root, "runTimingRule"),
+                ["collectionSiteCode"] = collection.SiteNumber,
+                ["deliverySiteCode"] = delivery.SiteNumber,
+                ["depotSiteCode"] = depot.SiteNumber,
+                ["mode"] = "loose-enrichment"
+            };
+            if (hints.Any(item => item.Value is not null))
+                root["dispatchTimingHints"] = hints;
+        }
+
+        if (FindNode(root, "dispatchTimingHints") is not null)
+            evidence.Add("Dispatch timing: loose master-data hints attached for planner/driver dispatch review");
     }
 
     private static bool IsMarketDepot(string? value)
@@ -151,6 +213,32 @@ public static class EmailOrderSiteMasterAlignment
                 return text.Trim();
         }
         return null;
+    }
+
+    private static void CopyFirst(JsonObject root, string target, params string[] candidates)
+    {
+        if (FindNode(root, target) is not null) return;
+        foreach (var candidate in candidates)
+        {
+            var value = FirstText(root, candidate);
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                root[target] = value;
+                return;
+            }
+        }
+    }
+
+    private static string? CloneText(JsonObject root, string name) => FirstText(root, name);
+
+    private static JsonArray EnsureWarningArray(JsonObject root)
+    {
+        if (FindNode(root, "intakeWarnings") is JsonArray existing) return existing;
+        var warnings = new JsonArray();
+        var text = FirstText(root, "intakeWarning", "warning");
+        if (!string.IsNullOrWhiteSpace(text)) warnings.Add(text);
+        root["intakeWarnings"] = warnings;
+        return warnings;
     }
 
     private static JsonNode? FindNode(JsonObject root, string name)
