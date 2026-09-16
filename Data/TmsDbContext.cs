@@ -192,7 +192,15 @@ public sealed class TmsDbContext(DbContextOptions<TmsDbContext> options) : DbCon
             .HasIndex(x => x.CreatedAt)
             .HasDatabaseName("IX_AuditOutbox_CreatedAt");
 
+        // StagedImports has database triggers in production. EF Core's default SQL Server
+        // save pipeline emits OUTPUT without INTO, which SQL Server rejects on triggered tables.
+        // Disabling the OUTPUT clause keeps order intake, TachoMaster sync status and fallback
+        // register writes trigger-safe without removing audit triggers or rowversion checks.
+        b.Entity<StagedImport>().ToTable("StagedImports", table => table.UseSqlOutputClause(false));
         b.Entity<StagedImport>().HasIndex(x => x.IdempotencyKey).IsUnique();
+        b.Entity<StagedImport>()
+            .HasIndex(x => new { x.EntityType, x.Status, x.ReceivedAtUtc })
+            .HasDatabaseName("IX_StagedImports_Entity_Status_ReceivedAtUtc");
         b.Entity<StagedImport>().Property(x => x.RowVersion).IsRowVersion();
         b.Entity<StagedImportEvent>().HasIndex(x => new { x.StagedImportId, x.OccurredAtUtc });
         b.Entity<StagedImportEvent>().HasOne<StagedImport>().WithMany().HasForeignKey(x => x.StagedImportId).OnDelete(DeleteBehavior.Restrict);
