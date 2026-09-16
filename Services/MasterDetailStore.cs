@@ -16,18 +16,42 @@ public static class MasterDetailStore
     {
         var type = $"masterdetail:{entityType.ToLowerInvariant()}";
         var idempotencyKey = $"{type}:{NormaliseKey(key)}";
-        var row = await db.StagedImports.SingleOrDefaultAsync(item => item.IdempotencyKey == idempotencyKey, ct);
-        if (row is null)
+        var existingPayload = await db.StagedImports.AsNoTracking()
+            .Where(item => item.IdempotencyKey == idempotencyKey)
+            .Select(item => item.PayloadJson)
+            .SingleOrDefaultAsync(ct);
+
+        var mergedPayload = MergePopulatedFields(existingPayload ?? "{}", payloadJson);
+        var now = DateTimeOffset.UtcNow;
+        var status = (int)StagingStatus.Promoted;
+        var rowSource = source ?? "SLH master detail";
+        var reviewNote = "Full workbook detail retained in the audited register for legacy production columns.";
+
+        // Do not use tracked StagedImport add/update here. StagedImports now has production
+        // hardening triggers for rejected order-learning suppression; EF Core's generated
+        // SQL can use a bare OUTPUT clause for rowversion/generated values, which SQL Server
+        // rejects when enabled triggers exist on the target table. Integration enrichers
+        // such as TachoMaster, Sage HR and Fleetio must be able to persist master-detail
+        // evidence without being coupled to order-review trigger behaviour.
+        if (existingPayload is null)
         {
-            row = new StagedImport { EntityType = type, IdempotencyKey = idempotencyKey, PayloadJson = "{}", Source = source ?? "SLH master detail" };
-            db.StagedImports.Add(row);
+            await db.Database.ExecuteSqlInterpolatedAsync($@"
+                INSERT INTO dbo.StagedImports
+                    (Id, EntityType, IdempotencyKey, PayloadJson, Status, Source, ReceivedAtUtc, ReviewedAtUtc, ReviewedBy, ReviewNote)
+                VALUES
+                    ({Guid.NewGuid()}, {type}, {idempotencyKey}, {mergedPayload}, {status}, {rowSource}, {now}, {now}, {user}, {reviewNote})", ct);
+            return;
         }
-        row.PayloadJson = MergePopulatedFields(row.PayloadJson, payloadJson);
-        row.Status = StagingStatus.Promoted;
-        row.ReviewedAtUtc = DateTimeOffset.UtcNow;
-        row.ReviewedBy = user;
-        row.ReviewNote = "Full workbook detail retained in the audited register for legacy production columns.";
-        await db.SaveChangesAsync(ct);
+
+        await db.Database.ExecuteSqlInterpolatedAsync($@"
+            UPDATE dbo.StagedImports
+               SET PayloadJson = {mergedPayload},
+                   Status = {status},
+                   Source = COALESCE({source}, Source),
+                   ReviewedAtUtc = {now},
+                   ReviewedBy = {user},
+                   ReviewNote = {reviewNote}
+             WHERE IdempotencyKey = {idempotencyKey}", ct);
     }
 
     public static async Task EnrichDriversAsync(TmsDbContext db, IReadOnlyCollection<Driver> drivers, CancellationToken ct)
