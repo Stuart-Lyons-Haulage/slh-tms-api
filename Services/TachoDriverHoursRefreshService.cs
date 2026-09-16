@@ -11,6 +11,17 @@ public sealed record TachoDriverHoursRefreshResult(
     Guid DriverId,
     string DisplayName,
     string? TachoMasterDriverId,
+    string? TachoCardNumber,
+    string? TachoVehicleCode,
+    DateTimeOffset? CardInsertedUtc,
+    DateTimeOffset? CurrentDutyEndUtc,
+    bool TachoDutyOpen,
+    int? TachoWorkTodayMinutes,
+    int? TachoDriveTodayMinutes,
+    int? TachoAvailableTodayMinutes,
+    int? TachoRestTodayMinutes,
+    int? TachoBreakCount,
+    int? TachoBreakMinutes,
     int? TachoDriveAvailableTodayMinutes,
     int? TachoDriveAvailableWeekMinutes,
     int? TachoWorkAvailableWeekMinutes,
@@ -24,6 +35,8 @@ public sealed class TachoDriverHoursRefreshService(
     DistributedLeaseManager leases,
     ILogger<TachoDriverHoursRefreshService> logger)
 {
+    private static readonly TimeZoneInfo London = TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+
     public async Task<int> RefreshDriverHoursOnlyAsync(string actor, CancellationToken ct)
     {
         await using var lease = await leases.TryAcquireAsync(
@@ -69,16 +82,10 @@ public sealed class TachoDriverHoursRefreshService(
 
         if (lease is null)
         {
-            return new(
+            return Empty(
                 "lease_busy",
                 false,
                 driverId,
-                string.Empty,
-                null,
-                null,
-                null,
-                null,
-                null,
                 "TachoMaster driver-hours refresh skipped because another distributed writer currently holds the integration lease.");
         }
 
@@ -95,31 +102,19 @@ public sealed class TachoDriverHoursRefreshService(
         catch (OperationCanceledException)
         {
             logger.LogWarning("TachoMaster single-driver hours refresh for {DriverId} stopped because the distributed lease was lost.", driverId);
-            return new(
+            return Empty(
                 "lease_lost",
                 false,
                 driverId,
-                string.Empty,
-                null,
-                null,
-                null,
-                null,
-                null,
                 "TachoMaster driver-hours refresh stopped because the distributed lease was lost.");
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "TachoMaster single-driver hours refresh failed for {DriverId}. Actor: {Actor}", driverId, actor);
-            return new(
+            return Empty(
                 "failed",
                 false,
                 driverId,
-                string.Empty,
-                null,
-                null,
-                null,
-                null,
-                null,
                 $"TachoMaster driver-hours refresh failed: {ex.GetBaseException().Message}");
         }
     }
@@ -183,31 +178,34 @@ public sealed class TachoDriverHoursRefreshService(
         var driver = await db.Drivers.FirstOrDefaultAsync(item => item.Id == driverId, ct);
         if (driver is null)
         {
-            return new("not_found", false, driverId, string.Empty, null, null, null, null, null,
-                "Driver was not found in Driver Master.");
+            return Empty("not_found", false, driverId, "Driver was not found in Driver Master.");
         }
 
         if (!driver.Active)
         {
-            return Result("inactive", false, driver,
+            return Result("inactive", false, driver, null,
                 "Driver is inactive, so TachoMaster hours were not refreshed.");
         }
 
         var memberCode = TachoDriverIdentityRules.NormaliseIdentifier(driver.TachoMasterDriverId);
         if (memberCode.Length == 0)
         {
-            return Result("missing_member_code", false, driver,
+            return Result("missing_member_code", false, driver, null,
                 "Driver has no TachoMaster Member Code, so TachoMaster hours were not refreshed.");
         }
 
         if (!options.IsConfigured)
         {
-            return Result("not_configured", false, driver,
+            return Result("not_configured", false, driver, null,
                 "TachoMaster is not configured, so driver hours were not refreshed.");
         }
 
-        var profiles = await tachoMaster.GetDriverProfilesAsync(ct);
-        var profile = profiles.FirstOrDefault(item =>
+        var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, London).DateTime);
+        var profilesTask = tachoMaster.GetDriverProfilesAsync(ct);
+        var dutiesTask = tachoMaster.GetDriverDutyStatusesAsync(today, ct);
+        await Task.WhenAll(profilesTask, dutiesTask);
+
+        var profile = (await profilesTask).FirstOrDefault(item =>
             string.Equals(
                 TachoDriverIdentityRules.NormaliseIdentifier(item.MemberCode.ToString(CultureInfo.InvariantCulture)),
                 memberCode,
@@ -215,44 +213,126 @@ public sealed class TachoDriverHoursRefreshService(
 
         if (profile is null)
         {
-            return Result("profile_not_found", false, driver,
+            return Result("profile_not_found", false, driver, null,
                 $"TachoMaster did not return a profile for Member Code {driver.TachoMasterDriverId}.");
         }
+
+        var todayDuties = (await dutiesTask)
+            .Where(item => string.Equals(
+                TachoDriverIdentityRules.NormaliseIdentifier(item.MemberCode.ToString(CultureInfo.InvariantCulture)),
+                memberCode,
+                StringComparison.OrdinalIgnoreCase))
+            .OrderBy(item => item.DutyStartUtc)
+            .ToList();
+        var dutyEvidence = BuildDutyEvidence(todayDuties);
 
         var now = DateTimeOffset.UtcNow;
         ApplyProfile(driver, profile, now);
         await db.SaveChangesAsync(ct);
 
         logger.LogInformation(
-            "TachoMaster single-driver hours refresh updated {DriverId} / {DriverName} by Member Code {MemberCode}. Actor: {Actor}",
+            "TachoMaster single-driver refresh updated hours and duty evidence for {DriverId} / {DriverName} by Member Code {MemberCode}. Actor: {Actor}",
             driver.Id,
             driver.DisplayName,
             driver.TachoMasterDriverId,
             actor);
 
-        return Result("updated", true, driver,
-            "TachoMaster driver hours refreshed from the latest profile metrics.");
+        return Result("updated", true, driver, dutyEvidence,
+            todayDuties.Count == 0
+                ? "TachoMaster driver hours refreshed, but no card/duty insertion was found for today."
+                : "TachoMaster driver hours refreshed with card inserted / first sign-on evidence for ETA and compliance use.");
+    }
+
+    private static TachoDutyEvidence? BuildDutyEvidence(IReadOnlyList<TachoDriverDutyStatus> duties)
+    {
+        if (duties.Count == 0) return null;
+        var first = duties.OrderBy(item => item.DutyStartUtc).First();
+        var current = duties
+            .OrderByDescending(item => item.DutyEndUtc is null)
+            .ThenByDescending(item => item.DutyStartUtc)
+            .First();
+
+        return new(
+            first.CardNumber,
+            current.VehicleCode,
+            first.DutyStartUtc,
+            current.DutyEndUtc,
+            current.DutyEndUtc is null,
+            duties.Sum(item => item.WorkMinutes),
+            duties.Sum(item => item.DriveMinutes),
+            duties.Sum(item => item.AvailableMinutes),
+            duties.Sum(item => item.RestMinutes),
+            duties.Sum(item => item.BreakCount),
+            duties.Any(item => item.BreakMinutes is not null) ? duties.Sum(item => item.BreakMinutes ?? 0) : null);
     }
 
     private static void ApplyProfile(Models.Driver driver, TachoDriverProfile profile, DateTimeOffset now)
     {
+        driver.TachoCardNumber = string.IsNullOrWhiteSpace(profile.CardNumber) ? driver.TachoCardNumber : profile.CardNumber;
         driver.TachoDriveAvailableTodayMinutes = profile.DriveAvailableTodayMinutes;
         driver.TachoDriveAvailableWeekMinutes = profile.DriveAvailableWeekMinutes;
         driver.TachoWorkAvailableWeekMinutes = profile.WorkAvailableWeekMinutes;
         driver.LastTachoSyncUtc = now;
     }
 
-    private static TachoDriverHoursRefreshResult Result(string status, bool updated, Models.Driver driver, string message) => new(
+    private static TachoDriverHoursRefreshResult Empty(string status, bool updated, Guid driverId, string message) => new(
+        status,
+        updated,
+        driverId,
+        string.Empty,
+        null,
+        null,
+        null,
+        null,
+        null,
+        false,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        message);
+
+    private static TachoDriverHoursRefreshResult Result(string status, bool updated, Models.Driver driver, TachoDutyEvidence? duty, string message) => new(
         status,
         updated,
         driver.Id,
         driver.DisplayName,
         driver.TachoMasterDriverId,
+        duty?.CardNumber ?? driver.TachoCardNumber,
+        duty?.VehicleCode,
+        duty?.CardInsertedUtc,
+        duty?.CurrentDutyEndUtc,
+        duty?.DutyOpen ?? false,
+        duty?.WorkTodayMinutes,
+        duty?.DriveTodayMinutes,
+        duty?.AvailableTodayMinutes,
+        duty?.RestTodayMinutes,
+        duty?.BreakCount,
+        duty?.BreakMinutes,
         driver.TachoDriveAvailableTodayMinutes,
         driver.TachoDriveAvailableWeekMinutes,
         driver.TachoWorkAvailableWeekMinutes,
         driver.LastTachoSyncUtc,
         message);
+
+    private sealed record TachoDutyEvidence(
+        string? CardNumber,
+        string? VehicleCode,
+        DateTimeOffset? CardInsertedUtc,
+        DateTimeOffset? CurrentDutyEndUtc,
+        bool DutyOpen,
+        int? WorkTodayMinutes,
+        int? DriveTodayMinutes,
+        int? AvailableTodayMinutes,
+        int? RestTodayMinutes,
+        int? BreakCount,
+        int? BreakMinutes);
 }
 
 public sealed class TachoDriverHoursRefreshWorker(
