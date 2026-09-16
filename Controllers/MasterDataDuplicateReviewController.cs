@@ -17,7 +17,13 @@ public sealed class MasterDataDuplicateReviewController(TmsDbContext db) : Contr
 
     [HttpPost("auto-merge"), Authorize(Policy = "TmsApprove")]
     public async Task<ActionResult<MasterDataDuplicateMergeResult>> AutoMerge([FromQuery] string? entityType, CancellationToken ct)
-        => Ok(await MasterDataDuplicateReviewService.AutoMergeHighConfidenceAsync(db, entityType, Actor(), ct));
+    {
+        var type = (entityType ?? "sites").Trim().ToLowerInvariant();
+        if (type is "site" or "sites")
+            return Ok(await SafeSiteDuplicateAutoMergeService.AutoMergeAsync(db, Actor(), ct));
+
+        return Ok(await MasterDataDuplicateReviewService.AutoMergeHighConfidenceAsync(db, entityType, Actor(), ct));
+    }
 
     [HttpPost("{entityType}/merge"), Authorize(Policy = "TmsApprove")]
     public async Task<ActionResult<MasterDataDuplicateMergeResult>> Merge(string entityType, MasterDataDuplicateMergeRequest request, CancellationToken ct)
