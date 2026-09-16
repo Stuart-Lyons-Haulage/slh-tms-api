@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Contracts;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
