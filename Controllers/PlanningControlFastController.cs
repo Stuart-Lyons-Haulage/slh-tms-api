@@ -121,7 +121,7 @@ public sealed class PlanningControlFastController(TmsDbContext db) : ControllerB
         return result.Values.ToList();
     }
 
-    private async Task<Dictionary<string, OrderDetail>> ReadApprovedOrderDetails(DateOnly date, string[] dateTokens, CancellationToken ct)
+    private async Task<Dictionary<string, FastOrderDetail>> ReadApprovedOrderDetails(DateOnly date, string[] dateTokens, CancellationToken ct)
     {
         var query = db.StagedImports.AsNoTracking()
             .Where(item => (item.EntityType == "order" || item.EntityType == "register:order") &&
@@ -141,7 +141,7 @@ public sealed class PlanningControlFastController(TmsDbContext db) : ControllerB
             .Take(1500)
             .ToListAsync(ct);
 
-        var result = new Dictionary<string, OrderDetail>(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, FastOrderDetail>(StringComparer.OrdinalIgnoreCase);
         foreach (var row in rows)
         {
             try
@@ -151,7 +151,7 @@ public sealed class PlanningControlFastController(TmsDbContext db) : ControllerB
                 var reference = Text(root, "poNumber", "reference", "orderReference", "orderRef");
                 if (string.IsNullOrWhiteSpace(reference) || result.ContainsKey(Normalise(reference))) continue;
                 if (!PlanningDates(root).Contains(date)) continue;
-                result[Normalise(reference)] = new OrderDetail(
+                result[Normalise(reference)] = new FastOrderDetail(
                     reference,
                     Text(root, "collectionLocation", "collectionSite", "collection", "sellerName", "pickupLocation", "pickupSite"),
                     Text(root, "deliveryLocation", "deliverySite", "delivery", "destination", "depot", "stallNumber"),
@@ -161,7 +161,6 @@ public sealed class PlanningControlFastController(TmsDbContext db) : ControllerB
                     Int(root, "pallets", "palletQty", "palletQuantity", "quantity"),
                     row.Source,
                     row.ReviewedAtUtc ?? row.ReceivedAtUtc,
-                    row.ReviewNote?.Contains("Amended from Manage Jobs", StringComparison.OrdinalIgnoreCase) == true,
                     Text(root, "planningWindow", "suggestedPlanningWindow"),
                     Text(root, "suggestedRouteType", "routeTiming"),
                     Text(root, "planningWindowReason", "pmReason"),
@@ -172,7 +171,7 @@ public sealed class PlanningControlFastController(TmsDbContext db) : ControllerB
         return result;
     }
 
-    private async Task<List<AllocationState>> ReadAllocations(DateOnly date, CancellationToken ct)
+    private async Task<List<FastAllocationState>> ReadAllocations(DateOnly date, CancellationToken ct)
     {
         var dateText = date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         var rows = await db.StagedImports.AsNoTracking()
@@ -181,12 +180,12 @@ public sealed class PlanningControlFastController(TmsDbContext db) : ControllerB
             .Take(5000)
             .ToListAsync(ct);
 
-        var latest = new Dictionary<(Guid OrderId, Guid LoadId, Guid? SourceLineId), AllocationState>();
+        var latest = new Dictionary<(Guid OrderId, Guid LoadId, Guid? SourceLineId), FastAllocationState>();
         foreach (var row in rows)
         {
             try
             {
-                var state = JsonSerializer.Deserialize<AllocationState>(row.PayloadJson, JsonOptions);
+                var state = JsonSerializer.Deserialize<FastAllocationState>(row.PayloadJson, JsonOptions);
                 if (state is null || state.Date != date) continue;
                 latest.TryAdd((state.OrderId, state.LoadId, state.SourceLineId), state);
             }
@@ -215,7 +214,7 @@ public sealed class PlanningControlFastController(TmsDbContext db) : ControllerB
         return dates;
     }
 
-    private static string ResolveWindow(TransportOrder order, OrderDetail? detail)
+    private static string ResolveWindow(TransportOrder order, FastOrderDetail? detail)
     {
         var explicitWindow = CanonicalWindow(detail?.PlanningWindow ?? detail?.SuggestedRouteType ?? detail?.PlanningWindowReason);
         if (explicitWindow == "PM") return "PM";
@@ -223,7 +222,7 @@ public sealed class PlanningControlFastController(TmsDbContext db) : ControllerB
         return "AM";
     }
 
-    private static bool RunsOvernight(TransportOrder order, OrderDetail? detail) =>
+    private static bool RunsOvernight(TransportOrder order, FastOrderDetail? detail) =>
         detail?.RunsOvernight == true || order.DeliveryDate is DateOnly delivery && delivery > order.CollectionDate;
 
     private static string CanonicalWindow(string? value)
@@ -295,4 +294,21 @@ public sealed class PlanningControlFastController(TmsDbContext db) : ControllerB
         value = default;
         return false;
     }
+
+    private sealed record FastOrderDetail(
+        string Reference,
+        string? Collection,
+        string? Destination,
+        string? Group,
+        string? Temperature,
+        string? PalletType,
+        int? Pallets,
+        string? Source,
+        DateTimeOffset UpdatedAtUtc,
+        string? PlanningWindow,
+        string? SuggestedRouteType,
+        string? PlanningWindowReason,
+        bool? RunsOvernight);
+
+    private sealed record FastAllocationState(Guid OrderId, Guid LoadId, int Pallets, DateOnly Date, DateTimeOffset UpdatedAtUtc, string? UpdatedBy, Guid? SourceLineId = null);
 }
