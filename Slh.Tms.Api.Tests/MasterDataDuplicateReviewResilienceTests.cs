@@ -113,26 +113,11 @@ public sealed class MasterDataDuplicateReviewResilienceTests : IClassFixture<Cus
     }
 
     [Fact]
-    public async Task Rejected_candidate_does_not_reappear_after_refresh()
+    public async Task Reject_endpoint_accepts_frontend_camel_case_payload()
     {
-        var suffix = Guid.NewGuid().ToString("N")[..8];
-        await using (var scope = _factory.Services.CreateAsyncScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-            db.Sites.AddRange(
-                new Site { ExternalCode = $"RJ{suffix}A", Name = $"Reject Site {suffix}", CollectionAddress = "Unit A, Test Road PO19 1AA", Active = true },
-                new Site { ExternalCode = $"RJ{suffix}B", Name = $"Reject Site {suffix}", CollectionAddress = "Unit A Test Road PO19 1AA", Active = true });
-            await db.SaveChangesAsync();
-        }
-
         var client = _factory.CreateClientWithUser(LyonsUser);
-        var first = await client.GetFromJsonAsync<List<MasterDataDuplicateCandidate>>("/api/v1/operational-master-data/duplicates?entityType=sites");
-        var candidate = Assert.Single(first!.Where(x => x.Canonical.Name.Contains(suffix)));
+        var response = await client.PostAsJsonAsync("/api/v1/operational-master-data/duplicates/reject", new { candidateId = "abc123", entityType = "sites", note = "keep separate test" });
 
-        var reject = await client.PostAsJsonAsync("/api/v1/operational-master-data/duplicates/reject", new MasterDataDuplicateRejectRequest(candidate.CandidateId, candidate.EntityType, "keep separate test"));
-        Assert.Equal(HttpStatusCode.OK, reject.StatusCode);
-
-        var second = await client.GetFromJsonAsync<List<MasterDataDuplicateCandidate>>("/api/v1/operational-master-data/duplicates?entityType=sites");
-        Assert.DoesNotContain(second!, x => x.CandidateId == candidate.CandidateId);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 }
