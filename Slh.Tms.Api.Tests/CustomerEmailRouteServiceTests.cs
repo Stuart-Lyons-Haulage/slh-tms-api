@@ -14,7 +14,7 @@ public sealed class CustomerEmailRouteServiceTests : IClassFixture<CustomWebFact
     public CustomerEmailRouteServiceTests(CustomWebFactory factory) => this.factory = factory;
 
     [Fact]
-    public async Task Approved_exact_sender_mapping_supplies_customer_but_not_generic_route_defaults()
+    public async Task Approved_exact_sender_mapping_supplies_customer_and_missing_route_defaults()
     {
         await using var scope = factory.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
@@ -40,10 +40,11 @@ public sealed class CustomerEmailRouteServiceTests : IClassFixture<CustomWebFact
         var payload = result.Orders.Single().Payload;
 
         Assert.Equal($"CUS-{suffix}".ToUpperInvariant(), payload.GetProperty("customerCode").GetString());
-        Assert.False(payload.TryGetProperty("collectionSiteCode", out _));
+        Assert.Equal(site.ExternalCode, payload.GetProperty("collectionSiteCode").GetString());
+        Assert.Equal(site.Name, payload.GetProperty("sellerName").GetString());
         Assert.False(payload.TryGetProperty("marketKey", out _));
         Assert.True(payload.GetProperty("emailRouteMatched").GetBoolean());
-        Assert.True(payload.GetProperty("emailRouteIdentityOnly").GetBoolean());
+        Assert.False(payload.GetProperty("emailRouteIdentityOnly").GetBoolean());
         Assert.False(payload.GetProperty("emailRouteRequiresReview").GetBoolean());
     }
 
@@ -101,7 +102,7 @@ public sealed class CustomerEmailRouteServiceTests : IClassFixture<CustomWebFact
     }
 
     [Fact]
-    public async Task Approved_domain_mapping_identifies_customer_without_supplying_route()
+    public async Task Approved_domain_mapping_identifies_customer_and_fills_missing_route_defaults()
     {
         await using var scope = factory.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
@@ -127,13 +128,49 @@ public sealed class CustomerEmailRouteServiceTests : IClassFixture<CustomWebFact
         var payload = result.Orders.Single().Payload;
 
         Assert.Equal($"CUS-{suffix}".ToUpperInvariant(), payload.GetProperty("customerCode").GetString());
-        Assert.False(payload.TryGetProperty("collectionSiteCode", out _));
-        Assert.False(payload.TryGetProperty("deliverySiteCode", out _));
-        Assert.True(payload.GetProperty("emailRouteIdentityOnly").GetBoolean());
+        Assert.Equal(collection.ExternalCode, payload.GetProperty("collectionSiteCode").GetString());
+        Assert.Equal(delivery.ExternalCode, payload.GetProperty("deliverySiteCode").GetString());
+        Assert.Equal(delivery.Name, payload.GetProperty("stallNumber").GetString());
+        Assert.False(payload.GetProperty("emailRouteIdentityOnly").GetBoolean());
     }
 
     [Fact]
-    public async Task Approved_orders_learn_sender_customer_only_and_clear_unsafe_route_defaults()
+    public async Task Approved_sender_mapping_does_not_overwrite_parsed_collection_or_destination()
+    {
+        await using var scope = factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var sender = $"no-overwrite-{suffix}@customer.example";
+        var collection = new Site { ExternalCode = $"COL-{suffix}", Name = $"Collection {suffix}", Active = true };
+        var delivery = new Site { ExternalCode = $"DEL-{suffix}", Name = $"Delivery {suffix}", Active = true };
+        db.Sites.AddRange(collection, delivery);
+        db.CustomerEmailRoutes.Add(new CustomerEmailRoute
+        {
+            CustomerCode = $"CUS-{suffix}", SenderEmail = sender,
+            DefaultSiteCode = collection.ExternalCode, DefaultDeliverySiteCode = delivery.ExternalCode,
+            RequiresReview = false, Active = true
+        });
+        await db.SaveChangesAsync();
+
+        var parsed = new EmailIntakeParseResult([new ParsedEmailOrder("one", "one",
+            JsonSerializer.SerializeToElement(new
+            {
+                customerCode = $"CUS-{suffix}".ToUpperInvariant(), sellerName = "Email Farm",
+                stallNumber = "Email Depot", pallets = 17, plannerReady = true
+            }), [])], [], null);
+
+        var result = await CustomerEmailRouteService.ApplyAsync(db, parsed, Request(sender, "Daily pallets"), CancellationToken.None);
+        var payload = result.Orders.Single().Payload;
+
+        Assert.Equal("Email Farm", payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Email Depot", payload.GetProperty("stallNumber").GetString());
+        Assert.False(payload.TryGetProperty("collectionSiteCode", out _));
+        Assert.False(payload.TryGetProperty("deliverySiteCode", out _));
+        Assert.False(payload.GetProperty("emailRouteRequiresReview").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Approved_orders_learn_sender_customer_only_without_clearing_route_defaults()
     {
         await using var scope = factory.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
@@ -156,9 +193,9 @@ public sealed class CustomerEmailRouteServiceTests : IClassFixture<CustomWebFact
 
         var route = db.CustomerEmailRoutes.Single(item => item.SenderEmail == sender);
         Assert.Equal(customer.ToUpperInvariant(), route.CustomerCode);
-        Assert.Null(route.DefaultSiteCode);
-        Assert.Null(route.DefaultDeliverySiteCode);
-        Assert.Null(route.MarketKey);
+        Assert.Equal($"OLD-{suffix}", route.DefaultSiteCode);
+        Assert.Equal($"DEL-{suffix}", route.DefaultDeliverySiteCode);
+        Assert.Equal($"market-{suffix}", route.MarketKey);
         Assert.False(route.RequiresReview);
     }
 
