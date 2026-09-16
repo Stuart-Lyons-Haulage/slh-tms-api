@@ -16,7 +16,7 @@
     },
     "definition": {
       "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
-      "contentVersion": "1.0.1.0",
+      "contentVersion": "1.0.2.0",
       "parameters": {
         "$connections": { "defaultValue": {}, "type": "Object" },
         "SLH_InfoMailboxUPN": { "defaultValue": "info@lyonshaulage.com", "type": "String" }
@@ -123,7 +123,7 @@
                     "value": {
                       "name": "@coalesce(items('For_Each_Source_Attachment')?['name'],items('For_Each_Source_Attachment')?['displayName'],items('For_Each_Source_Attachment')?['id'],'unnamed-attachment')",
                       "contentType": "@coalesce(items('For_Each_Source_Attachment')?['contentType'],'application/octet-stream')",
-                      "contentBase64": "@outputs('Get_Attachment_Content')?['body/contentBytes']",
+                      "contentBase64": "@coalesce(outputs('Get_Attachment_Content')?['body/contentBytes'],outputs('Get_Attachment_Content')?['body/$content'],outputs('Get_Attachment_Content')?['body/content'],body('Get_Attachment_Content')?['contentBytes'],body('Get_Attachment_Content')?['$content'],'')",
                       "isInline": "@coalesce(items('For_Each_Source_Attachment')?['isInline'],false)",
                       "contentId": "@items('For_Each_Source_Attachment')?['contentId']",
                       "size": "@items('For_Each_Source_Attachment')?['size']"
