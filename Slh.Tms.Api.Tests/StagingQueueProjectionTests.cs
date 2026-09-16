@@ -82,6 +82,25 @@ public sealed class StagingQueueProjectionTests
     }
 
     [Fact]
+    public void BuildPayloadSummary_keeps_delivery_date_for_order_review_priority()
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            poNumber = "PO-456",
+            customerCode = "HHP",
+            deliveryDate = "2026-09-16",
+            sourceBodyText = new string('x', 20000)
+        });
+
+        var summaryJson = StagingQueueProjection.BuildPayloadSummary(payload);
+        using var document = JsonDocument.Parse(summaryJson);
+        var root = document.RootElement;
+
+        Assert.Equal("2026-09-16", root.GetProperty("deliveryDate").GetString());
+        Assert.False(root.TryGetProperty("sourceBodyText", out _));
+    }
+
+    [Fact]
     public void BuildPayloadSummary_returns_empty_object_for_invalid_legacy_json()
     {
         Assert.Equal("{}", StagingQueueProjection.BuildPayloadSummary("not-json"));
