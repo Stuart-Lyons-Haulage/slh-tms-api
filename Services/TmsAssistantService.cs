@@ -72,7 +72,7 @@ public sealed class TmsAssistantService(
         try
         {
             newTachoDriversPending = await db.StagedImports.AsNoTracking()
-                .CountAsync(row => row.EntityType == "driverreview" && row.Status == StagingStatus.Pending, ct);
+                .CountAsync(row => row.EntityType == "driverreview" && row.Status == StagingStatus.PendingReview, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -160,7 +160,7 @@ public sealed class TmsAssistantService(
             // Build live driver context for the question — hours, Tacho status, dispatch day
             var driverContext = await BuildLiveDriverContextAsync(planningDate, ct);
             var pendingReviews = await db.StagedImports.AsNoTracking()
-                .Where(row => row.EntityType == "driverreview" && row.Status == StagingStatus.Pending)
+                .Where(row => row.EntityType == "driverreview" && row.Status == StagingStatus.PendingReview)
                 .Select(row => new { row.IdempotencyKey, row.ReviewNote, row.ReceivedAtUtc })
                 .Take(20)
                 .ToListAsync(ct);

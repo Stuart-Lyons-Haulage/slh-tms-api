@@ -213,7 +213,7 @@ public static class TachoMemberCodeDriverMasterSync
                                 receivedAtUtc = now
                             }, JsonOptions),
                             Source = "TachoMaster Member Code canonical Driver Master sync",
-                            Status = StagingStatus.Pending,
+                            Status = StagingStatus.PendingReview,
                             ReceivedAtUtc = now,
                             ReviewNote = $"New TachoMaster member {member} ({worker.DisplayName}) has no matching Driver Master record. Review and promote to create driver, or reject to discard."
                         });

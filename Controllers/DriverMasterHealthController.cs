@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
 
 namespace Slh.Tms.Api.Controllers;
@@ -37,12 +38,15 @@ public sealed class DriverMasterHealthController(TmsDbContext db, TachoDriverMas
             }
         }
 
+        var pendingReviewCount = await db.StagedImports.AsNoTracking()
+            .CountAsync(row => row.EntityType == "driverreview" && row.Status == StagingStatus.PendingReview, ct);
         var populationAligned = sourceWorkers is > 0 && quality.ActiveDrivers == sourceWorkers.Value;
         var healthy = quality.DuplicateMemberGroups == 0 &&
                       quality.DuplicateCardGroups == 0 &&
                       quality.ActiveWithoutMember == 0 &&
                       quality.ActiveWithoutCard == 0 &&
-                      populationAligned;
+                      populationAligned &&
+                      pendingReviewCount == 0;
 
         return Ok(new
         {
@@ -56,7 +60,9 @@ public sealed class DriverMasterHealthController(TmsDbContext db, TachoDriverMas
             quality.DuplicateCardGroups,
             quality.ActiveWithoutMember,
             quality.ActiveWithoutCard,
-            quality.LatestCanonicalSyncUtc
+            quality.LatestCanonicalSyncUtc,
+            pendingTachoReviewDrivers = pendingReviewCount,
+            tachoReviewQueueUrl = "/api/v1/driver-master/tacho-review"
         });
     }
 }
