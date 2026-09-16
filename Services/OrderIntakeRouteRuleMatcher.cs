@@ -10,7 +10,7 @@ namespace Slh.Tms.Api.Services;
 /// <summary>
 /// Applies SQL-authoritative route rules after sender/customer matching and parsing.
 /// A rule may fill missing route data but never overwrites contradictory parsed data.
-/// Ambiguous/tied/low-confidence matches remain planner review items.
+/// Ambiguous/tied matches remain planner review items.
 /// </summary>
 public static class OrderIntakeRouteRuleMatcher
 {
@@ -58,18 +58,19 @@ public static class OrderIntakeRouteRuleMatcher
 
         var best = candidates[0];
         var tied = candidates.Skip(1).Any(candidate => candidate.Score == best.Score && candidate.Rule.Priority == best.Rule.Priority);
-        var requiresReview = tied || best.Score < 70 || best.MatchedDimensions < 2;
+        var singleRuleForCustomer = rules.Count(rule => rule.CustomerCode.Equals(customer, StringComparison.OrdinalIgnoreCase) && rule.Active) == 1;
+        var requiresReview = tied || (!singleRuleForCustomer && (best.Score < 70 || best.MatchedDimensions < 2));
         var warnings = order.Warnings.ToList();
 
-        if (!requiresReview)
+        if (!tied)
         {
             await FillMissingSiteValues(db, root, best.Rule, ct);
         }
-        else
+        if (requiresReview)
         {
             warnings.Add(tied
                 ? "More than one SQL route rule matched with the same score; planner review retained."
-                : $"Best SQL route rule confidence was {best.Score}; planner review retained.");
+                : $"Best SQL route rule confidence was {best.Score}; missing fields were filled only where blank and planner review was retained.");
         }
 
         root["orderIntakeRouteRuleId"] = best.Rule.Id.ToString();
@@ -152,10 +153,11 @@ public static class OrderIntakeRouteRuleMatcher
             root["deliverySiteCode"] = rule.DestinationSiteCode;
         if (string.IsNullOrWhiteSpace(Text(root, "destinationCode")) && !string.IsNullOrWhiteSpace(rule.DestinationCode))
             root["destinationCode"] = rule.DestinationCode;
-        if (string.IsNullOrWhiteSpace(Text(root, "deliverySite")) && string.IsNullOrWhiteSpace(Text(root, "destination")) && !string.IsNullOrWhiteSpace(rule.DestinationName))
+        if (string.IsNullOrWhiteSpace(Text(root, "deliverySite")) && string.IsNullOrWhiteSpace(Text(root, "destination")) && string.IsNullOrWhiteSpace(Text(root, "stallNumber")) && !string.IsNullOrWhiteSpace(rule.DestinationName))
         {
             root["deliverySite"] = rule.DestinationName;
             root["destination"] = rule.DestinationName;
+            root["stallNumber"] = rule.DestinationName;
         }
         if (string.IsNullOrWhiteSpace(Text(root, "destinationPostcode")) && !string.IsNullOrWhiteSpace(rule.DestinationPostcode))
             root["destinationPostcode"] = rule.DestinationPostcode;
@@ -172,6 +174,7 @@ public static class OrderIntakeRouteRuleMatcher
                 root["deliverySiteCode"] = site.ExternalCode;
                 if (string.IsNullOrWhiteSpace(Text(root, "deliverySite"))) root["deliverySite"] = site.Name;
                 if (string.IsNullOrWhiteSpace(Text(root, "destination"))) root["destination"] = site.Name;
+                if (string.IsNullOrWhiteSpace(Text(root, "stallNumber"))) root["stallNumber"] = site.Name;
             }
         }
     }
