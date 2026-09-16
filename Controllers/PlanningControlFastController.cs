@@ -55,8 +55,8 @@ public sealed class PlanningControlFastController(TmsDbContext db) : ControllerB
                 orderedPallets = ordered,
                 plannedPallets = planned,
                 outstandingPallets = Math.Max(ordered - planned, 0),
-                collection = detail?.Collection ?? order.CollectionLocation ?? "Collection not mapped",
-                destination = detail?.Destination ?? order.DeliveryLocation ?? order.MarketName ?? "Destination not mapped",
+                collection = detail?.Collection ?? order.SellerName ?? "Collection not mapped",
+                destination = detail?.Destination ?? order.StallNumber ?? order.MarketName ?? "Destination not mapped",
                 planningWindow = window,
                 planningGroup = window == "PM" ? "PM Work" : "AM Runs",
                 runsOvernight = RunsOvernight(order, detail),
@@ -127,7 +127,13 @@ public sealed class PlanningControlFastController(TmsDbContext db) : ControllerB
             .Where(item => (item.EntityType == "order" || item.EntityType == "register:order") &&
                 (item.Status == StagingStatus.Approved || item.Status == StagingStatus.Promoted));
 
-        query = query.Where(item => dateTokens.Any(token => item.PayloadJson.Contains(token)));
+        if (dateTokens.Length >= 3)
+        {
+            var previousText = dateTokens[0];
+            var dateText = dateTokens[1];
+            var nextText = dateTokens[2];
+            query = query.Where(item => item.PayloadJson.Contains(previousText) || item.PayloadJson.Contains(dateText) || item.PayloadJson.Contains(nextText));
+        }
 
         var rows = await query
             .OrderByDescending(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc)
