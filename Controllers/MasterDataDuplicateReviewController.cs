@@ -18,27 +18,14 @@ public sealed class MasterDataDuplicateReviewController(TmsDbContext db) : Contr
     [HttpPost("auto-merge"), Authorize(Policy = "TmsApprove")]
     public async Task<ActionResult<MasterDataDuplicateMergeResult>> AutoMerge([FromQuery] string? entityType, CancellationToken ct)
     {
-        var candidates = await MasterDataDuplicateReviewService.FindCandidatesAsync(db, entityType, ct);
-        var mergeable = candidates
-            .Where(IsOperationallySafeAutoMergeCandidate)
-            .Take(50)
-            .ToList();
+        var type = (entityType ?? "sites").Trim().ToLowerInvariant();
+        if (type is "site" or "sites")
+            return Ok(await SafeSiteDuplicateAutoMergeService.AutoMergeAsync(db, Actor(), ct));
 
-        var messages = new List<string>();
-        var merged = 0;
-        foreach (var candidate in mergeable)
-        {
-            var result = await MasterDataDuplicateReviewService.MergeAsync(
-                db,
-                candidate.EntityType,
-                new MasterDataDuplicateMergeRequest(candidate.Canonical.Id, candidate.Duplicates.Select(row => row.Id).ToList(), "Automatic high-confidence master-data duplicate merge"),
-                Actor(),
-                ct);
-            merged += result.Merged;
-            messages.AddRange(result.Messages);
-        }
+        if (type is "market" or "markets")
+            return Ok(await SafeMarketDuplicateAutoMergeService.AutoMergeAsync(db, Actor(), ct));
 
-        return Ok(new MasterDataDuplicateMergeResult(merged, candidates.Count, messages));
+        return Ok(await MasterDataDuplicateReviewService.AutoMergeHighConfidenceAsync(db, entityType, Actor(), ct));
     }
 
     [HttpPost("{entityType}/merge"), Authorize(Policy = "TmsApprove")]
@@ -57,20 +44,6 @@ public sealed class MasterDataDuplicateReviewController(TmsDbContext db) : Contr
 
         await MasterDataDuplicateReviewService.RejectAsync(db, new MasterDataDuplicateRejectRequest(candidateId, entityType, note), Actor(), ct);
         return Ok(new { rejected = true });
-    }
-
-    private static bool IsOperationallySafeAutoMergeCandidate(MasterDataDuplicateCandidate candidate)
-    {
-        if (candidate.Duplicates.Count == 0) return false;
-        if (candidate.CanAutoMerge) return true;
-
-        var type = candidate.EntityType.Trim().ToLowerInvariant();
-        return type switch
-        {
-            "site" or "sites" => candidate.Confidence >= 94,
-            "market" or "markets" => candidate.Confidence >= 94,
-            _ => false
-        };
     }
 
     private static string? Text(JsonElement root, params string[] names)
