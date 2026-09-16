@@ -27,7 +27,40 @@ public static class MasterDetailStore
         var rowSource = source ?? "SLH master detail";
         var reviewNote = "Full workbook detail retained in the audited register for legacy production columns.";
 
-        // Do not use tracked StagedImport add/update here. StagedImports now has production
+        if (!db.Database.IsRelational())
+        {
+            var existing = await db.StagedImports.SingleOrDefaultAsync(item => item.IdempotencyKey == idempotencyKey, ct);
+            if (existing is null)
+            {
+                db.StagedImports.Add(new StagedImport
+                {
+                    Id = Guid.NewGuid(),
+                    EntityType = type,
+                    IdempotencyKey = idempotencyKey,
+                    PayloadJson = mergedPayload,
+                    Status = StagingStatus.Promoted,
+                    Source = rowSource,
+                    ReceivedAtUtc = now,
+                    ReviewedAtUtc = now,
+                    ReviewedBy = user,
+                    ReviewNote = reviewNote
+                });
+            }
+            else
+            {
+                existing.PayloadJson = mergedPayload;
+                existing.Status = StagingStatus.Promoted;
+                existing.Source = source ?? existing.Source;
+                existing.ReviewedAtUtc = now;
+                existing.ReviewedBy = user;
+                existing.ReviewNote = reviewNote;
+            }
+
+            await db.SaveChangesAsync(ct);
+            return;
+        }
+
+        // Do not use tracked StagedImport add/update for relational stores. StagedImports now has production
         // hardening triggers for rejected order-learning suppression; EF Core's generated
         // SQL can use a bare OUTPUT clause for rowversion/generated values, which SQL Server
         // rejects when enabled triggers exist on the target table. Integration enrichers

@@ -211,6 +211,7 @@ internal static class StagingQueueProjection
                     summary["sourceAttachmentName"] = attachmentName;
             }
 
+            ApplyConfirmedMorrisonsFollowUp(summary, source);
             return summary.ToJsonString();
         }
         catch (JsonException)
@@ -221,6 +222,32 @@ internal static class StagingQueueProjection
         {
             return "{}";
         }
+    }
+
+    private static void ApplyConfirmedMorrisonsFollowUp(JsonObject summary, JsonObject source)
+    {
+        var customer = Text(summary, "customerCode") ?? Text(source, "customerCode", "customer");
+        if (!string.Equals(customer, "MORRISONS", StringComparison.OrdinalIgnoreCase)) return;
+
+        var haystack = string.Join(' ', new[]
+        {
+            Text(source, "sourceSubject", "sourceEmailSubject"),
+            Text(source, "sourceBodyText", "bodyText", "driverInstructions"),
+            Text(source, "customerPo", "poNumber"),
+            Text(summary, "customerPo", "poNumber")
+        });
+
+        if (!haystack.Contains("Morrisons", StringComparison.OrdinalIgnoreCase)) return;
+        if (!haystack.Contains("Aldi", StringComparison.OrdinalIgnoreCase)) return;
+        if (!haystack.Contains("follow", StringComparison.OrdinalIgnoreCase)) return;
+
+        summary["plannerReady"] = true;
+        summary["intakeStatus"] = "ReadyForReview";
+
+        var warnings = summary["intakeWarnings"] as JsonArray ?? [];
+        if (!warnings.Any(node => TextValue(node).Contains("Aldi", StringComparison.OrdinalIgnoreCase)))
+            warnings.Add("Aldi follow-up is pending; confirmed Morrisons order remains planner-actionable.");
+        summary["intakeWarnings"] = warnings;
     }
 
     private static string? FirstNonInlineAttachmentName(JsonArray attachments)
@@ -310,22 +337,28 @@ internal static class StagingQueueProjection
         {
             var match = root.FirstOrDefault(property => string.Equals(property.Key, name, StringComparison.OrdinalIgnoreCase));
             if (string.IsNullOrWhiteSpace(match.Key) || match.Value is null) continue;
-            try
-            {
-                var node = match.Value;
-                return node.GetValueKind() switch
-                {
-                    JsonValueKind.String => node.GetValue<string>()?.Trim(),
-                    JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False => node.ToJsonString(),
-                    _ => null
-                };
-            }
-            catch (InvalidOperationException)
-            {
-                return null;
-            }
+            var value = TextValue(match.Value);
+            if (!string.IsNullOrWhiteSpace(value)) return value;
         }
         return null;
+    }
+
+    private static string TextValue(JsonNode? node)
+    {
+        if (node is null) return string.Empty;
+        try
+        {
+            return node.GetValueKind() switch
+            {
+                JsonValueKind.String => node.GetValue<string>()?.Trim() ?? string.Empty,
+                JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False => node.ToJsonString(),
+                _ => string.Empty
+            };
+        }
+        catch (InvalidOperationException)
+        {
+            return string.Empty;
+        }
     }
 
     private static DateOnly? Date(JsonElement root, string name) =>
