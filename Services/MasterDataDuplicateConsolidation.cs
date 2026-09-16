@@ -45,16 +45,49 @@ public static class MasterDataDuplicateConsolidation
             .ToDictionaryAsync(item => item.DriverId, item => item.Count, ct);
 
         var archived = 0;
+
+        // Deactivate any active driver that has no TachoMaster Member Code.
+        // These cannot be matched to a real tachograph identity and must not be
+        // consolidated into another person — they are removed for review.
+        foreach (var noMember in drivers.Where(driver => driver.Active && string.IsNullOrWhiteSpace(driver.TachoMasterDriverId)).ToList())
+        {
+            noMember.Active = false;
+            archived++;
+            db.MasterDataAudits.Add(new MasterDataAudit
+            {
+                EntityType = "Driver",
+                EntityId = noMember.Id,
+                Action = "DeactivatedNoTachoMemberCode",
+                ChangedBy = actor,
+                ChangesJson = JsonSerializer.Serialize(new
+                {
+                    reason = "Active driver has no TachoMaster Member Code and cannot be matched to a canonical Tacho identity",
+                    noMember.EmployeeNumber,
+                    noMember.DisplayName,
+                    noMember.TachoCardNumber
+                })
+            });
+        }
+
+        // Consolidate only within the same Member Code. Two drivers with different
+        // non-blank Member Codes are different people and must never be merged here —
+        // TachoMemberCodeDriverMasterSync owns cross-member merging under its stricter rules.
         foreach (var group in DuplicateGroupsByKeys(
-            drivers.Where(driver => driver.Active).ToList(),
+            drivers.Where(driver => driver.Active && !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId)).ToList(),
             driver => driver.Id,
             driver => new[]
             {
                 IdentityKey("member", driver.TachoMasterDriverId),
                 IdentityKey("employee", driver.EmployeeNumber),
-                IdentityKey("licence", driver.DrivingLicenceNumber),
-                NameMobileKey(driver.DisplayName, driver.MobileNumber)
-            }))
+                IdentityKey("licence", driver.DrivingLicenceNumber)
+                // NameMobileKey intentionally removed: name + mobile alone cannot prove
+                // two records are the same person without a shared Tacho identity.
+            })
+            // Hard gate: only merge rows that share the same normalised Member Code.
+            .Where(group => group
+                .Select(driver => TachoDriverIdentityRules.NormaliseIdentifier(driver.TachoMasterDriverId))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count() == 1))
         {
             var canonical = group
                 .OrderByDescending(driver => !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId))
