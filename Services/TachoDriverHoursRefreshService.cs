@@ -1,6 +1,8 @@
+using System.Data;
 using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
+using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Models.Tracking;
 
 namespace Slh.Tms.Api.Services;
@@ -26,6 +28,7 @@ public sealed record TachoDriverHoursRefreshResult(
     int? TachoDriveAvailableWeekMinutes,
     int? TachoWorkAvailableWeekMinutes,
     DateTimeOffset? LastTachoSyncUtc,
+    string IdentitySource,
     string Message);
 
 public sealed class TachoDriverHoursRefreshService(
@@ -128,46 +131,51 @@ public sealed class TachoDriverHoursRefreshService(
         }
 
         var now = DateTimeOffset.UtcNow;
-        var profiles = await tachoMaster.GetDriverProfilesAsync(ct);
-        var profilesByMemberCode = profiles
-            .Where(profile => profile.MemberCode > 0)
-            .GroupBy(profile => TachoDriverIdentityRules.NormaliseIdentifier(
-                profile.MemberCode.ToString(CultureInfo.InvariantCulture)),
-                StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        var today = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(now, London).DateTime);
+        var profilesTask = tachoMaster.GetDriverProfilesAsync(ct);
+        var dutiesTask = tachoMaster.GetDriverDutyStatusesAsync(today, ct);
+        await Task.WhenAll(profilesTask, dutiesTask);
 
-        if (profilesByMemberCode.Count == 0)
+        var profiles = await profilesTask;
+        var duties = await dutiesTask;
+        var profilesByMemberCode = ProfilesByMemberCode(profiles);
+        var profilesByCard = ProfilesByCardNumber(profiles);
+
+        if (profilesByMemberCode.Count == 0 && profilesByCard.Count == 0)
         {
-            logger.LogWarning("TachoMaster lightweight driver-hours refresh returned no driver profiles.");
+            logger.LogWarning("TachoMaster lightweight driver-hours refresh returned no usable driver profiles.");
             return 0;
         }
 
         var drivers = await db.Drivers
-            .Where(driver => driver.Active && driver.TachoMasterDriverId != null && driver.TachoMasterDriverId != string.Empty)
+            .Where(driver => driver.Active)
             .OrderBy(driver => driver.DisplayName)
             .ToListAsync(ct);
 
         var updated = 0;
         foreach (var driver in drivers)
         {
-            var memberCode = TachoDriverIdentityRules.NormaliseIdentifier(driver.TachoMasterDriverId);
-            if (memberCode.Length == 0) continue;
-            if (!profilesByMemberCode.TryGetValue(memberCode, out var profile)) continue;
+            var persistedCard = await ReadPersistedTachoCardNumberAsync(driver.Id, ct) ?? driver.TachoCardNumber;
+            var match = MatchProfile(driver.TachoMasterDriverId, persistedCard, profilesByMemberCode, profilesByCard);
+            if (match is null) continue;
 
-            ApplyProfile(driver, profile, now);
+            var todayDuties = MatchDuties(duties, match.Profile.MemberCode, persistedCard, match.Profile.CardNumber);
+            var state = TachoDriverState.From(driver, persistedCard, match.Profile, BuildDutyEvidence(todayDuties), now, match.IdentitySource);
+            ApplyState(driver, state);
+            await PersistStateAsync(driver.Id, state, ct);
             updated++;
         }
 
         if (updated == 0)
         {
             logger.LogInformation(
-                "TachoMaster lightweight driver-hours refresh found profiles, but none matched active TMS drivers by Member Code.");
+                "TachoMaster lightweight driver-hours refresh found profiles, but none matched active TMS drivers by Member Code or persisted DB Tacho card number.");
             return 0;
         }
 
         await db.SaveChangesAsync(ct);
         logger.LogInformation(
-            "TachoMaster lightweight driver-hours refresh updated {UpdatedDrivers} active driver(s) by Member Code. Actor: {Actor}",
+            "TachoMaster lightweight driver-hours refresh updated {UpdatedDrivers} active driver(s) by Member Code with DB Tacho card fallback. Actor: {Actor}",
             updated,
             actor);
         return updated;
@@ -183,20 +191,22 @@ public sealed class TachoDriverHoursRefreshService(
 
         if (!driver.Active)
         {
-            return Result("inactive", false, driver, null,
+            return Result("inactive", false, TachoDriverState.FromDriverOnly(driver, await ReadPersistedTachoCardNumberAsync(driver.Id, ct)),
                 "Driver is inactive, so TachoMaster hours were not refreshed.");
         }
 
+        var persistedCard = await ReadPersistedTachoCardNumberAsync(driver.Id, ct) ?? driver.TachoCardNumber;
         var memberCode = TachoDriverIdentityRules.NormaliseIdentifier(driver.TachoMasterDriverId);
-        if (memberCode.Length == 0)
+        var cardKey = NormaliseCard(persistedCard);
+        if (memberCode.Length == 0 && cardKey.Length == 0)
         {
-            return Result("missing_member_code", false, driver, null,
-                "Driver has no TachoMaster Member Code, so TachoMaster hours were not refreshed.");
+            return Result("missing_tacho_identity", false, TachoDriverState.FromDriverOnly(driver, persistedCard),
+                "Driver has no TachoMaster Member Code and no persisted DB Tacho card number, so TachoMaster hours were not refreshed.");
         }
 
         if (!options.IsConfigured)
         {
-            return Result("not_configured", false, driver, null,
+            return Result("not_configured", false, TachoDriverState.FromDriverOnly(driver, persistedCard),
                 "TachoMaster is not configured, so driver hours were not refreshed.");
         }
 
@@ -205,42 +215,87 @@ public sealed class TachoDriverHoursRefreshService(
         var dutiesTask = tachoMaster.GetDriverDutyStatusesAsync(today, ct);
         await Task.WhenAll(profilesTask, dutiesTask);
 
-        var profile = (await profilesTask).FirstOrDefault(item =>
-            string.Equals(
-                TachoDriverIdentityRules.NormaliseIdentifier(item.MemberCode.ToString(CultureInfo.InvariantCulture)),
-                memberCode,
-                StringComparison.OrdinalIgnoreCase));
+        var profiles = await profilesTask;
+        var duties = await dutiesTask;
+        var match = MatchProfile(driver.TachoMasterDriverId, persistedCard, ProfilesByMemberCode(profiles), ProfilesByCardNumber(profiles));
 
-        if (profile is null)
+        if (match is null)
         {
-            return Result("profile_not_found", false, driver, null,
-                $"TachoMaster did not return a profile for Member Code {driver.TachoMasterDriverId}.");
+            return Result("profile_not_found", false, TachoDriverState.FromDriverOnly(driver, persistedCard),
+                memberCode.Length > 0
+                    ? $"TachoMaster did not return a profile for Member Code {driver.TachoMasterDriverId}."
+                    : "TachoMaster did not return a profile matching the persisted DB Tacho card number.");
         }
 
-        var todayDuties = (await dutiesTask)
-            .Where(item => string.Equals(
-                TachoDriverIdentityRules.NormaliseIdentifier(item.MemberCode.ToString(CultureInfo.InvariantCulture)),
-                memberCode,
-                StringComparison.OrdinalIgnoreCase))
-            .OrderBy(item => item.DutyStartUtc)
-            .ToList();
-        var dutyEvidence = BuildDutyEvidence(todayDuties);
-
-        var now = DateTimeOffset.UtcNow;
-        ApplyProfile(driver, profile, now);
+        var todayDuties = MatchDuties(duties, match.Profile.MemberCode, persistedCard, match.Profile.CardNumber);
+        var state = TachoDriverState.From(driver, persistedCard, match.Profile, BuildDutyEvidence(todayDuties), DateTimeOffset.UtcNow, match.IdentitySource);
+        ApplyState(driver, state);
+        await PersistStateAsync(driver.Id, state, ct);
         await db.SaveChangesAsync(ct);
 
         logger.LogInformation(
-            "TachoMaster single-driver refresh updated hours and duty evidence for {DriverId} / {DriverName} by Member Code {MemberCode}. Actor: {Actor}",
+            "TachoMaster single-driver refresh updated hours and duty evidence for {DriverId} / {DriverName}. Identity: {IdentitySource}. Actor: {Actor}",
             driver.Id,
             driver.DisplayName,
-            driver.TachoMasterDriverId,
+            state.IdentitySource,
             actor);
 
-        return Result("updated", true, driver, dutyEvidence,
+        return Result("updated", true, state,
             todayDuties.Count == 0
-                ? "TachoMaster driver hours refreshed, but no card/duty insertion was found for today."
-                : "TachoMaster driver hours refreshed with card inserted / first sign-on evidence for ETA and compliance use.");
+                ? $"TachoMaster driver hours refreshed by {state.IdentitySource}, but no card/duty insertion was found for today."
+                : $"TachoMaster driver hours refreshed by {state.IdentitySource} with card inserted / first sign-on evidence for ETA and compliance use.");
+    }
+
+    private static Dictionary<string, TachoDriverProfile> ProfilesByMemberCode(IReadOnlyList<TachoDriverProfile> profiles) => profiles
+        .Where(profile => profile.MemberCode > 0)
+        .GroupBy(profile => TachoDriverIdentityRules.NormaliseIdentifier(profile.MemberCode.ToString(CultureInfo.InvariantCulture)), StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+
+    private static Dictionary<string, TachoDriverProfile> ProfilesByCardNumber(IReadOnlyList<TachoDriverProfile> profiles) => profiles
+        .Select(profile => new { Key = NormaliseCard(profile.CardNumber), Profile = profile })
+        .Where(item => item.Key.Length >= 8)
+        .GroupBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(group => group.Key, group => group.First().Profile, StringComparer.OrdinalIgnoreCase);
+
+    private static TachoProfileMatch? MatchProfile(
+        string? tachoMasterDriverId,
+        string? persistedCardNumber,
+        IReadOnlyDictionary<string, TachoDriverProfile> profilesByMemberCode,
+        IReadOnlyDictionary<string, TachoDriverProfile> profilesByCard)
+    {
+        var memberCode = TachoDriverIdentityRules.NormaliseIdentifier(tachoMasterDriverId);
+        if (memberCode.Length > 0)
+        {
+            return profilesByMemberCode.TryGetValue(memberCode, out var profile)
+                ? new(profile, "TachoMasterDriverId")
+                : null;
+        }
+
+        var card = NormaliseCard(persistedCardNumber);
+        if (card.Length < 8) return null;
+        return profilesByCard.TryGetValue(card, out var cardProfile)
+            ? new(cardProfile, "TachoCardNumber")
+            : null;
+    }
+
+    private static IReadOnlyList<TachoDriverDutyStatus> MatchDuties(
+        IReadOnlyList<TachoDriverDutyStatus> duties,
+        int memberCode,
+        string? persistedCard,
+        string? profileCard)
+    {
+        var member = TachoDriverIdentityRules.NormaliseIdentifier(memberCode.ToString(CultureInfo.InvariantCulture));
+        var dbCard = NormaliseCard(persistedCard);
+        var tachoCard = NormaliseCard(profileCard);
+        return duties.Where(duty =>
+            string.Equals(
+                TachoDriverIdentityRules.NormaliseIdentifier(duty.MemberCode.ToString(CultureInfo.InvariantCulture)),
+                member,
+                StringComparison.OrdinalIgnoreCase)
+            || CardsMatch(dbCard, NormaliseCard(duty.CardNumber))
+            || CardsMatch(tachoCard, NormaliseCard(duty.CardNumber)))
+            .OrderBy(item => item.DutyStartUtc)
+            .ToList();
     }
 
     private static TachoDutyEvidence? BuildDutyEvidence(IReadOnlyList<TachoDriverDutyStatus> duties)
@@ -266,60 +321,105 @@ public sealed class TachoDriverHoursRefreshService(
             duties.Any(item => item.BreakMinutes is not null) ? duties.Sum(item => item.BreakMinutes ?? 0) : null);
     }
 
-    private static void ApplyProfile(Models.Driver driver, TachoDriverProfile profile, DateTimeOffset now)
+    private static void ApplyState(Driver driver, TachoDriverState state)
     {
-        driver.TachoCardNumber = string.IsNullOrWhiteSpace(profile.CardNumber) ? driver.TachoCardNumber : profile.CardNumber;
-        driver.TachoDriveAvailableTodayMinutes = profile.DriveAvailableTodayMinutes;
-        driver.TachoDriveAvailableWeekMinutes = profile.DriveAvailableWeekMinutes;
-        driver.TachoWorkAvailableWeekMinutes = profile.WorkAvailableWeekMinutes;
-        driver.LastTachoSyncUtc = now;
+        driver.TachoMasterDriverId = string.IsNullOrWhiteSpace(driver.TachoMasterDriverId) ? state.TachoMasterDriverId : driver.TachoMasterDriverId;
+        driver.TachoCardNumber = state.TachoCardNumber;
+        driver.TachoDriveAvailableTodayMinutes = state.TachoDriveAvailableTodayMinutes;
+        driver.TachoDriveAvailableWeekMinutes = state.TachoDriveAvailableWeekMinutes;
+        driver.TachoWorkAvailableWeekMinutes = state.TachoWorkAvailableWeekMinutes;
+        driver.LastTachoSyncUtc = state.LastTachoSyncUtc;
+    }
+
+    private async Task PersistStateAsync(Guid driverId, TachoDriverState state, CancellationToken ct)
+    {
+        await db.Database.ExecuteSqlInterpolatedAsync($"""
+UPDATE [dbo].[Drivers]
+SET [TachoMasterDriverId] = COALESCE(NULLIF([TachoMasterDriverId], N''), {state.TachoMasterDriverId}),
+    [TachoCardNumber] = {state.TachoCardNumber},
+    [LastTachoVehicleCode] = {state.TachoVehicleCode},
+    [LastTachoCardInsertedUtc] = {state.CardInsertedUtc},
+    [LastTachoDutyEndUtc] = {state.CurrentDutyEndUtc},
+    [LastTachoDutyOpen] = {state.TachoDutyOpen},
+    [TachoWorkTodayMinutes] = {state.TachoWorkTodayMinutes},
+    [TachoDriveTodayMinutes] = {state.TachoDriveTodayMinutes},
+    [TachoAvailableTodayMinutes] = {state.TachoAvailableTodayMinutes},
+    [TachoRestTodayMinutes] = {state.TachoRestTodayMinutes},
+    [TachoBreakCount] = {state.TachoBreakCount},
+    [TachoBreakMinutes] = {state.TachoBreakMinutes},
+    [TachoDriveAvailableTodayMinutes] = {state.TachoDriveAvailableTodayMinutes},
+    [TachoDriveAvailableWeekMinutes] = {state.TachoDriveAvailableWeekMinutes},
+    [TachoWorkAvailableWeekMinutes] = {state.TachoWorkAvailableWeekMinutes},
+    [LastTachoSyncUtc] = {state.LastTachoSyncUtc}
+WHERE [Id] = {driverId};
+""", ct);
+    }
+
+    private async Task<string?> ReadPersistedTachoCardNumberAsync(Guid driverId, CancellationToken ct)
+    {
+        var connection = db.Database.GetDbConnection();
+        var shouldClose = connection.State != ConnectionState.Open;
+        if (shouldClose) await connection.OpenAsync(ct);
+
+        try
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT [TachoCardNumber] FROM [dbo].[Drivers] WHERE [Id] = @driverId";
+            var parameter = command.CreateParameter();
+            parameter.ParameterName = "@driverId";
+            parameter.Value = driverId;
+            command.Parameters.Add(parameter);
+
+            var result = await command.ExecuteScalarAsync(ct);
+            return result is null or DBNull ? null : Convert.ToString(result, CultureInfo.InvariantCulture);
+        }
+        finally
+        {
+            if (shouldClose) await connection.CloseAsync();
+        }
+    }
+
+    private static string NormaliseCard(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
+    private static bool CardsMatch(string? left, string? right)
+    {
+        var a = NormaliseCard(left);
+        var b = NormaliseCard(right);
+        if (a.Length < 8 || b.Length < 8) return false;
+        return string.Equals(a, b, StringComparison.OrdinalIgnoreCase) ||
+               a.EndsWith(b, StringComparison.OrdinalIgnoreCase) ||
+               b.EndsWith(a, StringComparison.OrdinalIgnoreCase);
     }
 
     private static TachoDriverHoursRefreshResult Empty(string status, bool updated, Guid driverId, string message) => new(
+        status, updated, driverId, string.Empty, null, null, null, null, null, false,
+        null, null, null, null, null, null, null, null, null, null, "None", message);
+
+    private static TachoDriverHoursRefreshResult Result(string status, bool updated, TachoDriverState state, string message) => new(
         status,
         updated,
-        driverId,
-        string.Empty,
-        null,
-        null,
-        null,
-        null,
-        null,
-        false,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
+        state.DriverId,
+        state.DisplayName,
+        state.TachoMasterDriverId,
+        state.TachoCardNumber,
+        state.TachoVehicleCode,
+        state.CardInsertedUtc,
+        state.CurrentDutyEndUtc,
+        state.TachoDutyOpen,
+        state.TachoWorkTodayMinutes,
+        state.TachoDriveTodayMinutes,
+        state.TachoAvailableTodayMinutes,
+        state.TachoRestTodayMinutes,
+        state.TachoBreakCount,
+        state.TachoBreakMinutes,
+        state.TachoDriveAvailableTodayMinutes,
+        state.TachoDriveAvailableWeekMinutes,
+        state.TachoWorkAvailableWeekMinutes,
+        state.LastTachoSyncUtc,
+        state.IdentitySource,
         message);
 
-    private static TachoDriverHoursRefreshResult Result(string status, bool updated, Models.Driver driver, TachoDutyEvidence? duty, string message) => new(
-        status,
-        updated,
-        driver.Id,
-        driver.DisplayName,
-        driver.TachoMasterDriverId,
-        duty?.CardNumber ?? driver.TachoCardNumber,
-        duty?.VehicleCode,
-        duty?.CardInsertedUtc,
-        duty?.CurrentDutyEndUtc,
-        duty?.DutyOpen ?? false,
-        duty?.WorkTodayMinutes,
-        duty?.DriveTodayMinutes,
-        duty?.AvailableTodayMinutes,
-        duty?.RestTodayMinutes,
-        duty?.BreakCount,
-        duty?.BreakMinutes,
-        driver.TachoDriveAvailableTodayMinutes,
-        driver.TachoDriveAvailableWeekMinutes,
-        driver.TachoWorkAvailableWeekMinutes,
-        driver.LastTachoSyncUtc,
-        message);
+    private sealed record TachoProfileMatch(TachoDriverProfile Profile, string IdentitySource);
 
     private sealed record TachoDutyEvidence(
         string? CardNumber,
@@ -333,6 +433,74 @@ public sealed class TachoDriverHoursRefreshService(
         int? RestTodayMinutes,
         int? BreakCount,
         int? BreakMinutes);
+
+    private sealed record TachoDriverState(
+        Guid DriverId,
+        string DisplayName,
+        string? TachoMasterDriverId,
+        string? TachoCardNumber,
+        string? TachoVehicleCode,
+        DateTimeOffset? CardInsertedUtc,
+        DateTimeOffset? CurrentDutyEndUtc,
+        bool TachoDutyOpen,
+        int? TachoWorkTodayMinutes,
+        int? TachoDriveTodayMinutes,
+        int? TachoAvailableTodayMinutes,
+        int? TachoRestTodayMinutes,
+        int? TachoBreakCount,
+        int? TachoBreakMinutes,
+        int? TachoDriveAvailableTodayMinutes,
+        int? TachoDriveAvailableWeekMinutes,
+        int? TachoWorkAvailableWeekMinutes,
+        DateTimeOffset? LastTachoSyncUtc,
+        string IdentitySource)
+    {
+        public static TachoDriverState From(Driver driver, string? persistedCard, TachoDriverProfile profile, TachoDutyEvidence? duty, DateTimeOffset now, string identitySource) => new(
+            driver.Id,
+            driver.DisplayName,
+            string.IsNullOrWhiteSpace(driver.TachoMasterDriverId)
+                ? profile.MemberCode.ToString(CultureInfo.InvariantCulture)
+                : driver.TachoMasterDriverId,
+            FirstNonBlank(duty?.CardNumber, profile.CardNumber, persistedCard, driver.TachoCardNumber),
+            duty?.VehicleCode,
+            duty?.CardInsertedUtc,
+            duty?.CurrentDutyEndUtc,
+            duty?.DutyOpen ?? false,
+            duty?.WorkTodayMinutes,
+            duty?.DriveTodayMinutes,
+            duty?.AvailableTodayMinutes,
+            duty?.RestTodayMinutes,
+            duty?.BreakCount,
+            duty?.BreakMinutes,
+            profile.DriveAvailableTodayMinutes,
+            profile.DriveAvailableWeekMinutes,
+            profile.WorkAvailableWeekMinutes,
+            now,
+            identitySource);
+
+        public static TachoDriverState FromDriverOnly(Driver driver, string? persistedCard) => new(
+            driver.Id,
+            driver.DisplayName,
+            driver.TachoMasterDriverId,
+            FirstNonBlank(persistedCard, driver.TachoCardNumber),
+            null,
+            null,
+            null,
+            false,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            driver.TachoDriveAvailableTodayMinutes,
+            driver.TachoDriveAvailableWeekMinutes,
+            driver.TachoWorkAvailableWeekMinutes,
+            driver.LastTachoSyncUtc,
+            "None");
+
+        private static string? FirstNonBlank(params string?[] values) => values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+    }
 }
 
 public sealed class TachoDriverHoursRefreshWorker(
