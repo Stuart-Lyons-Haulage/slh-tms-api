@@ -36,6 +36,12 @@ public static class SiteMasterIdentityResolver
         var postcode = ExtractPostcode(incoming.CollectionAddress);
         var map = NormaliseMap(incoming.MapLink);
         var aliases = SplitAliases(incoming.Aliases).ToList();
+        var incomingAliasCandidates = new[] { incoming.Name, incoming.DriverTextName }
+            .Concat(aliases)
+            .Select(Normalise)
+            .Where(value => value.Length >= 3)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
         if (code.Length > 0)
         {
@@ -67,7 +73,7 @@ public static class SiteMasterIdentityResolver
             if (map.Length >= 8 && siteMap.Length >= 8 && siteMap == map)
                 strong.Add((site, 94, "Matched by map link."));
 
-            foreach (var alias in aliases.Select(Normalise).Where(value => value.Length >= 3))
+            foreach (var alias in incomingAliasCandidates)
             {
                 if (siteName == alias || siteDriverName == alias || siteAliases.Contains(alias))
                     strong.Add((site, postcode.Length == 0 ? 88 : 93, postcode.Length == 0 ? "Matched by alias without postcode." : "Matched by alias."));
