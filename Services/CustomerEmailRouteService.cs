@@ -9,10 +9,9 @@ using Slh.Tms.Api.Models;
 namespace Slh.Tms.Api.Services;
 
 /// <summary>
-/// Applies planner-approved sender mappings to identify the customer. Exact addresses
-/// outrank domains; ambiguous/conflicting mappings always remain in review. Operational
-/// route selection is handled separately by OrderIntakeRouteRuleMatcher so a sender or
-/// origin cannot silently become a route assumption.
+/// Applies planner-approved sender mappings from SQL master data. Sender/customer
+/// mappings may fill missing collection/delivery defaults, but they must never overwrite
+/// a collection or destination that was explicitly parsed from the email.
 /// </summary>
 public static class CustomerEmailRouteService
 {
@@ -65,15 +64,12 @@ public static class CustomerEmailRouteService
 
         Site? collectionSite = null;
         Site? deliverySite = null;
-        // Legacy site defaults are only honoured for a subject-specific mapping. Generic
-        // sender/domain mappings identify the customer only; route rules decide the route.
-        var subjectSpecific = !string.IsNullOrWhiteSpace(route.SubjectContains);
-        if (subjectSpecific && !string.IsNullOrWhiteSpace(route.DefaultSiteCode))
+        if (!string.IsNullOrWhiteSpace(route.DefaultSiteCode))
         {
             collectionSite = await db.Sites.AsNoTracking().FirstOrDefaultAsync(
                 item => item.Active && item.ExternalCode == route.DefaultSiteCode, ct);
         }
-        if (subjectSpecific && !string.IsNullOrWhiteSpace(route.DefaultDeliverySiteCode))
+        if (!string.IsNullOrWhiteSpace(route.DefaultDeliverySiteCode))
         {
             deliverySite = await db.Sites.AsNoTracking().FirstOrDefaultAsync(
                 item => item.Active && item.ExternalCode == route.DefaultDeliverySiteCode, ct);
@@ -85,7 +81,7 @@ public static class CustomerEmailRouteService
         {
             var root = JsonNode.Parse(order.Payload.GetRawText())?.AsObject() ?? new JsonObject();
             var warnings = order.Warnings.ToList();
-            var conflict = ApplyCustomerMapping(root, route.Route, collectionSite, deliverySite, sender, warnings, subjectSpecific);
+            var conflict = ApplyCustomerMapping(root, route.Route, collectionSite, deliverySite, sender, warnings);
             if (route.RequiresReview || conflict)
                 root["plannerReady"] = false;
             routed.Add(order with
@@ -177,13 +173,6 @@ public static class CustomerEmailRouteService
             {
                 existing.RequiresReview = true;
             }
-            else
-            {
-                // Remove unsafe generic route defaults learned by the legacy model.
-                existing.DefaultSiteCode = null;
-                existing.DefaultDeliverySiteCode = null;
-                existing.MarketKey = null;
-            }
 
             db.MasterDataAudits.Add(new MasterDataAudit
             {
@@ -195,7 +184,6 @@ public static class CustomerEmailRouteService
                 {
                     senderEmail = sender,
                     customerCode = normalCustomer,
-                    routeDefaultsSuppressed = true,
                     existing.RequiresReview
                 })
             });
@@ -207,7 +195,7 @@ public static class CustomerEmailRouteService
         }
     }
 
-    private static bool ApplyCustomerMapping(JsonObject root, CustomerEmailRoute route, Site? collectionSite, Site? deliverySite, string sender, List<string> warnings, bool subjectSpecific)
+    private static bool ApplyCustomerMapping(JsonObject root, CustomerEmailRoute route, Site? collectionSite, Site? deliverySite, string sender, List<string> warnings)
     {
         var conflict = false;
         var currentCustomer = Text(root, "customerCode");
@@ -219,7 +207,7 @@ public static class CustomerEmailRouteService
             warnings.Add($"Parsed customer {currentCustomer} conflicts with SQL sender mapping {route.CustomerCode}; planner review retained.");
         }
 
-        if (subjectSpecific && collectionSite is not null)
+        if (collectionSite is not null)
         {
             var currentCode = Text(root, "collectionSiteCode");
             var currentName = Text(root, "collectionSite") ?? Text(root, "sellerName");
@@ -234,35 +222,37 @@ public static class CustomerEmailRouteService
                 && !string.Equals(currentCode, collectionSite.ExternalCode, StringComparison.OrdinalIgnoreCase))
             {
                 conflict = true;
-                warnings.Add($"Parsed collection site {currentCode} conflicts with subject-specific mapping {collectionSite.ExternalCode}; planner review retained.");
+                warnings.Add($"Parsed collection site {currentCode} conflicts with SQL sender mapping {collectionSite.ExternalCode}; planner review retained.");
             }
         }
-        if (subjectSpecific && deliverySite is not null)
+        if (deliverySite is not null)
         {
             var currentCode = Text(root, "deliverySiteCode");
-            var currentName = Text(root, "deliverySite") ?? Text(root, "destination");
+            var currentName = Text(root, "deliverySite") ?? Text(root, "destination") ?? Text(root, "stallNumber");
             if (string.IsNullOrWhiteSpace(currentCode) && string.IsNullOrWhiteSpace(currentName))
             {
                 root["deliverySiteCode"] = deliverySite.ExternalCode;
                 root["deliverySiteId"] = deliverySite.Id.ToString();
                 root["deliverySite"] = deliverySite.Name;
                 root["destination"] = deliverySite.Name;
+                root["stallNumber"] = deliverySite.Name;
             }
             else if (!string.IsNullOrWhiteSpace(currentCode) && !string.Equals(currentCode, deliverySite.ExternalCode, StringComparison.OrdinalIgnoreCase))
             {
                 conflict = true;
-                warnings.Add($"Parsed delivery site {currentCode} conflicts with subject-specific mapping {deliverySite.ExternalCode}; planner review retained.");
+                warnings.Add($"Parsed delivery site {currentCode} conflicts with SQL sender mapping {deliverySite.ExternalCode}; planner review retained.");
             }
         }
 
+        var hasRouteDefaults = collectionSite is not null || deliverySite is not null;
         root["emailRouteMatched"] = true;
         root["emailRouteId"] = route.Id.ToString();
         root["emailRouteSender"] = sender;
         root["emailRouteCustomerCode"] = route.CustomerCode;
-        root["emailRouteDefaultSiteCode"] = subjectSpecific ? route.DefaultSiteCode : null;
-        root["emailRouteDefaultDeliverySiteCode"] = subjectSpecific ? route.DefaultDeliverySiteCode : null;
+        root["emailRouteDefaultSiteCode"] = route.DefaultSiteCode;
+        root["emailRouteDefaultDeliverySiteCode"] = route.DefaultDeliverySiteCode;
         root["emailRouteRequiresReview"] = route.RequiresReview || conflict;
-        root["emailRouteIdentityOnly"] = !subjectSpecific;
+        root["emailRouteIdentityOnly"] = !hasRouteDefaults;
         return conflict;
     }
 
