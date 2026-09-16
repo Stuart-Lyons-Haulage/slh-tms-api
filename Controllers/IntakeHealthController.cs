@@ -14,7 +14,7 @@ public sealed class IntakeHealthController(TmsDbContext db) : ControllerBase
     [HttpGet]
     public async Task<IActionResult> Get([FromQuery] DateTimeOffset? fromUtc, CancellationToken ct)
     {
-        var from = fromUtc ?? DateTimeOffset.UtcNow.AddHours(-24);
+        var from = fromUtc ?? DateTimeOffset.UtcNow.AddDays(-7);
         if (from > DateTimeOffset.UtcNow.AddMinutes(5))
             return BadRequest(new { error = "fromUtc_must_not_be_in_the_future" });
 
@@ -48,7 +48,7 @@ public sealed class IntakeHealthController(TmsDbContext db) : ControllerBase
 
         var warnings = new List<string>();
         if (evidenceEmails > 0 && orderRecords == 0)
-            warnings.Add("Mailbox evidence has been received but no transport orders have been staged in this window.");
+            warnings.Add("Mailbox evidence has been received but no transport orders have been staged in this seven day window.");
         if (failed > 0)
             warnings.Add($"{failed} mailbox order record(s) are in Failed status.");
         if (mappingExceptions > 0)
@@ -73,7 +73,7 @@ public sealed class IntakeHealthController(TmsDbContext db) : ControllerBase
             lastPromotedUtc,
             healthy = warnings.Count == 0,
             warnings,
-            note = "Evidence emails count messages retained by the TMS intake path. Unrelated mail deliberately ignored before evidence retention is not counted here."
+            note = "Evidence emails count messages retained by the TMS intake path over the last seven days by default. Unrelated mail deliberately ignored before evidence retention is not counted here."
         });
     }
 }
