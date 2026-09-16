@@ -25,15 +25,39 @@ public sealed class StagingQueueController(TmsDbContext db) : ControllerBase
         pageSize = Math.Clamp(pageSize, 1, 100);
 
         var targetStatus = status ?? StagingStatus.PendingReview;
+        var normalisedEntityType = entityType?.Trim().ToLowerInvariant();
         var query = db.StagedImports.AsNoTracking().Where(item => item.Status == targetStatus);
-        if (!string.IsNullOrWhiteSpace(entityType))
-            query = query.Where(item => item.EntityType == entityType.Trim().ToLowerInvariant());
+        if (!string.IsNullOrWhiteSpace(normalisedEntityType))
+            query = query.Where(item => item.EntityType == normalisedEntityType);
 
         var total = await query.CountAsync(ct);
         var offset = (page - 1) * pageSize;
-        var rows = await query
-            .OrderByDescending(item => item.ReceivedAtUtc)
-            .ThenByDescending(item => item.Id)
+        var rowsQuery = query;
+
+        // Order Review filters by planning date in the portal. Without this priority, a busy inbox can put
+        // today's/tomorrow's orders on page 2+ and make the page appear empty even though records exist.
+        if (targetStatus == StagingStatus.PendingReview && normalisedEntityType == "order")
+        {
+            var today = DateOnly.FromDateTime(DateTime.UtcNow);
+            var todayText = today.ToString("yyyy-MM-dd");
+            var tomorrowText = today.AddDays(1).ToString("yyyy-MM-dd");
+            var yesterdayText = today.AddDays(-1).ToString("yyyy-MM-dd");
+
+            rowsQuery = rowsQuery
+                .OrderByDescending(item => item.PayloadJson.Contains(todayText) || item.PayloadJson.Contains(tomorrowText) || item.PayloadJson.Contains(yesterdayText))
+                .ThenByDescending(item => item.PayloadJson.Contains(tomorrowText))
+                .ThenByDescending(item => item.PayloadJson.Contains(todayText))
+                .ThenByDescending(item => item.ReceivedAtUtc)
+                .ThenByDescending(item => item.Id);
+        }
+        else
+        {
+            rowsQuery = rowsQuery
+                .OrderByDescending(item => item.ReceivedAtUtc)
+                .ThenByDescending(item => item.Id);
+        }
+
+        var rows = await rowsQuery
             .Skip(offset)
             .Take(pageSize)
             .Select(item => new StagingQueueRawRow(
