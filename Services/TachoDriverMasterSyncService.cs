@@ -152,10 +152,6 @@ public sealed class TachoDriverMasterSyncService(
         var liveNameCounts = workers
             .GroupBy(worker => TachoDriverIdentityRules.NormalisePerson(worker.DisplayName), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
-        var liveCardCounts = workers
-            .Where(worker => !string.IsNullOrWhiteSpace(worker.CardNumber))
-            .GroupBy(worker => TachoDriverIdentityRules.NormaliseIdentifier(worker.CardNumber), StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
         var claimedDriverIds = new HashSet<Guid>();
         var created = 0;
         var updated = 0;
@@ -175,12 +171,12 @@ public sealed class TachoDriverMasterSyncService(
                                  string.IsNullOrWhiteSpace(driver.TachoCardNumber) ||
                                  TachoDriverIdentityRules.CardsMatch(driver.TachoCardNumber, worker.CardNumber))
                 .ToList();
-            var cardKey = TachoDriverIdentityRules.NormaliseIdentifier(worker.CardNumber);
-            var cardIsUnique = cardKey.Length > 0 && liveCardCounts.GetValueOrDefault(cardKey) == 1;
-            var cardMatches = cardIsUnique
-                ? drivers.Where(driver => !claimedDriverIds.Contains(driver.Id))
-                    .Where(driver => TachoDriverIdentityRules.CardsMatch(driver.TachoCardNumber, worker.CardNumber)).ToList()
-                : [];
+            var cardMatches = string.IsNullOrWhiteSpace(worker.CardNumber)
+                ? []
+                : drivers
+                    .Where(driver => !claimedDriverIds.Contains(driver.Id))
+                    .Where(driver => TachoDriverIdentityRules.CardsMatch(driver.TachoCardNumber, worker.CardNumber))
+                    .ToList();
             // The physical tachograph card is the canonical person identifier. Member code is
             // retained as the fallback for workers whose live TachoMaster record has no card.
             var strong = cardMatches.Count > 0 ? cardMatches : memberMatches;
@@ -446,8 +442,9 @@ public sealed class TachoDriverMasterSyncService(
                 .Select(driver => CanonicalScore(driver, worker, loadUse.GetValueOrDefault(driver.Id)))
                 .DefaultIfEmpty(0)
                 .Max())
-            .ThenByDescending(worker => !string.IsNullOrWhiteSpace(worker.EmployeeNumber))
             .ThenByDescending(worker => !string.IsNullOrWhiteSpace(worker.CardNumber))
+            .ThenByDescending(worker => ParseDate(worker.CardLastRead))
+            .ThenByDescending(worker => !string.IsNullOrWhiteSpace(worker.EmployeeNumber))
             .ThenBy(worker => worker.MemberCode)
             .First();
     }
@@ -925,7 +922,12 @@ internal sealed class TachoLiveWorkerDirectory(HttpClient httpClient, TachoMaste
 
         return result
             .GroupBy(worker => worker.MemberCode)
-            .Select(group => group.First())
+            .Select(group => group
+                .OrderByDescending(worker => !string.IsNullOrWhiteSpace(worker.CardNumber))
+                .ThenByDescending(worker => TryParseDate(worker.CardLastRead))
+                .ThenByDescending(worker => !string.IsNullOrWhiteSpace(worker.EmployeeNumber))
+                .ThenBy(worker => worker.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .First())
             .OrderBy(worker => worker.DisplayName, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
@@ -1045,6 +1047,13 @@ internal sealed class TachoLiveWorkerDirectory(HttpClient httpClient, TachoMaste
     }
     private static int Int(JsonElement element, params string[] names) => int.TryParse(Text(element, names), out var value) ? value : 0;
     private static bool Bool(JsonElement element, params string[] names) => bool.TryParse(Text(element, names), out var value) && value;
+    private static DateOnly? TryParseDate(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        if (DateOnly.TryParse(value, CultureInfo.GetCultureInfo("en-GB"), DateTimeStyles.AllowWhiteSpaces, out var date))
+            return date;
+        return null;
+    }
 }
 
 public sealed class TachoDriverMasterBackgroundService(
