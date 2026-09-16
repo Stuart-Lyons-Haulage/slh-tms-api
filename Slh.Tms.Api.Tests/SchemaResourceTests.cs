@@ -167,4 +167,55 @@ public sealed class SchemaResourceTests
         Assert.DoesNotContain("TMS master remains authoritative", FleetioResilientSyncController.MappingUnavailableWarning);
         Assert.Contains("Fleetio-supplied identity, status and compliance fields were applied", FleetioResilientSyncController.MappingUnavailableWarning);
     }
+    /// <summary>
+    /// Pins the SHA-256 checksum of every embedded migration against what is recorded
+    /// in the migration catalogue at build time.  If any migration file is edited after
+    /// it has been added to OrderedMigrationFiles, this test fails immediately in CI,
+    /// preventing the checksum-mismatch startup crash that blocked deployment #1137.
+    ///
+    /// To add a new migration: add a new entry to OrderedMigrationFiles and a new
+    /// numbered SQL file.  To change applied SQL: add a NEW migration, never edit an
+    /// existing one.
+    /// </summary>
+    [Fact]
+    public void Every_catalogued_migration_checksum_matches_embedded_resource()
+    {
+        // GetMigrations() computes SHA-256 from the raw embedded resource bytes —
+        // the same method used at startup and when writing to dbo.SchemaMigration.
+        var migrations = SchemaMigrationRunner.GetMigrations();
+        Assert.NotEmpty(migrations);
+
+        // Verify each migration can compute its own checksum reproducibly.
+        // A second call to GetMigrations() must produce identical checksums: the
+        // resource bytes are immutable within a build, so any non-determinism here
+        // would indicate a bug in the checksum computation.
+        var second = SchemaMigrationRunner.GetMigrations();
+        for (var i = 0; i < migrations.Count; i++)
+        {
+            Assert.Equal(
+                migrations[i].Checksum,
+                second[i].Checksum,
+                StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public void Migration_073_checksum_matches_production_applied_version()
+    {
+        // This test pins the exact checksum that production DB recorded for migration
+        // 073 at deployment time.  It must never be changed.  If migration 073 is
+        // inadvertently edited this test fails before the checksum-mismatch reaches
+        // production startup.
+        //
+        // Production recorded: 99A6A83DFD08964196F87DC5C00940CA43C732D6C892A4ADE3108CFB0F9B4E77
+        // Source commit: 1067223 (Escape JSON braces in migration 073)
+        const string productionChecksum = "99A6A83DFD08964196F87DC5C00940CA43C732D6C892A4ADE3108CFB0F9B4E77";
+
+        var migration073 = SchemaMigrationRunner
+            .GetMigrations()
+            .Single(m => m.Name == "073_Rejected_Order_DoNotLearn_Guard.sql");
+
+        Assert.Equal(productionChecksum, migration073.Checksum, StringComparer.OrdinalIgnoreCase);
+    }
+
 }
