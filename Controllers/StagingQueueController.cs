@@ -182,6 +182,10 @@ internal static class StagingQueueProjection
         {
             return false;
         }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
     }
 
     internal static string BuildPayloadSummary(string payloadJson)
@@ -202,9 +206,7 @@ internal static class StagingQueueProjection
             if (!summary.ContainsKey("sourceAttachmentName") &&
                 source.FirstOrDefault(property => string.Equals(property.Key, "sourceAttachments", StringComparison.OrdinalIgnoreCase)).Value is JsonArray attachments)
             {
-                var attachmentName = attachments
-                    .OfType<JsonObject>()
-                    .FirstOrDefault(item => item["isInline"]?.GetValue<bool>() != true)?["name"]?.GetValue<string>();
+                var attachmentName = FirstNonInlineAttachmentName(attachments);
                 if (!string.IsNullOrWhiteSpace(attachmentName))
                     summary["sourceAttachmentName"] = attachmentName;
             }
@@ -215,6 +217,21 @@ internal static class StagingQueueProjection
         {
             return "{}";
         }
+        catch (InvalidOperationException)
+        {
+            return "{}";
+        }
+    }
+
+    private static string? FirstNonInlineAttachmentName(JsonArray attachments)
+    {
+        foreach (var item in attachments.OfType<JsonObject>())
+        {
+            if (Bool(item, "isInline") == true) continue;
+            var name = Text(item, "name");
+            if (!string.IsNullOrWhiteSpace(name)) return name;
+        }
+        return null;
     }
 
     private static IReadOnlyCollection<DateOnly> PlanningDates(JsonElement root)
@@ -287,10 +304,37 @@ internal static class StagingQueueProjection
         return null;
     }
 
+    private static string? Text(JsonObject root, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            var match = root.FirstOrDefault(property => string.Equals(property.Key, name, StringComparison.OrdinalIgnoreCase));
+            if (string.IsNullOrWhiteSpace(match.Key) || match.Value is null) continue;
+            try
+            {
+                var node = match.Value;
+                return node.GetValueKind() switch
+                {
+                    JsonValueKind.String => node.GetValue<string>()?.Trim(),
+                    JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False => node.ToJsonString(),
+                    _ => null
+                };
+            }
+            catch (InvalidOperationException)
+            {
+                return null;
+            }
+        }
+        return null;
+    }
+
     private static DateOnly? Date(JsonElement root, string name) =>
         DateOnly.TryParse(Text(root, name), out var value) ? value : null;
 
     private static bool? Bool(JsonElement root, params string[] names) =>
+        bool.TryParse(Text(root, names), out var value) ? value : null;
+
+    private static bool? Bool(JsonObject root, params string[] names) =>
         bool.TryParse(Text(root, names), out var value) ? value : null;
 
     private static string Normalise(string? value) =>
