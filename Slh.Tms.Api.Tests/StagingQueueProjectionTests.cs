@@ -101,6 +101,39 @@ public sealed class StagingQueueProjectionTests
     }
 
     [Fact]
+    public void MatchesPlanningDate_keeps_cross_date_pm_on_collection_day_only()
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            poNumber = "PO-789",
+            customerCode = "HHP",
+            collectionDate = "2026-09-15",
+            deliveryDate = "2026-09-16",
+            sellerName = "Hall Hunter",
+            stallNumber = "Leyland"
+        });
+
+        Assert.True(StagingQueueProjection.MatchesPlanningDate(payload, new DateOnly(2026, 9, 15)));
+        Assert.False(StagingQueueProjection.MatchesPlanningDate(payload, new DateOnly(2026, 9, 16)));
+    }
+
+    [Fact]
+    public void MatchesPlanningDate_shows_delivery_only_pm_on_previous_and_delivery_day()
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            poNumber = "PO-999",
+            customerCode = "Barefoots",
+            deliveryDate = "2026-09-16",
+            requestedTime = "PM load"
+        });
+
+        Assert.True(StagingQueueProjection.MatchesPlanningDate(payload, new DateOnly(2026, 9, 15)));
+        Assert.True(StagingQueueProjection.MatchesPlanningDate(payload, new DateOnly(2026, 9, 16)));
+        Assert.False(StagingQueueProjection.MatchesPlanningDate(payload, new DateOnly(2026, 9, 14)));
+    }
+
+    [Fact]
     public void BuildPayloadSummary_returns_empty_object_for_invalid_legacy_json()
     {
         Assert.Equal("{}", StagingQueueProjection.BuildPayloadSummary("not-json"));
