@@ -13,7 +13,8 @@ namespace Slh.Tms.Api.Controllers;
 public sealed class TachoDriverMasterController(
     TmsDbContext db,
     TachoDriverMasterSyncJobService jobs,
-    TachoDriverMasterSyncService sync) : ControllerBase
+    TachoDriverMasterSyncService sync,
+    TachoDriverHoursRefreshService hoursRefresh) : ControllerBase
 {
     [HttpPost("tachomaster/sync")]
     [Authorize(Policy = "TmsApprove")]
@@ -80,6 +81,24 @@ public sealed class TachoDriverMasterController(
     {
         var profile = await sync.ProfileAsync(driverId, ct);
         return profile is null ? NotFound() : Ok(profile);
+    }
+
+    [HttpPost("{driverId:guid}/refresh-tacho")]
+    [Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> RefreshTacho(Guid driverId, CancellationToken ct)
+    {
+        var actor = User.Identity?.Name ?? User.FindFirst("preferred_username")?.Value ?? "TMS user";
+        var result = await hoursRefresh.RefreshDriverHoursOnlyAsync(driverId, actor, ct);
+
+        return result.Status switch
+        {
+            "updated" => Ok(result),
+            "not_found" => NotFound(result),
+            "inactive" or "missing_member_code" or "not_configured" => BadRequest(result),
+            "lease_busy" or "lease_lost" => StatusCode(StatusCodes.Status409Conflict, result),
+            "profile_not_found" => StatusCode(StatusCodes.Status502BadGateway, result),
+            _ => StatusCode(StatusCodes.Status500InternalServerError, result)
+        };
     }
 
     private static DateTimeOffset? Latest(DateTimeOffset? left, DateTimeOffset? right)
