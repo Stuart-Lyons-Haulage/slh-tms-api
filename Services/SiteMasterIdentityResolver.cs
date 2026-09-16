@@ -67,7 +67,7 @@ public static class SiteMasterIdentityResolver
             if (map.Length >= 8 && siteMap.Length >= 8 && siteMap == map)
                 strong.Add((site, 94, "Matched by map link."));
 
-            foreach (var alias in aliases.Select(Normalise).Where(value => value.Length >= 4))
+            foreach (var alias in aliases.Select(Normalise).Where(value => value.Length >= 3))
             {
                 if (siteName == alias || siteDriverName == alias || siteAliases.Contains(alias))
                     strong.Add((site, postcode.Length == 0 ? 88 : 93, postcode.Length == 0 ? "Matched by alias without postcode." : "Matched by alias."));
