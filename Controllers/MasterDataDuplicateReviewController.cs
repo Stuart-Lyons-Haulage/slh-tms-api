@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Slh.Tms.Api.Data;
@@ -23,10 +24,28 @@ public sealed class MasterDataDuplicateReviewController(TmsDbContext db) : Contr
         => Ok(await MasterDataDuplicateReviewService.MergeAsync(db, entityType, request, Actor(), ct));
 
     [HttpPost("reject"), Authorize(Policy = "TmsApprove")]
-    public async Task<IActionResult> Reject(MasterDataDuplicateRejectRequest request, CancellationToken ct)
+    public async Task<IActionResult> Reject(JsonElement request, CancellationToken ct)
     {
-        await MasterDataDuplicateReviewService.RejectAsync(db, request, Actor(), ct);
+        var candidateId = Text(request, "candidateId", "CandidateId");
+        var entityType = Text(request, "entityType", "EntityType");
+        var note = Text(request, "note", "Note");
+
+        if (string.IsNullOrWhiteSpace(candidateId) || string.IsNullOrWhiteSpace(entityType))
+            return BadRequest(new { error = "candidateId and entityType are required to keep a duplicate candidate separate." });
+
+        await MasterDataDuplicateReviewService.RejectAsync(db, new MasterDataDuplicateRejectRequest(candidateId, entityType, note), Actor(), ct);
         return Ok(new { rejected = true });
+    }
+
+    private static string? Text(JsonElement root, params string[] names)
+    {
+        if (root.ValueKind != JsonValueKind.Object) return null;
+        foreach (var name in names)
+        {
+            if (root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String)
+                return value.GetString();
+        }
+        return null;
     }
 
     private string Actor() => User.Identity?.Name ?? User.FindFirst("preferred_username")?.Value ?? "SLH Assistant";
