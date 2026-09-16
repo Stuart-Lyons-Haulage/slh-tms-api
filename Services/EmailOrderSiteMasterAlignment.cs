@@ -8,6 +8,10 @@ namespace Slh.Tms.Api.Services;
 /// Canonicalises every parsed mailbox order against Site Master before it is shown in
 /// Order Review or written to staging. Source wording is retained as evidence, while
 /// planner-facing fields use the canonical Site/driver wording.
+///
+/// This is deliberately enrichment-only: a sender/body/attachment order must remain
+/// visible in Order Review even when Site Master is incomplete or a site cannot be
+/// resolved. Missing matches are carried as intake warnings rather than blocking intake.
 /// </summary>
 public static class EmailOrderSiteMasterAlignment
 {
@@ -31,11 +35,12 @@ public static class EmailOrderSiteMasterAlignment
                     AlignObject(line, resolver);
             }
 
+            var warnings = MergeWarnings(order.Warnings, root);
             orders.Add(new ParsedEmailOrder(
                 order.SourceKey,
                 order.NaturalKey,
                 JsonSerializer.SerializeToElement(root),
-                order.Warnings));
+                warnings));
         }
 
         return new EmailIntakeParseResult(orders, parsed.Warnings, parsed.IgnoredReason);
@@ -43,14 +48,17 @@ public static class EmailOrderSiteMasterAlignment
 
     private static void AlignObject(JsonObject root, PlannerSourceMasterDataResolver resolver)
     {
-        var rawCollection = FirstText(root, "collectionSite", "collectionLocation", "sellerName");
-        var rawDelivery = FirstText(root, "deliverySite", "deliveryLocation", "stallNumber", "destination");
+        var rawCollection = FirstText(root,
+            "collectionSite", "collectionLocation", "sellerName", "origin", "pickupSite", "pickupLocation", "collectFrom");
+        var rawDelivery = FirstText(root,
+            "deliverySite", "deliveryLocation", "stallNumber", "destination", "dropSite", "dropLocation", "deliverTo");
         var rawDepot = FirstText(root, "depot", "depotName", "marketName");
 
         var collection = resolver.Resolve(rawCollection);
         var delivery = resolver.Resolve(rawDelivery);
         var depot = resolver.Resolve(rawDepot);
         var evidence = new JsonArray();
+        var warnings = WarningArray(root);
         var marketInternalDestination = IsMarketDepot(rawDepot)
             && !IsMarketDepot(rawDelivery)
             && depot.SiteMatched
@@ -67,7 +75,16 @@ public static class EmailOrderSiteMasterAlignment
             root["collectionSiteCode"] = collection.SiteNumber;
             root["collectionGeofenceId"] = collection.GeofenceId?.ToString();
             root["collectionGeofenceName"] = collection.GeofenceName;
+            if (!string.IsNullOrWhiteSpace(collection.Address))
+            {
+                root["masterCollectionAddress"] = collection.Address;
+                if (FindNode(root, "collectionAddress") is null) root["collectionAddress"] = collection.Address;
+            }
             evidence.Add($"Collection: {collection.EvidenceNote}");
+        }
+        else if (!string.IsNullOrWhiteSpace(rawCollection))
+        {
+            warnings.Add($"Collection site '{rawCollection}' was not matched to Site Master; order retained for review.");
         }
 
         if (delivery.SiteMatched && !string.IsNullOrWhiteSpace(delivery.SiteName))
@@ -86,8 +103,16 @@ public static class EmailOrderSiteMasterAlignment
             root["deliverySiteCode"] = delivery.SiteNumber;
             root["deliveryGeofenceId"] = delivery.GeofenceId?.ToString();
             root["deliveryGeofenceName"] = delivery.GeofenceName;
-            if (!string.IsNullOrWhiteSpace(delivery.Address)) root["masterDeliveryAddress"] = delivery.Address;
+            if (!string.IsNullOrWhiteSpace(delivery.Address))
+            {
+                root["masterDeliveryAddress"] = delivery.Address;
+                if (FindNode(root, "deliveryAddress") is null) root["deliveryAddress"] = delivery.Address;
+            }
             evidence.Add($"Destination: {delivery.EvidenceNote}");
+        }
+        else if (!string.IsNullOrWhiteSpace(rawDelivery))
+        {
+            warnings.Add($"Delivery site '{rawDelivery}' was not matched to Site Master; order retained for review.");
         }
 
         if (depot.SiteMatched && !string.IsNullOrWhiteSpace(depot.SiteName))
@@ -114,11 +139,34 @@ public static class EmailOrderSiteMasterAlignment
         }
 
         var anyMatched = collection.SiteMatched || delivery.SiteMatched || depot.SiteMatched;
+        root["masterDataMode"] = "enrichment-only";
+        root["masterDataAligned"] = anyMatched;
         if (anyMatched)
-        {
-            root["masterDataAligned"] = true;
             root["masterDataAlignmentEvidence"] = evidence;
+        if (warnings.Count > 0)
+            root["intakeWarnings"] = warnings;
+    }
+
+    private static JsonArray WarningArray(JsonObject root)
+    {
+        if (FindNode(root, "intakeWarnings") is JsonArray existing) return existing;
+        var warnings = new JsonArray();
+        root["intakeWarnings"] = warnings;
+        return warnings;
+    }
+
+    private static IReadOnlyList<string> MergeWarnings(IReadOnlyList<string> original, JsonObject root)
+    {
+        var values = new List<string>(original.Where(value => !string.IsNullOrWhiteSpace(value)));
+        if (FindNode(root, "intakeWarnings") is JsonArray warnings)
+        {
+            foreach (var warning in warnings)
+            {
+                if (warning is JsonValue jsonValue && jsonValue.TryGetValue<string>(out var text) && !string.IsNullOrWhiteSpace(text))
+                    values.Add(text.Trim());
+            }
         }
+        return values.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     private static bool IsMarketDepot(string? value)
