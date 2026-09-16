@@ -169,7 +169,7 @@ public sealed class MasterDataController(StagingService staging, TmsDbContext db
         string.IsNullOrWhiteSpace(collection) || string.IsNullOrWhiteSpace(delivery) ? null : $"{collection.Trim()} to {delivery.Trim()}";
 
     private static string Key(string? value) =>
-        new((value ?? string.Empty).Trim().ToLowerInvariant().Select(character => char.IsLetterOrDigit(character) ? character : '-').ToArray()).Trim('-');
+        new string((value ?? string.Empty).Trim().ToLowerInvariant().Select(character => char.IsLetterOrDigit(character) ? character : '-').ToArray()).Trim('-');
 
     private static string? Text(JsonElement payload, string name)
     {
