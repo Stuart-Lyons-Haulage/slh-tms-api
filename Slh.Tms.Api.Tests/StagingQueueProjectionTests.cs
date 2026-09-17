@@ -82,6 +82,57 @@ public sealed class StagingQueueProjectionTests
     }
 
     [Fact]
+    public void BuildPayloadSummary_turns_mapping_review_into_selectable_planner_review()
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            poNumber = "PORD000676/SITTINGBOURNE",
+            customerPo = "PORD000676",
+            customerCode = "MORRISONS",
+            collectionDate = "2026-09-18",
+            deliveryDate = "2026-09-18",
+            pallets = 18,
+            sellerName = "Groves Farm",
+            stallNumber = "Fresh Cut",
+            plannerReady = false,
+            intakeStatus = "Review",
+            emailRouteRequiresReview = true,
+            sourceSubject = "ALDI & Morrisons - 18.09.2026"
+        });
+
+        var summaryJson = StagingQueueProjection.BuildPayloadSummary(payload);
+        using var document = JsonDocument.Parse(summaryJson);
+        var root = document.RootElement;
+
+        Assert.True(root.GetProperty("plannerReady").GetBoolean());
+        Assert.True(root.GetProperty("orderIntakeRouteRequiresReview").GetBoolean());
+        Assert.Equal("Review", root.GetProperty("intakeStatus").GetString());
+    }
+
+    [Fact]
+    public void BuildPayloadSummary_keeps_genuine_preorder_blocked()
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            poNumber = "PORD000676/ALDI-TO-FOLLOW",
+            customerCode = "ALDI",
+            collectionDate = "2026-09-18",
+            deliveryDate = "2026-09-18",
+            pallets = 6,
+            plannerReady = false,
+            intakeStatus = "PreOrder",
+            emailRouteRequiresReview = true
+        });
+
+        var summaryJson = StagingQueueProjection.BuildPayloadSummary(payload);
+        using var document = JsonDocument.Parse(summaryJson);
+        var root = document.RootElement;
+
+        Assert.False(root.GetProperty("plannerReady").GetBoolean());
+        Assert.Equal("PreOrder", root.GetProperty("intakeStatus").GetString());
+    }
+
+    [Fact]
     public void BuildPayloadSummary_keeps_delivery_date_for_order_review_priority()
     {
         var payload = JsonSerializer.Serialize(new
