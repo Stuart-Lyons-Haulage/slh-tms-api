@@ -30,9 +30,9 @@ The supported production pattern is therefore:
 5. Append a structured object containing `id`, `name`, `contentType`, `size`, `isInline`, `contentId` and `contentBytes` to `NormalizedAttachments`.
 6. Submit `IntakeInfoMailboxEmail` after the attachment loop whether the loop succeeded, failed, timed out or was skipped. This prevents a single attachment problem from dropping the entire customer email.
 
-Do not build attachment objects with a manually concatenated `json(concat(...))` string in the source-controlled definition. A structured object avoids malformed JSON when Outlook returns values such as inline `contentId` strings.
+Do not build attachment objects with a manually concatenated `json(concat(...))` string in the source-controlled definition. A structured object avoids malformed JSON when Outlook returns values such as inline `contentId` strings. The live flow may still show a designer expression, but its effective payload must match the structured object above.
 
-The TMS request mappings must keep `bodyText` from Outlook `bodyPreview`, `bodyHtml` from the full body, and convert `isHtml` to the string `html` or `text` for `bodyFormat`.
+The TMS request mappings must keep `bodyText` from Outlook `bodyPreview`, `bodyHtml` from the full body, and convert `isHtml` to the string `html` or `text` for `bodyFormat`. `senderName` should prefer `fromName` and fall back to `from`.
 
 ## SQL email-intake mappings
 
