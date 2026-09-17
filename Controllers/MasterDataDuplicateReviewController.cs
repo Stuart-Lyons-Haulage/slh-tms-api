@@ -22,6 +22,9 @@ public sealed class MasterDataDuplicateReviewController(TmsDbContext db) : Contr
         if (type is "site" or "sites")
             return Ok(await SafeSiteDuplicateAutoMergeService.AutoMergeAsync(db, Actor(), ct));
 
+        if (type is "market" or "markets")
+            return Ok(await SafeMarketDuplicateAutoMergeService.AutoMergeAsync(db, Actor(), ct));
+
         return Ok(await MasterDataDuplicateReviewService.AutoMergeHighConfidenceAsync(db, entityType, Actor(), ct));
     }
 

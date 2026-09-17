@@ -209,17 +209,64 @@ public sealed class TachoDriverMasterSyncService(
 
             if (canonical is null)
             {
-                canonical = new Driver
+                // An unmatched TachoMaster worker is staged for human review rather than
+                // being immediately created as an active driver. This matches the behaviour
+                // of TachoMemberCodeDriverMasterSync (called by the orchestrator) and ensures
+                // no driver enters Driver Master without a reviewer confirming their identity.
+                var reviewKey = $"driverreview:member:{TachoDriverIdentityRules.NormaliseIdentifier(member)}";
+                var existingReview = await db.StagedImports
+                    .FirstOrDefaultAsync(row => row.EntityType == "driverreview" && row.IdempotencyKey == reviewKey, ct);
+                if (existingReview is null)
                 {
-                    EmployeeNumber = UniqueEmployeeNumber(worker, drivers),
-                    DisplayName = worker.DisplayName,
-                    TachoName = worker.DisplayName,
-                    DriverType = Clean(worker.WorkerType),
-                    Active = true
-                };
-                db.Drivers.Add(canonical);
-                drivers.Add(canonical);
-                created++;
+                    db.StagedImports.Add(new StagedImport
+                    {
+                        EntityType = "driverreview",
+                        IdempotencyKey = reviewKey,
+                        PayloadJson = JsonSerializer.Serialize(new
+                        {
+                            tachoMemberCode = member,
+                            displayName = worker.DisplayName,
+                            cardNumber = worker.CardNumber,
+                            employeeNumber = worker.EmployeeNumber,
+                            workerType = worker.WorkerType,
+                            agencyName = worker.AgencyName,
+                            cardLastRead = worker.CardLastRead,
+                            driverCardExpiry = worker.DriverCardExpiry,
+                            drivingLicenceExpiry = worker.DrivingLicenceExpiry,
+                            cpcExpiry = worker.CpcExpiry,
+                            source = "TachoMaster live worker directory (canonical sync path) — no matching Driver Master record",
+                            receivedAtUtc = now
+                        }, JsonOptions),
+                        Source = "TachoMaster canonical Driver Master sync",
+                        Status = StagingStatus.PendingReview,
+                        ReceivedAtUtc = now,
+                        ReviewNote = $"New TachoMaster member {member} ({worker.DisplayName}) has no matching Driver Master record. Review and promote to create driver, or reject to discard."
+                    });
+                }
+                else
+                {
+                    existingReview.PayloadJson = JsonSerializer.Serialize(new
+                    {
+                        tachoMemberCode = member,
+                        displayName = worker.DisplayName,
+                        cardNumber = worker.CardNumber,
+                        employeeNumber = worker.EmployeeNumber,
+                        workerType = worker.WorkerType,
+                        agencyName = worker.AgencyName,
+                        cardLastRead = worker.CardLastRead,
+                        driverCardExpiry = worker.DriverCardExpiry,
+                        drivingLicenceExpiry = worker.DrivingLicenceExpiry,
+                        cpcExpiry = worker.CpcExpiry,
+                        source = "TachoMaster live worker directory (canonical sync path) — no matching Driver Master record",
+                        receivedAtUtc = now
+                    }, JsonOptions);
+                    existingReview.ReviewedAtUtc = now;
+                    existingReview.ReviewNote = $"Updated from TachoMaster canonical sync at {now:u}. Still pending Driver Master review.";
+                }
+
+                // Skip this worker — no Driver entity created until a reviewer promotes the item.
+                UpsertProfile(profileRows, worker, actor, now);
+                continue;
             }
             else updated++;
 
@@ -281,8 +328,11 @@ public sealed class TachoDriverMasterSyncService(
         var duplicateCardGroupsAfter = DuplicateIdentityGroupCount(activeAfter, driver => driver.TachoCardNumber);
         var activeWithoutMemberAfter = activeAfter.Count(driver => string.IsNullOrWhiteSpace(driver.TachoMasterDriverId));
         var workersWithoutCardAfter = workers.Count(worker => string.IsNullOrWhiteSpace(worker.CardNumber));
-        var canonicalHealthy = claimedDriverIds.Count == workers.Count &&
-                               duplicateMemberGroupsAfter == 0 &&
+        // Unmatched workers are now staged to the review queue rather than auto-created,
+        // so the population gate no longer requires claimedDriverIds.Count == workers.Count.
+        // A clean sync still requires no duplicate identities and no active drivers without a member code.
+        var unclaimedWorkers = workers.Count - claimedDriverIds.Count;
+        var canonicalHealthy = duplicateMemberGroupsAfter == 0 &&
                                duplicateCardGroupsAfter == 0 &&
                                activeWithoutMemberAfter == 0;
 
@@ -293,6 +343,7 @@ public sealed class TachoDriverMasterSyncService(
             canonicalActiveDrivers = activeAfter.Count,
             created,
             updated,
+            unclaimedStagedForReview = unclaimedWorkers,
             duplicateRecordsRetired = retired,
             driversArchivedNotInTachoMaster = archived,
             sameNameDifferentIdentityGroups = CountDuplicateNames(workers),
@@ -308,7 +359,7 @@ public sealed class TachoDriverMasterSyncService(
             await transaction.RollbackAsync(ct);
             await transaction.DisposeAsync();
             db.ChangeTracker.Clear();
-            var failureMessage = $"TachoMaster canonical Driver Master was not promoted because the resulting population failed the strict identity gate: source={workers.Count}, claimed={claimedDriverIds.Count}, active={activeAfter.Count}, duplicate members={duplicateMemberGroupsAfter}, duplicate cards={duplicateCardGroupsAfter}, active without member code={activeWithoutMemberAfter}, source workers without card={workersWithoutCardAfter}. Cardless workers are allowed when their stable TachoMaster Member Code is present. No partial cleanse was committed.";
+            var failureMessage = $"TachoMaster canonical Driver Master was not promoted because the resulting population failed the strict identity gate: source={workers.Count}, claimed={claimedDriverIds.Count}, unclaimed(staged for review)={unclaimedWorkers}, active={activeAfter.Count}, duplicate members={duplicateMemberGroupsAfter}, duplicate cards={duplicateCardGroupsAfter}, active without member code={activeWithoutMemberAfter}, source workers without card={workersWithoutCardAfter}. Cardless workers are allowed when their stable TachoMaster Member Code is present. No partial cleanse was committed.";
             db.StagedImports.Add(new StagedImport
             {
                 EntityType = "tachodrivermastersync",
@@ -1060,8 +1111,15 @@ public sealed class TachoDriverMasterBackgroundService(
     IServiceScopeFactory scopeFactory,
     ILogger<TachoDriverMasterBackgroundService> logger) : BackgroundService
 {
+    // Enqueues a canonical Driver Master job every 60 minutes. The job is picked up
+    // by TachoDriverMasterSyncJobService which runs the orchestrator — the same code path
+    // used by manual syncs triggered from the UI. This replaces the old direct SyncAsync
+    // call which bypassed the orchestrator and used a separate (now stale) code path.
+    private static readonly TimeSpan FullSyncInterval = TimeSpan.FromMinutes(60);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Brief startup delay so the app is fully ready before the first enqueue.
         try { await Task.Delay(TimeSpan.FromSeconds(90), stoppingToken); }
         catch (OperationCanceledException) { return; }
 
@@ -1070,15 +1128,14 @@ public sealed class TachoDriverMasterBackgroundService(
             try
             {
                 await using var scope = scopeFactory.CreateAsyncScope();
-                var sync = scope.ServiceProvider.GetRequiredService<TachoDriverMasterSyncService>();
-                var result = await sync.SyncAsync("system:tachomaster-canonical-driver-master", stoppingToken);
-                if (result.Success) logger.LogInformation("{Message}", result.Message);
-                else logger.LogWarning("{Message}", result.Message);
+                var jobs = scope.ServiceProvider.GetRequiredService<TachoDriverMasterSyncJobService>();
+                await jobs.EnqueueAsync("system:tachomaster-canonical-driver-master-scheduled", stoppingToken);
+                logger.LogInformation("TachoMaster canonical Driver Master sync job enqueued by scheduled background service.");
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
-            catch (Exception ex) { logger.LogError(ex, "Scheduled TachoMaster canonical Driver Master sync failed."); }
+            catch (Exception ex) { logger.LogError(ex, "Scheduled TachoMaster canonical Driver Master job enqueue failed."); }
 
-            try { await Task.Delay(TimeSpan.FromHours(4), stoppingToken); }
+            try { await Task.Delay(FullSyncInterval, stoppingToken); }
             catch (OperationCanceledException) { return; }
         }
     }

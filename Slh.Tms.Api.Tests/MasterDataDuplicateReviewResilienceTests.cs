@@ -39,6 +39,31 @@ public sealed class MasterDataDuplicateReviewResilienceTests : IClassFixture<Cus
     }
 
     [Fact]
+    public async Task Site_auto_merge_accepts_same_external_code_candidates_scored_for_operational_review()
+    {
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        await using (var scope = _factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.Sites.AddRange(
+                new Site { ExternalCode = $"SAFE{suffix}", Name = $"Natures Way Selsey {suffix}", CollectionAddress = "Selsey PO20 9HP", Active = true },
+                new Site { ExternalCode = $"SAFE{suffix}", Name = $"Natures Way Foods {suffix}", MapLink = "https://maps.example/selsey", Active = true });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClientWithUser(LyonsUser);
+        var response = await client.PostAsync("/api/v1/operational-master-data/duplicates/auto-merge?entityType=sites", null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = await response.Content.ReadFromJsonAsync<MasterDataDuplicateMergeResult>();
+        Assert.True(result!.Merged >= 1);
+
+        await using var verifyScope = _factory.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        Assert.Single(verifyDb.Sites.Where(site => site.ExternalCode == $"SAFE{suffix}" && site.Active));
+    }
+
+    [Fact]
     public async Task Driver_scan_links_tachomaster_row_to_existing_employee_number_row()
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];
@@ -79,6 +104,31 @@ public sealed class MasterDataDuplicateReviewResilienceTests : IClassFixture<Cus
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var candidates = await response.Content.ReadFromJsonAsync<List<MasterDataDuplicateCandidate>>();
         Assert.Contains(candidates!, x => x.Canonical.Code is "1" or "SLH001" && x.Duplicates.Any(row => row.Code is "1" or "SLH001"));
+    }
+
+    [Fact]
+    public async Task Market_auto_merge_accepts_same_market_stand_candidates_without_sender()
+    {
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        await using (var scope = _factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+            db.MarketContacts.AddRange(
+                new MarketContact { Market = "Covent", Name = $"Berry Seller {suffix}", StandOrLocation = "A12", Active = true },
+                new MarketContact { Market = "Covent", Name = $"Berry Seller {suffix}", StandOrLocation = "A12", Salesman = "Night sales", Active = true });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClientWithUser(LyonsUser);
+        var response = await client.PostAsync("/api/v1/operational-master-data/duplicates/auto-merge?entityType=markets", null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = await response.Content.ReadFromJsonAsync<MasterDataDuplicateMergeResult>();
+        Assert.True(result!.Merged >= 1);
+
+        await using var verifyScope = _factory.Services.CreateAsyncScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        Assert.Single(verifyDb.MarketContacts.Where(contact => contact.Name == $"Berry Seller {suffix}" && contact.Active));
     }
 
     [Fact]

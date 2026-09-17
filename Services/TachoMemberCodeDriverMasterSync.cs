@@ -184,18 +184,65 @@ public static class TachoMemberCodeDriverMasterSync
 
                 if (canonical is null)
                 {
-                    canonical = new Driver
+                    // A new TachoMaster member with no matching Driver Master record is staged
+                    // for human review rather than being created as an active driver immediately.
+                    // The review queue (StagedImports, EntityType "driverreview") is surfaced in
+                    // the UI and picked up by the Assistant suggestion "drivers-tacho-new".
+                    var reviewKey = $"driverreview:member:{TachoDriverIdentityRules.NormaliseIdentifier(member)}";
+                    var existingReview = await db.StagedImports
+                        .FirstOrDefaultAsync(row => row.EntityType == "driverreview" && row.IdempotencyKey == reviewKey, ct);
+                    if (existingReview is null)
                     {
-                        EmployeeNumber = UniqueEmployeeNumber(worker, drivers),
-                        DisplayName = worker.DisplayName,
-                        TachoName = worker.DisplayName,
-                        DriverType = Clean(worker.WorkerType),
-                        TachoMasterDriverId = member,
-                        Active = true
-                    };
-                    db.Drivers.Add(canonical);
-                    drivers.Add(canonical);
-                    created++;
+                        db.StagedImports.Add(new StagedImport
+                        {
+                            EntityType = "driverreview",
+                            IdempotencyKey = reviewKey,
+                            PayloadJson = JsonSerializer.Serialize(new
+                            {
+                                tachoMemberCode = member,
+                                displayName = worker.DisplayName,
+                                cardNumber = worker.CardNumber,
+                                employeeNumber = worker.EmployeeNumber,
+                                workerType = worker.WorkerType,
+                                agencyName = worker.AgencyName,
+                                cardLastRead = worker.CardLastRead,
+                                driverCardExpiry = worker.DriverCardExpiry,
+                                drivingLicenceExpiry = worker.DrivingLicenceExpiry,
+                                cpcExpiry = worker.CpcExpiry,
+                                source = "TachoMaster live worker directory — no matching Driver Master record",
+                                receivedAtUtc = now
+                            }, JsonOptions),
+                            Source = "TachoMaster Member Code canonical Driver Master sync",
+                            Status = StagingStatus.PendingReview,
+                            ReceivedAtUtc = now,
+                            ReviewNote = $"New TachoMaster member {member} ({worker.DisplayName}) has no matching Driver Master record. Review and promote to create driver, or reject to discard."
+                        });
+                    }
+                    else
+                    {
+                        // Refresh the payload so the review item always reflects the latest Tacho data.
+                        existingReview.PayloadJson = JsonSerializer.Serialize(new
+                        {
+                            tachoMemberCode = member,
+                            displayName = worker.DisplayName,
+                            cardNumber = worker.CardNumber,
+                            employeeNumber = worker.EmployeeNumber,
+                            workerType = worker.WorkerType,
+                            agencyName = worker.AgencyName,
+                            cardLastRead = worker.CardLastRead,
+                            driverCardExpiry = worker.DriverCardExpiry,
+                            drivingLicenceExpiry = worker.DrivingLicenceExpiry,
+                            cpcExpiry = worker.CpcExpiry,
+                            source = "TachoMaster live worker directory — no matching Driver Master record",
+                            receivedAtUtc = now
+                        }, JsonOptions);
+                        existingReview.ReviewedAtUtc = now;
+                        existingReview.ReviewNote = $"Updated from TachoMaster sync at {now:u}. Still pending Driver Master review.";
+                    }
+
+                    // Skip claiming this worker — it has no canonical driver record yet.
+                    UpsertProfile(db, profileRows, worker, actor, now);
+                    continue;
                 }
                 else
                 {

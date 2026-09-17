@@ -36,6 +36,12 @@ public static class SiteMasterIdentityResolver
         var postcode = ExtractPostcode(incoming.CollectionAddress);
         var map = NormaliseMap(incoming.MapLink);
         var aliases = SplitAliases(incoming.Aliases).ToList();
+        var incomingAliasCandidates = new[] { incoming.Name, incoming.DriverTextName }
+            .Concat(aliases)
+            .Select(Normalise)
+            .Where(value => value.Length >= 3)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
         if (code.Length > 0)
         {

@@ -58,6 +58,32 @@ public sealed class TmsAssistantService(
         if (missingTachoNames > 0)
             suggestions.Add(new("drivers-tacho", "medium", "Match TachoMaster names", $"{missingTachoNames} active driver{(missingTachoNames == 1 ? " has" : "s have")} no TachoMaster matching name.", "Drivers", false));
 
+        // Tacho data freshness — if hours data is stale it cannot be trusted for dispatch
+        var staleThreshold = now.AddHours(-12);
+        var staleTacho = drivers.Count(x => !string.IsNullOrWhiteSpace(x.TachoMasterDriverId) &&
+            (x.LastTachoSyncUtc is null || x.LastTachoSyncUtc < staleThreshold));
+        if (staleTacho > 0)
+            suggestions.Add(new("drivers-tacho-stale", "high", "Refresh TachoMaster hours data",
+                $"{staleTacho} driver{(staleTacho == 1 ? "'s" : "s'")} available-hours data has not synced from TachoMaster in the last 12 hours. Dispatch suggestions may use out-of-date hours. Run a manual TachoMaster sync to refresh.",
+                "Drivers", false));
+
+        // New drivers awaiting review from TachoMaster
+        var newTachoDriversPending = 0;
+        try
+        {
+            newTachoDriversPending = await db.StagedImports.AsNoTracking()
+                .CountAsync(row => row.EntityType == "driverreview" && row.Status == StagingStatus.PendingReview, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Assistant could not count pending driver review items.");
+            db.ChangeTracker.Clear();
+        }
+        if (newTachoDriversPending > 0)
+            suggestions.Add(new("drivers-tacho-new", "high", "Review new TachoMaster drivers",
+                $"{newTachoDriversPending} new driver{(newTachoDriversPending == 1 ? "" : "s")} appeared in TachoMaster with no matching Driver Master record. Review each one to confirm identity before adding to dispatch.",
+                "Drivers", false));
+
         var licenceDue = drivers.Count(x => x.LicenceExpiry is null || x.LicenceExpiry <= DateOnly.FromDateTime(DateTime.UtcNow.AddDays(30)));
         if (licenceDue > 0)
             suggestions.Add(new("drivers-licence", "high", "Review driver licences", $"{licenceDue} active driver licence record{(licenceDue == 1 ? " needs" : "s need")} checking or expires within 30 days.", "Drivers", false));
@@ -131,6 +157,14 @@ public sealed class TmsAssistantService(
 
         try
         {
+            // Build live driver context for the question — hours, Tacho status, dispatch day
+            var driverContext = await BuildLiveDriverContextAsync(planningDate, ct);
+            var pendingReviews = await db.StagedImports.AsNoTracking()
+                .Where(row => row.EntityType == "driverreview" && row.Status == StagingStatus.PendingReview)
+                .Select(row => new { row.IdempotencyKey, row.ReviewNote, row.ReceivedAtUtc })
+                .Take(20)
+                .ToListAsync(ct);
+
             using var request = new HttpRequestMessage(HttpMethod.Post, $"{options.BaseUrl.TrimEnd('/')}/responses");
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.ApiKey);
             request.Content = JsonContent.Create(new
@@ -138,10 +172,40 @@ public sealed class TmsAssistantService(
                 model = options.Model,
                 store = false,
                 safety_identifier = SafetyIdentifier(userKey),
-                reasoning = new { effort = "low" },
+                reasoning = new { effort = "medium" },
                 text = new { verbosity = "low" },
-                instructions = "You are the SLH transport planning assistant. Give concise, practical UK road-haulage advice using only the supplied operational snapshot. Never claim to change data. Never recommend bypassing legal driver-hours, vehicle compliance, staging review, or human approval. Do not discuss rates, margins or costings. Put safety and compliance first. For routing/ETA location quality, prefer an approved linked geofence or canonical Site Master coordinates over imported order coordinates. Where neither is available, explicitly tell the planner which site needs a physical address or postcode in Site Master so Azure Maps can geocode it. If a geofence link is ambiguous, require human review rather than guessing.",
-                input = $"Planner question: {message.Trim()}\nOperational snapshot JSON: {JsonSerializer.Serialize(snapshot)}"
+                instructions = """
+                    You are the SLH Transport Management System (TMS) AI assistant for Stuart Lyons Haulage.
+                    You have live access to the operational snapshot, driver Tacho data, and dispatch state.
+
+                    YOUR CAPABILITIES — you can answer questions about:
+                    - Which drivers are available today and their remaining legal drive/work hours from TachoMaster
+                    - Each driver's previous vehicle, current day number in their cycle, and live position
+                    - Which runs are unallocated and which drivers best fit them (by vehicle preference, hours, position)
+                    - New drivers appearing in TachoMaster that are pending review before dispatch
+                    - Drivers with no Tacho Member Code who have been deactivated
+                    - Fleet compliance risks (MOT, PMI, VOR) blocking vehicle allocation
+                    - Site master data gaps (missing coordinates, missing geofences) affecting ETA
+
+                    RULES:
+                    - Put compliance and legal driver hours FIRST. Never suggest allocating a driver whose Tacho hours are insufficient.
+                    - Never suggest bypassing the Driver-to-Review queue — new Tacho drivers must be confirmed before dispatch.
+                    - Drivers without a TachoMaster Member Code have been deactivated and cannot be allocated.
+                    - Prefer the driver's live Falcon/DOT vehicle over historical preference.
+                    - For routing, prefer confirmed geofence coordinates over order coordinates.
+                    - Be specific: name the driver, vehicle registration, and remaining hours when making suggestions.
+                    - Do not discuss rates, margins or costs.
+                    """,
+                input = string.Join("\n\n", new[]
+                {
+                    $"Planner question: {message.Trim()}",
+                    $"Planning date: {planningDate:dd MMM yyyy}",
+                    $"Operational snapshot: {JsonSerializer.Serialize(snapshot)}",
+                    $"Live driver Tacho and dispatch context: {JsonSerializer.Serialize(driverContext)}",
+                    pendingReviews.Count > 0
+                        ? $"Drivers pending TachoMaster review (not yet in dispatch): {JsonSerializer.Serialize(pendingReviews)}"
+                        : "No drivers are currently pending TachoMaster review."
+                })
             });
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(options.TimeoutSeconds, 5, 60)));
@@ -165,6 +229,79 @@ public sealed class TmsAssistantService(
     }
 
     public static string NormaliseRegistration(string value) => new(value.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
+    private async Task<object> BuildLiveDriverContextAsync(DateOnly planningDate, CancellationToken ct)
+    {
+        try
+        {
+            var drivers = await db.Drivers.AsNoTracking()
+                .Where(x => x.Active && !string.IsNullOrWhiteSpace(x.TachoMasterDriverId))
+                .OrderBy(x => x.DisplayName)
+                .Take(200)
+                .ToListAsync(ct);
+
+            // Get today's allocations
+            var todayLoads = await db.Loads.AsNoTracking()
+                .Where(x => x.PlanningDate == planningDate && x.Status != LoadStatus.Cancelled && x.DriverId != null)
+                .Select(x => new { x.DriverId, x.VehicleId, x.Reference, x.Status })
+                .ToListAsync(ct);
+            var allocatedDriverIds = todayLoads.Select(x => x.DriverId!.Value).ToHashSet();
+
+            // Get previous vehicles from recent loads (last 7 days)
+            var since = planningDate.AddDays(-7);
+            var recentLoads = await db.Loads.AsNoTracking()
+                .Where(x => x.PlanningDate >= since && x.PlanningDate < planningDate && x.DriverId != null && x.VehicleId != null)
+                .OrderByDescending(x => x.PlanningDate)
+                .Select(x => new { x.DriverId, x.VehicleId, x.PlanningDate })
+                .ToListAsync(ct);
+            var previousVehicleByDriver = recentLoads
+                .GroupBy(x => x.DriverId!.Value)
+                .ToDictionary(g => g.Key, g => g.First().VehicleId!.Value);
+
+            // Get vehicle registrations
+            var vehicleIds = previousVehicleByDriver.Values.ToHashSet();
+            var vehicles = await db.Vehicles.AsNoTracking()
+                .Where(x => vehicleIds.Contains(x.Id))
+                .Select(x => new { x.Id, x.Registration, x.FleetNumber })
+                .ToDictionaryAsync(x => x.Id, ct);
+
+            return drivers.Select(driver =>
+            {
+                var daysTacho = driver.TachoDriveAvailableTodayMinutes;
+                var weekTacho = driver.TachoDriveAvailableWeekMinutes;
+                var workWeek = driver.TachoWorkAvailableWeekMinutes;
+                var previousVehicleId = previousVehicleByDriver.GetValueOrDefault(driver.Id);
+                var previousVehicle = previousVehicleId != default && vehicles.TryGetValue(previousVehicleId, out var v) ? v.Registration : null;
+                var lastSync = driver.LastTachoSyncUtc;
+                var syncAge = lastSync.HasValue ? $"{(DateTimeOffset.UtcNow - lastSync.Value).TotalHours:F1}h ago" : "never";
+
+                return new
+                {
+                    driverId = driver.Id,
+                    name = driver.DisplayName,
+                    tachoMemberCode = driver.TachoMasterDriverId,
+                    tachoCardNumber = driver.TachoCardNumber,
+                    allocatedToday = allocatedDriverIds.Contains(driver.Id),
+                    availableDriveMinutesToday = daysTacho,
+                    availableDriveMinutesWeek = weekTacho,
+                    availableWorkMinutesWeek = workWeek,
+                    availableDriveHoursToday = daysTacho.HasValue ? $"{daysTacho / 60:F1}h" : "unknown",
+                    previousVehicleRegistration = previousVehicle,
+                    licenceExpiry = driver.LicenceExpiry?.ToString("dd MMM yyyy"),
+                    cpcExpiry = driver.CPCExpiry?.ToString("dd MMM yyyy"),
+                    digitalCardExpiry = driver.DigitalTachoCardExpiry?.ToString("dd MMM yyyy"),
+                    lastTachoSync = syncAge,
+                    tachoDataFresh = lastSync.HasValue && lastSync.Value >= DateTimeOffset.UtcNow.AddHours(-12)
+                };
+            }).ToList();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Assistant could not build live driver context; proceeding without it.");
+            db.ChangeTracker.Clear();
+            return new { error = "Live driver context unavailable", reason = ex.GetBaseException().Message };
+        }
+    }
 
     private async Task<List<TransportOrder>> ReadOrders(DateOnly date, CancellationToken ct)
     {
