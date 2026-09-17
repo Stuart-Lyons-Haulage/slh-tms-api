@@ -43,8 +43,8 @@ class WorkflowValidationTests(unittest.TestCase):
 
     def test_rejects_attachment_presence_trigger_filter(self):
         workflow = load_workflow()
-        trigger_parameters = workflow["properties"]["definition"]["triggers"]["When_New_Email_Arrives_Info_Shared_Mailbox"]["inputs"]["parameters"]
-        trigger_parameters["hasAttachments"] = False
+        trigger = workflow["properties"]["definition"]["triggers"]["When_New_Email_Arrives_Info_Shared_Mailbox"]
+        trigger["inputs"]["parameters"]["hasAttachments"] = True
         errors = validate(workflow)
         self.assertTrue(any("attachment presence" in item for item in errors))
 
@@ -55,46 +55,61 @@ class WorkflowValidationTests(unittest.TestCase):
         errors = validate(workflow)
         self.assertTrue(any("must not filter sender, subject or order type" in item for item in errors))
 
-    def test_rejects_trigger_attachment_string_loop(self):
+    def test_rejects_get_attachments_v2_requirement(self):
         workflow = load_workflow()
-        workflow["properties"]["definition"]["actions"]["For_Each_Source_Attachment"]["foreach"] = "@triggerOutputs()?['body/attachments']"
-        errors = validate(workflow)
-        self.assertTrue(any("trigger attachments string" in item for item in errors))
-
-    def test_rejects_dropping_email_when_attachment_receive_fails(self):
-        workflow = load_workflow()
-        workflow["properties"]["definition"]["actions"]["POST_To_TMS_Staging"]["runAfter"] = {
-            "For_Each_Source_Attachment": ["Succeeded"],
-            "Record_Attachment_List_Failure": ["Skipped"],
+        workflow["properties"]["definition"]["actions"]["Get_Attachment_List"] = {
+            "type": "OpenApiConnection",
+            "inputs": {"host": {"operationId": "GetAttachments_V2"}},
         }
         errors = validate(workflow)
-        self.assertTrue(any("attachment-loop success/failure/timeout/skipped" in item for item in errors))
+        self.assertTrue(any("trigger attachment collection" in item for item in errors))
+
+    def test_rejects_loop_not_using_trigger_attachments(self):
+        workflow = load_workflow()
+        workflow["properties"]["definition"]["actions"]["Apply_to_each"]["foreach"] = "@json('[]')"
+        errors = validate(workflow)
+        self.assertTrue(any("trigger body/attachments collection" in item for item in errors))
 
     def test_rejects_missing_attachment_content_fetch(self):
         workflow = load_workflow()
-        attachment_actions = workflow["properties"]["definition"]["actions"]["For_Each_Source_Attachment"]["actions"]
-        attachment_actions["Get_Attachment_Content"]["inputs"]["host"]["operationId"] = "GetAttachments_V2"
+        actions = workflow["properties"]["definition"]["actions"]["Apply_to_each"]["actions"]
+        actions["Get_Attachment_(V2)"]["inputs"]["host"]["operationId"] = "GetAttachments_V2"
         errors = validate(workflow)
         self.assertTrue(any("GetAttachment_V2" in item for item in errors))
 
-    def test_rejects_attachment_metadata_without_file_bytes(self):
+    def test_rejects_manual_json_string_attachment_payload(self):
         workflow = load_workflow()
-        attachment_actions = workflow["properties"]["definition"]["actions"]["For_Each_Source_Attachment"]["actions"]
-        attachment_actions["Append_Original_Attachment"]["inputs"]["value"]["contentBase64"] = ""
+        actions = workflow["properties"]["definition"]["actions"]["Apply_to_each"]["actions"]
+        actions["Append_to_array_variable"]["inputs"]["value"] = "@json(concat('{...}'))"
         errors = validate(workflow)
-        self.assertTrue(any("source attachment bytes" in item for item in errors))
+        self.assertTrue(any("JSON object" in item for item in errors))
 
-    def test_rejects_staging_request_that_does_not_submit_attachment_array(self):
+    def test_rejects_attachment_without_content_bytes(self):
         workflow = load_workflow()
-        workflow["properties"]["definition"]["actions"]["POST_To_TMS_Staging"]["inputs"]["body"]["attachments"] = []
+        actions = workflow["properties"]["definition"]["actions"]["Apply_to_each"]["actions"]
+        del actions["Append_to_array_variable"]["inputs"]["value"]["contentBytes"]
         errors = validate(workflow)
-        self.assertTrue(any("varAttachments array" in item for item in errors))
+        self.assertTrue(any("missing contentBytes" in item for item in errors))
+
+    def test_rejects_dropping_email_when_attachment_loop_fails(self):
+        workflow = load_workflow()
+        submit = workflow["properties"]["definition"]["actions"]["Intake_info_mailbox_email"]
+        submit["runAfter"] = {"Apply_to_each": ["Succeeded"]}
+        errors = validate(workflow)
+        self.assertTrue(any("success/failure/timeout/skipped" in item for item in errors))
+
+    def test_rejects_staging_request_without_attachment_array(self):
+        workflow = load_workflow()
+        params = workflow["properties"]["definition"]["actions"]["Intake_info_mailbox_email"]["inputs"]["parameters"]
+        params["body/attachments"] = []
+        errors = validate(workflow)
+        self.assertTrue(any("NormalizedAttachments array" in item for item in errors))
 
     def test_rejects_wrong_body_mapping(self):
         workflow = load_workflow()
-        body = workflow["properties"]["definition"]["actions"]["POST_To_TMS_Staging"]["inputs"]["body"]
-        body["bodyText"] = "@triggerOutputs()?['body/body']"
-        body["bodyFormat"] = "@triggerOutputs()?['body/isHtml']"
+        params = workflow["properties"]["definition"]["actions"]["Intake_info_mailbox_email"]["inputs"]["parameters"]
+        params["body/bodyText"] = "@triggerBody()?['body']"
+        params["body/bodyFormat"] = "@triggerBody()?['isHtml']"
         errors = validate(workflow)
         self.assertTrue(any("bodyText must come from Outlook bodyPreview" in item for item in errors))
         self.assertTrue(any("bodyFormat must convert Outlook isHtml" in item for item in errors))
