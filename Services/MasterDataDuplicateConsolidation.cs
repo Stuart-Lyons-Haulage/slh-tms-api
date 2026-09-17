@@ -46,10 +46,19 @@ public static class MasterDataDuplicateConsolidation
 
         var archived = 0;
 
-        // Deactivate any active driver that has no TachoMaster Member Code.
-        // These cannot be matched to a real tachograph identity and must not be
-        // consolidated into another person — they are removed for review.
-        foreach (var noMember in drivers.Where(driver => driver.Active && string.IsNullOrWhiteSpace(driver.TachoMasterDriverId)).ToList())
+        // Flag active drivers with no TachoMaster Member Code — but only deactivate those
+        // that have clearly never synced (LastTachoSyncUtc is null) AND were created more
+        // than 14 days ago. New starters are legitimately in Driver Master before their first
+        // Tacho sync; silently deactivating them would remove real drivers.
+        // TachoMasterDriverId is [NotMapped] — it is populated by EnrichDriversAsync from
+        // the master detail store at runtime. An empty value after enrichment means Tacho has
+        // never linked this driver, not merely that the field wasn't loaded.
+        var newStarterGrace = DateTime.UtcNow.AddDays(-14);
+        foreach (var noMember in drivers.Where(driver =>
+            driver.Active &&
+            string.IsNullOrWhiteSpace(driver.TachoMasterDriverId) &&
+            driver.LastTachoSyncUtc is null &&
+            driver.CreatedAt < newStarterGrace).ToList())
         {
             noMember.Active = false;
             archived++;
@@ -61,12 +70,46 @@ public static class MasterDataDuplicateConsolidation
                 ChangedBy = actor,
                 ChangesJson = JsonSerializer.Serialize(new
                 {
-                    reason = "Active driver has no TachoMaster Member Code and cannot be matched to a canonical Tacho identity",
+                    reason = "Active driver has no TachoMaster Member Code after 14-day grace period and has never synced — deactivated for review",
                     noMember.EmployeeNumber,
                     noMember.DisplayName,
-                    noMember.TachoCardNumber
+                    noMember.TachoCardNumber,
+                    createdAt = noMember.CreatedAt,
+                    lastTachoSyncUtc = noMember.LastTachoSyncUtc
                 })
             });
+        }
+
+        // Separately: surface drivers within the grace period who still have no member code
+        // as a pending-review staging entry so dispatch knows they are not yet Tacho-linked.
+        var pendingNewStarters = drivers.Where(driver =>
+            driver.Active &&
+            string.IsNullOrWhiteSpace(driver.TachoMasterDriverId) &&
+            driver.LastTachoSyncUtc is null &&
+            driver.CreatedAt >= newStarterGrace).ToList();
+        foreach (var newStarter in pendingNewStarters)
+        {
+            var reviewKey = $"driverreview:newstarter:{newStarter.EmployeeNumber}";
+            var exists = await db.StagedImports.AnyAsync(row => row.IdempotencyKey == reviewKey && row.Status == StagingStatus.PendingReview, ct);
+            if (!exists)
+            {
+                db.StagedImports.Add(new StagedImport
+                {
+                    EntityType = "driverreview",
+                    IdempotencyKey = reviewKey,
+                    PayloadJson = JsonSerializer.Serialize(new
+                    {
+                        employeeNumber = newStarter.EmployeeNumber,
+                        displayName = newStarter.DisplayName,
+                        createdAt = newStarter.CreatedAt,
+                        source = "New starter — no TachoMaster Member Code yet (within 14-day grace period)"
+                    }),
+                    Source = "MasterDataDuplicateConsolidation new-starter check",
+                    Status = StagingStatus.PendingReview,
+                    ReceivedAtUtc = DateTimeOffset.UtcNow,
+                    ReviewNote = $"New starter {newStarter.DisplayName} ({newStarter.EmployeeNumber}) has no TachoMaster Member Code yet. Ensure their Tacho card has been set up and synced before dispatch."
+                });
+            }
         }
 
         // Consolidate only within the same Member Code. Two drivers with different

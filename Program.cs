@@ -118,6 +118,8 @@ builder.Services.AddScoped<IntakeMappingService>();
 builder.Services.AddScoped<OrderCompletenessService>();
 builder.Services.AddScoped<WarehouseMovementService>();
 builder.Services.AddScoped<PlanningOptimiserService>();
+builder.Services.AddScoped<DispatchService>();
+builder.Services.AddScoped<BetaOptimiserService>();
 builder.Services.AddScoped<SiteTimingRuleStore>();
 builder.Services.AddScoped<DotTrackingTelemetryStore>();
 builder.Services.AddScoped<IAzureMapsMatrixService, AzureMapsMatrixService>();
