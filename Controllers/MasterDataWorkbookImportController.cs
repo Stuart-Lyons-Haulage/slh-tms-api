@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using ExcelDataReader;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -49,7 +50,8 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
 
         result.Warnings.Add("Drivers are update-only from this workbook. TachoMaster remains the authority for driver identity and live tacho readings.");
         result.Warnings.Add("Sites with weak or conflicting matches are held for review and are not created during commit.");
-        result.Warnings.Add("Collection Sites, Customers For Deliveries, Site Cutoffs and Run Times are now imported as master detail records for intake/planner matching.");
+        result.Warnings.Add("Collection Sites, Customers For Deliveries, Site Cutoffs and Run Times are imported as master detail records for intake/planner matching.");
+        result.Warnings.Add("Timing rules now retain latestCollectionTime for wall boards. Dispatch can still set an earlier planned start; once the first geofence is hit live ETA/ETO takes over for downstream stops.");
         return result;
     }
 
@@ -59,12 +61,14 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
         if (rows.Count == 0) return;
 
         var liveSites = await db.Sites.ToListAsync(ct);
+        await MasterDetailStore.EnrichSitesAsync(db, liveSites, ct);
+
         foreach (var row in rows)
         {
             var externalCode = row.Text("siteid", "site id", "sitecode", "site code", "externalcode", "external code");
             var name = row.Text("site", "sitename", "site name", "name", "delivery name", "customer delivery name");
             var driverText = row.Text("driver text name", "drivertextname", "driver name", "driver facing name");
-            var address = row.Text("collection address", "collection addresses", "address", "delivery address");
+            var address = row.Text("collection address", "collection addresses", "address", "delivery address", "physical address", "site address");
             var mapLink = row.Text("map link", "maplink", "google maps", "maps");
             var aliases = row.Text("aliases", "alias", "delivery names", "collection names");
             var instructions = row.Text("collection notes", "collection instructions", "instructions", "notes");
@@ -100,7 +104,8 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                     aliases = site.Aliases,
                     active = site.Active,
                     addressCheck = row.Text("address check", "address status", "credential check"),
-                    sourceWorkbookSheet = row.SheetName
+                    sourceWorkbookSheet = row.SheetName,
+                    sourceWorkbookRow = row.RowNumber
                 }, "SLH master workbook safe import", ct);
                 detail.ActionTaken = "updated existing live site";
             }
@@ -131,7 +136,8 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                     aliases = site.Aliases,
                     active = site.Active,
                     addressCheck = row.Text("address check", "address status", "credential check"),
-                    sourceWorkbookSheet = row.SheetName
+                    sourceWorkbookSheet = row.SheetName,
+                    sourceWorkbookRow = row.RowNumber
                 }, "SLH master workbook safe import", ct);
                 detail.ActionTaken = "created new site";
             }
@@ -185,25 +191,40 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
         {
             var route = row.Text("alltimes", "route", "route combination", "routecombination", "run", "run name", "selsey");
             if (string.IsNullOrWhiteSpace(route)) continue;
+
             var palletType = row.Text("pallet type", "pallettype");
+            var lastDespatch = row.Time("last despatch time", "lastdespatchtime", "last dispatch time", "lastdispatchtime");
+            var collectFrom = row.Time("planned collect time from", "planned collect from", "collectfrom", "plannedcollecttimefrom");
+            var collectTo = row.Time("planned collect time to", "planned collect to", "collectto", "plannedcollecttimeto");
+            var depotDeadline = row.Time("depot delivery - no later than", "depot delivery no later than", "depot deadline", "depotdelivery", "depotdeliverynolaterthan");
+            var latestCollectionTime = collectTo ?? collectFrom;
+            var collectionContext = row.Text("collection context", "collectioncontext");
+            var collectionKey = RoutePart(route, 0) ?? collectionContext;
+            var deliveryKey = RoutePart(route, -1);
+            var key = $"{Canonical(collectionContext)}:{Canonical(route)}:{Canonical(palletType)}";
+
             var payload = new
             {
                 routeCombination = route,
                 normalisedRouteKey = Canonical(route),
-                collectionKey = RoutePart(route, 0),
-                deliveryKey = RoutePart(route, -1),
+                collectionContext,
+                collectionKey,
+                deliveryKey,
                 palletType,
-                lastDespatch = row.Time("last despatch time", "lastdespatchtime", "last dispatch time"),
-                collectFrom = row.Time("planned collect time from", "planned collect from", "collectfrom"),
-                collectTo = row.Time("planned collect time to", "planned collect to", "collectto"),
-                depotDeadline = row.Time("depot delivery - no later than", "depot delivery no later than", "depot deadline", "depotdelivery"),
+                lastDespatch,
+                collectFrom,
+                collectTo,
+                latestCollectionTime,
+                depotDeadline,
+                dispatchPlanningMode = "Manual planned start may be earlier; latestCollectionTime is the wall-board risk/deadline until first geofence hit updates live ETO/ETA.",
+                firstGeofenceResetsLiveEtos = true,
                 sourceWorkbookSheet = row.SheetName,
                 sourceWorkbookRow = row.RowNumber
             };
-            var key = $"{Canonical(route)}:{Canonical(palletType)}";
+
             if (commit)
                 await SaveMasterDetailAsync("sitetimingrule", key, payload, "SLH master workbook run times", ct);
-            result.Rows.Add(new WorkbookRowResult("Run Times", row.RowNumber, route, commit ? "imported" : "ready", commit ? "Route timing rule saved to masterdetail:sitetimingrule." : "Route timing rule is ready to import.", 90) { ActionTaken = commit ? "upserted timing rule" : "would upsert timing rule" });
+            result.Rows.Add(new WorkbookRowResult("Run Times", row.RowNumber, route, commit ? "imported" : "ready", commit ? "Route timing rule saved with latestCollectionTime for wall-board planning." : "Route timing rule is ready to import with latestCollectionTime.", 92) { ActionTaken = commit ? "upserted timing rule" : "would upsert timing rule" });
         }
     }
 
@@ -211,13 +232,22 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
     {
         var rows = workbook.Sheets.Where(sheet => sheet.Key.Contains("cutoff", StringComparison.OrdinalIgnoreCase) || sheet.Key.Contains("cut off", StringComparison.OrdinalIgnoreCase)).SelectMany(sheet => sheet.Value).ToList();
         var liveSites = await db.Sites.AsNoTracking().Where(site => site.Active).ToListAsync(ct);
+        await MasterDetailStore.EnrichSitesAsync(db, liveSites, ct);
+
         foreach (var row in rows)
         {
             var siteCode = row.Text("siteid", "site id", "sitecode", "site code", "externalcode");
             var siteName = row.Text("site", "sitename", "site name", "name");
-            var identity = new IncomingSiteIdentity(siteCode, siteName, row.Text("driver text name", "drivertextname"), row.Text("collection address", "address"), row.Text("aliases", "alias"), row.Text("map link", "maplink"));
+            var identity = new IncomingSiteIdentity(siteCode, siteName, row.Text("driver text name", "drivertextname"), row.Text("collection address", "address", "physical address"), row.Text("aliases", "alias"), row.Text("map link", "maplink"));
             var resolution = SiteMasterIdentityResolver.Resolve(identity, liveSites);
-            var key = $"{Canonical(siteCode ?? siteName)}:{Canonical(row.Text("plan", "plantype", "plan type"))}:{Canonical(row.Text("temperature", "temp"))}:{Canonical(row.Text("pallet type", "pallettype"))}";
+            var cutoffCheck = row.Time("cutoff check", "cut off check", "cutoffcheck");
+            var standardCutoff = row.Time("standard cutoff", "standardcutoff") ?? cutoffCheck;
+            var extendedCutoff = row.Time("extended cutoff", "extendedcutoff");
+            var collectFrom = row.Time("planned collect from", "planned collect time from", "collectfrom", "plannedcollecttimefrom");
+            var collectTo = row.Time("planned collect to", "planned collect time to", "collectto", "plannedcollecttimeto");
+            var latestCollectionTime = collectTo ?? collectFrom ?? extendedCutoff ?? standardCutoff ?? cutoffCheck;
+            var siteKey = resolution.Site?.ExternalCode ?? siteCode ?? siteName;
+            var key = $"{Canonical(siteKey)}:{Canonical(row.Text("plan", "plantype", "plan type"))}:{Canonical(row.Text("temperature", "temp"))}:{Canonical(row.Text("pallet type", "pallettype"))}";
             var detail = new WorkbookRowResult("Site Cutoffs", row.RowNumber, siteName ?? siteCode ?? "cutoff", resolution.Matched ? "matched" : "ready", resolution.Matched ? "Cut-off matched to live Site Master." : "Cut-off saved as timing detail for later site association.", resolution.Matched ? 90 : 65);
             if (commit)
             {
@@ -227,16 +257,22 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                     siteName = resolution.Site?.Name ?? siteName,
                     matchedLiveSite = resolution.Matched,
                     plan = row.Text("plan", "plan type", "plantype"),
-                    standardCutoff = row.Time("standard cutoff", "standardcutoff"),
-                    extendedCutoff = row.Time("extended cutoff", "extendedcutoff"),
+                    standardCutoff,
+                    extendedCutoff,
+                    cutoffCheck,
+                    fallbackCutoff = standardCutoff ?? extendedCutoff ?? cutoffCheck,
+                    latestCollectionTime,
                     contact = row.Text("contact"),
                     notes = row.Text("notes"),
                     temperature = row.Text("temperature", "temp"),
                     palletType = row.Text("pallet type", "pallettype"),
-                    lastDespatch = row.Time("last despatch time", "lastdespatchtime"),
-                    collectFrom = row.Time("planned collect from", "planned collect time from", "collectfrom"),
-                    collectTo = row.Time("planned collect to", "planned collect time to", "collectto"),
-                    depotDeadline = row.Time("depot delivery deadline", "depot delivery - no later than", "depot deadline", "depotdelivery"),
+                    lastDespatch = row.Time("last despatch time", "lastdespatchtime", "last dispatch time"),
+                    collectFrom,
+                    collectTo,
+                    depotDeadline = row.Time("depot delivery deadline", "depot delivery - no later than", "depot deadline", "depotdelivery", "depotdeliverynolaterthan"),
+                    wallBoardDeadline = latestCollectionTime,
+                    dispatchPlanningMode = "Manual planned start can be earlier; latestCollectionTime is used as wall-board risk time until live geofence tracking takes over.",
+                    firstGeofenceResetsLiveEtos = true,
                     sourceWorkbookSheet = row.SheetName,
                     sourceWorkbookRow = row.RowNumber
                 }, "SLH master workbook site cutoffs", ct);
@@ -299,18 +335,25 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
     private async Task ProcessMarketContactsAsync(Workbook workbook, WorkbookImportResult result, bool commit, CancellationToken ct)
     {
         var rows = workbook.Sheets.Where(sheet => sheet.Key.Contains("market", StringComparison.OrdinalIgnoreCase)).SelectMany(sheet => sheet.Value).ToList();
-        foreach (var row in rows)
+        foreach (var entry in ExpandMarketRows(rows))
         {
-            var market = row.Text("market", "market name") ?? "General";
-            var name = row.Text("name", "seller", "seller name", "contact name");
-            if (string.IsNullOrWhiteSpace(name)) continue;
-            var payload = new Dictionary<string, object?> { ["market"] = market, ["name"] = name, ["standOrLocation"] = row.Text("stand", "stall", "stall number", "location"), ["salesman"] = row.Text("salesman"), ["sender"] = row.Text("sender", "email sender"), ["readOnlyMapPdfUrl"] = row.Text("map", "map pdf", "readonlymappdfurl"), ["active"] = row.Bool("active") ?? true };
+            if (string.IsNullOrWhiteSpace(entry.Name)) continue;
+            var payload = new Dictionary<string, object?>
+            {
+                ["market"] = entry.Market,
+                ["name"] = entry.Name,
+                ["standOrLocation"] = entry.StandOrLocation,
+                ["salesman"] = entry.Salesman,
+                ["sender"] = entry.Sender,
+                ["readOnlyMapPdfUrl"] = entry.ReadOnlyMapPdfUrl,
+                ["active"] = true
+            };
             if (commit)
             {
                 using var doc = JsonDocument.Parse(JsonSerializer.Serialize(payload));
                 await staging.PromoteDirect("marketcontact", doc.RootElement, ct);
             }
-            result.Rows.Add(new WorkbookRowResult("Market Contacts", row.RowNumber, $"{market} - {name}", commit ? "imported" : "ready", "Market contact ready for upsert.", 85) { ActionTaken = commit ? "upserted market contact" : "would upsert market contact" });
+            result.Rows.Add(new WorkbookRowResult("Market Contacts", entry.RowNumber, $"{entry.Market} - {entry.Name}", commit ? "imported" : "ready", "Market contact ready for upsert, including cross-tabbed Covent/Spit/Western/Sales/Sender layouts.", 88) { ActionTaken = commit ? "upserted market contact" : "would upsert market contact" });
         }
     }
 
@@ -344,18 +387,14 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
             var tachoCard = row.Text("tachocardnumber", "tacho card number", "card number", "driver card", "digicard");
             var employee = row.Text("employee number", "employee no", "driverid", "driver id", "payroll number");
             var name = row.Text("display name", "driver", "driver name", "name");
-            if (string.IsNullOrWhiteSpace(tachoId) && string.IsNullOrWhiteSpace(tachoCard))
-            {
-                result.Rows.Add(new WorkbookRowResult("Drivers", row.RowNumber, name ?? employee ?? "driver", "skipped", "No TachoMaster Member Code or DB Tacho card number was supplied. Workbook driver rows never match by name or employee number.", 30) { ActionTaken = "not written" });
-                continue;
-            }
 
             var driver = drivers.FirstOrDefault(item => !string.IsNullOrWhiteSpace(tachoId) && TachoDriverIdentityRules.MemberMatches(item.TachoMasterDriverId, tachoId))
-                ?? drivers.FirstOrDefault(item => !string.IsNullOrWhiteSpace(tachoCard) && TachoDriverIdentityRules.CardsMatch(item.TachoCardNumber, tachoCard));
+                ?? drivers.FirstOrDefault(item => !string.IsNullOrWhiteSpace(tachoCard) && TachoDriverIdentityRules.CardsMatch(item.TachoCardNumber, tachoCard))
+                ?? drivers.FirstOrDefault(item => !string.IsNullOrWhiteSpace(employee) && SiteMasterIdentityResolver.Normalise(item.EmployeeNumber) == SiteMasterIdentityResolver.Normalise(employee));
 
             if (driver is null)
             {
-                result.Rows.Add(new WorkbookRowResult("Drivers", row.RowNumber, name ?? employee ?? tachoId ?? tachoCard!, "skipped", "No existing live driver matched by TachoMaster Member Code or DB Tacho card number. Workbook driver rows are update-only and cannot create drivers.", 30) { ActionTaken = "not written" });
+                result.Rows.Add(new WorkbookRowResult("Drivers", row.RowNumber, name ?? employee ?? tachoId ?? tachoCard ?? "driver", "skipped", "No existing live driver matched by TachoMaster Member Code, DB Tacho card number or existing employee/DriverID. Workbook driver rows are update-only and cannot create drivers.", 30) { ActionTaken = "not written" });
                 continue;
             }
 
@@ -372,7 +411,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                     tachoMasterDriverId = driver.TachoMasterDriverId,
                     tachoCardNumber = driver.TachoCardNumber,
                     phoneNumber = driver.MobileNumber,
-                    email = row.Text("email", "email address"),
+                    email = row.Text("email", "email address", "e-mail"),
                     coding = row.Text("coding", "code", "driver code"),
                     driverType = driver.DriverType,
                     driverGroup = driver.DriverGroup,
@@ -380,11 +419,12 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                     northEligible = row.Bool("north eligible", "northeligible"),
                     preloadEligible = row.Bool("preload eligible", "preloadeligible"),
                     notes = row.Text("notes"),
-                    sourceWorkbookSheet = row.SheetName
+                    sourceWorkbookSheet = row.SheetName,
+                    sourceWorkbookRow = row.RowNumber
                 };
                 await SaveMasterDetailAsync("driver", driver.EmployeeNumber ?? driver.Id.ToString(), payload, "SLH master workbook driver overlay", ct);
             }
-            result.Rows.Add(new WorkbookRowResult("Drivers", row.RowNumber, driver.DisplayName, commit ? "updated" : "matched", "Matched existing live driver by TachoMaster Member Code or DB Tacho card number; operational overlay only.", 95) { ActionTaken = commit ? "updated driver overlay" : "would update driver overlay" });
+            result.Rows.Add(new WorkbookRowResult("Drivers", row.RowNumber, driver.DisplayName, commit ? "updated" : "matched", "Matched existing live driver; operational overlay only, no driver creation.", 95) { ActionTaken = commit ? "updated driver overlay" : "would update driver overlay" });
         }
         if (commit) await db.SaveChangesAsync(ct);
     }
@@ -422,17 +462,33 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
     {
         var canonicalSheet = Canonical(sheetName);
         var minimumHeaderCells = canonicalSheet is "collectionsites" or "customersfordeliveries" ? 1 : 2;
-        var headerIndex = rawRows.FindIndex(row => row.Count(value => !string.IsNullOrWhiteSpace(value)) >= minimumHeaderCells && LooksLikeHeader(sheetName, row));
+        var headerIndex = canonicalSheet.Contains("runtime")
+            ? rawRows.FindIndex(row => row.Any(cell => Canonical(cell) == "pallettype"))
+            : rawRows.FindIndex(row => row.Count(value => !string.IsNullOrWhiteSpace(value)) >= minimumHeaderCells && LooksLikeHeader(sheetName, row));
         if (headerIndex < 0) return [];
+
         var headers = rawRows[headerIndex].Select((value, index) => HeaderName(sheetName, value, index)).ToList();
         var rows = new List<WorkbookRow>();
+        string? collectionContext = null;
+
         for (var r = headerIndex + 1; r < rawRows.Count; r++)
         {
             var raw = rawRows[r];
             if (raw.All(string.IsNullOrWhiteSpace)) continue;
+
+            if (canonicalSheet.Contains("runtime") && IsRunTimeSectionRow(raw))
+            {
+                collectionContext = raw.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim();
+                continue;
+            }
+
             var values = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
             for (var c = 0; c < Math.Min(headers.Count, raw.Count); c++)
                 if (!string.IsNullOrWhiteSpace(headers[c])) values[headers[c]] = raw[c];
+
+            if (canonicalSheet.Contains("runtime") && !string.IsNullOrWhiteSpace(collectionContext))
+                values["collectioncontext"] = collectionContext;
+
             rows.Add(new WorkbookRow(sheetName, r + 1, values));
         }
         return rows;
@@ -451,8 +507,69 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
         var text = string.Join("|", row.Where(value => !string.IsNullOrWhiteSpace(value)).Select(Canonical));
         if (sheet is "collectionsites" && text.Contains("collectionsites")) return true;
         if (sheet is "customersfordeliveries" && text.Contains("deliveries")) return true;
-        if (sheet.Contains("runtime") && text.Contains("pallettype")) return true;
-        return text.Contains("siteid") || text.Contains("vehicleid") || text.Contains("registration") || text.Contains("driverid") || text.Contains("alltimes") || text.Contains("pallettype") || text.Contains("market") || text.Contains("customer") || text.Contains("provider");
+        if (sheet.Contains("runtime")) return text.Contains("pallettype");
+        return text.Contains("siteid") || text.Contains("vehicleid") || text.Contains("registration") || text.Contains("driverid") || text.Contains("pallettype") || text.Contains("market") || text.Contains("customer") || text.Contains("provider") || text.Contains("cutoffcheck");
+    }
+
+    private static bool IsRunTimeSectionRow(List<string?> row)
+    {
+        var nonBlank = row.Select((value, index) => new { value, index }).Where(cell => !string.IsNullOrWhiteSpace(cell.value)).ToList();
+        if (nonBlank.Count != 1 || nonBlank[0].index != 0) return false;
+        var value = nonBlank[0].value!.Trim();
+        return !value.Contains('-', StringComparison.OrdinalIgnoreCase) && !value.Contains("AllTimes", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static IEnumerable<MarketWorkbookEntry> ExpandMarketRows(IEnumerable<WorkbookRow> rows)
+    {
+        foreach (var row in rows)
+        {
+            var directMarket = row.Text("market", "market name");
+            var directName = row.Text("name", "seller", "seller name", "contact name");
+            if (!string.IsNullOrWhiteSpace(directName))
+            {
+                yield return new MarketWorkbookEntry(row.RowNumber, directMarket ?? "General", directName.Trim(), row.Text("stand", "stall", "stall number", "location") ?? InferStand(directName), row.Text("salesman"), row.Text("sender", "email sender"), row.Text("map", "map pdf", "readonlymappdfurl"));
+                continue;
+            }
+
+            foreach (var column in row.Values)
+            {
+                if (string.IsNullOrWhiteSpace(column.Value)) continue;
+                var market = MarketFromColumn(column.Key);
+                if (market is null) continue;
+                var rawName = column.Value.Trim();
+                var stand = InferStand(rawName);
+                var name = RemoveTrailingStand(rawName, stand);
+                var isSender = market.Equals("Sender", StringComparison.OrdinalIgnoreCase);
+                yield return new MarketWorkbookEntry(row.RowNumber, market, name, stand, isSender ? null : name, isSender ? name : null, null);
+            }
+        }
+    }
+
+    private static string? MarketFromColumn(string key)
+    {
+        var canonical = Canonical(key);
+        if (canonical.Contains("covent")) return "Covent";
+        if (canonical.Contains("spit") || canonical.Contains("spital")) return "Spitalfields";
+        if (canonical.Contains("western")) return "Western";
+        if (canonical.Contains("salesmen") || canonical.Contains("salesman")) return "Sales";
+        if (canonical.Contains("sender")) return "Sender";
+        return null;
+    }
+
+    private static string? InferStand(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var bracket = Regex.Match(value, @"\(([^)]+)\)\s*$", RegexOptions.IgnoreCase);
+        if (bracket.Success) return bracket.Groups[1].Value.Trim();
+        var labelled = Regex.Match(value, @"\b(?:stall|stand|unit|units)\s*#?\s*([a-z]?\d{1,4}[a-z]?(?:\s*(?:-|–|—|&|and)\s*[a-z]?\d{1,4}[a-z]?)?)\s*$", RegexOptions.IgnoreCase);
+        return labelled.Success ? labelled.Groups[1].Value.Trim() : null;
+    }
+
+    private static string RemoveTrailingStand(string value, string? stand)
+    {
+        if (string.IsNullOrWhiteSpace(stand)) return value.Trim();
+        var withoutBracket = Regex.Replace(value, @"\s*\([^)]+\)\s*$", string.Empty).Trim();
+        return Regex.Replace(withoutBracket, @"\b(?:stall|stand|unit|units)\s*#?\s*" + Regex.Escape(stand) + @"\s*$", string.Empty, RegexOptions.IgnoreCase).Trim();
     }
 
     private static string? RoutePart(string route, int index)
@@ -464,6 +581,8 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
 
     private static string Canonical(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
     private static bool SheetIs(string sheet, string expected) => Canonical(sheet) == Canonical(expected);
+
+    private sealed record MarketWorkbookEntry(int RowNumber, string Market, string Name, string? StandOrLocation, string? Salesman, string? Sender, string? ReadOnlyMapPdfUrl);
 }
 
 public sealed record Workbook(Dictionary<string, List<WorkbookRow>> Sheets);
