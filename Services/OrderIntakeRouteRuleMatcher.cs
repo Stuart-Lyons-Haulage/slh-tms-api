@@ -11,9 +11,30 @@ namespace Slh.Tms.Api.Services;
 /// Applies SQL-authoritative route rules after sender/customer matching and parsing.
 /// A rule may fill missing route data but never overwrites contradictory parsed data.
 /// Ambiguous/tied matches remain planner review items.
+///
+/// The matcher is deliberately scoped to the regular retailer formats that are stable
+/// enough for automatic route assistance: Aldi, Morrisons and Waitrose. Other inbound
+/// orders can still be staged from the parser, but legacy / experimental route rules
+/// must not steer those records.
 /// </summary>
 public static class OrderIntakeRouteRuleMatcher
 {
+    private static readonly HashSet<string> SupportedRetailerCodes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "ALDI",
+        "MORRISONS",
+        "WAITROSE"
+    };
+
+    private static readonly string[] SupportedRetailerNames =
+    [
+        "ALDI",
+        "MORRISONS",
+        "MORRISON'S",
+        "WAITROSE",
+        "WEIGHTROSE"
+    ];
+
     public static async Task<EmailIntakeParseResult> ApplyAsync(TmsDbContext db, EmailIntakeParseResult parsed, CancellationToken ct)
     {
         if (parsed.Orders.Count == 0 || !db.Database.IsRelational()) return parsed;
@@ -45,8 +66,12 @@ public static class OrderIntakeRouteRuleMatcher
         if (string.IsNullOrWhiteSpace(customer)) return order;
 
         var evidence = Evidence.From(root);
+        if (!HasSupportedRetailerEvidence(customer, evidence))
+            return order;
+
         var candidates = rules
             .Where(rule => rule.CustomerCode.Equals(customer, StringComparison.OrdinalIgnoreCase))
+            .Where(IsSupportedRetailerRule)
             .Select(rule => Score(rule, evidence))
             .Where(match => match is not null)
             .Select(match => match!)
@@ -58,7 +83,7 @@ public static class OrderIntakeRouteRuleMatcher
 
         var best = candidates[0];
         var tied = candidates.Skip(1).Any(candidate => candidate.Score == best.Score && candidate.Rule.Priority == best.Rule.Priority);
-        var singleRuleForCustomer = rules.Count(rule => rule.CustomerCode.Equals(customer, StringComparison.OrdinalIgnoreCase) && rule.Active) == 1;
+        var singleRuleForCustomer = rules.Count(rule => rule.CustomerCode.Equals(customer, StringComparison.OrdinalIgnoreCase) && rule.Active && IsSupportedRetailerRule(rule)) == 1;
         var requiresReview = tied || (!singleRuleForCustomer && (best.Score < 70 || best.MatchedDimensions < 2));
         var warnings = order.Warnings.ToList();
 
@@ -69,14 +94,15 @@ public static class OrderIntakeRouteRuleMatcher
         if (requiresReview)
         {
             warnings.Add(tied
-                ? "More than one SQL route rule matched with the same score; planner review retained."
-                : $"Best SQL route rule confidence was {best.Score}; missing fields were filled only where blank and planner review was retained.");
+                ? "More than one supported Aldi/Morrisons/Waitrose SQL route rule matched with the same score; planner review retained."
+                : $"Best supported Aldi/Morrisons/Waitrose SQL route rule confidence was {best.Score}; missing fields were filled only where blank and planner review was retained.");
         }
 
         root["orderIntakeRouteRuleId"] = best.Rule.Id.ToString();
         root["orderIntakeRouteConfidenceScore"] = best.Score;
         root["orderIntakeRouteMatchedDimensions"] = best.MatchedDimensions;
         root["orderIntakeRouteRequiresReview"] = requiresReview;
+        root["orderIntakeRouteScope"] = "Aldi/Morrisons/Waitrose only";
         root["orderIntakeRouteExplanation"] = JsonSerializer.SerializeToNode(best.Explanation);
         root["orderIntakeRouteAlternatives"] = JsonSerializer.SerializeToNode(candidates.Take(3).Select(candidate => new
         {
@@ -102,7 +128,7 @@ public static class OrderIntakeRouteRuleMatcher
 
     private static Match? Score(RouteRule rule, Evidence evidence)
     {
-        if (!rule.Active) return null;
+        if (!rule.Active || !IsSupportedRetailerRule(rule)) return null;
         var today = DateOnly.FromDateTime(DateTime.UtcNow);
         if (rule.EffectiveFrom.HasValue && today < rule.EffectiveFrom.Value) return null;
         if (rule.EffectiveTo.HasValue && today > rule.EffectiveTo.Value) return null;
@@ -138,6 +164,36 @@ public static class OrderIntakeRouteRuleMatcher
         matchedDimensions++;
         explanation.Add($"{label} matched {expected}.");
         return true;
+    }
+
+    private static bool HasSupportedRetailerEvidence(string? customer, Evidence evidence)
+    {
+        if (IsSupportedValue(customer)) return true;
+        if (evidence.Retailers.Any(IsSupportedValue)) return true;
+        if (evidence.DestinationCodes.Any(value => value.StartsWith("ALD", StringComparison.OrdinalIgnoreCase) || value.StartsWith("MOR", StringComparison.OrdinalIgnoreCase))) return true;
+        if (evidence.DestinationNames.Any(IsSupportedValue)) return true;
+        return false;
+    }
+
+    private static bool IsSupportedRetailerRule(RouteRule rule)
+    {
+        if (IsSupportedValue(rule.RetailerCode)) return true;
+        if (!string.IsNullOrWhiteSpace(rule.DestinationCode) &&
+            (rule.DestinationCode.StartsWith("ALD", StringComparison.OrdinalIgnoreCase) ||
+             rule.DestinationCode.StartsWith("MOR", StringComparison.OrdinalIgnoreCase))) return true;
+        if (!string.IsNullOrWhiteSpace(rule.DestinationSiteCode) &&
+            (rule.DestinationSiteCode.StartsWith("ALD", StringComparison.OrdinalIgnoreCase) ||
+             rule.DestinationSiteCode.StartsWith("MOR", StringComparison.OrdinalIgnoreCase))) return true;
+        if (IsSupportedValue(rule.DestinationName)) return true;
+        return false;
+    }
+
+    private static bool IsSupportedValue(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        var normalised = Normalize(value);
+        if (SupportedRetailerCodes.Any(code => normalised.Equals(Normalize(code), StringComparison.Ordinal))) return true;
+        return SupportedRetailerNames.Any(name => normalised.Contains(Normalize(name), StringComparison.Ordinal));
     }
 
     private static async Task FillMissingSiteValues(TmsDbContext db, JsonObject root, RouteRule rule, CancellationToken ct)
@@ -203,10 +259,12 @@ public static class OrderIntakeRouteRuleMatcher
             await using var reader = await command.ExecuteReaderAsync(ct);
             while (await reader.ReadAsync(ct))
             {
-                result.Add(new RouteRule(
+                var rule = new RouteRule(
                     reader.GetGuid(0), reader.GetString(1), NullString(reader, 2), NullString(reader, 3), NullString(reader, 4),
                     NullString(reader, 5), NullString(reader, 6), NullString(reader, 7), NullString(reader, 8), reader.GetInt32(9),
-                    reader.GetInt32(10), reader.GetBoolean(11), NullDate(reader, 12), NullDate(reader, 13)));
+                    reader.GetInt32(10), reader.GetBoolean(11), NullDate(reader, 12), NullDate(reader, 13));
+                if (IsSupportedRetailerRule(rule))
+                    result.Add(rule);
             }
             return result;
         }
