@@ -7,6 +7,8 @@ The flow is configured as `Started` and accepts all inbound messages in the shar
 ## Existing components used
 
 - Outlook shared mailbox: `info@lyonshaulage.com`
+- Outlook trigger: `When a new email arrives in a shared mailbox (V2)` with attachment metadata included
+- Outlook attachment content action: `Get Attachment (V2)`
 - TMS custom connector operation: `IntakeInfoMailboxEmail`
 - Hosted route: `POST /api/v1/order-intake/email`
 - OAuth scope: existing Entra `Tms.Access`
@@ -15,11 +17,28 @@ The flow is configured as `Started` and accepts all inbound messages in the shar
 - Live-order trace: SQL `TransportOrders.SourceStagedImportId`
 - Governed sender routing: SQL `CustomerEmailRoutes` and SQL `OrderIntakeRouteRules`, applied by the TMS API
 
+## Live Outlook connector pattern
+
+The production Office 365 Outlook connector used by SLH does not expose a separate `Get Attachments (V2)` list action in this flow. The email trigger already supplies the attachment collection.
+
+The supported production pattern is therefore:
+
+1. Trigger on every new Info mailbox Inbox message. Do not filter by sender, subject, order type or attachment presence.
+2. Initialise the `NormalizedAttachments` array.
+3. `Apply to each` over `@coalesce(triggerOutputs()?['body/attachments'],json('[]'))`.
+4. Inside the loop, call `Get Attachment (V2)` using the trigger Message Id and the current attachment Id.
+5. Append a structured object containing `id`, `name`, `contentType`, `size`, `isInline`, `contentId` and `contentBytes` to `NormalizedAttachments`.
+6. Submit `IntakeInfoMailboxEmail` after the attachment loop whether the loop succeeded, failed, timed out or was skipped. This prevents a single attachment problem from dropping the entire customer email.
+
+Do not build attachment objects with a manually concatenated `json(concat(...))` string in the source-controlled definition. A structured object avoids malformed JSON when Outlook returns values such as inline `contentId` strings.
+
+The TMS request mappings must keep `bodyText` from Outlook `bodyPreview`, `bodyHtml` from the full body, and convert `isHtml` to the string `html` or `text` for `bodyFormat`.
+
 ## SQL email-intake mappings
 
 The API owns normalised sender/customer mappings and route rules in SQL. Sender mappings identify the customer; route rules separately match the customer, origin, retailer and destination. Planners manage them through the authenticated mapping APIs. SQL remains the sole master-data authority.
 
-The existing mailbox flow still submits every candidate email to `IntakeInfoMailboxEmail`; routing is applied centrally by the API so replays and non-flow callers behave identically. Exact sender addresses outrank domains, subject-specific mappings outrank generic mappings, and conflicts never auto-route. When a planner approves an order, its exact external sender is learned. If the same sender is later approved for a different collection site, the customer mapping is retained but the unsafe site default is cleared. Cross-customer conflicts are marked `RequiresReview`.
+The mailbox flow submits every candidate email to `IntakeInfoMailboxEmail`; routing is applied centrally by the API so replays and non-flow callers behave identically. Exact sender addresses outrank domains, subject-specific mappings outrank generic mappings, and conflicts never auto-route. When a planner approves an order, its exact external sender is learned. If the same sender is later approved for a different collection site, the customer mapping is retained but the unsafe site default is cleared. Cross-customer conflicts are marked `RequiresReview`.
 
 Power Automate must submit the complete message to the API and must not maintain a parallel routing store or bypass the API's conflict and approval checks.
 
