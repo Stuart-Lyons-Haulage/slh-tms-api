@@ -18,7 +18,7 @@ public sealed class DriverMasterHealthController(TmsDbContext db, TachoDriverMas
     {
         var quality = await sync.QualityAsync(ct);
         var latestPayload = await db.StagedImports.AsNoTracking()
-            .Where(item => item.EntityType == "tachodrivermastersync")
+            .Where(item => item.EntityType == "tachodrivermastersync" || item.EntityType == "tachodrivermasterorchestration")
             .OrderByDescending(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc)
             .Select(item => item.PayloadJson)
             .FirstOrDefaultAsync(ct);
@@ -34,35 +34,47 @@ public sealed class DriverMasterHealthController(TmsDbContext db, TachoDriverMas
             }
             catch (JsonException)
             {
-                // The quality endpoint remains useful even if one historic audit payload is malformed.
+                // Historic/provider population is informational only. Driver Master is authoritative.
             }
         }
 
-        var pendingReviewCount = await db.StagedImports.AsNoTracking()
+        var legacyPendingReviewCount = await db.StagedImports.AsNoTracking()
             .CountAsync(row => row.EntityType == "driverreview" && row.Status == StagingStatus.PendingReview, ct);
-        var populationAligned = sourceWorkers is > 0 && quality.ActiveDrivers == sourceWorkers.Value;
-        var healthy = quality.DuplicateMemberGroups == 0 &&
-                      quality.DuplicateCardGroups == 0 &&
-                      quality.ActiveWithoutMember == 0 &&
-                      quality.ActiveWithoutCard == 0 &&
-                      populationAligned &&
-                      pendingReviewCount == 0;
+
+        var duplicateIdentityProblem = quality.DuplicateMemberGroups > 0 || quality.DuplicateCardGroups > 0;
+        var reviewRequired = quality.ActiveWithoutMember;
+        var cardWarnings = Math.Max(0, quality.ActiveWithMember - quality.ActiveWithCard);
+        var status = duplicateIdentityProblem
+            ? "attention"
+            : reviewRequired > 0 || cardWarnings > 0 || legacyPendingReviewCount > 0
+                ? "review"
+                : "healthy";
 
         return Ok(new
         {
-            status = healthy ? "healthy" : "attention",
+            status,
+            operationalAuthority = "Driver Master",
+            employmentAuthority = "Sage HR",
+            tachoRole = "Identity, card, duty and hours enrichment",
             quality.ActiveDrivers,
-            sourceWorkers,
-            populationAligned,
             quality.ActiveWithMember,
             quality.ActiveWithCard,
+            reviewRequiredDrivers = reviewRequired,
+            cardWarningDrivers = cardWarnings,
             quality.DuplicateMemberGroups,
             quality.DuplicateCardGroups,
-            quality.ActiveWithoutMember,
-            quality.ActiveWithoutCard,
             quality.LatestCanonicalSyncUtc,
-            pendingTachoReviewDrivers = pendingReviewCount,
-            tachoReviewQueueUrl = "/api/v1/driver-master/tacho-review"
+            sourceWorkers,
+            populationAligned = sourceWorkers is > 0 ? quality.ActiveDrivers == sourceWorkers.Value : (bool?)null,
+            populationAlignmentIsInformational = true,
+            legacyPendingTachoReviewDrivers = legacyPendingReviewCount,
+            message = duplicateIdentityProblem
+                ? "Duplicate Tacho identity evidence needs attention. Driver Master rows remain live until deliberately amended."
+                : reviewRequired > 0
+                    ? $"{reviewRequired} active Driver Master driver(s) need a Tacho member/DB number match. They remain live and visible for review."
+                    : cardWarnings > 0
+                        ? $"{cardWarnings} Tacho-linked driver(s) do not currently have card evidence."
+                        : "Driver Master identity health is clear."
         });
     }
 }

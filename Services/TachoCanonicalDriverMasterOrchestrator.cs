@@ -1,7 +1,7 @@
 using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
-using Slh.Tms.Api.Models.Tracking;
 
 namespace Slh.Tms.Api.Services;
 
@@ -13,18 +13,16 @@ public sealed record TachoCanonicalOrchestrationResult(
     string Message);
 
 /// <summary>
-/// Single authority for manual and scheduled TachoMaster Driver Master cleansing.
-/// TachoMaster Member Code is the canonical person identity. Card number, employee number and
-/// compatible name are supporting evidence only and must never merge two different Member Codes.
+/// Single authority for scheduled/manual TachoMaster Driver Master enrichment.
+/// Driver Master is the operational authority. Sage HR maintains employed-driver identity/status;
+/// TachoMaster enriches existing Driver Master rows with Member Code, card and hours evidence.
+/// A Tacho refresh must never deactivate a valid Driver Master row merely because it is not present
+/// in the provider's current/eligible worker population.
 /// </summary>
 public sealed class TachoCanonicalDriverMasterOrchestrator(
     TmsDbContext db,
     IntegrationSyncCoordinator integration,
-    DriverMasterClassificationService classification,
     DistributedLeaseManager leases,
-    TachoMasterClient tachoMaster,
-    TachoMasterOptions tachoMasterOptions,
-    IHttpClientFactory httpClientFactory,
     ILogger<TachoCanonicalDriverMasterOrchestrator> logger)
 {
     public async Task<TachoCanonicalOrchestrationResult> RunAsync(string actor, CancellationToken ct)
@@ -33,11 +31,12 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
         if (lease is null)
         {
             var now = DateTimeOffset.UtcNow;
-            var canonicalResult = new TachoDriverMasterSyncResult(false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                "Canonical TachoMaster sync skipped because another distributed writer currently holds the integration lease.", now);
-            var enrichment = new IntegrationSyncResult("TachoMaster", false, now, canonicalResult.Message);
-            return new TachoCanonicalOrchestrationResult(false, canonicalResult, enrichment, now, canonicalResult.Message);
+            var skipped = new TachoDriverMasterSyncResult(false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                "TachoMaster enrichment skipped because another distributed writer currently holds the integration lease.", now);
+            var enrichment = new IntegrationSyncResult("TachoMaster", false, now, skipped.Message);
+            return new TachoCanonicalOrchestrationResult(false, skipped, enrichment, now, skipped.Message);
         }
+
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, lease.LostToken);
         return await RunCoreAsync(actor, linked.Token);
     }
@@ -50,41 +49,48 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
 
         try
         {
-            await classification.ApplyAsync(actor, ct);
+            // This is deliberately non-destructive. IntegrationSyncCoordinator matches existing
+            // Driver Master rows by Member Code/card/employee number/name and enriches them.
+            // New Sage HR employees therefore remain active while waiting for a confident Tacho match.
             enrichment = await integration.SyncTachoMasterCoreAsync($"{actor}:identity-enrichment", ct);
-            if (!enrichment.Success)
-                logger.LogWarning("TachoMaster identity-enrichment pass did not complete before canonical sync: {Message}", enrichment.Message);
 
-            canonicalResult = await TachoMemberCodeDriverMasterSync.RunAsync(
-                db,
-                tachoMaster,
-                httpClientFactory,
-                tachoMasterOptions,
-                logger,
-                actor,
-                ct);
+            var activeDrivers = await db.Drivers.AsNoTracking().Where(driver => driver.Active).ToListAsync(ct);
+            await MasterDetailStore.EnrichDriversAsync(db, activeDrivers, ct);
+            var withMember = activeDrivers.Count(driver => !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId));
+            var withCard = activeDrivers.Count(driver => !string.IsNullOrWhiteSpace(driver.TachoCardNumber));
+            var duplicateMembers = activeDrivers
+                .Where(driver => !string.IsNullOrWhiteSpace(driver.TachoMasterDriverId))
+                .GroupBy(driver => TachoDriverIdentityRules.NormaliseIdentifier(driver.TachoMasterDriverId), StringComparer.OrdinalIgnoreCase)
+                .Count(group => group.Key.Length > 0 && group.Count() > 1);
+            var duplicateCards = activeDrivers
+                .Where(driver => !string.IsNullOrWhiteSpace(driver.TachoCardNumber))
+                .GroupBy(driver => TachoDriverIdentityRules.NormaliseIdentifier(driver.TachoCardNumber), StringComparer.OrdinalIgnoreCase)
+                .Count(group => group.Key.Length > 0 && group.Count() > 1);
 
-            if (canonicalResult.Success)
-                await classification.ApplyAsync(actor, ct);
+            var completedAt = DateTimeOffset.UtcNow;
+            var message = enrichment.Success
+                ? $"Non-destructive TachoMaster enrichment completed for Driver Master. {withMember}/{activeDrivers.Count} active drivers have a Member/DB number and {withCard}/{activeDrivers.Count} have card evidence."
+                : $"TachoMaster enrichment failed safely without deactivating Driver Master rows. {enrichment.Message}";
 
-            try
-            {
-                db.ChangeTracker.Clear();
-                var masterRepair = await MasterDataDuplicateConsolidation.RunAsync(db, actor, logger, ct);
-                logger.LogInformation(
-                    "Master duplicate consolidation completed: {SiteDuplicates} site duplicate(s), {DriverDuplicates} driver duplicate(s), {MarketDuplicates} market duplicate(s), {VehicleDuplicates} vehicle duplicate(s), {TrailerDuplicates} trailer duplicate(s), {FuelRecovered} vehicle fuel detail recovery/recoveries.",
-                    masterRepair.Sites.ArchivedDuplicates,
-                    masterRepair.DriverDuplicatesArchived,
-                    masterRepair.MarketDuplicatesArchived,
-                    masterRepair.VehicleDuplicatesArchived,
-                    masterRepair.TrailerDuplicatesArchived,
-                    masterRepair.VehicleFuelDetailsRecovered);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                db.ChangeTracker.Clear();
-                logger.LogWarning(ex, "Master duplicate consolidation failed; Driver Master result is retained and the repair will retry on the next canonical pass.");
-            }
+            canonicalResult = new TachoDriverMasterSyncResult(
+                enrichment.Success,
+                withMember,
+                activeDrivers.Count,
+                0,
+                enrichment.Changed,
+                0,
+                0,
+                0,
+                0,
+                0,
+                duplicateMembers,
+                activeDrivers.Count - withCard,
+                message,
+                completedAt);
+
+            logger.LogInformation(
+                "Tacho Driver Master enrichment: active={Active}, member-linked={WithMember}, card-linked={WithCard}, duplicate-members={DuplicateMembers}, duplicate-cards={DuplicateCards}. Driver Master rows were not archived.",
+                activeDrivers.Count, withMember, withCard, duplicateMembers, duplicateCards);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -92,17 +98,16 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "TachoMaster Member Code canonical Driver Master orchestration failed.");
-            enrichment = new IntegrationSyncResult("TachoMaster", false, DateTimeOffset.UtcNow, "Identity-enrichment pass did not complete.");
+            logger.LogError(ex, "Non-destructive TachoMaster Driver Master enrichment failed.");
+            var completedAt = DateTimeOffset.UtcNow;
+            enrichment = new IntegrationSyncResult("TachoMaster", false, completedAt, ex.GetBaseException().Message);
             canonicalResult = new TachoDriverMasterSyncResult(false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                ex.GetBaseException().Message, DateTimeOffset.UtcNow);
+                $"TachoMaster enrichment failed safely. {ex.GetBaseException().Message}", completedAt);
         }
 
         var completed = DateTimeOffset.UtcNow;
         var success = canonicalResult.Success;
-        var message = success
-            ? $"Canonical TachoMaster Member Code Driver Master completed. {canonicalResult.Message}"
-            : $"Canonical TachoMaster Member Code Driver Master failed safely. {canonicalResult.Message}";
+        var messageFinal = canonicalResult.Message;
 
         db.StagedImports.Add(new StagedImport
         {
@@ -113,8 +118,10 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
                 startedAtUtc = started,
                 completedAtUtc = completed,
                 success,
-                identityAuthority = "TachoMaster Member Code",
-                identityOrder = new[] { "TachoMaster Member Code", "Tacho Card Number", "Employee Number", "Unique compatible name" },
+                operationalAuthority = "Driver Master",
+                employmentAuthority = "Sage HR",
+                tachoRole = "Non-destructive identity/card/hours enrichment",
+                identityOrder = new[] { "TachoMaster Member/DB number", "Tacho Card Number", "Employee Number", "Unique compatible name" },
                 identityEnrichment = new
                 {
                     enrichment.Success,
@@ -122,34 +129,26 @@ public sealed class TachoCanonicalDriverMasterOrchestrator(
                     enrichment.Message,
                     enrichment.Changed
                 },
-                canonical = new
+                driverMaster = new
                 {
-                    canonicalResult.Success,
-                    canonicalResult.SourceWorkers,
                     canonicalResult.CanonicalActiveDrivers,
-                    canonicalResult.Created,
-                    canonicalResult.Updated,
-                    canonicalResult.DuplicateRecordsRetired,
-                    canonicalResult.DriversArchivedNotInTachoMaster,
-                    canonicalResult.MatchedByMember,
-                    canonicalResult.MatchedByCard,
-                    canonicalResult.MatchedByUniqueName,
-                    canonicalResult.SameNameDifferentIdentityGroups,
-                    canonicalResult.WorkersWithoutCard,
+                    memberLinkedDrivers = canonicalResult.SourceWorkers,
+                    updated = canonicalResult.Updated,
+                    rowsArchivedByTacho = 0,
                     canonicalResult.Message
                 }
             }),
             Source = actor.StartsWith("system:", StringComparison.OrdinalIgnoreCase)
-                ? "Scheduled TachoMaster Member Code canonical Driver Master"
-                : "Manual TachoMaster Member Code canonical Driver Master",
+                ? "Scheduled non-destructive TachoMaster Driver Master enrichment"
+                : "Manual non-destructive TachoMaster Driver Master enrichment",
             Status = success ? StagingStatus.Promoted : StagingStatus.Rejected,
             ReceivedAtUtc = started,
             ReviewedAtUtc = completed,
             ReviewedBy = actor,
-            ReviewNote = message
+            ReviewNote = messageFinal
         });
         await db.SaveChangesAsync(ct);
 
-        return new TachoCanonicalOrchestrationResult(success, canonicalResult, enrichment, completed, message);
+        return new TachoCanonicalOrchestrationResult(success, canonicalResult, enrichment, completed, messageFinal);
     }
 }
