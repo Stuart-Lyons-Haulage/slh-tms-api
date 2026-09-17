@@ -28,7 +28,7 @@ public static class SafeSiteDuplicateAutoMergeService
             {
                 var mergeNote = candidate.CanAutoMerge
                     ? "Automatic high-confidence site duplicate merge."
-                    : "Automatic safe same-name site duplicate merge; no conflicting postcode, address or customer evidence.";
+                    : "Automatic safe same-name/site-code duplicate merge; no conflicting postcode, address or customer evidence.";
 
                 var result = await MasterDataDuplicateReviewService.MergeAsync(
                     db,
@@ -68,12 +68,14 @@ public static class SafeSiteDuplicateAutoMergeService
         var addresses = rows.Select(row => NormalizeAddress(row.Address)).Where(value => value.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var customerCodes = rows.Select(row => Normalize(Field(row, "customerCode"))).Where(value => value.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
-        if (names.Count != 1) return false;
         if (customerCodes.Count > 1) return false;
         if (postcodes.Count > 1) return false;
         if (addresses.Count > 1 && postcodes.Count == 0) return false;
 
+        // Same SiteID/ExternalCode is a safe identity even when one row has a fuller display name.
         if (codes.Count == 1) return true;
+
+        if (names.Count != 1) return false;
 
         // Exact duplicate names with no extra identity conflict are safe when there is no conflicting evidence.
         // This handles the common broken-import case where the same site was inserted many times with blank details.
