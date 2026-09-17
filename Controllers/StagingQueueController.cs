@@ -212,6 +212,7 @@ internal static class StagingQueueProjection
             }
 
             ApplyConfirmedMorrisonsFollowUp(summary, source);
+            ApplyPlannerReviewProjection(summary, source);
             return summary.ToJsonString();
         }
         catch (JsonException)
@@ -248,6 +249,32 @@ internal static class StagingQueueProjection
         if (!warnings.Any(node => TextValue(node).Contains("Aldi", StringComparison.OrdinalIgnoreCase)))
             warnings.Add("Aldi follow-up is pending; confirmed Morrisons order remains planner-actionable.");
         summary["intakeWarnings"] = warnings;
+    }
+
+    /// <summary>
+    /// A sender/customer or route mapping review is a planner confirmation flag, not a
+    /// customer pre-order. Keep genuine PreOrder rows blocked, but make mapping-review
+    /// rows selectable in Order Review so the existing explicit bulk-approval path can
+    /// acknowledge the flag and promote them safely.
+    /// </summary>
+    private static void ApplyPlannerReviewProjection(JsonObject summary, JsonObject source)
+    {
+        var intakeStatus = Text(summary, "intakeStatus") ?? Text(source, "intakeStatus");
+        if (string.Equals(intakeStatus, "PreOrder", StringComparison.OrdinalIgnoreCase)) return;
+
+        var plannerReady = Bool(summary, "plannerReady") ?? Bool(source, "plannerReady");
+        if (plannerReady != false) return;
+
+        var senderReview = Bool(summary, "emailRouteRequiresReview") ?? Bool(source, "emailRouteRequiresReview");
+        var routeReview = Bool(summary, "orderIntakeRouteRequiresReview") ?? Bool(source, "orderIntakeRouteRequiresReview");
+        if (senderReview != true && routeReview != true) return;
+
+        summary["plannerReady"] = true;
+        // The existing portal already treats this field as an amber, explicitly-reviewable
+        // state. Reuse it so the row is selectable but never included in "Select all clean".
+        summary["orderIntakeRouteRequiresReview"] = true;
+        if (string.IsNullOrWhiteSpace(Text(summary, "intakeStatus")))
+            summary["intakeStatus"] = "Review";
     }
 
     private static string? FirstNonInlineAttachmentName(JsonArray attachments)
