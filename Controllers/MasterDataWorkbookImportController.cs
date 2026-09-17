@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using ExcelDataReader;
@@ -37,6 +38,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
         var result = new WorkbookImportResult(commit ? "commit" : "preview");
 
         await ProcessSitesAsync(workbook, result, commit, ct);
+        await ProcessPlannerListsAsync(workbook, result, commit, ct);
         await ProcessCustomerContactsAsync(workbook, result, commit, ct);
         await ProcessMarketContactsAsync(workbook, result, commit, ct);
         await ProcessSiteCutoffsAsync(workbook, result, commit, ct);
@@ -47,6 +49,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
 
         result.Warnings.Add("Drivers are update-only from this workbook. TachoMaster remains the authority for driver identity and live tacho readings.");
         result.Warnings.Add("Sites with weak or conflicting matches are held for review and are not created during commit.");
+        result.Warnings.Add("Collection Sites, Customers For Deliveries, Site Cutoffs and Run Times are now imported as master detail records for intake/planner matching.");
         return result;
     }
 
@@ -86,7 +89,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                 site.MapLink = mapLink ?? site.MapLink;
                 site.Aliases = SiteMasterIdentityResolver.MergeAliases(site.Aliases, aliases, name, driverText);
                 site.Active = active;
-                await MasterDetailStore.SaveAsync(db, "site", site.ExternalCode, SiteMasterIdentityResolver.ToJson(new
+                await SaveMasterDetailAsync("site", site.ExternalCode, new
                 {
                     externalCode = site.ExternalCode,
                     name = site.Name,
@@ -98,7 +101,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                     active = site.Active,
                     addressCheck = row.Text("address check", "address status", "credential check"),
                     sourceWorkbookSheet = row.SheetName
-                }), "SLH master workbook safe import", User.Identity?.Name, ct);
+                }, "SLH master workbook safe import", ct);
                 detail.ActionTaken = "updated existing live site";
             }
             else if (commit && resolution.CanCreate)
@@ -117,7 +120,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                 };
                 db.Sites.Add(site);
                 liveSites.Add(site);
-                await MasterDetailStore.SaveAsync(db, "site", site.ExternalCode, SiteMasterIdentityResolver.ToJson(new
+                await SaveMasterDetailAsync("site", site.ExternalCode, new
                 {
                     externalCode = site.ExternalCode,
                     name = site.Name,
@@ -129,7 +132,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                     active = site.Active,
                     addressCheck = row.Text("address check", "address status", "credential check"),
                     sourceWorkbookSheet = row.SheetName
-                }), "SLH master workbook safe import", User.Identity?.Name, ct);
+                }, "SLH master workbook safe import", ct);
                 detail.ActionTaken = "created new site";
             }
             else if (resolution.RequiresReview)
@@ -144,26 +147,62 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
         if (commit) await db.SaveChangesAsync(ct);
     }
 
+    private async Task ProcessPlannerListsAsync(Workbook workbook, WorkbookImportResult result, bool commit, CancellationToken ct)
+    {
+        var listDefinitions = new[]
+        {
+            new { Sheet = "Collection Sites", Entity = "plannercollectionsite", Header = "collection sites", Field = "collectionSite" },
+            new { Sheet = "Customers For Deliveries", Entity = "plannerdeliverypoint", Header = "deliveries", Field = "deliveryPoint" }
+        };
+
+        foreach (var definition in listDefinitions)
+        {
+            var rows = workbook.Sheets.Where(sheet => SheetIs(sheet.Key, definition.Sheet)).SelectMany(sheet => sheet.Value).ToList();
+            foreach (var row in rows)
+            {
+                var value = row.Text(definition.Header, definition.Field, "name", "site", "customer", "delivery", "collection");
+                if (string.IsNullOrWhiteSpace(value) || value.Equals("Customers", StringComparison.OrdinalIgnoreCase)) continue;
+                var key = Canonical(value);
+                var payload = new
+                {
+                    key,
+                    name = value.Trim(),
+                    sourceWorkbookSheet = row.SheetName,
+                    sourceWorkbookRow = row.RowNumber,
+                    active = true
+                };
+                if (commit)
+                    await SaveMasterDetailAsync(definition.Entity, key, payload, "SLH master workbook planner list", ct);
+                result.Rows.Add(new WorkbookRowResult(definition.Sheet, row.RowNumber, value.Trim(), commit ? "imported" : "ready", $"{definition.Sheet} entry ready for planner/import matching.", 90) { ActionTaken = commit ? "upserted planner list item" : "would upsert planner list item" });
+            }
+        }
+    }
+
     private async Task ProcessRunTimesAsync(Workbook workbook, WorkbookImportResult result, bool commit, CancellationToken ct)
     {
         var rows = workbook.Sheets.Where(sheet => sheet.Key.Contains("run", StringComparison.OrdinalIgnoreCase) && sheet.Key.Contains("time", StringComparison.OrdinalIgnoreCase)).SelectMany(sheet => sheet.Value).ToList();
         foreach (var row in rows)
         {
-            var route = row.Text("alltimes", "route", "route combination", "routecombination", "run", "run name");
+            var route = row.Text("alltimes", "route", "route combination", "routecombination", "run", "run name", "selsey");
             if (string.IsNullOrWhiteSpace(route)) continue;
             var palletType = row.Text("pallet type", "pallettype");
             var payload = new
             {
                 routeCombination = route,
+                normalisedRouteKey = Canonical(route),
+                collectionKey = RoutePart(route, 0),
+                deliveryKey = RoutePart(route, -1),
                 palletType,
                 lastDespatch = row.Time("last despatch time", "lastdespatchtime", "last dispatch time"),
                 collectFrom = row.Time("planned collect time from", "planned collect from", "collectfrom"),
                 collectTo = row.Time("planned collect time to", "planned collect to", "collectto"),
-                depotDeadline = row.Time("depot delivery - no later than", "depot delivery no later than", "depot deadline", "depotdelivery")
+                depotDeadline = row.Time("depot delivery - no later than", "depot delivery no later than", "depot deadline", "depotdelivery"),
+                sourceWorkbookSheet = row.SheetName,
+                sourceWorkbookRow = row.RowNumber
             };
-            var key = $"{route}:{palletType}";
+            var key = $"{Canonical(route)}:{Canonical(palletType)}";
             if (commit)
-                await MasterDetailStore.SaveAsync(db, "sitetimingrule", key, SiteMasterIdentityResolver.ToJson(payload), "SLH master workbook run times", User.Identity?.Name, ct);
+                await SaveMasterDetailAsync("sitetimingrule", key, payload, "SLH master workbook run times", ct);
             result.Rows.Add(new WorkbookRowResult("Run Times", row.RowNumber, route, commit ? "imported" : "ready", commit ? "Route timing rule saved to masterdetail:sitetimingrule." : "Route timing rule is ready to import.", 90) { ActionTaken = commit ? "upserted timing rule" : "would upsert timing rule" });
         }
     }
@@ -178,14 +217,15 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
             var siteName = row.Text("site", "sitename", "site name", "name");
             var identity = new IncomingSiteIdentity(siteCode, siteName, row.Text("driver text name", "drivertextname"), row.Text("collection address", "address"), row.Text("aliases", "alias"), row.Text("map link", "maplink"));
             var resolution = SiteMasterIdentityResolver.Resolve(identity, liveSites);
-            var key = $"{siteCode ?? siteName}:{row.Text("plan", "plantype", "plan type")}:{row.Text("temperature", "temp")}:{row.Text("pallet type", "pallettype")}";
-            var detail = new WorkbookRowResult("Site Cutoffs", row.RowNumber, siteName ?? siteCode ?? "cutoff", resolution.Matched ? "matched" : "review", resolution.Matched ? "Cut-off matched to live Site Master." : "Cut-off could not be confidently matched to a live site; not imported on commit.", resolution.Matched ? 90 : 40);
-            if (commit && resolution.Matched)
+            var key = $"{Canonical(siteCode ?? siteName)}:{Canonical(row.Text("plan", "plantype", "plan type"))}:{Canonical(row.Text("temperature", "temp"))}:{Canonical(row.Text("pallet type", "pallettype"))}";
+            var detail = new WorkbookRowResult("Site Cutoffs", row.RowNumber, siteName ?? siteCode ?? "cutoff", resolution.Matched ? "matched" : "ready", resolution.Matched ? "Cut-off matched to live Site Master." : "Cut-off saved as timing detail for later site association.", resolution.Matched ? 90 : 65);
+            if (commit)
             {
-                await MasterDetailStore.SaveAsync(db, "sitecutoff", key, SiteMasterIdentityResolver.ToJson(new
+                await SaveMasterDetailAsync("sitecutoff", key, new
                 {
-                    siteId = resolution.Site!.ExternalCode,
-                    siteName = resolution.Site.Name,
+                    siteId = resolution.Site?.ExternalCode ?? siteCode,
+                    siteName = resolution.Site?.Name ?? siteName,
+                    matchedLiveSite = resolution.Matched,
                     plan = row.Text("plan", "plan type", "plantype"),
                     standardCutoff = row.Time("standard cutoff", "standardcutoff"),
                     extendedCutoff = row.Time("extended cutoff", "extendedcutoff"),
@@ -194,13 +234,15 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                     temperature = row.Text("temperature", "temp"),
                     palletType = row.Text("pallet type", "pallettype"),
                     lastDespatch = row.Time("last despatch time", "lastdespatchtime"),
-                    collectFrom = row.Time("planned collect time from", "planned collect from", "collectfrom"),
-                    collectTo = row.Time("planned collect time to", "planned collect to", "collectto"),
-                    depotDeadline = row.Time("depot delivery - no later than", "depot deadline", "depotdelivery")
-                }), "SLH master workbook site cutoffs", User.Identity?.Name, ct);
-                detail.ActionTaken = "upserted site cutoff detail";
+                    collectFrom = row.Time("planned collect from", "planned collect time from", "collectfrom"),
+                    collectTo = row.Time("planned collect to", "planned collect time to", "collectto"),
+                    depotDeadline = row.Time("depot delivery deadline", "depot delivery - no later than", "depot deadline", "depotdelivery"),
+                    sourceWorkbookSheet = row.SheetName,
+                    sourceWorkbookRow = row.RowNumber
+                }, "SLH master workbook site cutoffs", ct);
+                detail.ActionTaken = resolution.Matched ? "upserted site cutoff detail" : "upserted unmatched cutoff detail";
             }
-            else detail.ActionTaken = commit ? "held for review - not written" : "would import if site match is confirmed";
+            else detail.ActionTaken = resolution.Matched ? "would upsert site cutoff detail" : "would save unmatched timing detail for review/association";
             result.Rows.Add(detail);
         }
     }
@@ -340,11 +382,16 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
                     notes = row.Text("notes"),
                     sourceWorkbookSheet = row.SheetName
                 };
-                await MasterDetailStore.SaveAsync(db, "driver", driver.EmployeeNumber ?? driver.Id.ToString(), SiteMasterIdentityResolver.ToJson(payload), "SLH master workbook driver overlay", User.Identity?.Name, ct);
+                await SaveMasterDetailAsync("driver", driver.EmployeeNumber ?? driver.Id.ToString(), payload, "SLH master workbook driver overlay", ct);
             }
             result.Rows.Add(new WorkbookRowResult("Drivers", row.RowNumber, driver.DisplayName, commit ? "updated" : "matched", "Matched existing live driver by TachoMaster Member Code or DB Tacho card number; operational overlay only.", 95) { ActionTaken = commit ? "updated driver overlay" : "would update driver overlay" });
         }
         if (commit) await db.SaveChangesAsync(ct);
+    }
+
+    private async Task SaveMasterDetailAsync(string entityType, string key, object payload, string source, CancellationToken ct)
+    {
+        await MasterDetailStore.SaveAsync(db, entityType, key, SiteMasterIdentityResolver.ToJson(payload), source, User.Identity?.Name, ct);
     }
 
     private static async Task<Workbook> ReadWorkbookAsync(IFormFile file, CancellationToken ct)
@@ -373,9 +420,11 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
 
     private static List<WorkbookRow> ParseRows(string sheetName, List<List<string?>> rawRows)
     {
-        var headerIndex = rawRows.FindIndex(row => row.Count(value => !string.IsNullOrWhiteSpace(value)) >= 2 && LooksLikeHeader(sheetName, row));
+        var canonicalSheet = Canonical(sheetName);
+        var minimumHeaderCells = canonicalSheet is "collectionsites" or "customersfordeliveries" ? 1 : 2;
+        var headerIndex = rawRows.FindIndex(row => row.Count(value => !string.IsNullOrWhiteSpace(value)) >= minimumHeaderCells && LooksLikeHeader(sheetName, row));
         if (headerIndex < 0) return [];
-        var headers = rawRows[headerIndex].Select((value, index) => string.IsNullOrWhiteSpace(value) ? $"column{index}" : Canonical(value)).ToList();
+        var headers = rawRows[headerIndex].Select((value, index) => HeaderName(sheetName, value, index)).ToList();
         var rows = new List<WorkbookRow>();
         for (var r = headerIndex + 1; r < rawRows.Count; r++)
         {
@@ -389,10 +438,28 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
         return rows;
     }
 
+    private static string HeaderName(string sheetName, string? value, int index)
+    {
+        if (index == 0 && sheetName.Contains("run", StringComparison.OrdinalIgnoreCase) && sheetName.Contains("time", StringComparison.OrdinalIgnoreCase))
+            return "alltimes";
+        return string.IsNullOrWhiteSpace(value) ? $"column{index}" : Canonical(value);
+    }
+
     private static bool LooksLikeHeader(string sheetName, List<string?> row)
     {
+        var sheet = Canonical(sheetName);
         var text = string.Join("|", row.Where(value => !string.IsNullOrWhiteSpace(value)).Select(Canonical));
+        if (sheet is "collectionsites" && text.Contains("collectionsites")) return true;
+        if (sheet is "customersfordeliveries" && text.Contains("deliveries")) return true;
+        if (sheet.Contains("runtime") && text.Contains("pallettype")) return true;
         return text.Contains("siteid") || text.Contains("vehicleid") || text.Contains("registration") || text.Contains("driverid") || text.Contains("alltimes") || text.Contains("pallettype") || text.Contains("market") || text.Contains("customer") || text.Contains("provider");
+    }
+
+    private static string? RoutePart(string route, int index)
+    {
+        var parts = route.Split('-', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length == 0) return null;
+        return index < 0 ? parts[^1] : index < parts.Length ? parts[index] : null;
     }
 
     private static string Canonical(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
@@ -450,18 +517,27 @@ public sealed record WorkbookRow(string SheetName, int RowNumber, Dictionary<str
     {
         var value = Text(names);
         if (string.IsNullOrWhiteSpace(value)) return null;
-        return TimeOnly.TryParse(value, out var time) ? time.ToString("HH:mm:ss") : value;
+        if (TimeOnly.TryParse(value, CultureInfo.InvariantCulture, out var time)) return time.ToString("HH:mm:ss");
+        if (decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out var serial) && serial >= 0 && serial < 1)
+        {
+            var span = TimeSpan.FromDays((double)serial);
+            return TimeOnly.FromTimeSpan(span).ToString("HH:mm:ss");
+        }
+        return value;
     }
 
     public DateOnly? Date(params string[] names)
     {
         var value = Text(names);
-        return DateOnly.TryParse(value, out var date) ? date : null;
+        if (DateOnly.TryParse(value, out var date)) return date;
+        if (double.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out var serial) && serial > 25000)
+            return DateOnly.FromDateTime(DateTime.FromOADate(serial));
+        return null;
     }
 
     public decimal? Decimal(params string[] names)
     {
         var value = Text(names);
-        return decimal.TryParse(value, out var number) ? number : null;
+        return decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out var number) ? number : null;
     }
 }
