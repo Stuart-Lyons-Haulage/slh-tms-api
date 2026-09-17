@@ -508,6 +508,7 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
         if (sheet is "collectionsites" && text.Contains("collectionsites")) return true;
         if (sheet is "customersfordeliveries" && text.Contains("deliveries")) return true;
         if (sheet.Contains("runtime")) return text.Contains("pallettype");
+        if (sheet.Contains("market") && (text.Contains("covent") || text.Contains("spit") || text.Contains("spital") || text.Contains("western") || text.Contains("salesmen") || text.Contains("salesman") || text.Contains("sender"))) return true;
         return text.Contains("siteid") || text.Contains("vehicleid") || text.Contains("registration") || text.Contains("driverid") || text.Contains("pallettype") || text.Contains("market") || text.Contains("customer") || text.Contains("provider") || text.Contains("cutoffcheck");
     }
 
