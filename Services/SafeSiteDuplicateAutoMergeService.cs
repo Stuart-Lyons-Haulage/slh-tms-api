@@ -26,15 +26,17 @@ public static class SafeSiteDuplicateAutoMergeService
         {
             try
             {
+                var mergeNote = candidate.CanAutoMerge
+                    ? "Automatic high-confidence site duplicate merge."
+                    : "Automatic safe same-name/site-code duplicate merge; no conflicting postcode, address or customer evidence.";
+
                 var result = await MasterDataDuplicateReviewService.MergeAsync(
                     db,
                     "sites",
                     new MasterDataDuplicateMergeRequest(
                         candidate.Canonical.Id,
                         candidate.Duplicates.Select(row => row.Id).ToList(),
-                        candidate.CanAutoMerge
-                            ? "Automatic high-confidence site duplicate merge."
-                            : "Automatic safe site duplicate merge; no conflicting postcode, address or customer evidence."),
+                        mergeNote),
                     actor,
                     ct);
 
@@ -60,8 +62,8 @@ public static class SafeSiteDuplicateAutoMergeService
         if (candidate.Duplicates.Count == 0) return false;
 
         var rows = new[] { candidate.Canonical }.Concat(candidate.Duplicates).ToList();
-        var codes = rows.Select(row => Normalize(row.Code)).Where(value => value.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var names = rows.Select(row => Normalize(row.Name)).Where(value => value.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var codes = rows.Select(row => Normalize(row.Code)).Where(value => value.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var postcodes = rows.Select(row => NormalizePostcode(row.Postcode ?? ExtractPostcode(row.Address))).Where(value => value.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var addresses = rows.Select(row => NormalizeAddress(row.Address)).Where(value => value.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var customerCodes = rows.Select(row => Normalize(Field(row, "customerCode"))).Where(value => value.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
@@ -70,13 +72,12 @@ public static class SafeSiteDuplicateAutoMergeService
         if (postcodes.Count > 1) return false;
         if (addresses.Count > 1 && postcodes.Count == 0) return false;
 
-        var sameExternalCode = codes.Count == 1;
-        if (sameExternalCode) return true;
+        // Same SiteID/ExternalCode is a safe identity even when one row has a fuller display name.
+        if (codes.Count == 1) return true;
 
-        var sameName = names.Count == 1;
-        if (!sameName) return false;
+        if (names.Count != 1) return false;
 
-        // Exact duplicate names with no extra identity evidence are safe when there is no conflicting evidence.
+        // Exact duplicate names with no extra identity conflict are safe when there is no conflicting evidence.
         // This handles the common broken-import case where the same site was inserted many times with blank details.
         if (codes.Count <= rows.Count && addresses.Count <= 1 && postcodes.Count <= 1) return true;
 
