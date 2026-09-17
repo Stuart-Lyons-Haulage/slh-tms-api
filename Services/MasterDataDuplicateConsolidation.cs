@@ -46,70 +46,46 @@ public static class MasterDataDuplicateConsolidation
 
         var archived = 0;
 
-        // Flag active drivers with no TachoMaster Member Code — but only deactivate those
-        // that have clearly never synced (LastTachoSyncUtc is null) AND were created more
-        // than 14 days ago. New starters are legitimately in Driver Master before their first
-        // Tacho sync; silently deactivating them would remove real drivers.
-        // TachoMasterDriverId is [NotMapped] — it is populated by EnrichDriversAsync from
-        // the master detail store at runtime. An empty value after enrichment means Tacho has
-        // never linked this driver, not merely that the field wasn't loaded.
-        var newStarterGrace = DateTime.UtcNow.AddDays(-14);
-        foreach (var noMember in drivers.Where(driver =>
+        // Driver Master/Sage HR is authoritative for the operational driver population.
+        // TachoMaster enriches identity/card/duty evidence but must never deactivate a valid
+        // Driver Master record simply because it has not linked yet. Keep unmatched active
+        // drivers live and surface them for review instead.
+        var reviewQueued = 0;
+        var pendingTachoReview = drivers.Where(driver =>
             driver.Active &&
-            string.IsNullOrWhiteSpace(driver.TachoMasterDriverId) &&
-            driver.LastTachoSyncUtc is null &&
-            driver.CreatedAt < newStarterGrace).ToList())
-        {
-            noMember.Active = false;
-            archived++;
-            db.MasterDataAudits.Add(new MasterDataAudit
-            {
-                EntityType = "Driver",
-                EntityId = noMember.Id,
-                Action = "DeactivatedNoTachoMemberCode",
-                ChangedBy = actor,
-                ChangesJson = JsonSerializer.Serialize(new
-                {
-                    reason = "Active driver has no TachoMaster Member Code after 14-day grace period and has never synced — deactivated for review",
-                    noMember.EmployeeNumber,
-                    noMember.DisplayName,
-                    noMember.TachoCardNumber,
-                    createdAt = noMember.CreatedAt,
-                    lastTachoSyncUtc = noMember.LastTachoSyncUtc
-                })
-            });
-        }
+            string.IsNullOrWhiteSpace(driver.TachoMasterDriverId)).ToList();
 
-        // Separately: surface drivers within the grace period who still have no member code
-        // as a pending-review staging entry so dispatch knows they are not yet Tacho-linked.
-        var pendingNewStarters = drivers.Where(driver =>
-            driver.Active &&
-            string.IsNullOrWhiteSpace(driver.TachoMasterDriverId) &&
-            driver.LastTachoSyncUtc is null &&
-            driver.CreatedAt >= newStarterGrace).ToList();
-        foreach (var newStarter in pendingNewStarters)
+        foreach (var driver in pendingTachoReview)
         {
-            var reviewKey = $"driverreview:newstarter:{newStarter.EmployeeNumber}";
-            var exists = await db.StagedImports.AnyAsync(row => row.IdempotencyKey == reviewKey && row.Status == StagingStatus.PendingReview, ct);
-            if (!exists)
+            var reviewIdentity = !string.IsNullOrWhiteSpace(driver.EmployeeNumber)
+                ? driver.EmployeeNumber
+                : driver.Id.ToString("N");
+            var reviewKey = $"driverreview:tacho-unmatched:{reviewIdentity}";
+            var exists = await db.StagedImports.AnyAsync(row =>
+                row.IdempotencyKey == reviewKey &&
+                row.Status == StagingStatus.PendingReview, ct);
+
+            if (exists) continue;
+
+            db.StagedImports.Add(new StagedImport
             {
-                db.StagedImports.Add(new StagedImport
+                EntityType = "driverreview",
+                IdempotencyKey = reviewKey,
+                PayloadJson = JsonSerializer.Serialize(new
                 {
-                    EntityType = "driverreview",
-                    IdempotencyKey = reviewKey,
-                    PayloadJson = JsonSerializer.Serialize(new
-                    {
-                        employeeNumber = newStarter.EmployeeNumber,
-                        displayName = newStarter.DisplayName,
-                        createdAt = newStarter.CreatedAt,
-                        source = "New starter — no TachoMaster Member Code yet (within 14-day grace period)"
-                    }),
-                    Source = "MasterDataDuplicateConsolidation new-starter check",
-                    Status = StagingStatus.PendingReview,
-                    ReceivedAtUtc = DateTimeOffset.UtcNow,
-                    ReviewNote = $"New starter {newStarter.DisplayName} ({newStarter.EmployeeNumber}) has no TachoMaster Member Code yet. Ensure their Tacho card has been set up and synced before dispatch."
-                });
-            }
+                    driverId = driver.Id,
+                    employeeNumber = driver.EmployeeNumber,
+                    displayName = driver.DisplayName,
+                    tachoCardNumber = driver.TachoCardNumber,
+                    lastTachoSyncUtc = driver.LastTachoSyncUtc,
+                    source = "Active Driver Master record awaiting TachoMaster identity match"
+                }),
+                Source = "MasterDataDuplicateConsolidation Tacho identity review",
+                Status = StagingStatus.PendingReview,
+                ReceivedAtUtc = DateTimeOffset.UtcNow,
+                ReviewNote = $"Driver {driver.DisplayName} ({driver.EmployeeNumber}) is active in Driver Master but has no TachoMaster Member/DB number. Keep active; review or enter the Tacho identity manually if automatic matching does not resolve it."
+            });
+            reviewQueued++;
         }
 
         // Consolidate only within the same Member Code. Two drivers with different
@@ -208,7 +184,7 @@ public static class MasterDataDuplicateConsolidation
             }
         }
 
-        if (archived > 0) await db.SaveChangesAsync(ct);
+        if (archived > 0 || reviewQueued > 0) await db.SaveChangesAsync(ct);
         return archived;
     }
 
