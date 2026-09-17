@@ -54,13 +54,21 @@ public sealed class DependencyHealthService(
         // make an old provider snapshot appear newer just because a page was refreshed.
         var roadTechUtc = await SafeTimestamp(async () => await db.VehicleLiveStatuses.AsNoTracking()
             .MaxAsync(item => (DateTimeOffset?)item.LastEventTimeUtc, ct), "RoadTech", ct);
-        var fleetioUtc = await SafeTimestamp(async () => await db.IntegrationMappings.AsNoTracking()
+        var fleetioMappingUtc = await SafeTimestamp(async () => await db.IntegrationMappings.AsNoTracking()
             .Where(item => item.Provider == "Fleetio" && item.Active)
-            .MaxAsync(item => (DateTimeOffset?)item.UpdatedAtUtc, ct), "Fleetio", ct);
-        var tachoUtc = await SafeTimestamp(async () => await db.StagedImports.AsNoTracking()
+            .MaxAsync(item => (DateTimeOffset?)item.UpdatedAtUtc, ct), "Fleetio mappings", ct);
+        var fleetioVehicleUtc = await SafeTimestamp(async () => await db.Vehicles.AsNoTracking()
+            .Where(item => item.Active && item.FleetioLastSyncedUtc != null)
+            .MaxAsync(item => item.FleetioLastSyncedUtc, ct), "Fleetio vehicles", ct);
+        var fleetioUtc = Latest(fleetioMappingUtc, fleetioVehicleUtc);
+        var tachoAuditUtc = await SafeTimestamp(async () => await db.StagedImports.AsNoTracking()
             .Where(item => item.Status == StagingStatus.Promoted &&
                 (item.EntityType == "tachodrivermastersync" || item.EntityType == "tachomastersync" || item.EntityType == "tachodriverprofile"))
-            .MaxAsync(item => (DateTimeOffset?)(item.ReviewedAtUtc ?? item.ReceivedAtUtc), ct), "TachoMaster", ct);
+            .MaxAsync(item => (DateTimeOffset?)(item.ReviewedAtUtc ?? item.ReceivedAtUtc), ct), "TachoMaster audit", ct);
+        var tachoDriverUtc = await SafeTimestamp(async () => await db.Drivers.AsNoTracking()
+            .Where(item => item.Active && item.LastTachoSyncUtc != null)
+            .MaxAsync(item => item.LastTachoSyncUtc, ct), "TachoMaster driver state", ct);
+        var tachoUtc = Latest(tachoAuditUtc, tachoDriverUtc);
         var sageUtc = await SafeTimestamp(async () => await db.StagedImports.AsNoTracking()
             .Where(item => item.EntityType == "sagehrsync" && item.Status == StagingStatus.Promoted)
             .MaxAsync(item => (DateTimeOffset?)(item.ReviewedAtUtc ?? item.ReceivedAtUtc), ct), "Sage HR", ct);
@@ -100,6 +108,9 @@ public sealed class DependencyHealthService(
             return null;
         }
     }
+
+    private static DateTimeOffset? Latest(params DateTimeOffset?[] values) =>
+        values.Where(value => value is not null).Max();
 
     private static double? Age(DateTimeOffset? value, DateTimeOffset now) =>
         value is null ? null : Math.Max(0, (now - value.Value).TotalSeconds);
