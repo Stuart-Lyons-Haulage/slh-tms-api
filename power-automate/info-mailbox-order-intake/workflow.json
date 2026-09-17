@@ -24,7 +24,7 @@
     },
     "definition": {
       "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
-      "contentVersion": "1.0.3.0",
+      "contentVersion": "1.0.4.0",
       "parameters": {
         "$connections": {
           "defaultValue": {},
@@ -59,98 +59,33 @@
         }
       },
       "actions": {
-        "Initialise_Correlation_Id": {
+        "Initialise_Normalized_Attachments": {
           "type": "InitializeVariable",
           "inputs": {
             "variables": [
               {
-                "name": "varCorrelationId",
-                "type": "string",
-                "value": "@guid()"
-              }
-            ]
-          }
-        },
-        "Initialise_Attachment_Array": {
-          "type": "InitializeVariable",
-          "runAfter": {
-            "Initialise_Correlation_Id": [
-              "Succeeded"
-            ]
-          },
-          "inputs": {
-            "variables": [
-              {
-                "name": "varAttachments",
+                "name": "NormalizedAttachments",
                 "type": "array",
                 "value": []
               }
             ]
           }
         },
-        "Get_Attachment_List": {
-          "type": "OpenApiConnection",
-          "runAfter": {
-            "Initialise_Attachment_Array": [
-              "Succeeded"
-            ]
-          },
-          "inputs": {
-            "host": {
-              "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365",
-              "connectionName": "shared_office365",
-              "operationId": "GetAttachments_V2"
-            },
-            "parameters": {
-              "messageId": "@triggerOutputs()?['body/id']",
-              "mailboxAddress": "@parameters('SLH_InfoMailboxUPN')"
-            }
-          },
-          "runtimeConfiguration": {
-            "retryPolicy": {
-              "type": "exponential",
-              "count": 4,
-              "interval": "PT10S",
-              "minimumInterval": "PT10S",
-              "maximumInterval": "PT2M"
-            }
-          }
-        },
-        "Record_Attachment_List_Failure": {
-          "type": "AppendToArrayVariable",
-          "runAfter": {
-            "Get_Attachment_List": [
-              "Failed",
-              "TimedOut"
-            ]
-          },
-          "inputs": {
-            "name": "varAttachments",
-            "value": {
-              "name": "ATTACHMENT_LIST_UNAVAILABLE",
-              "contentType": "application/octet-stream",
-              "contentBase64": "",
-              "isInline": false,
-              "contentUnavailable": true,
-              "failureReason": "Outlook attachment listing failed or timed out after retries; the email must still be submitted to TMS."
-            }
-          }
-        },
-        "For_Each_Source_Attachment": {
+        "Apply_to_each": {
           "type": "Foreach",
           "runAfter": {
-            "Get_Attachment_List": [
+            "Initialise_Normalized_Attachments": [
               "Succeeded"
             ]
           },
-          "foreach": "@coalesce(outputs('Get_Attachment_List')?['body/value'],json('[]'))",
+          "foreach": "@coalesce(triggerOutputs()?['body/attachments'],json('[]'))",
           "runtimeConfiguration": {
             "concurrency": {
               "repetitions": 1
             }
           },
           "actions": {
-            "Get_Attachment_Content": {
+            "Get_Attachment_(V2)": {
               "type": "OpenApiConnection",
               "inputs": {
                 "host": {
@@ -160,7 +95,7 @@
                 },
                 "parameters": {
                   "messageId": "@triggerOutputs()?['body/id']",
-                  "attachmentId": "@items('For_Each_Source_Attachment')?['id']",
+                  "attachmentId": "@items('Apply_to_each')?['id']",
                   "mailboxAddress": "@parameters('SLH_InfoMailboxUPN')"
                 }
               },
@@ -179,95 +114,65 @@
                 }
               }
             },
-            "Append_Original_Attachment": {
+            "Append_to_array_variable": {
               "type": "AppendToArrayVariable",
               "runAfter": {
-                "Get_Attachment_Content": [
+                "Get_Attachment_(V2)": [
                   "Succeeded"
                 ]
               },
               "inputs": {
-                "name": "varAttachments",
+                "name": "NormalizedAttachments",
                 "value": {
-                  "id": "@items('For_Each_Source_Attachment')?['id']",
-                  "name": "@coalesce(items('For_Each_Source_Attachment')?['name'],items('For_Each_Source_Attachment')?['displayName'],items('For_Each_Source_Attachment')?['id'],'unnamed-attachment')",
-                  "contentType": "@coalesce(items('For_Each_Source_Attachment')?['contentType'],'application/octet-stream')",
-                  "contentBase64": "@coalesce(outputs('Get_Attachment_Content')?['body/contentBytes'],outputs('Get_Attachment_Content')?['body/$content'],outputs('Get_Attachment_Content')?['body/content'],body('Get_Attachment_Content')?['contentBytes'],body('Get_Attachment_Content')?['$content'],'')",
-                  "isInline": "@coalesce(items('For_Each_Source_Attachment')?['isInline'],false)",
-                  "contentId": "@items('For_Each_Source_Attachment')?['contentId']",
-                  "size": "@items('For_Each_Source_Attachment')?['size']"
-                }
-              }
-            },
-            "Append_Failed_Attachment_Metadata": {
-              "type": "AppendToArrayVariable",
-              "runAfter": {
-                "Get_Attachment_Content": [
-                  "Failed",
-                  "TimedOut"
-                ]
-              },
-              "inputs": {
-                "name": "varAttachments",
-                "value": {
-                  "id": "@items('For_Each_Source_Attachment')?['id']",
-                  "name": "@coalesce(items('For_Each_Source_Attachment')?['name'],items('For_Each_Source_Attachment')?['displayName'],items('For_Each_Source_Attachment')?['id'],'unnamed-attachment')",
-                  "contentType": "@coalesce(items('For_Each_Source_Attachment')?['contentType'],'application/octet-stream')",
-                  "contentBase64": "",
-                  "isInline": "@coalesce(items('For_Each_Source_Attachment')?['isInline'],false)",
-                  "contentId": "@items('For_Each_Source_Attachment')?['contentId']",
-                  "size": "@items('For_Each_Source_Attachment')?['size']",
-                  "contentUnavailable": true,
-                  "failureReason": "Outlook attachment content fetch failed or timed out after retries; source email still submitted to TMS."
+                  "id": "@outputs('Get_Attachment_(V2)')?['body/id']",
+                  "name": "@outputs('Get_Attachment_(V2)')?['body/name']",
+                  "contentType": "@outputs('Get_Attachment_(V2)')?['body/contentType']",
+                  "size": "@coalesce(outputs('Get_Attachment_(V2)')?['body/size'],0)",
+                  "isInline": "@coalesce(outputs('Get_Attachment_(V2)')?['body/isInline'],false)",
+                  "contentId": "@coalesce(outputs('Get_Attachment_(V2)')?['body/contentId'],'')",
+                  "contentBytes": "@outputs('Get_Attachment_(V2)')?['body/contentBytes']"
                 }
               }
             }
           }
         },
-        "POST_To_TMS_Staging": {
+        "Intake_info_mailbox_email": {
           "type": "OpenApiConnection",
           "runAfter": {
-            "For_Each_Source_Attachment": [
+            "Apply_to_each": [
               "Succeeded",
               "Failed",
               "TimedOut",
               "Skipped"
-            ],
-            "Record_Attachment_List_Failure": [
-              "Succeeded",
-              "Skipped"
             ]
           },
           "inputs": {
+            "parameters": {
+              "Content-Type": "application/json",
+              "Accept": "application/json",
+              "body/messageId": "@triggerOutputs()?['body/id']",
+              "body/internetMessageId": "@triggerBody()?['internetMessageId']",
+              "body/conversationId": "@triggerBody()?['conversationId']",
+              "body/mailbox": "@parameters('SLH_InfoMailboxUPN')",
+              "body/senderAddress": "@triggerBody()?['from']",
+              "body/senderName": "@coalesce(triggerBody()?['fromName'],triggerBody()?['from'])",
+              "body/toRecipients": "@coalesce(triggerBody()?['toRecipients'],json('[]'))",
+              "body/ccRecipients": "@coalesce(triggerBody()?['ccRecipients'],json('[]'))",
+              "body/subject": "@triggerBody()?['subject']",
+              "body/receivedAtUtc": "@triggerBody()?['receivedDateTime']",
+              "body/bodyText": "@coalesce(triggerBody()?['bodyPreview'],'')",
+              "body/bodyHtml": "@coalesce(triggerBody()?['body'],'')",
+              "body/bodyFormat": "@if(equals(coalesce(triggerBody()?['isHtml'],true),true),'html','text')",
+              "body/importance": "@triggerBody()?['importance']",
+              "body/webLink": "@triggerBody()?['webLink']",
+              "body/correlationId": "@guid()",
+              "body/attachments": "@variables('NormalizedAttachments')"
+            },
             "host": {
               "apiId": "/providers/Microsoft.PowerApps/apis/shared_slhtms",
               "connectionName": "shared_slhtms",
               "operationId": "IntakeInfoMailboxEmail"
-            },
-            "body": {
-              "messageId": "@triggerOutputs()?['body/id']",
-              "internetMessageId": "@triggerOutputs()?['body/internetMessageId']",
-              "conversationId": "@triggerOutputs()?['body/conversationId']",
-              "mailbox": "@parameters('SLH_InfoMailboxUPN')",
-              "senderAddress": "@triggerOutputs()?['body/from']",
-              "senderName": "@triggerOutputs()?['body/fromName']",
-              "toRecipients": "@coalesce(triggerOutputs()?['body/toRecipients'],json('[]'))",
-              "ccRecipients": "@coalesce(triggerOutputs()?['body/ccRecipients'],json('[]'))",
-              "subject": "@triggerOutputs()?['body/subject']",
-              "receivedAtUtc": "@triggerOutputs()?['body/receivedDateTime']",
-              "bodyText": "@coalesce(triggerOutputs()?['body/bodyPreview'],'')",
-              "bodyHtml": "@coalesce(triggerOutputs()?['body/body'],'')",
-              "bodyFormat": "@if(equals(coalesce(triggerOutputs()?['body/isHtml'],true),true),'html','text')",
-              "importance": "@triggerOutputs()?['body/importance']",
-              "webLink": "@triggerOutputs()?['body/webLink']",
-              "correlationId": "@variables('varCorrelationId')",
-              "attachments": "@variables('varAttachments')"
             }
-          },
-          "trackedProperties": {
-            "correlationId": "@variables('varCorrelationId')",
-            "sourceMessageId": "@triggerOutputs()?['body/id']",
-            "internetMessageId": "@triggerOutputs()?['body/internetMessageId']"
           },
           "runtimeConfiguration": {
             "retryPolicy": {
@@ -285,67 +190,18 @@
             }
           }
         },
-        "Apply_TMS_Category_To_Source_Email": {
-          "type": "OpenApiConnection",
-          "runAfter": {
-            "POST_To_TMS_Staging": [
-              "Succeeded"
-            ]
-          },
-          "inputs": {
-            "host": {
-              "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365",
-              "connectionName": "shared_office365",
-              "operationId": "AssignCategory_V2"
-            },
-            "parameters": {
-              "messageId": "@triggerOutputs()?['body/id']",
-              "mailboxAddress": "@parameters('SLH_InfoMailboxUPN')",
-              "categories": "@createArray(coalesce(body('POST_To_TMS_Staging')?['outlookCategory'],if(equals(body('POST_To_TMS_Staging')?['ignored'],true),'TMS Checked','TMS Review')))"
-            }
-          },
-          "runtimeConfiguration": {
-            "retryPolicy": {
-              "type": "exponential",
-              "count": 3,
-              "interval": "PT10S",
-              "minimumInterval": "PT10S",
-              "maximumInterval": "PT2M"
-            }
-          }
-        },
         "Record_Import_Result": {
           "type": "Compose",
           "runAfter": {
-            "Apply_TMS_Category_To_Source_Email": [
+            "Intake_info_mailbox_email": [
               "Succeeded",
-              "Failed",
-              "TimedOut",
-              "Skipped"
-            ]
-          },
-          "inputs": {
-            "correlationId": "@variables('varCorrelationId')",
-            "messageId": "@triggerOutputs()?['body/id']",
-            "httpStatus": "@outputs('POST_To_TMS_Staging')?['statusCode']",
-            "result": "@body('POST_To_TMS_Staging')"
-          }
-        },
-        "Handle_Import_Exception": {
-          "type": "Compose",
-          "runAfter": {
-            "POST_To_TMS_Staging": [
               "Failed",
               "TimedOut"
             ]
           },
           "inputs": {
-            "correlationId": "@variables('varCorrelationId')",
             "messageId": "@triggerOutputs()?['body/id']",
-            "internetMessageId": "@triggerOutputs()?['body/internetMessageId']",
-            "mailbox": "@parameters('SLH_InfoMailboxUPN')",
-            "subject": "@triggerOutputs()?['body/subject']",
-            "failure": "TMS submission failed after bounded retries. Leave source email unflagged/uncategorised so it is visible for replay."
+            "result": "@body('Intake_info_mailbox_email')"
           }
         }
       },

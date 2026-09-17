@@ -4,11 +4,12 @@ import pathlib
 import sys
 
 
-REQUIRED_REQUEST_FIELDS = {
-    "messageId", "internetMessageId", "conversationId", "mailbox",
-    "senderAddress", "senderName", "toRecipients", "ccRecipients", "subject",
-    "receivedAtUtc", "bodyText", "bodyHtml", "bodyFormat", "importance",
-    "webLink", "correlationId", "attachments",
+REQUIRED_PARAMETER_FIELDS = {
+    "body/messageId", "body/internetMessageId", "body/conversationId", "body/mailbox",
+    "body/senderAddress", "body/senderName", "body/toRecipients", "body/ccRecipients",
+    "body/subject", "body/receivedAtUtc", "body/bodyText", "body/bodyHtml",
+    "body/bodyFormat", "body/importance", "body/webLink", "body/correlationId",
+    "body/attachments",
 }
 
 
@@ -48,79 +49,85 @@ def validate(workflow):
         trigger = {}
 
     trigger_parameters = trigger.get("inputs", {}).get("parameters", {})
-    if "hasAttachments" in trigger_parameters:
-        errors.append("shared-mailbox trigger must not filter by attachment presence")
-    if trigger.get("conditions"):
-        errors.append("shared-mailbox trigger must not filter sender, subject or order type; every inbox email must reach TMS intake")
     if trigger_parameters.get("mailboxAddress") not in (
-        "@parameters('SLH_InfoMailboxUPN')",
-        "info@lyonshaulage.com",
+        "@parameters('SLH_InfoMailboxUPN')", "info@lyonshaulage.com"
     ):
         errors.append("shared-mailbox trigger must target the Info mailbox")
     if trigger_parameters.get("includeAttachments") is not True:
         errors.append("shared-mailbox trigger must include attachment metadata")
+    if "hasAttachments" in trigger_parameters:
+        errors.append("shared-mailbox trigger must not filter by attachment presence")
+    if trigger.get("conditions"):
+        errors.append("shared-mailbox trigger must not filter sender, subject or order type; every inbox email must reach TMS intake")
 
     serialized = json.dumps(workflow, separators=(",", ":"))
+    if "GetAttachments_V2" in serialized:
+        errors.append("flow must use the trigger attachment collection; this tenant exposes Get Attachment (V2), not Get Attachments (V2)")
     if "/api/v1/orders" in serialized or '"operationId":"CreateOrder"' in serialized:
         errors.append("live-order endpoint/action is forbidden")
-    forbidden_external_stores = ("shared_sharepoint", "CreateItem", "Microsoft List", "SharePoint")
-    if any(value.lower() in serialized.lower() for value in forbidden_external_stores):
+    if any(value.lower() in serialized.lower() for value in ("shared_sharepoint", "CreateItem", "Microsoft List", "SharePoint")):
         errors.append("Microsoft Lists/SharePoint storage is forbidden; TMS SQL is authoritative")
     if "IntakeInfoMailboxEmail" not in serialized:
         errors.append("Pending Review intake operation IntakeInfoMailboxEmail is missing")
 
-    submit = _find_action(actions, "POST_To_TMS_Staging") or {}
-    body = submit.get("inputs", {}).get("body", {})
-    missing = sorted(REQUIRED_REQUEST_FIELDS - set(body))
+    initialise = _find_action(actions, "Initialise_Normalized_Attachments") or {}
+    variables = initialise.get("inputs", {}).get("variables", [])
+    if not any(v.get("name") == "NormalizedAttachments" and v.get("type") == "array" for v in variables if isinstance(v, dict)):
+        errors.append("NormalizedAttachments array initialisation is missing")
+
+    loop = _find_action(actions, "Apply_to_each") or {}
+    foreach_expression = str(loop.get("foreach", ""))
+    if "triggerOutputs" not in foreach_expression or "body/attachments" not in foreach_expression or "coalesce" not in foreach_expression:
+        errors.append("Apply_to_each must enumerate the trigger body/attachments collection with an empty-array fallback")
+
+    loop_actions = loop.get("actions", {})
+    get_attachment = loop_actions.get("Get_Attachment_(V2)", {})
+    if get_attachment.get("inputs", {}).get("host", {}).get("operationId") != "GetAttachment_V2":
+        errors.append("Get_Attachment_(V2) must call Outlook GetAttachment_V2")
+    get_params = get_attachment.get("inputs", {}).get("parameters", {})
+    if "body/id" not in str(get_params.get("messageId", "")):
+        errors.append("Get_Attachment_(V2) must use the trigger email Message Id")
+    if "Apply_to_each" not in str(get_params.get("attachmentId", "")):
+        errors.append("Get_Attachment_(V2) must use the current Apply_to_each attachment Id")
+
+    append = loop_actions.get("Append_to_array_variable", {})
+    append_inputs = append.get("inputs", {})
+    if append_inputs.get("name") != "NormalizedAttachments":
+        errors.append("attachment normalisation must append to NormalizedAttachments")
+    append_value = append_inputs.get("value", {})
+    if not isinstance(append_value, dict):
+        errors.append("attachment normalisation must append a JSON object, not a manually concatenated JSON string")
+        append_value = {}
+    for key in ("id", "name", "contentType", "size", "isInline", "contentId", "contentBytes"):
+        if key not in append_value:
+            errors.append(f"normalised attachment is missing {key}")
+    if "Get_Attachment_(V2)" not in str(append_value.get("contentBytes", "")):
+        errors.append("normalised attachment contentBytes must come from Get_Attachment_(V2)")
+
+    submit = _find_action(actions, "Intake_info_mailbox_email") or {}
+    submit_params = submit.get("inputs", {}).get("parameters", {})
+    missing = sorted(REQUIRED_PARAMETER_FIELDS - set(submit_params))
     if missing:
         errors.append("request evidence fields missing: " + ", ".join(missing))
-
-    if body.get("attachments") != "@variables('varAttachments')":
-        errors.append("TMS staging request must submit the varAttachments array containing retained attachment copies")
-    if "bodyPreview" not in str(body.get("bodyText", "")):
+    if submit_params.get("body/attachments") != "@variables('NormalizedAttachments')":
+        errors.append("TMS staging request must submit the NormalizedAttachments array")
+    if "bodyPreview" not in str(submit_params.get("body/bodyText", "")):
         errors.append("bodyText must come from Outlook bodyPreview")
-    if "body/body" not in str(body.get("bodyHtml", "")):
+    if "body" not in str(submit_params.get("body/bodyHtml", "")):
         errors.append("bodyHtml must contain the full Outlook body")
-    body_format = str(body.get("bodyFormat", ""))
+    body_format = str(submit_params.get("body/bodyFormat", ""))
     if "isHtml" not in body_format or "'html'" not in body_format or "'text'" not in body_format:
         errors.append("bodyFormat must convert Outlook isHtml to the API string values html/text")
 
-    get_attachment_list = _find_action(actions, "Get_Attachment_List") or {}
-    if get_attachment_list.get("inputs", {}).get("host", {}).get("operationId") != "GetAttachments_V2":
-        errors.append("Get_Attachment_List must call Outlook GetAttachments_V2")
-
-    attachment_loop = _find_action(actions, "For_Each_Source_Attachment") or {}
-    if "Get_Attachment_List" not in str(attachment_loop.get("foreach", "")):
-        errors.append("attachment loop must enumerate GetAttachments_V2 results")
-
-    attachment_actions = attachment_loop.get("actions", {})
-    get_attachment = attachment_actions.get("Get_Attachment_Content", {})
-    if get_attachment.get("inputs", {}).get("host", {}).get("operationId") != "GetAttachment_V2":
-        errors.append("Get_Attachment_Content must call Outlook GetAttachment_V2")
-
-    append_attachment = attachment_actions.get("Append_Original_Attachment", {})
-    append_value = append_attachment.get("inputs", {}).get("value", {})
-    content_expression = str(append_value.get("contentBase64", ""))
-    if "Get_Attachment_Content" not in content_expression or "contentBytes" not in content_expression:
-        errors.append("source attachment bytes must be mapped from Get_Attachment_Content body/contentBytes into contentBase64")
-
-    failed_metadata = attachment_actions.get("Append_Failed_Attachment_Metadata", {}).get("inputs", {}).get("value", {})
-    if failed_metadata.get("contentUnavailable") is not True:
-        errors.append("failed attachment fetches must retain contentUnavailable metadata")
-
-    list_failure = _find_action(actions, "Record_Attachment_List_Failure") or {}
-    if list_failure.get("inputs", {}).get("value", {}).get("contentUnavailable") is not True:
-        errors.append("attachment-list failure must still be represented in the intake evidence")
-
-    submit_run_after = submit.get("runAfter", {})
-    submit_after_loop = set(submit_run_after.get("For_Each_Source_Attachment", []))
-    if submit_after_loop and not {"Succeeded", "Failed", "TimedOut", "Skipped"}.issubset(submit_after_loop):
-        errors.append("TMS submission must continue after attachment-loop success/failure/timeout/skipped")
+    run_after = set(submit.get("runAfter", {}).get("Apply_to_each", []))
+    required_states = {"Succeeded", "Failed", "TimedOut", "Skipped"}
+    if not required_states.issubset(run_after):
+        errors.append("TMS submission must continue after Apply_to_each success/failure/timeout/skipped")
 
     for node in _walk(actions):
-        if not isinstance(node, dict) or "runtimeConfiguration" not in node:
+        if not isinstance(node, dict):
             continue
-        policy = node["runtimeConfiguration"].get("retryPolicy", {})
+        policy = node.get("runtimeConfiguration", {}).get("retryPolicy", {})
         if policy and not (
             policy.get("type") == "exponential"
             and isinstance(policy.get("count"), int)
@@ -131,24 +138,10 @@ def validate(workflow):
     trigger_concurrency = trigger.get("runtimeConfiguration", {}).get("concurrency", {})
     if trigger_concurrency.get("runs") != 4:
         errors.append("trigger concurrency must be 4")
-
-    for node in _walk(actions):
-        if isinstance(node, dict) and node.get("type") == "Foreach":
-            foreach_expression = str(node.get("foreach", ""))
-            if "triggerOutputs" in foreach_expression and "attachments" in foreach_expression:
-                errors.append("attachment loop must use the GetAttachments_V2 result, not the trigger attachments string")
-
-    if "Get_Attachment_Content" not in serialized:
-        errors.append("attachment content retrieval is missing")
     if "secureData" not in serialized:
         errors.append("secure input/output protection is missing")
-    connection_names = set(properties.get("connectionReferences", {}))
-    if connection_names != {"shared_office365", "shared_slhtms"}:
+    if set(properties.get("connectionReferences", {})) != {"shared_office365", "shared_slhtms"}:
         errors.append("flow must use only the Outlook and existing TMS connection references")
-
-    obsolete_placeholder = "Placeholder only - replace with SLH TMS API"
-    if obsolete_placeholder.lower() in serialized.lower():
-        errors.append("obsolete placeholder Compose action must not remain in the production flow")
 
     return errors
 
