@@ -122,6 +122,8 @@ var dispatchOptions = new DispatchOptions();
 builder.Configuration.GetSection("Dispatch").Bind(dispatchOptions);
 builder.Services.AddSingleton(dispatchOptions);
 builder.Services.AddScoped<DispatchService>();
+builder.Services.AddScoped<IBetaHgvRouteProvider, AzureMapsHgvRouteProvider>();
+builder.Services.AddScoped<BetaRouteOptimisationEngine>();
 builder.Services.AddScoped<BetaOptimiserService>();
 builder.Services.AddScoped<SiteTimingRuleStore>();
 builder.Services.AddScoped<DotTrackingTelemetryStore>();
