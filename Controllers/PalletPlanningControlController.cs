@@ -51,8 +51,6 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                 .OrderBy(x => loadById.TryGetValue(x.LoadId, out var load) ? load.Reference : x.LoadId.ToString())
                 .ToList();
 
-            // Runs created before quantity allocation existed remain valid. Once any explicit allocation
-            // exists for the order, including a zero, the explicit quantities become authoritative.
             if (!hasExplicitAllocations && allocations.Count == 0)
             {
                 var linkedLoad = loads.FirstOrDefault(load => load.Status != LoadStatus.Cancelled && load.Stops.Any(stop => stop.OrderId == order.Id));
@@ -64,7 +62,6 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             var outstanding = Math.Max(ordered - planned, 0);
             var overplanned = Math.Max(planned - ordered, 0);
             var collection = Collection(detail, order);
-            var group = collection;
             var destination = Destination(detail, order);
             var planningWindow = ResolvePlanningWindow(detail, order, collection, destination);
             var planningSection = PlanningSection(planningWindow.PlanningWindow);
@@ -76,12 +73,14 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             var late = firstRunCreated is not null && order.CreatedAtUtc > firstRunCreated.Value.AddMinutes(15);
             if (late) lateCount++;
 
-            var consolidatedLane = $"{group} → {destination}";
-            destinations.Add(consolidatedLane);
-            if (!matrixRows.TryGetValue(planningSection, out var byGroup))
-                matrixRows[planningSection] = byGroup = new Dictionary<string, CellAccumulator>(StringComparer.OrdinalIgnoreCase);
-            if (!byGroup.TryGetValue(consolidatedLane, out var cell))
-                byGroup[consolidatedLane] = cell = new CellAccumulator(planningSection, planningSection, consolidatedLane);
+            // Operational rule: the matrix is collection site down the left and delivery point across the top.
+            // AM/PM/overnight is kept as order metadata for the Orders-to-Plan subheadings only.
+            var group = collection;
+            destinations.Add(destination);
+            if (!matrixRows.TryGetValue(group, out var byDestination))
+                matrixRows[group] = byDestination = new Dictionary<string, CellAccumulator>(StringComparer.OrdinalIgnoreCase);
+            if (!byDestination.TryGetValue(destination, out var cell))
+                byDestination[destination] = cell = new CellAccumulator(planningSection, group, destination);
             cell.Ordered += ordered;
             cell.Planned += planned;
             cell.OrderIds.Add(order.Id);
@@ -104,9 +103,9 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                 outstandingPallets = outstanding,
                 overplannedPallets = overplanned,
                 collection,
-                destination = consolidatedLane,
+                destination,
                 originalDestination = destination,
-                planningGroup = planningSection,
+                planningGroup = group,
                 planningSection,
                 planningWindow = planningWindow.PlanningWindow,
                 suggestedPlanningWindow = planningWindow.PlanningWindow,
@@ -152,6 +151,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         }
 
         var orderedDestinations = destinations.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+        var orderedCollections = matrixRows.Keys.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
         var cells = matrixRows.Values.SelectMany(x => x.Values).Select(cell => new
         {
             planningSection = cell.Section,
@@ -179,7 +179,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                 runs = loads.Count(x => x.Status != LoadStatus.Cancelled)
             },
             planningSections = new[] { "AM Runs", "PM Work" },
-            planningGroups = new[] { "AM Runs", "PM Work" }.Where(section => matrixRows.ContainsKey(section)).ToList(),
+            planningGroups = orderedCollections,
             destinations = orderedDestinations,
             cells,
             orders = orderRows,
@@ -420,17 +420,11 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             var hasExplicit = latest.Keys.Any(key => key.OrderId == order.Id);
             if (hasExplicit)
             {
-                var loadAllocations = latest.Values
-                    .Where(x => x.OrderId == order.Id && x.LoadId == loadId && x.Pallets > 0)
-                    .ToList();
+                var loadAllocations = latest.Values.Where(x => x.OrderId == order.Id && x.LoadId == loadId && x.Pallets > 0).ToList();
                 foreach (var allocation in loadAllocations)
                 {
-                    var line = allocation.SourceLineId is Guid sourceLineId
-                        ? orderSourceLines.SingleOrDefault(x => x.Id == sourceLineId)
-                        : null;
-                    var handling = line is null
-                        ? parentHandling
-                        : PalletHandlingRules.Resolve(order.CustomerCode, line.CollectionSite, line.DeliverySite, line.PalletType);
+                    var line = allocation.SourceLineId is Guid sourceLineId ? orderSourceLines.SingleOrDefault(x => x.Id == sourceLineId) : null;
+                    var handling = line is null ? parentHandling : PalletHandlingRules.Resolve(order.CustomerCode, line.CollectionSite, line.DeliverySite, line.PalletType);
                     AddCapacityUnits(handling, allocation.Pallets, ref standard, ref euro, ref unknown, ref trolleys);
                 }
                 continue;
@@ -445,10 +439,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
                     AddCapacityUnits(handling, Math.Max(line.Pallets ?? 0, 0), ref standard, ref euro, ref unknown, ref trolleys);
                 }
             }
-            else
-            {
-                AddCapacityUnits(parentHandling, EffectiveOrderedPallets(order, detail), ref standard, ref euro, ref unknown, ref trolleys);
-            }
+            else AddCapacityUnits(parentHandling, EffectiveOrderedPallets(order, detail), ref standard, ref euro, ref unknown, ref trolleys);
         }
 
         decimal standardCapacity = PalletCapacityCalculator.DefaultStandardCapacity;
@@ -464,14 +455,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
             catch (Exception ex) when (SchemaUnavailable(ex)) { db.ChangeTracker.Clear(); }
         }
 
-        var capacity = PalletCapacityCalculator.Calculate(
-            standard,
-            euro,
-            unknown,
-            standardCapacity,
-            euroCapacity,
-            trolleys,
-            PalletCapacityCalculator.DefaultTrolleyCapacity);
+        var capacity = PalletCapacityCalculator.Calculate(standard, euro, unknown, standardCapacity, euroCapacity, trolleys, PalletCapacityCalculator.DefaultTrolleyCapacity);
         var capacityLabel = trolleys > 0
             ? $"Standard/Euro/Trolley · {capacity.Status} · {capacity.UtilisationPercent:0.0}% · trolley {capacity.TrolleyPositionsUsed:0.##}/{capacity.TrolleyCapacity:0.##}"
             : $"Standard/Euro · {capacity.Status} · {capacity.UtilisationPercent:0.0}%";
@@ -498,23 +482,10 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         return capacity;
     }
 
-    private static void AddCapacityUnits(
-        PalletHandlingResult handling,
-        int quantity,
-        ref decimal standard,
-        ref decimal euro,
-        ref decimal unknown,
-        ref decimal trolleys)
+    private static void AddCapacityUnits(PalletHandlingResult handling, int quantity, ref decimal standard, ref decimal euro, ref decimal unknown, ref decimal trolleys)
     {
         if (quantity <= 0) return;
-        if (string.Equals(handling.LoadUnitType, "Trolley", StringComparison.OrdinalIgnoreCase))
-        {
-            trolleys += quantity;
-            return;
-        }
-
-        // Trays and crates retain their own operational colour in Pallet Control but do not consume
-        // the pallet/trolley capacity ratio until SLH defines a trailer footprint rule for them.
+        if (string.Equals(handling.LoadUnitType, "Trolley", StringComparison.OrdinalIgnoreCase)) { trolleys += quantity; return; }
         if (!handling.IsPallet) return;
         switch (handling.PalletType)
         {
@@ -526,8 +497,6 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
 
     private static int EffectiveOrderedPallets(TransportOrder order, OrderDetail? detail)
     {
-        // A register-backed order amended in Manage Jobs updates its audited staged payload rather than
-        // an older duplicate TransportOrders row. In that case the amended payload must be authoritative.
         var value = detail?.Amended == true ? detail.Pallets ?? order.Pallets : order.Pallets ?? detail?.Pallets;
         return Math.Max(value ?? 0, 0);
     }
@@ -538,22 +507,11 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         {
             var window = CanonicalPlanningWindow(detail.PlanningWindow);
             var runsOvernight = detail.RunsOvernight ?? (order.DeliveryDate is DateOnly delivery && delivery > order.CollectionDate);
-            var routeType = !string.IsNullOrWhiteSpace(detail.SuggestedRouteType)
-                ? detail.SuggestedRouteType!
-                : window == "PM" && runsOvernight ? "PM Overnight" : window;
+            var routeType = !string.IsNullOrWhiteSpace(detail.SuggestedRouteType) ? detail.SuggestedRouteType! : window == "PM" && runsOvernight ? "PM Overnight" : window;
             return new PlanningWindowClassification(window, runsOvernight, routeType, "High", detail.PlanningWindowReason ?? "Planning window supplied by staged order", false);
         }
 
-        var payload = JsonSerializer.SerializeToElement(new
-        {
-            customerCode = order.CustomerCode,
-            collectionDate = order.CollectionDate.ToString("yyyy-MM-dd"),
-            deliveryDate = order.DeliveryDate?.ToString("yyyy-MM-dd"),
-            sellerName = collection,
-            stallNumber = destination,
-            driverInstructions = order.DriverInstructions,
-            marketName = order.MarketName
-        }, JsonOptions);
+        var payload = JsonSerializer.SerializeToElement(new { customerCode = order.CustomerCode, collectionDate = order.CollectionDate.ToString("yyyy-MM-dd"), deliveryDate = order.DeliveryDate?.ToString("yyyy-MM-dd"), sellerName = collection, stallNumber = destination, driverInstructions = order.DriverInstructions, marketName = order.MarketName }, JsonOptions);
         return OrderPlanningWindowClassifier.Classify(payload);
     }
 
@@ -572,17 +530,6 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         return "AM";
     }
 
-    private static string PlanningGroup(OrderDetail? detail, TransportOrder order)
-    {
-        if (!string.IsNullOrWhiteSpace(detail?.Group)) return detail.Group!;
-        var collection = Collection(detail, order);
-        var temperature = detail?.Temperature;
-        if (string.IsNullOrWhiteSpace(temperature) || collection.Contains("°", StringComparison.OrdinalIgnoreCase) || collection.Contains("temp", StringComparison.OrdinalIgnoreCase)) return collection;
-        var clean = temperature.Trim().Replace("degrees", "°", StringComparison.OrdinalIgnoreCase);
-        if (!clean.Contains("°") && decimal.TryParse(new string(clean.Where(c => char.IsDigit(c) || c is '-' or '.').ToArray()), out var number)) clean = $"{number:0.#}°C";
-        return $"{collection} ({clean})";
-    }
-
     private static string Collection(OrderDetail? detail, TransportOrder order) =>
         !string.IsNullOrWhiteSpace(detail?.Collection) ? detail.Collection! : !string.IsNullOrWhiteSpace(order.SellerName) ? order.SellerName! : "Collection not mapped";
 
@@ -592,15 +539,6 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         if (!string.IsNullOrWhiteSpace(order.StallNumber)) return order.StallNumber!;
         var tagged = Tagged(order.DriverInstructions, "Depot") ?? Tagged(order.DriverInstructions, "Delivery site") ?? Tagged(order.DriverInstructions, "Destination");
         return string.IsNullOrWhiteSpace(tagged) ? "Destination not mapped" : tagged;
-    }
-
-    private static string? NormalisePalletType(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return null;
-        var clean = value.Trim();
-        if (clean.Contains("euro", StringComparison.OrdinalIgnoreCase)) return "Euro";
-        if (clean.Contains("std", StringComparison.OrdinalIgnoreCase) || clean.Contains("standard", StringComparison.OrdinalIgnoreCase)) return "Standard";
-        return clean;
     }
 
     private static string? Tagged(string? notes, string label)
@@ -630,6 +568,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
     private static bool SchemaUnavailable(Exception ex) => ex.GetBaseException().Message.Contains("Invalid object name", StringComparison.OrdinalIgnoreCase) || ex.GetBaseException().Message.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase);
 
     private sealed record OrderDetail(string Reference, string? Collection, string? Destination, string? Group, string? Temperature, string? PalletType, int? Pallets, string? Source, DateTimeOffset UpdatedAtUtc, bool Amended, string? PlanningWindow, string? SuggestedRouteType, string? PlanningWindowReason, bool? RunsOvernight);
+
     private async Task<Dictionary<Guid, List<OrderSourceLine>>> ReadCurrentSourceLines(IReadOnlyCollection<TransportOrder> orders, CancellationToken ct)
     {
         var movementByOrder = orders.Where(x => x.SourceMovementId is not null).ToDictionary(x => x.SourceMovementId!.Value, x => x.Id);
@@ -637,10 +576,7 @@ public sealed class PalletPlanningControlController(TmsDbContext db, ILogger<Pal
         try
         {
             var movements = await db.OrderMovements.AsNoTracking().Where(x => movementByOrder.Keys.Contains(x.Id) && x.CurrentRevisionId != null).ToListAsync(ct);
-            var revisionToOrder = movements
-                .Where(x => x.CurrentRevisionId is not null && movementByOrder.ContainsKey(x.Id))
-                .GroupBy(x => x.CurrentRevisionId!.Value)
-                .ToDictionary(group => group.Key, group => movementByOrder[group.OrderByDescending(x => x.UpdatedAtUtc).First().Id]);
+            var revisionToOrder = movements.Where(x => x.CurrentRevisionId is not null && movementByOrder.ContainsKey(x.Id)).GroupBy(x => x.CurrentRevisionId!.Value).ToDictionary(group => group.Key, group => movementByOrder[group.OrderByDescending(x => x.UpdatedAtUtc).First().Id]);
             if (revisionToOrder.Count == 0) return [];
             var lines = await db.OrderSourceLines.AsNoTracking().Where(x => revisionToOrder.Keys.Contains(x.RevisionId)).ToListAsync(ct);
             return lines.GroupBy(x => revisionToOrder[x.RevisionId]).ToDictionary(x => x.Key, x => x.OrderBy(line => line.SourceRowKey).ToList());
