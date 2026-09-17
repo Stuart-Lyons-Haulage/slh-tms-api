@@ -22,6 +22,19 @@ def _walk(value):
             yield from _walk(child)
 
 
+def _find_action(actions, name):
+    if name in actions:
+        return actions[name]
+    for node in actions.values():
+        if isinstance(node, dict):
+            nested = node.get("actions")
+            if isinstance(nested, dict):
+                found = _find_action(nested, name)
+                if found is not None:
+                    return found
+    return None
+
+
 def validate(workflow):
     errors = []
     properties = workflow.get("properties", {})
@@ -29,16 +42,23 @@ def validate(workflow):
     actions = definition.get("actions", {})
     triggers = definition.get("triggers", {})
 
-    if "When_New_Email_Arrives_Info_Shared_Mailbox" not in triggers:
+    trigger = triggers.get("When_New_Email_Arrives_Info_Shared_Mailbox")
+    if not isinstance(trigger, dict):
         errors.append("shared-mailbox trigger is missing")
-    trigger = triggers.get("When_New_Email_Arrives_Info_Shared_Mailbox", {})
+        trigger = {}
+
     trigger_parameters = trigger.get("inputs", {}).get("parameters", {})
     if "hasAttachments" in trigger_parameters:
         errors.append("shared-mailbox trigger must not filter by attachment presence")
-
-    trigger_conditions = json.dumps(trigger.get("conditions", []), separators=(",", ":")).lower()
-    if not trigger_conditions or "@lyonshaulage.com" not in trigger_conditions or "load plan" not in trigger_conditions:
-        errors.append("shared-mailbox trigger must ignore internal outbound Lyons load-plan emails before TMS intake")
+    if trigger.get("conditions"):
+        errors.append("shared-mailbox trigger must not filter sender, subject or order type; every inbox email must reach TMS intake")
+    if trigger_parameters.get("mailboxAddress") not in (
+        "@parameters('SLH_InfoMailboxUPN')",
+        "info@lyonshaulage.com",
+    ):
+        errors.append("shared-mailbox trigger must target the Info mailbox")
+    if trigger_parameters.get("includeAttachments") is not True:
+        errors.append("shared-mailbox trigger must include attachment metadata")
 
     serialized = json.dumps(workflow, separators=(",", ":"))
     if "/api/v1/orders" in serialized or '"operationId":"CreateOrder"' in serialized:
@@ -49,27 +69,33 @@ def validate(workflow):
     if "IntakeInfoMailboxEmail" not in serialized:
         errors.append("Pending Review intake operation IntakeInfoMailboxEmail is missing")
 
-    submit = actions.get("Scope_Submit_To_TMS", {}).get("actions", {}).get("POST_To_TMS_Staging", {})
+    submit = _find_action(actions, "POST_To_TMS_Staging") or {}
     body = submit.get("inputs", {}).get("body", {})
     missing = sorted(REQUIRED_REQUEST_FIELDS - set(body))
     if missing:
         errors.append("request evidence fields missing: " + ", ".join(missing))
 
-    # Intake must still stage the source email when Outlook cannot list/fetch an attachment.
-    # Scope_Receive_Source records explicit contentUnavailable metadata for those failures, so
-    # submitting after Succeeded/Failed/TimedOut preserves the body and evidence for planner review
-    # instead of silently dropping the entire order email.
-    submit_scope = actions.get("Scope_Submit_To_TMS", {})
-    receive_run_after = set(submit_scope.get("runAfter", {}).get("Scope_Receive_Source", []))
-    if receive_run_after != {"Succeeded", "Failed", "TimedOut"}:
-        errors.append("TMS submission must stage source email after receive success/failure/timeout so attachment failures are retained for review")
+    if body.get("attachments") != "@variables('varAttachments')":
+        errors.append("TMS staging request must submit the varAttachments array containing retained attachment copies")
+    if "bodyPreview" not in str(body.get("bodyText", "")):
+        errors.append("bodyText must come from Outlook bodyPreview")
+    if "body/body" not in str(body.get("bodyHtml", "")):
+        errors.append("bodyHtml must contain the full Outlook body")
+    body_format = str(body.get("bodyFormat", ""))
+    if "isHtml" not in body_format or "'html'" not in body_format or "'text'" not in body_format:
+        errors.append("bodyFormat must convert Outlook isHtml to the API string values html/text")
 
-    receive_actions = actions.get("Scope_Receive_Source", {}).get("actions", {})
-    attachment_loop = receive_actions.get("For_Each_Source_Attachment", {})
+    get_attachment_list = _find_action(actions, "Get_Attachment_List") or {}
+    if get_attachment_list.get("inputs", {}).get("host", {}).get("operationId") != "GetAttachments_V2":
+        errors.append("Get_Attachment_List must call Outlook GetAttachments_V2")
+
+    attachment_loop = _find_action(actions, "For_Each_Source_Attachment") or {}
+    if "Get_Attachment_List" not in str(attachment_loop.get("foreach", "")):
+        errors.append("attachment loop must enumerate GetAttachments_V2 results")
+
     attachment_actions = attachment_loop.get("actions", {})
     get_attachment = attachment_actions.get("Get_Attachment_Content", {})
-    get_attachment_operation = get_attachment.get("inputs", {}).get("host", {}).get("operationId")
-    if get_attachment_operation != "GetAttachment_V2":
+    if get_attachment.get("inputs", {}).get("host", {}).get("operationId") != "GetAttachment_V2":
         errors.append("Get_Attachment_Content must call Outlook GetAttachment_V2")
 
     append_attachment = attachment_actions.get("Append_Original_Attachment", {})
@@ -78,8 +104,18 @@ def validate(workflow):
     if "Get_Attachment_Content" not in content_expression or "contentBytes" not in content_expression:
         errors.append("source attachment bytes must be mapped from Get_Attachment_Content body/contentBytes into contentBase64")
 
-    if body.get("attachments") != "@variables('varAttachments')":
-        errors.append("TMS staging request must submit the varAttachments array containing retained attachment copies")
+    failed_metadata = attachment_actions.get("Append_Failed_Attachment_Metadata", {}).get("inputs", {}).get("value", {})
+    if failed_metadata.get("contentUnavailable") is not True:
+        errors.append("failed attachment fetches must retain contentUnavailable metadata")
+
+    list_failure = _find_action(actions, "Record_Attachment_List_Failure") or {}
+    if list_failure.get("inputs", {}).get("value", {}).get("contentUnavailable") is not True:
+        errors.append("attachment-list failure must still be represented in the intake evidence")
+
+    submit_run_after = submit.get("runAfter", {})
+    submit_after_loop = set(submit_run_after.get("For_Each_Source_Attachment", []))
+    if submit_after_loop and not {"Succeeded", "Failed", "TimedOut", "Skipped"}.issubset(submit_after_loop):
+        errors.append("TMS submission must continue after attachment-loop success/failure/timeout/skipped")
 
     for node in _walk(actions):
         if not isinstance(node, dict) or "runtimeConfiguration" not in node:
@@ -109,6 +145,11 @@ def validate(workflow):
     connection_names = set(properties.get("connectionReferences", {}))
     if connection_names != {"shared_office365", "shared_slhtms"}:
         errors.append("flow must use only the Outlook and existing TMS connection references")
+
+    obsolete_placeholder = "Placeholder only - replace with SLH TMS API"
+    if obsolete_placeholder.lower() in serialized.lower():
+        errors.append("obsolete placeholder Compose action must not remain in the production flow")
+
     return errors
 
 
