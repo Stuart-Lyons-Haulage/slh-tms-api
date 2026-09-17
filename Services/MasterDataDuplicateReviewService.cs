@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
@@ -148,6 +150,7 @@ public static class MasterDataDuplicateReviewService
             var driverName = Normalise(row.DriverTextName);
             var address = NormaliseAddress(row.CollectionAddress);
             var postcode = ExtractPostcode(row.CollectionAddress);
+            var namesAndAliases = SiteIdentityTokens(row).ToList();
 
             if (code.Length >= 2) Add(groups, $"site-code:{code}", row);
             if (name.Length >= 5 && !string.IsNullOrWhiteSpace(postcode)) Add(groups, $"site-name-postcode:{name}|{postcode}", row);
@@ -155,6 +158,14 @@ public static class MasterDataDuplicateReviewService
             if (name.Length >= 5 && address.Length >= 8) Add(groups, $"site-name-address:{name}|{address}", row);
             if (address.Length >= 12 && !string.IsNullOrWhiteSpace(postcode)) Add(groups, $"site-address-postcode:{address}|{postcode}", row);
             if (name.Length >= 8 && string.IsNullOrWhiteSpace(postcode) && address.Length == 0) Add(groups, $"site-name-only:{name}", row);
+
+            foreach (var token in namesAndAliases)
+            {
+                if (token.Length < 5) continue;
+                if (!string.IsNullOrWhiteSpace(postcode)) Add(groups, $"site-token-postcode:{token}|{postcode}", row);
+                if (address.Length >= 8) Add(groups, $"site-token-address:{token}|{address}", row);
+                if (string.IsNullOrWhiteSpace(postcode) && address.Length == 0 && token.Length >= 8) Add(groups, $"site-token-only:{token}", row);
+            }
         }
 
         return DistinctGroups(groups.Values, row => row.Id)
@@ -238,13 +249,14 @@ public static class MasterDataDuplicateReviewService
 
         foreach (var row in rows)
         {
-            var market = Normalise(row.Market);
-            var name = Normalise(row.Name);
-            var stand = Normalise(row.StandOrLocation);
-            var sender = Normalise(row.Sender);
+            var market = Normalise(CanonicalMarket(row.Market));
+            var name = Normalise(Clean(row.Name));
+            var stand = Normalise(Clean(row.StandOrLocation) ?? InferStand(row.Name));
+            var sender = Normalise(Clean(row.Sender));
 
             if (market.Length > 0 && name.Length > 0) Add(groups, $"market-name-stand:{market}|{name}|{stand}", row);
             if (market.Length > 0 && sender.Length > 0) Add(groups, $"market-sender:{market}|{sender}", row);
+            if (market.Length > 0 && name.Length > 0 && sender.Length > 0) Add(groups, $"market-name-sender:{market}|{name}|{sender}", row);
         }
 
         return DistinctGroups(groups.Values, row => row.Id)
@@ -443,8 +455,20 @@ public static class MasterDataDuplicateReviewService
         var duplicates = await db.MarketContacts.Where(row => request.DuplicateIds.Contains(row.Id) && row.Id != canonical.Id && row.Active).ToListAsync(ct);
         if (duplicates.Count == 0) return new MasterDataDuplicateMergeResult(0, 1, ["No active market duplicates were found to merge."]);
 
+        canonical.Market = CanonicalMarket(canonical.Market);
+        canonical.Name = Clean(canonical.Name) ?? canonical.Name;
+        canonical.StandOrLocation = Clean(canonical.StandOrLocation) ?? InferStand(canonical.Name);
+        canonical.Salesman = Clean(canonical.Salesman);
+        canonical.Sender = Clean(canonical.Sender);
+
         foreach (var duplicate in duplicates)
         {
+            duplicate.Market = CanonicalMarket(duplicate.Market);
+            duplicate.Name = Clean(duplicate.Name) ?? duplicate.Name;
+            duplicate.StandOrLocation = Clean(duplicate.StandOrLocation) ?? InferStand(duplicate.Name);
+            duplicate.Salesman = Clean(duplicate.Salesman);
+            duplicate.Sender = Clean(duplicate.Sender);
+
             canonical.StandOrLocation = Preserve(canonical.StandOrLocation, duplicate.StandOrLocation);
             canonical.Salesman = Preserve(canonical.Salesman, duplicate.Salesman);
             canonical.Sender = Preserve(canonical.Sender, duplicate.Sender);
@@ -457,7 +481,7 @@ public static class MasterDataDuplicateReviewService
             EntityId = canonical.Id,
             Action = "DuplicateMerge",
             ChangedBy = actor,
-            ChangesJson = JsonSerializer.Serialize(new { canonical = canonical.Name, merged = duplicates.Select(row => row.Name), request.Note })
+            ChangesJson = JsonSerializer.Serialize(new { canonical = canonical.Name, market = canonical.Market, stand = canonical.StandOrLocation, merged = duplicates.Select(row => row.Name), request.Note })
         });
         await db.SaveChangesAsync(ct);
 
@@ -470,18 +494,16 @@ public static class MasterDataDuplicateReviewService
         var duplicates = group.Where(row => row.Id != canonical.Id).ToList();
         var postcode = ExtractPostcode(canonical.CollectionAddress) ?? duplicates.Select(row => ExtractPostcode(row.CollectionAddress)).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
         var sameExternalCode = duplicates.Any(row => Normalise(row.ExternalCode) == Normalise(canonical.ExternalCode));
-        var sameName = duplicates.All(row =>
-            Normalise(row.Name) == Normalise(canonical.Name) ||
-            Normalise(row.DriverTextName) == Normalise(canonical.Name) ||
-            Normalise(row.Name) == Normalise(canonical.DriverTextName));
+        var canonicalTokens = SiteIdentityTokens(canonical).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var sameIdentity = duplicates.All(row => SiteIdentityTokens(row).Any(canonicalTokens.Contains));
         var samePostcode = !string.IsNullOrWhiteSpace(postcode) && duplicates.All(row => ExtractPostcode(row.CollectionAddress) == postcode);
-        var confidence = sameExternalCode && sameName ? 99 : sameExternalCode ? 94 : sameName && samePostcode ? 98 : sameName ? 86 : samePostcode ? 82 : 70;
+        var confidence = sameExternalCode && sameIdentity ? 99 : sameIdentity && samePostcode ? 98 : sameExternalCode ? 94 : sameIdentity ? 88 : samePostcode ? 82 : 70;
 
         return new MasterDataDuplicateCandidate(
             CandidateId($"site:{canonical.Id}:{string.Join(',', duplicates.Select(row => row.Id))}"),
             "sites",
             confidence,
-            sameExternalCode ? "Same site external code; merge preserves address/routing data." : samePostcode ? "Same normalised site name/address and postcode." : "Likely duplicate site name/address. Review before merging.",
+            sameExternalCode ? "Same site external code; merge preserves address/routing data." : sameIdentity && samePostcode ? "Same site name/alias and postcode." : sameIdentity ? "Same site name/alias; review address before merging." : "Likely duplicate site name/address. Review before merging.",
             confidence >= 95,
             SiteRecord(canonical),
             duplicates.Select(SiteRecord).ToList(),
@@ -541,16 +563,22 @@ public static class MasterDataDuplicateReviewService
 
     private static MasterDataDuplicateCandidate BuildMarketCandidate(IReadOnlyList<MarketContact> group)
     {
-        var canonical = group.OrderByDescending(row => new[] { row.StandOrLocation, row.Salesman, row.Sender }.Count(value => !string.IsNullOrWhiteSpace(value))).ThenBy(row => row.Name).First();
+        var canonical = group
+            .OrderByDescending(row => string.Equals(row.Market, CanonicalMarket(row.Market), StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(row => new[] { row.StandOrLocation, row.Salesman, row.Sender }.Count(value => !string.IsNullOrWhiteSpace(value)))
+            .ThenBy(row => row.Name)
+            .First();
         var duplicates = group.Where(row => row.Id != canonical.Id).ToList();
         var sameSender = !string.IsNullOrWhiteSpace(canonical.Sender) && duplicates.Any(row => Normalise(row.Sender) == Normalise(canonical.Sender));
+        var sameStand = duplicates.All(row => Normalise(Clean(row.StandOrLocation) ?? InferStand(row.Name)) == Normalise(Clean(canonical.StandOrLocation) ?? InferStand(canonical.Name)));
+        var confidence = sameSender ? 96 : sameStand ? 95 : 92;
 
         return new MasterDataDuplicateCandidate(
             CandidateId($"market:{canonical.Id}:{string.Join(',', duplicates.Select(row => row.Id))}"),
             "markets",
-            sameSender ? 96 : 94,
-            sameSender ? "Same market sender/contact identity." : "Same market, customer/sender and stand/location.",
-            sameSender,
+            confidence,
+            sameSender ? "Same canonical market and sender/contact identity." : "Same canonical market, customer/sender and stand/location.",
+            confidence >= 95,
             MarketRecord(canonical),
             duplicates.Select(MarketRecord).ToList(),
             ["standOrLocation", "salesman", "sender"]);
@@ -609,13 +637,48 @@ public static class MasterDataDuplicateReviewService
     private static MasterDataDuplicateRecord DriverRecord(Driver row) => new(row.Id, row.EmployeeNumber, row.DisplayName, null, null, row.Active, new Dictionary<string, object?> { ["tachoMasterDriverId"] = row.TachoMasterDriverId, ["mobileNumber"] = row.MobileNumber, ["driverType"] = row.DriverType, ["driverGroup"] = row.DriverGroup, ["skills"] = row.Skills });
     private static MasterDataDuplicateRecord VehicleRecord(Vehicle row) => new(row.Id, row.Registration, row.Registration, null, null, row.Active, new Dictionary<string, object?> { ["fleetNumber"] = row.FleetNumber, ["abbreviation"] = row.Abbreviation, ["fuelProvider"] = row.FuelProvider, ["cabMobile"] = row.CabMobile, ["fuelPin"] = row.FuelPin, ["shellCard"] = row.ShellCard, ["bpRedCard"] = row.BpRedCard, ["bpPlainCard"] = row.BpPlainCard, ["fleetioId"] = row.FleetioId });
     private static MasterDataDuplicateRecord TrailerRecord(Trailer row) => new(row.Id, row.TrailerNumber, row.TrailerNumber, null, null, row.Active, new Dictionary<string, object?> { ["type"] = row.Type, ["standardCapacity"] = row.StandardCapacity, ["euroCapacity"] = row.EuroCapacity });
-    private static MasterDataDuplicateRecord MarketRecord(MarketContact row) => new(row.Id, row.MarketKey ?? row.Id.ToString("N"), $"{row.Market} / {row.Name}", null, null, row.Active, new Dictionary<string, object?> { ["market"] = row.Market, ["standOrLocation"] = row.StandOrLocation, ["salesman"] = row.Salesman, ["sender"] = row.Sender });
+    private static MasterDataDuplicateRecord MarketRecord(MarketContact row) => new(row.Id, row.MarketKey ?? row.Id.ToString("N"), $"{CanonicalMarket(row.Market)} / {Clean(row.Name) ?? row.Name}", null, null, row.Active, new Dictionary<string, object?> { ["market"] = CanonicalMarket(row.Market), ["standOrLocation"] = Clean(row.StandOrLocation) ?? InferStand(row.Name), ["salesman"] = Clean(row.Salesman), ["sender"] = Clean(row.Sender) });
     private static int SiteCompleteness(Site row) => new object?[] { row.CollectionAddress, row.MapLink, row.Latitude, row.Longitude, row.CollectionInstructions, row.DriverTextName, row.Aliases, row.OperationalRegion, row.CustomerCode }.Count(value => value is not null && !string.IsNullOrWhiteSpace(value.ToString()));
-    private static string MergeAliases(Site canonical, IReadOnlyCollection<Site> duplicates) => string.Join(", ", new[] { canonical.Name, canonical.DriverTextName, canonical.Aliases }.Concat(duplicates.SelectMany(row => new[] { row.Name, row.DriverTextName, row.Aliases, row.ExternalCode })).Where(value => !string.IsNullOrWhiteSpace(value)).SelectMany(value => value!.Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)).Distinct(StringComparer.OrdinalIgnoreCase));
-    private static string CandidateId(string value) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value))).ToLowerInvariant()[..16];
+    private static string MergeAliases(Site canonical, IReadOnlyCollection<Site> duplicates) => string.Join(", ", new[] { canonical.Name, canonical.DriverTextName, canonical.Aliases }.Concat(duplicates.SelectMany(row => new[] { row.Name, row.DriverTextName, row.Aliases, row.ExternalCode })).Where(value => !string.IsNullOrWhiteSpace(value)).SelectMany(SplitAliases).Distinct(StringComparer.OrdinalIgnoreCase));
+    private static string CandidateId(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant()[..16];
     private static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : Regex.Replace(value.Trim(), @"\s+", " ");
     private static string Normalise(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
     private static string NormaliseRegistration(string? value) => new((value ?? string.Empty).Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+
+    private static IEnumerable<string> SiteIdentityTokens(Site site) =>
+        new[] { site.Name, site.DriverTextName, site.ExternalCode }
+            .Concat(SplitAliases(site.Aliases))
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(Normalise)
+            .Where(value => value.Length >= 2)
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+
+    private static IEnumerable<string> SplitAliases(string? value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? []
+            : value.Split(new[] { ',', ';', '|' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private static string CanonicalMarket(string? value)
+    {
+        var clean = Clean(value) ?? "General";
+        var normal = Normalise(clean);
+        if (normal.Contains("covent")) return "Covent";
+        if (normal.Contains("spital") || normal.Contains("spit")) return "Spitalfields";
+        if (normal.Contains("western")) return "Western";
+        if (normal.Contains("sales")) return "Sales";
+        if (normal.Contains("sender")) return "Sender";
+        return clean;
+    }
+
+    private static string? InferStand(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        var bracket = Regex.Match(name, @"\(([^)]+)\)\s*$", RegexOptions.IgnoreCase);
+        if (bracket.Success) return bracket.Groups[1].Value.Trim();
+        var labelled = Regex.Match(name, @"\b(?:stall|stand|unit|units)\s*#?\s*([a-z]?\d{1,4}[a-z]?(?:\s*(?:-|–|—|&|and)\s*[a-z]?\d{1,4}[a-z]?)?)\s*$", RegexOptions.IgnoreCase);
+        return labelled.Success ? labelled.Groups[1].Value.Trim() : null;
+    }
+
     private static string NormaliseTrailerNumber(string? value)
     {
         var normalised = NormaliseRegistration(value);
@@ -623,7 +686,9 @@ public static class MasterDataDuplicateReviewService
         normalised = normalised.TrimStart('0');
         return string.IsNullOrWhiteSpace(normalised) ? NormaliseRegistration(value) : normalised;
     }
+
     private static string NormaliseAddress(string? value) => Normalise(Regex.Replace(value ?? string.Empty, @"\b(road|rd|street|st|avenue|ave|lane|ln|drive|dr|unit|industrial|estate)\b", string.Empty, RegexOptions.IgnoreCase));
+
     private static string? ExtractPostcode(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return null;
