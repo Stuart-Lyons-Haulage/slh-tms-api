@@ -27,7 +27,6 @@ public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, I
     public async Task<IReadOnlyList<SageHrEmployee>> GetActiveEmployeesAsync(CancellationToken cancellationToken = default)
     {
         EnsureConfigured();
-        ConfigureClient();
         var employees = new List<SageHrEmployee>();
         for (var page = 1; page <= 100; page++)
         {
@@ -55,7 +54,6 @@ public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, I
     public async Task<IReadOnlyList<SageHrOutOfOffice>> GetOutOfOfficeAsync(DateOnly date, CancellationToken cancellationToken = default)
     {
         EnsureConfigured();
-        ConfigureClient();
         using var request = Request(HttpMethod.Get, $"leave-management/out-of-office-today?date={Uri.EscapeDataString(date.ToString("yyyy-MM-dd"))}");
         using var response = await httpClient.SendAsync(request, cancellationToken);
         if (!response.IsSuccessStatusCode)
@@ -77,15 +75,12 @@ public sealed class SageHrClient(HttpClient httpClient, SageHrOptions options, I
             throw new InvalidOperationException("Sage HR runtime settings are incomplete.");
     }
 
-    private void ConfigureClient()
-    {
-        httpClient.BaseAddress = new Uri(NormaliseBaseUrl(options.BaseUrl));
-        httpClient.Timeout = TimeSpan.FromSeconds(30);
-    }
-
     private HttpRequestMessage Request(HttpMethod method, string path)
     {
-        var request = new HttpRequestMessage(method, path);
+        // Do not mutate HttpClient.BaseAddress or Timeout here. This typed client is used by
+        // dashboard/dispatch flows that call employees and leave concurrently; changing HttpClient
+        // properties after the first send throws InvalidOperationException in .NET.
+        var request = new HttpRequestMessage(method, new Uri(new Uri(NormaliseBaseUrl(options.BaseUrl)), path));
         request.Headers.Add("X-Auth-Token", options.ApiKey);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         return request;
