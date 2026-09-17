@@ -13,9 +13,9 @@ namespace Slh.Tms.Api.Services;
 /// Ambiguous/tied matches remain planner review items.
 ///
 /// The matcher is deliberately scoped to the regular retailer formats that are stable
-/// enough for automatic route assistance: Aldi, Morrisons and Waitrose. Other inbound
-/// orders can still be staged from the parser, but legacy / experimental route rules
-/// must not steer those records.
+/// enough for automatic route assistance: Aldi, Morrisons, Waitrose and Costco.
+/// Other inbound orders can still be staged from the parser, but legacy / experimental
+/// route rules must not steer those records.
 /// </summary>
 public static class OrderIntakeRouteRuleMatcher
 {
@@ -23,7 +23,8 @@ public static class OrderIntakeRouteRuleMatcher
     {
         "ALDI",
         "MORRISONS",
-        "WAITROSE"
+        "WAITROSE",
+        "COSTCO"
     };
 
     private static readonly string[] SupportedRetailerNames =
@@ -32,7 +33,8 @@ public static class OrderIntakeRouteRuleMatcher
         "MORRISONS",
         "MORRISON'S",
         "WAITROSE",
-        "WEIGHTROSE"
+        "WEIGHTROSE",
+        "COSTCO"
     ];
 
     public static async Task<EmailIntakeParseResult> ApplyAsync(TmsDbContext db, EmailIntakeParseResult parsed, CancellationToken ct)
@@ -94,15 +96,15 @@ public static class OrderIntakeRouteRuleMatcher
         if (requiresReview)
         {
             warnings.Add(tied
-                ? "More than one supported Aldi/Morrisons/Waitrose SQL route rule matched with the same score; planner review retained."
-                : $"Best supported Aldi/Morrisons/Waitrose SQL route rule confidence was {best.Score}; missing fields were filled only where blank and planner review was retained.");
+                ? "More than one supported Aldi/Morrisons/Waitrose/Costco SQL route rule matched with the same score; planner review retained."
+                : $"Best supported Aldi/Morrisons/Waitrose/Costco SQL route rule confidence was {best.Score}; missing fields were filled only where blank and planner review was retained.");
         }
 
         root["orderIntakeRouteRuleId"] = best.Rule.Id.ToString();
         root["orderIntakeRouteConfidenceScore"] = best.Score;
         root["orderIntakeRouteMatchedDimensions"] = best.MatchedDimensions;
         root["orderIntakeRouteRequiresReview"] = requiresReview;
-        root["orderIntakeRouteScope"] = "Aldi/Morrisons/Waitrose only";
+        root["orderIntakeRouteScope"] = "Aldi/Morrisons/Waitrose/Costco only";
         root["orderIntakeRouteExplanation"] = JsonSerializer.SerializeToNode(best.Explanation);
         root["orderIntakeRouteAlternatives"] = JsonSerializer.SerializeToNode(candidates.Take(3).Select(candidate => new
         {
@@ -170,7 +172,7 @@ public static class OrderIntakeRouteRuleMatcher
     {
         if (IsSupportedValue(customer)) return true;
         if (evidence.Retailers.Any(IsSupportedValue)) return true;
-        if (evidence.DestinationCodes.Any(value => value.StartsWith("ALD", StringComparison.OrdinalIgnoreCase) || value.StartsWith("MOR", StringComparison.OrdinalIgnoreCase))) return true;
+        if (evidence.DestinationCodes.Any(IsSupportedDestinationCode)) return true;
         if (evidence.DestinationNames.Any(IsSupportedValue)) return true;
         return false;
     }
@@ -178,15 +180,19 @@ public static class OrderIntakeRouteRuleMatcher
     private static bool IsSupportedRetailerRule(RouteRule rule)
     {
         if (IsSupportedValue(rule.RetailerCode)) return true;
-        if (!string.IsNullOrWhiteSpace(rule.DestinationCode) &&
-            (rule.DestinationCode.StartsWith("ALD", StringComparison.OrdinalIgnoreCase) ||
-             rule.DestinationCode.StartsWith("MOR", StringComparison.OrdinalIgnoreCase))) return true;
-        if (!string.IsNullOrWhiteSpace(rule.DestinationSiteCode) &&
-            (rule.DestinationSiteCode.StartsWith("ALD", StringComparison.OrdinalIgnoreCase) ||
-             rule.DestinationSiteCode.StartsWith("MOR", StringComparison.OrdinalIgnoreCase))) return true;
+        if (!string.IsNullOrWhiteSpace(rule.DestinationCode) && IsSupportedDestinationCode(rule.DestinationCode)) return true;
+        if (!string.IsNullOrWhiteSpace(rule.DestinationSiteCode) && IsSupportedDestinationCode(rule.DestinationSiteCode)) return true;
         if (IsSupportedValue(rule.DestinationName)) return true;
         return false;
     }
+
+    private static bool IsSupportedDestinationCode(string value) =>
+        value.StartsWith("ALD", StringComparison.OrdinalIgnoreCase) ||
+        value.StartsWith("MOR", StringComparison.OrdinalIgnoreCase) ||
+        value.StartsWith("WR", StringComparison.OrdinalIgnoreCase) ||
+        value.StartsWith("WAI", StringComparison.OrdinalIgnoreCase) ||
+        value.StartsWith("COS", StringComparison.OrdinalIgnoreCase) ||
+        value.StartsWith("CST", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsSupportedValue(string? value)
     {
@@ -317,6 +323,8 @@ public static class OrderIntakeRouteRuleMatcher
             {
                 if (code.StartsWith("ALD", StringComparison.OrdinalIgnoreCase)) retailers.Add("ALDI");
                 if (code.StartsWith("MOR", StringComparison.OrdinalIgnoreCase)) retailers.Add("MORRISONS");
+                if (code.StartsWith("WR", StringComparison.OrdinalIgnoreCase) || code.StartsWith("WAI", StringComparison.OrdinalIgnoreCase)) retailers.Add("WAITROSE");
+                if (code.StartsWith("COS", StringComparison.OrdinalIgnoreCase) || code.StartsWith("CST", StringComparison.OrdinalIgnoreCase)) retailers.Add("COSTCO");
             }
             return new Evidence(
                 Values(root, "collectionSiteCode", "originSiteCode"),
