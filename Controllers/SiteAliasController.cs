@@ -102,7 +102,7 @@ public sealed class SiteAliasController(TmsDbContext db) : ControllerBase
         var profile = new SiteTimingProfileDto(
             SiteId: site.Id,
             ExternalCode: site.ExternalCode,
-            SiteName: site.Name,
+            Name: site.Name,
             Aliases: site.Aliases,
             LatestCollectionTime: cutoffs.Select(item => item.LatestCollectionTime).Concat(routeTimings.Select(item => item.LatestCollectionTime)).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)),
             WallBoardDeadline: cutoffs.Select(item => item.WallBoardDeadline).Concat(routeTimings.Select(item => item.LatestCollectionTime)).FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)),
@@ -214,7 +214,7 @@ public sealed class SiteAliasController(TmsDbContext db) : ControllerBase
         }
     }
 
-    private static IEnumerable<string> BuildSiteTokens(Site site)
+    private static IEnumerable<string?> BuildSiteTokens(Site site)
     {
         yield return site.ExternalCode;
         yield return site.Name;
@@ -223,7 +223,7 @@ public sealed class SiteAliasController(TmsDbContext db) : ControllerBase
         foreach (var alias in SplitAliases(site.Aliases)) yield return alias;
     }
 
-    private static bool MatchesSite(IEnumerable<string> siteTokens, params string?[] values)
+    private static bool MatchesSite(IEnumerable<string?> siteTokens, params string?[] values)
     {
         var tokenSet = siteTokens
             .Select(NormaliseKey)
