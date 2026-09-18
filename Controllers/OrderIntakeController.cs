@@ -299,7 +299,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
         var eligible = parsed.Orders
             .Where(order => IsNwfTransferOrder(order.Payload) ||
-                            IsSimplifiedDestination(order.Payload.GetRawText()) ||
+                            IsSimplifiedDestination(order.Payload) ||
                             (parsed.Orders.Count == 1 && IsSimplifiedDestination(source)))
             .ToList();
 
@@ -312,6 +312,21 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         value.Contains("Waitrose", StringComparison.OrdinalIgnoreCase) ||
         value.Contains("Weightrose", StringComparison.OrdinalIgnoreCase) ||
         value.Contains("Costco", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsSimplifiedDestination(JsonElement payload)
+    {
+        // Deliberately inspect only order-level customer/destination fields. Route
+        // enrichment and source-evidence metadata can mention another retailer and
+        // must never cause an unrelated row in a mixed NWF report to pass the gate.
+        var fields = new[]
+        {
+            "customerCode", "customerName", "marketName", "stallNumber",
+            "depotId", "depotDescription", "deliverySiteName", "destinationName"
+        };
+        return fields.Any(field => TryGetProperty(payload, field, out var value) &&
+                                   value.ValueKind == JsonValueKind.String &&
+                                   IsSimplifiedDestination(value.GetString() ?? string.Empty));
+    }
 
     private static bool IsNwfTransferOrder(JsonElement payload) =>
         string.Equals(ReadText(payload, "customerCode"), "NWF", StringComparison.OrdinalIgnoreCase) &&
