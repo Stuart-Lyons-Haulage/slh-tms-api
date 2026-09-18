@@ -161,10 +161,10 @@ public sealed class OrderLifecycleEndToEndTests : IClassFixture<CustomWebFactory
     private static object MailboxOrder(string messageId, string po, int pallets, DateOnly collectionDate, DateOnly deliveryDate) => new
     {
         messageId, internetMessageId = $"<{messageId}@example.test>", mailbox = "info@lyonshaulage.com",
-        senderAddress = "chris.benning@primafruit.co.uk", senderName = "Chris Benning",
+        senderAddress = "orders@summerberry.co.uk", senderName = "Summer Berry",
         subject = $"HHP WAITROSE DIRECT DEPOT DELIVERY {deliveryDate:dd/MM/yy}",
         receivedAtUtc = new DateTimeOffset(collectionDate.Year, collectionDate.Month, collectionDate.Day, 8, 0, 0, TimeSpan.Zero),
-        bodyText = $"Please collect {pallets} pallets from Hall Hunter today {collectionDate:dd/MM/yyyy}.\n* Leyland {pallets} pallets\nFor Delivery date {deliveryDate:dd/MM/yyyy}.\nPO number: {po}. 174 cases of Berries.",
+        bodyText = $"Please collect {pallets} pallets from Summer Berry today {collectionDate:dd/MM/yyyy}.\n* Leyland {pallets} pallets\nFor Delivery date {deliveryDate:dd/MM/yyyy}.\nPO number: {po}. 174 cases of Berries.",
         webLink = "https://outlook.office.com/mail/e2e"
     };
 

@@ -23,7 +23,7 @@ public sealed class SpecialistMailboxOrderParser
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex GenericPalletRegex = new(
-        @"\b(?<qty>\d{1,3})\s+pallets?\b",
+        @"\b(?<qty>\d{1,3})\s*(?:pallets?|plts?)\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex NumericDateRegex = new(
@@ -46,12 +46,24 @@ public sealed class SpecialistMailboxOrderParser
         @"^(?<from>[A-Z0-9 .&'()/-]{2,100}?)\s+to\s+(?<to>[A-Z0-9 .&'()/-]{2,100}?)\s+transfers?\s+for\s+collections?\s*[-–—:]?\s*(?<date>\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)(?:\s*,\s*(?<ref>\d{5,}))?\s*$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    private static readonly Regex NwfTransferSubjectRegex = new(
+        @"^NWF\s+transfer\s*[-–—:]\s*(?<from>[A-Z0-9 .&'()/-]{2,100}?)\s+to\s+(?<to>[A-Z0-9 .&'()/-]{2,100}?)\s+(?:(?:MON|TUE|WED|THU|FRI|SAT|SUN)(?:DAY)?\s+)?(?<date>\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     private static readonly Regex CoventDropRegex = new(
         @"^(?<name>[^\r\n-][^\r\n]{1,100}?)\s*-\s*(?<qty>\d{1,3})\s+pallets?\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.Multiline);
 
     private static readonly Regex IfcoRowRegex = new(
         @"(?m)^IFCO\s*\|(?<fields>.+)$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex NwfConfirmedCustomerRowRegex = new(
+        @"(?m)^\s*(?<customer>ALDI|MORRISONS|WAITROSE|COSTCO)\s*\|(?<fields>.+)$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex NwfCollectionSplitRegex = new(
+        @"(?<site>Barnham|Merston|Runcton|Selsey|Drayton)\s+(?<qty>\d{1,3})\s*/?\s*(?:plts?|pallets?)\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex WaitroseDirectDepotRegex = new(
@@ -78,6 +90,9 @@ public sealed class SpecialistMailboxOrderParser
 
         var waitroseDirect = ParseWaitroseDirectDepot(request, subject, body);
         if (waitroseDirect is not null) return waitroseDirect;
+
+        var nwfConfirmedCustomer = ParseNwfConfirmedCustomerCollections(request, subject, body);
+        if (nwfConfirmedCustomer is not null) return nwfConfirmedCustomer;
 
         var apsDoleSubway = ParseApsDoleSubway(request, subject, body);
         if (apsDoleSubway is not null) return apsDoleSubway;
@@ -115,7 +130,86 @@ public sealed class SpecialistMailboxOrderParser
         if (routeTransfer.Success)
             return ParseTransfer(request, routeTransfer, body);
 
+        var nwfTransfer = NwfTransferSubjectRegex.Match(subject);
+        if (nwfTransfer.Success)
+            return ParseTransfer(request, nwfTransfer, body);
+
         return null;
+    }
+
+    private static EmailIntakeParseResult? ParseNwfConfirmedCustomerCollections(MailboxEmailIntakeRequest request, string subject, string body)
+    {
+        if (!(request.SenderAddress ?? string.Empty).EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) ||
+            !subject.Contains("confirm", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        var rows = NwfConfirmedCustomerRowRegex.Matches(body);
+        if (rows.Count == 0) return null;
+
+        var received = request.ReceivedAtUtc ?? DateTimeOffset.UtcNow;
+        var orders = new List<ParsedEmailOrder>();
+        var rowNumber = 0;
+
+        foreach (Match row in rows)
+        {
+            rowNumber++;
+            var customer = row.Groups["customer"].Value.Trim().ToUpperInvariant();
+            var fields = row.Groups["fields"].Value.Split('|').Select(CleanField).ToArray();
+            if (fields.Length < 10) continue;
+
+            var transportPo = CleanReference(fields[0]);
+            var collectionDate = ParseFlexibleNumericDate(fields[2], received.Year);
+            var deliveryDate = ParseFlexibleNumericDate(fields[3], received.Year);
+            var destination = fields[5];
+            var collection = fields[8];
+            var totalPallets = int.TryParse(fields[9], NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedTotal) ? parsedTotal : (int?)null;
+            var splitNotes = fields.ElementAtOrDefault(10) ?? string.Empty;
+            if (collectionDate is null || deliveryDate is null || string.IsNullOrWhiteSpace(destination) || string.IsNullOrWhiteSpace(collection) || totalPallets is null)
+                continue;
+
+            var sites = collection.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (sites.Length == 1)
+            {
+                AddNwfConfirmedCustomerOrder(orders, request, rowNumber, customer, transportPo, collectionDate.Value,
+                    deliveryDate.Value, destination, sites[0], totalPallets.Value, []);
+                continue;
+            }
+
+            var splits = NwfCollectionSplitRegex.Matches(splitNotes)
+                .Select(match => (Site: CleanField(match.Groups["site"].Value), Pallets: int.Parse(match.Groups["qty"].Value, CultureInfo.InvariantCulture)))
+                .ToList();
+            var reconciled = splits.Count == sites.Length &&
+                             splits.Sum(item => item.Pallets) == totalPallets.Value &&
+                             sites.All(site => splits.Any(item => item.Site.Equals(site, StringComparison.OrdinalIgnoreCase)));
+            if (!reconciled) continue;
+
+            foreach (var split in splits)
+                AddNwfConfirmedCustomerOrder(orders, request, rowNumber, customer, transportPo, collectionDate.Value,
+                    deliveryDate.Value, destination, split.Site, split.Pallets, []);
+        }
+
+        return orders.Count == 0 ? null : new EmailIntakeParseResult(orders, [], null);
+    }
+
+    private static void AddNwfConfirmedCustomerOrder(
+        ICollection<ParsedEmailOrder> orders,
+        MailboxEmailIntakeRequest request,
+        int rowNumber,
+        string customer,
+        string transportPo,
+        DateOnly collectionDate,
+        DateOnly deliveryDate,
+        string destination,
+        string collection,
+        int pallets,
+        IReadOnlyList<string> warnings)
+    {
+        var customerPo = $"{transportPo}/{collection}";
+        var reference = BuildReference(transportPo, $"{destination}-{collection}");
+        var naturalKey = NaturalKey(request, customer, destination, collectionDate, customerPo);
+        var payload = BasePayload(request, reference, customerPo, customer, collectionDate, deliveryDate, pallets,
+            collection, destination, $"NWF confirmed {customer} collection", null, warnings, "NWF confirmed customer collection table");
+        orders.Add(new ParsedEmailOrder($"nwf-confirmed-{rowNumber}-{SafeToken(collection, 20)}", naturalKey, payload, warnings));
     }
 
     private static EmailIntakeParseResult? ParseWaitroseDirectDepot(MailboxEmailIntakeRequest request, string subject, string body)
@@ -369,7 +463,10 @@ public sealed class SpecialistMailboxOrderParser
         var collection = transfer.Groups["from"].Value.Trim();
         var destination = transfer.Groups["to"].Value.Trim();
         var date = ParseFlexibleNumericDate(transfer.Groups["date"].Value, received.Year) ?? LocalDate(received);
-        var transportRef = transfer.Groups["ref"].Success ? transfer.Groups["ref"].Value.Trim() : StableEmailReference(request.MessageId);
+        var bodyTransferRef = Regex.Match(body, @"\bINTO\d{5,}\b", RegexOptions.IgnoreCase);
+        var transportRef = transfer.Groups["ref"].Success
+            ? transfer.Groups["ref"].Value.Trim()
+            : bodyTransferRef.Success ? bodyTransferRef.Value.ToUpperInvariant() : StableEmailReference(request.MessageId);
         var pallets = FirstPalletQuantity(body);
         var combined = $"{request.Subject}\n{body}";
         var customer = InferTransferCustomer(request, combined, collection, destination);

@@ -133,6 +133,44 @@ public sealed class SpecialistMailboxOrderParserTests
     }
 
     [Fact]
+    public void NwfTransferSubject_ExtractsBarnhamDraytonReferenceAndPlts()
+    {
+        var result = parser.TryParse(new MailboxEmailIntakeRequest(
+            "transfer-nwf-1", null, "info@lyonshaulage.com", "PackagingPlanner@nwfltd.co.uk", "Packaging Planner",
+            "NWF transfer - Barnham to Drayton SUN 20/09", DateTimeOffset.Parse("2026-09-18T07:04:36Z"),
+            "@D_Drayton Logistics - please receive on arrival = INTO000173010\n20/09/2026 | 25FPPCOLTOV2 | V1 | 35,840 | 2plts = All stock", null, null, null));
+
+        var order = Assert.Single(result!.Orders);
+        Assert.Equal("NWF", order.Payload.GetProperty("customerCode").GetString());
+        Assert.Equal("Barnham", order.Payload.GetProperty("sellerName").GetString());
+        Assert.Equal("Drayton", order.Payload.GetProperty("stallNumber").GetString());
+        Assert.Equal("2026-09-20", order.Payload.GetProperty("collectionDate").GetString());
+        Assert.Equal(2, order.Payload.GetProperty("pallets").GetInt32());
+        Assert.Contains("INTO000173010", order.Payload.GetProperty("poNumber").GetString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void NwfConfirmedAldiCollection_SplitsCollectionSitesExactly()
+    {
+        var result = parser.TryParse(new MailboxEmailIntakeRequest(
+            "nwf-aldi-confirmed-1", null, "info@lyonshaulage.com", "MariuszUrbanski@nwfltd.co.uk", "Mariusz Urbanski",
+            "Aldi Bedford - confirmation for 19/09", DateTimeOffset.Parse("2026-09-17T13:23:55Z"),
+            """
+            Please see confirmed ALDI trays collection for 19/09
+            ALDI| PO00505088 | £195.87| 19/09/2026| 20/09/2026| 26| Bedford| 228419235| PO00503669 | Merston / Runcton| 33| Merston 18 plt / Runcton 15/ plt
+            ALDI| PO00505089 | £195.87| 19/09/2026| 20/09/2026| 26| Bedford| 228419486| PO00503677 | Selsey| 33|
+            """, null, null, null));
+
+        Assert.NotNull(result);
+        Assert.Equal(3, result!.Orders.Count);
+        Assert.Equal(66, result.Orders.Sum(order => order.Payload.GetProperty("pallets").GetInt32()));
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("sellerName").GetString() == "Merston" && order.Payload.GetProperty("pallets").GetInt32() == 18);
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("sellerName").GetString() == "Runcton" && order.Payload.GetProperty("pallets").GetInt32() == 15);
+        Assert.Contains(result.Orders, order => order.Payload.GetProperty("sellerName").GetString() == "Selsey" && order.Payload.GetProperty("pallets").GetInt32() == 33);
+        Assert.All(result.Orders, order => Assert.Equal("2026-09-20", order.Payload.GetProperty("deliveryDate").GetString()));
+    }
+
+    [Fact]
     public void IfcoConfirmedCollectionsBody_CreatesCrateTrayCollectionRows()
     {
         var result = parser.TryParse(new MailboxEmailIntakeRequest(

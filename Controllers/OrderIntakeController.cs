@@ -57,24 +57,49 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         if (string.IsNullOrWhiteSpace(request.MessageId))
             return BadRequest(new ErrorResponse("missing_message_id", "Mailbox message ID is required so repeated flow runs remain idempotent.", HttpContext.TraceIdentifier));
 
+        // Always retain the source email before deciding whether it belongs in the
+        // deliberately narrow automatic-order lane. Paused sources remain auditable
+        // and can be replayed later without manufacturing review-queue orders today.
+        await EnsureSourceEmailEvidence(request, ct);
+
+        if (!IsSimplifiedIntakeSource(request))
+            return Ok(new
+            {
+                ignored = true,
+                reason = "Paused by simplified order intake lane; source evidence retained.",
+                staged = 0,
+                existing = 0,
+                superseded = 0,
+                linked = 0,
+                warnings = Array.Empty<string>(),
+                outlookCategory = (string?)null
+            });
+
         var parsed = await ParseEmail(request, ct);
         if (parsed.IgnoredReason is not null)
         {
-            if (ShouldStageMappingException(request, parsed))
-            {
-                await EnsureSourceEmailEvidence(request, ct);
-                return await StageMappingException(request, parsed, ct);
-            }
             var linked = 0;
             if (parsed.IgnoredReason.Contains("Operational request", StringComparison.OrdinalIgnoreCase))
             {
-                await EnsureSourceEmailEvidence(request, ct);
                 linked = await LinkOperationalUpdateToPendingOrders(request, ct);
             }
             return Ok(new { ignored = true, reason = parsed.IgnoredReason, staged = 0, existing = 0, superseded = 0, linked, warnings = parsed.Warnings, outlookCategory = (string?)null });
         }
 
-        await EnsureSourceEmailEvidence(request, ct);
+        parsed = ApplySimplifiedDestinationGate(request, parsed);
+        if (parsed.Orders.Count == 0)
+            return Ok(new
+            {
+                ignored = true,
+                reason = "Parsed source is outside the simplified Aldi/Morrisons/Waitrose/Costco lane; source evidence retained.",
+                staged = 0,
+                existing = 0,
+                superseded = 0,
+                linked = 0,
+                warnings = parsed.Warnings,
+                outlookCategory = (string?)null
+            });
+
         var staged = 0;
         var existing = 0;
         var records = new List<object>();
@@ -234,6 +259,86 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         }
         var aligned = await EmailOrderSiteMasterAlignment.AlignAsync(db, routed, ct);
         return await NwfCrateReferenceLinker.EnrichAsync(db, aligned, request, ct);
+    }
+
+    private static bool IsSimplifiedIntakeSource(MailboxEmailIntakeRequest request)
+    {
+        var sender = request.SenderAddress ?? string.Empty;
+        var source = string.Join("\n", new[]
+        {
+            request.SenderAddress,
+            request.SenderName,
+            request.Subject,
+            request.BodyText,
+            request.BodyHtml,
+            string.Join(" ", (request.Attachments ?? []).Where(item => item.IsInline != true).Select(item => item.Name))
+        }.Where(value => !string.IsNullOrWhiteSpace(value)));
+
+        return sender.EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) ||
+               sender.EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) ||
+               sender.EndsWith("@summerberry.co.uk", StringComparison.OrdinalIgnoreCase) ||
+               IsNwfTransferSource(request) ||
+               source.Contains("Natures Way", StringComparison.OrdinalIgnoreCase) ||
+               source.Contains("Nature's Way", StringComparison.OrdinalIgnoreCase) ||
+               Regex.IsMatch(source, @"\b(?:NWF|NWAY)\b", RegexOptions.IgnoreCase) ||
+               source.Contains("Barfoots", StringComparison.OrdinalIgnoreCase) ||
+               source.Contains("Greenhouse Growers", StringComparison.OrdinalIgnoreCase) ||
+               source.Contains("Greenhouse", StringComparison.OrdinalIgnoreCase) ||
+               source.Contains("Summer Berry", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static EmailIntakeParseResult ApplySimplifiedDestinationGate(MailboxEmailIntakeRequest request, EmailIntakeParseResult parsed)
+    {
+        var source = string.Join("\n", new[]
+        {
+            request.Subject,
+            request.BodyText,
+            request.BodyHtml,
+            string.Join(" ", (request.Attachments ?? []).Where(item => item.IsInline != true).Select(item => item.Name))
+        }.Where(value => !string.IsNullOrWhiteSpace(value)));
+
+        var eligible = parsed.Orders
+            .Where(order => IsNwfTransferOrder(order.Payload) ||
+                            IsSimplifiedDestination(order.Payload) ||
+                            (parsed.Orders.Count == 1 && IsSimplifiedDestination(source)))
+            .ToList();
+
+        return parsed with { Orders = eligible };
+    }
+
+    private static bool IsSimplifiedDestination(string value) =>
+        value.Contains("Aldi", StringComparison.OrdinalIgnoreCase) ||
+        value.Contains("Morrisons", StringComparison.OrdinalIgnoreCase) ||
+        value.Contains("Waitrose", StringComparison.OrdinalIgnoreCase) ||
+        value.Contains("Weightrose", StringComparison.OrdinalIgnoreCase) ||
+        value.Contains("Costco", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsSimplifiedDestination(JsonElement payload)
+    {
+        // Deliberately inspect only order-level customer/destination fields. Route
+        // enrichment and source-evidence metadata can mention another retailer and
+        // must never cause an unrelated row in a mixed NWF report to pass the gate.
+        var fields = new[]
+        {
+            "customerCode", "customerName", "marketName", "stallNumber",
+            "depotId", "depotDescription", "deliverySiteName", "destinationName"
+        };
+        return fields.Any(field => TryGetProperty(payload, field, out var value) &&
+                                   value.ValueKind == JsonValueKind.String &&
+                                   IsSimplifiedDestination(value.GetString() ?? string.Empty));
+    }
+
+    private static bool IsNwfTransferOrder(JsonElement payload) =>
+        string.Equals(ReadText(payload, "customerCode"), "NWF", StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(ReadText(payload, "jobType"), "Collection transfer", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsNwfTransferSource(MailboxEmailIntakeRequest request)
+    {
+        var subject = request.Subject ?? string.Empty;
+        if (!subject.Contains("transfer", StringComparison.OrdinalIgnoreCase)) return false;
+
+        var nwfSites = new[] { "Barnham", "Merston", "Runcton", "Selsey", "Drayton" };
+        return nwfSites.Count(site => subject.Contains(site, StringComparison.OrdinalIgnoreCase)) >= 2;
     }
 
     private static JsonElement AddFastPathMarker(JsonElement payload)
