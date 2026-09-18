@@ -230,3 +230,133 @@ CREATE TABLE [ops].[OrderSourceLinks](
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_ops_OrderSourceLinks_EvidenceId' AND object_id = OBJECT_ID(N'[ops].[OrderSourceLinks]'))
     CREATE INDEX [IX_ops_OrderSourceLinks_EvidenceId] ON [ops].[OrderSourceLinks]([EvidenceId]);
 GO
+
+
+/* V2 Master Data expansion */
+IF COL_LENGTH(N'master.Sites', N'DriverTextName') IS NULL ALTER TABLE [master].[Sites] ADD [DriverTextName] nvarchar(200) NULL;
+IF COL_LENGTH(N'master.Sites', N'FullAddress') IS NULL ALTER TABLE [master].[Sites] ADD [FullAddress] nvarchar(max) NULL;
+IF COL_LENGTH(N'master.Sites', N'MapLink') IS NULL ALTER TABLE [master].[Sites] ADD [MapLink] nvarchar(max) NULL;
+IF COL_LENGTH(N'master.Sites', N'CollectionInstructions') IS NULL ALTER TABLE [master].[Sites] ADD [CollectionInstructions] nvarchar(max) NULL;
+GO
+
+IF COL_LENGTH(N'master.Drivers', N'TachoName') IS NULL ALTER TABLE [master].[Drivers] ADD [TachoName] nvarchar(max) NULL;
+IF COL_LENGTH(N'master.Drivers', N'DriverType') IS NULL ALTER TABLE [master].[Drivers] ADD [DriverType] nvarchar(max) NULL;
+IF COL_LENGTH(N'master.Drivers', N'DriverGroup') IS NULL ALTER TABLE [master].[Drivers] ADD [DriverGroup] nvarchar(max) NULL;
+IF COL_LENGTH(N'master.Drivers', N'Coding') IS NULL ALTER TABLE [master].[Drivers] ADD [Coding] nvarchar(max) NULL;
+IF COL_LENGTH(N'master.Drivers', N'AgencyName') IS NULL ALTER TABLE [master].[Drivers] ADD [AgencyName] nvarchar(max) NULL;
+IF COL_LENGTH(N'master.Drivers', N'NorthEligible') IS NULL ALTER TABLE [master].[Drivers] ADD [NorthEligible] bit NULL;
+IF COL_LENGTH(N'master.Drivers', N'PreloadEligible') IS NULL ALTER TABLE [master].[Drivers] ADD [PreloadEligible] bit NULL;
+IF COL_LENGTH(N'master.Drivers', N'Notes') IS NULL ALTER TABLE [master].[Drivers] ADD [Notes] nvarchar(max) NULL;
+IF COL_LENGTH(N'master.Drivers', N'TachoMasterDriverId') IS NULL ALTER TABLE [master].[Drivers] ADD [TachoMasterDriverId] nvarchar(120) NULL;
+IF COL_LENGTH(N'master.Drivers', N'LicenceExpiry') IS NULL ALTER TABLE [master].[Drivers] ADD [LicenceExpiry] date NULL;
+IF COL_LENGTH(N'master.Drivers', N'LicenceStatus') IS NULL ALTER TABLE [master].[Drivers] ADD [LicenceStatus] nvarchar(max) NULL;
+IF COL_LENGTH(N'master.Drivers', N'LastTachoMasterSync') IS NULL ALTER TABLE [master].[Drivers] ADD [LastTachoMasterSync] datetimeoffset NULL;
+GO
+
+IF COL_LENGTH(N'master.Vehicles', N'Abbreviation') IS NULL ALTER TABLE [master].[Vehicles] ADD [Abbreviation] nvarchar(max) NULL;
+IF COL_LENGTH(N'master.Vehicles', N'Transmission') IS NULL ALTER TABLE [master].[Vehicles] ADD [Transmission] nvarchar(max) NULL;
+IF COL_LENGTH(N'master.Vehicles', N'Dvs') IS NULL ALTER TABLE [master].[Vehicles] ADD [Dvs] nvarchar(max) NULL;
+IF COL_LENGTH(N'master.Vehicles', N'CabMobile') IS NULL ALTER TABLE [master].[Vehicles] ADD [CabMobile] nvarchar(max) NULL;
+IF COL_LENGTH(N'master.Vehicles', N'FuelPin') IS NULL ALTER TABLE [master].[Vehicles] ADD [FuelPin] nvarchar(max) NULL;
+IF COL_LENGTH(N'master.Vehicles', N'ShellCard') IS NULL ALTER TABLE [master].[Vehicles] ADD [ShellCard] nvarchar(max) NULL;
+IF COL_LENGTH(N'master.Vehicles', N'BpRedCard') IS NULL ALTER TABLE [master].[Vehicles] ADD [BpRedCard] nvarchar(max) NULL;
+IF COL_LENGTH(N'master.Vehicles', N'BpPlainCard') IS NULL ALTER TABLE [master].[Vehicles] ADD [BpPlainCard] nvarchar(max) NULL;
+IF COL_LENGTH(N'master.Vehicles', N'Notes') IS NULL ALTER TABLE [master].[Vehicles] ADD [Notes] nvarchar(max) NULL;
+GO
+
+IF OBJECT_ID(N'[master].[CustomerContacts]', N'U') IS NULL
+CREATE TABLE [master].[CustomerContacts](
+    [Id] uniqueidentifier NOT NULL PRIMARY KEY,
+    [Code] nvarchar(80) NOT NULL,
+    [CustomerId] uniqueidentifier NOT NULL,
+    [ContactName] nvarchar(max) NOT NULL,
+    [Role] nvarchar(max) NULL,
+    [Email] nvarchar(max) NULL,
+    [Phone] nvarchar(max) NULL,
+    [Notes] nvarchar(max) NULL,
+    [Active] bit NOT NULL,
+    CONSTRAINT [UX_master_CustomerContacts_Code] UNIQUE ([Code]),
+    CONSTRAINT [FK_master_CustomerContacts_Customers_CustomerId] FOREIGN KEY ([CustomerId]) REFERENCES [master].[Customers]([Id]) ON DELETE CASCADE
+);
+GO
+
+IF OBJECT_ID(N'[master].[MarketContacts]', N'U') IS NULL
+CREATE TABLE [master].[MarketContacts](
+    [Id] uniqueidentifier NOT NULL PRIMARY KEY,
+    [Key] nvarchar(300) NOT NULL,
+    [MarketName] nvarchar(120) NOT NULL,
+    [Name] nvarchar(200) NOT NULL,
+    [StandOrLocation] nvarchar(max) NULL,
+    [Salesman] nvarchar(max) NULL,
+    [Sender] nvarchar(max) NULL,
+    [Active] bit NOT NULL,
+    CONSTRAINT [UX_master_MarketContacts_Key] UNIQUE ([Key])
+);
+GO
+
+IF OBJECT_ID(N'[master].[SiteCutoffs]', N'U') IS NULL
+CREATE TABLE [master].[SiteCutoffs](
+    [Id] uniqueidentifier NOT NULL PRIMARY KEY,
+    [Code] nvarchar(80) NOT NULL,
+    [SiteId] uniqueidentifier NOT NULL,
+    [Plan] nvarchar(max) NULL,
+    [StandardCutoff] time NULL,
+    [ExtendedCutoff] time NULL,
+    [Contact] nvarchar(max) NULL,
+    [Notes] nvarchar(max) NULL,
+    [Temperature] nvarchar(max) NULL,
+    [PalletType] nvarchar(max) NULL,
+    [LastDespatchTime] time NULL,
+    [PlannedCollectFrom] time NULL,
+    [PlannedCollectTo] time NULL,
+    [DepotDeliveryDeadline] time NULL,
+    [Active] bit NOT NULL,
+    CONSTRAINT [UX_master_SiteCutoffs_Code] UNIQUE ([Code]),
+    CONSTRAINT [FK_master_SiteCutoffs_Sites_SiteId] FOREIGN KEY ([SiteId]) REFERENCES [master].[Sites]([Id]) ON DELETE CASCADE
+);
+GO
+
+IF OBJECT_ID(N'[master].[RouteTimings]', N'U') IS NULL
+CREATE TABLE [master].[RouteTimings](
+    [Id] uniqueidentifier NOT NULL PRIMARY KEY,
+    [Key] nvarchar(300) NOT NULL,
+    [Route] nvarchar(250) NOT NULL,
+    [PalletType] nvarchar(max) NULL,
+    [LastDespatchTime] time NULL,
+    [PlannedCollectFrom] time NULL,
+    [PlannedCollectTo] time NULL,
+    [DepotDeliveryDeadline] time NULL,
+    [Active] bit NOT NULL,
+    CONSTRAINT [UX_master_RouteTimings_Key] UNIQUE ([Key])
+);
+GO
+
+IF OBJECT_ID(N'[master].[FuelPrices]', N'U') IS NULL
+CREATE TABLE [master].[FuelPrices](
+    [Id] uniqueidentifier NOT NULL PRIMARY KEY,
+    [Code] nvarchar(80) NOT NULL,
+    [WeekCommencing] date NOT NULL,
+    [Provider] nvarchar(120) NOT NULL,
+    [PricePencePerLitre] decimal(10,4) NOT NULL,
+    [IsPricingMaximum] bit NOT NULL,
+    [Source] nvarchar(max) NULL,
+    [Notes] nvarchar(max) NULL,
+    [Active] bit NOT NULL,
+    CONSTRAINT [UX_master_FuelPrices_Code] UNIQUE ([Code])
+);
+GO
+
+IF OBJECT_ID(N'[master].[SiteAliasCandidates]', N'U') IS NULL
+CREATE TABLE [master].[SiteAliasCandidates](
+    [Id] uniqueidentifier NOT NULL PRIMARY KEY,
+    [Alias] nvarchar(250) NOT NULL,
+    [AliasType] nvarchar(40) NOT NULL,
+    [Source] nvarchar(max) NULL,
+    [SiteId] uniqueidentifier NULL,
+    [Approved] bit NOT NULL,
+    [Active] bit NOT NULL,
+    CONSTRAINT [FK_master_SiteAliasCandidates_Sites_SiteId] FOREIGN KEY ([SiteId]) REFERENCES [master].[Sites]([Id]) ON DELETE SET NULL
+);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_SiteAliasCandidates_Type_Alias' AND object_id = OBJECT_ID(N'[master].[SiteAliasCandidates]'))
+    CREATE UNIQUE INDEX [UX_master_SiteAliasCandidates_Type_Alias] ON [master].[SiteAliasCandidates]([AliasType],[Alias]);
+GO
