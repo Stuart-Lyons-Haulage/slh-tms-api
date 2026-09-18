@@ -99,8 +99,13 @@ IF OBJECT_ID(N'[master].[Trailers]', N'U') IS NULL
 CREATE TABLE [master].[Trailers](
     [Id] uniqueidentifier NOT NULL PRIMARY KEY,
     [TrailerNumber] nvarchar(450) NOT NULL,
+    [Registration] nvarchar(40) NULL,
     [TrailerType] nvarchar(max) NULL,
     [PalletCapacity] int NULL,
+    [EuroPalletCapacity] int NULL,
+    [CurrentLocation] nvarchar(160) NULL,
+    [MotExpiry] date NULL,
+    [Notes] nvarchar(max) NULL,
     [Active] bit NOT NULL,
     CONSTRAINT [UX_master_Trailers_TrailerNumber] UNIQUE ([TrailerNumber])
 );
@@ -383,4 +388,12 @@ CREATE TABLE [master].[MasterDataReviewItems](
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_master_MasterDataReviewItems_Resolved_Category_CreatedAtUtc' AND object_id = OBJECT_ID(N'[master].[MasterDataReviewItems]'))
     CREATE INDEX [IX_master_MasterDataReviewItems_Resolved_Category_CreatedAtUtc]
     ON [master].[MasterDataReviewItems]([Resolved],[Category],[CreatedAtUtc]);
+GO
+
+
+IF COL_LENGTH(N'master.Trailers', N'Registration') IS NULL ALTER TABLE [master].[Trailers] ADD [Registration] nvarchar(40) NULL;
+IF COL_LENGTH(N'master.Trailers', N'EuroPalletCapacity') IS NULL ALTER TABLE [master].[Trailers] ADD [EuroPalletCapacity] int NULL;
+IF COL_LENGTH(N'master.Trailers', N'CurrentLocation') IS NULL ALTER TABLE [master].[Trailers] ADD [CurrentLocation] nvarchar(160) NULL;
+IF COL_LENGTH(N'master.Trailers', N'MotExpiry') IS NULL ALTER TABLE [master].[Trailers] ADD [MotExpiry] date NULL;
+IF COL_LENGTH(N'master.Trailers', N'Notes') IS NULL ALTER TABLE [master].[Trailers] ADD [Notes] nvarchar(max) NULL;
 GO
