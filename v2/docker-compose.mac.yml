@@ -1,0 +1,17 @@
+services:
+  sql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    container_name: slh-tms-v2-sql
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: "Developer"
+      MSSQL_SA_PASSWORD: "${SLH_TMS_V2_SA_PASSWORD}"
+    ports:
+      - "14333:1433"
+    volumes:
+      - slh_tms_v2_sql_data:/var/opt/mssql
+    restart: unless-stopped
+
+volumes:
+  slh_tms_v2_sql_data:
