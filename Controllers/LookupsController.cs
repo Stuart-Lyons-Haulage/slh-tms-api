@@ -54,6 +54,179 @@ public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController
         }
         return Ok(rows);
     }
+
+    [HttpPost("sites/roadrunner-master/reconcile"), Authorize(Policy = "TmsApprove")]
+    public async Task<IActionResult> ReconcileRoadrunnerSites([FromBody] IReadOnlyList<RoadrunnerSiteProfileRequest> records, CancellationToken ct)
+    {
+        if (records.Count == 0) return Ok(new { received = 0, linked = 0, review = 0, unmatched = 0, results = Array.Empty<object>() });
+        if (records.Count > 1000) return BadRequest(new { message = "Roadrunner Site Master import is limited to 1,000 rows per request." });
+
+        var sites = await db.Sites.Where(site => site.Active).OrderBy(site => site.Name).ToListAsync(ct);
+        await MasterDetailStore.EnrichSitesAsync(db, sites, ct);
+
+        var results = new List<object>();
+        var linked = 0;
+        var review = 0;
+        var unmatched = 0;
+
+        foreach (var record in records)
+        {
+            var roadRunnerCode = Clip(record.Code, 80);
+            var company = Clip(record.Company, 200);
+            if (string.IsNullOrWhiteSpace(roadRunnerCode))
+            {
+                unmatched++;
+                results.Add(new { code = record.Code, company, status = "unmatched", confidence = 0, reason = "Roadrunner row has no Code." });
+                continue;
+            }
+
+            var address = string.Join(", ", new[]
+            {
+                record.Add1, record.Add2, record.Add3, record.AddTown, record.AddCounty, record.AddPostcode, record.AddCountry
+            }.Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value!.Trim()));
+
+            var normalRoadrunnerCode = SiteMasterIdentityResolver.Normalise(roadRunnerCode);
+            var existingRoadrunnerMatches = sites
+                .Where(site => SiteMasterIdentityResolver.Normalise(site.RoadrunnerCode) == normalRoadrunnerCode)
+                .ToList();
+
+            Site? matchedSite = null;
+            var confidence = 0;
+            var reason = string.Empty;
+
+            if (existingRoadrunnerMatches.Count == 1)
+            {
+                matchedSite = existingRoadrunnerMatches[0];
+                confidence = 100;
+                reason = "Matched existing Site Master record by Roadrunner Code.";
+            }
+            else if (existingRoadrunnerMatches.Count > 1)
+            {
+                review++;
+                results.Add(new
+                {
+                    code = roadRunnerCode,
+                    company,
+                    status = "review",
+                    confidence = 100,
+                    reason = "Roadrunner Code is already linked to more than one active Site Master record.",
+                    candidates = existingRoadrunnerMatches.Select(site => new { site.Id, site.ExternalCode, site.Name }).ToArray()
+                });
+                continue;
+            }
+
+            if (matchedSite is null && !string.IsNullOrWhiteSpace(record.AddPostcode))
+            {
+                var postcode = SiteMasterIdentityResolver.Normalise(record.AddPostcode);
+                var postcodeMatches = sites
+                    .Where(site => SiteMasterIdentityResolver.ExtractPostcode(site.CollectionAddress) == postcode)
+                    .ToList();
+                if (postcodeMatches.Count == 1)
+                {
+                    matchedSite = postcodeMatches[0];
+                    confidence = 99;
+                    reason = "Matched existing Site Master record by unique postcode.";
+                }
+            }
+
+            SiteIdentityResolution? resolution = null;
+            if (matchedSite is null)
+            {
+                resolution = SiteMasterIdentityResolver.Resolve(
+                    new IncomingSiteIdentity(
+                        null,
+                        company,
+                        company,
+                        address,
+                        SiteMasterIdentityResolver.MergeAliases(record.Code, record.LookupCode, record.Company, record.AddTown),
+                        null),
+                    sites);
+
+                if (resolution.Matched && resolution.Confidence >= 90)
+                {
+                    matchedSite = resolution.Site;
+                    confidence = resolution.Confidence;
+                    reason = resolution.Reason;
+                }
+            }
+
+            if (matchedSite is null)
+            {
+                if (resolution?.RequiresReview == true || resolution?.PossibleDuplicates.Count > 0)
+                {
+                    review++;
+                    results.Add(new
+                    {
+                        code = roadRunnerCode,
+                        company,
+                        status = "review",
+                        confidence = resolution?.Confidence ?? 0,
+                        reason = resolution?.Reason ?? "Possible Site Master match requires review.",
+                        candidates = resolution?.PossibleDuplicates.Select(site => new { site.Id, site.ExternalCode, site.Name }).ToArray()
+                            ?? Array.Empty<object>()
+                    });
+                }
+                else
+                {
+                    unmatched++;
+                    results.Add(new
+                    {
+                        code = roadRunnerCode,
+                        company,
+                        status = "unmatched",
+                        confidence = resolution?.Confidence ?? 0,
+                        reason = "No existing Site Master record could be matched safely. No new site was created."
+                    });
+                }
+                continue;
+            }
+
+            matchedSite.RoadrunnerCode = roadRunnerCode;
+            matchedSite.RoadrunnerProfileJson = JsonSerializer.Serialize(record);
+            matchedSite.Aliases = Clip(
+                SiteMasterIdentityResolver.MergeAliases(
+                    matchedSite.Aliases,
+                    roadRunnerCode,
+                    record.LookupCode,
+                    record.Company,
+                    record.AddTown,
+                    record.AddPostcode),
+                500);
+
+            if (string.IsNullOrWhiteSpace(matchedSite.DriverTextName) && !string.IsNullOrWhiteSpace(company))
+                matchedSite.DriverTextName = company;
+            if (string.IsNullOrWhiteSpace(matchedSite.CollectionAddress) && !string.IsNullOrWhiteSpace(address))
+                matchedSite.CollectionAddress = Clip(address, 500);
+            matchedSite.Latitude ??= record.Latitude;
+            matchedSite.Longitude ??= record.Longitude;
+
+            await MasterDetailStore.SaveAsync(
+                db,
+                "site",
+                matchedSite.ExternalCode,
+                JsonSerializer.Serialize(matchedSite),
+                "Roadrunner Site Master import",
+                User.Identity?.Name ?? User.FindFirst("preferred_username")?.Value,
+                ct);
+
+            linked++;
+            results.Add(new
+            {
+                code = roadRunnerCode,
+                company,
+                status = "linked",
+                confidence,
+                reason,
+                siteId = matchedSite.Id,
+                siteCode = matchedSite.ExternalCode,
+                siteName = matchedSite.Name
+            });
+        }
+
+        await db.SaveChangesAsync(ct);
+        return Ok(new { received = records.Count, linked, review, unmatched, results });
+    }
+
     [HttpGet("market-contacts")] public async Task<IActionResult> MarketContacts([FromQuery] string? q, CancellationToken ct)
     {
         var rows = await db.MarketContacts.AsNoTracking().Where(x => x.Active && (q == null || x.Name.Contains(q) || x.Market.Contains(q))).OrderBy(x => x.Market).ThenBy(x => x.Name).Take(5000).ToListAsync(ct);
@@ -181,7 +354,7 @@ public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController
         if (string.IsNullOrWhiteSpace(code) || string.IsNullOrWhiteSpace(request.Name)) return BadRequest(new { message = "Site code and name are required." });
         if (await db.Sites.AnyAsync(x => x.Id != id && x.ExternalCode == code, ct)) return Conflict(new { message = $"Site code {code} already exists." });
         if (request.Latitude is < -90 or > 90 || request.Longitude is < -180 or > 180) return BadRequest(new { message = "Map point is outside the valid latitude/longitude range." });
-        site.ExternalCode = code; site.Name = ClipRequired(request.Name, 200); site.DriverTextName = Clip(request.DriverTextName, 200); site.Aliases = Clip(request.Aliases, 500); site.CollectionAddress = Clip(request.CollectionAddress, 500); site.CollectionInstructions = Clip(request.CollectionInstructions, 1000); site.MapLink = Clip(request.MapLink, 1000); site.Latitude = request.Latitude; site.Longitude = request.Longitude; site.CustomField1 = Clip(request.CustomField1, 200); site.CustomField2 = Clip(request.CustomField2, 200); site.CustomField3 = Clip(request.CustomField3, 200); site.Active = request.Active;
+        site.ExternalCode = code; site.Name = ClipRequired(request.Name, 200); site.DriverTextName = Clip(request.DriverTextName, 200); site.Aliases = Clip(request.Aliases, 500); site.CollectionAddress = Clip(request.CollectionAddress, 500); site.CollectionInstructions = Clip(request.CollectionInstructions, 1000); site.MapLink = Clip(request.MapLink, 1000); site.Latitude = request.Latitude; site.Longitude = request.Longitude; site.CustomField1 = Clip(request.CustomField1, 200); site.CustomField2 = Clip(request.CustomField2, 200); site.CustomField3 = Clip(request.CustomField3, 200); site.RoadrunnerCode = Clip(request.RoadrunnerCode, 80); site.RoadrunnerProfileJson = request.RoadrunnerProfileJson; site.Active = request.Active;
         await db.SaveChangesAsync(ct);
         await MasterDetailStore.SaveAsync(db, "site", code, JsonSerializer.Serialize(site), "SLH site editor", User.Identity?.Name, ct);
         return Ok(site);
@@ -211,5 +384,43 @@ public sealed record LookupDriverUpdateRequest(string? EmployeeNumber, string? D
 public sealed record LookupCustomerUpdateRequest(string? Code, string? Name, bool Active);
 public sealed record CustomerContactUpdateRequest(string? CustomerCode, string? Name, string? Email, string? MobileNumber, bool ReceivesEtaUpdates, bool Active);
 public sealed record LookupTrailerUpdateRequest(string? TrailerNumber, string? Type, int? StandardCapacity, int? EuroCapacity, string? Notes, bool Active);
-public sealed record LookupSiteUpdateRequest(string? ExternalCode, string? Name, string? DriverTextName, string? Aliases, string? CollectionAddress, string? CollectionInstructions, string? MapLink, decimal? Latitude, decimal? Longitude, string? CustomField1, string? CustomField2, string? CustomField3, bool Active);
+public sealed record LookupSiteUpdateRequest(string? ExternalCode, string? Name, string? DriverTextName, string? Aliases, string? CollectionAddress, string? CollectionInstructions, string? MapLink, decimal? Latitude, decimal? Longitude, string? CustomField1, string? CustomField2, string? CustomField3, string? RoadrunnerCode, string? RoadrunnerProfileJson, bool Active);
+
+public sealed record RoadrunnerSiteProfileRequest(
+    string? Code,
+    string? LookupCode,
+    string? CompanyLetter,
+    string? Company,
+    string? Add1,
+    string? Add2,
+    string? Add3,
+    string? AddTown,
+    string? AddCounty,
+    string? AddPostcode,
+    string? AddCountry,
+    decimal? Latitude,
+    decimal? Longitude,
+    string? Contact1,
+    string? Contact2,
+    string? Telephone,
+    string? Fax,
+    string? Email,
+    string? CollectTimeFrom1,
+    string? CollectTimeTo1,
+    string? CollectTimeFrom2,
+    string? CollectTimeTo2,
+    string? DeliverTimeFrom1,
+    string? DeliverTimeTo1,
+    string? DeliverTimeFrom2,
+    string? DeliverTimeTo2,
+    string? CollectTurnaround,
+    string? CollectTurnaroundPerPallet,
+    string? DeliverTurnaround,
+    string? DeliverTurnaroundPerPallet,
+    string? VehicleType,
+    bool? TailLiftRequired,
+    string? GridRef,
+    string? RateArea,
+    bool? BookingRequired,
+    string? VanRouteName);
 public sealed record MarketContactUpdateRequest(string? Market, string? Name, string? StandOrLocation, string? Salesman, string? Sender, bool Active);
