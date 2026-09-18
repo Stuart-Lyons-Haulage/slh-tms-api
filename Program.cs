@@ -18,6 +18,8 @@ using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using Slh.Tms.Api.Authorization;
+using Slh.Tms.Api.Authentication;
+using Slh.Tms.Api.Local;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Hubs;
 using Slh.Tms.Api.Models.Tracking;
@@ -28,8 +30,15 @@ using Slh.Tms.Api.Services;
 [assembly: InternalsVisibleTo("Slh.Tms.Api.Tests")]
 
 var builder = WebApplication.CreateBuilder(args);
-var tenantId = builder.Configuration["Entra:TenantId"] ?? throw new InvalidOperationException("Entra:TenantId is required");
-var audience = builder.Configuration["Entra:Audience"] ?? throw new InvalidOperationException("Entra:Audience is required");
+var localTestMode = builder.Configuration.GetValue<bool>("LocalTest:Enabled");
+var tenantId = builder.Configuration["Entra:TenantId"];
+var audience = builder.Configuration["Entra:Audience"];
+if (!localTestMode && string.IsNullOrWhiteSpace(tenantId))
+    throw new InvalidOperationException("Entra:TenantId is required");
+if (!localTestMode && string.IsNullOrWhiteSpace(audience))
+    throw new InvalidOperationException("Entra:Audience is required");
+tenantId ??= "local-test";
+audience ??= "local-test";
 var allowedTmsDomains = builder.Configuration.GetSection("Entra:AllowedDomains").Get<string[]>() ?? ["lyonshaulage.com"];
 var deploymentRevision = builder.Configuration["Deployment:Revision"] ?? "local";
 var applicationInsightsConnectionString =
@@ -105,7 +114,8 @@ builder.Services.AddSingleton<SqlLatencyInterceptor>();
 builder.Services.AddSingleton<PlanningChangeNotifier>();
 builder.Services.AddSingleton<OutboundHttpPolicyRegistry>();
 builder.Services.AddScoped<DependencyHealthService>();
-builder.Services.AddHostedService<DependencyTelemetrySampler>();
+if (!localTestMode) builder.Services.AddHostedService<DependencyTelemetrySampler>();
+builder.Services.AddSingleton<LocalFileEvidenceArchiveService>();
 builder.Services.AddDbContext<TmsDbContext>((services, options) =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("TmsDb"))
         .AddInterceptors(services.GetRequiredService<SqlLatencyInterceptor>()));
@@ -240,55 +250,73 @@ builder.Services.AddHttpClient<FleetioClient>()
 builder.Services.Configure<HostOptions>(options =>
     options.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
 
-builder.Services.AddHostedService<DotTrackingIngestionService>();
-builder.Services.AddHostedService<TachoDriverMasterSyncJobWorker>();
-builder.Services.AddHostedService<TachoDriverHoursRefreshWorker>();
-builder.Services.AddHostedService<DriverMasterClassificationBackgroundService>();
-builder.Services.AddHostedService<AuditOutboxBackgroundService>();
-builder.Services.AddHostedService<BackloadTriggerHostedService>();
-builder.Services.AddHostedService<LiveEtaService>();
-builder.Services.AddHostedService<EtaAccuracyService>();
+if (!localTestMode || builder.Configuration.GetValue<bool>("LocalTest:EnableExternalIntegrations"))
+{
+    builder.Services.AddHostedService<DotTrackingIngestionService>();
+    builder.Services.AddHostedService<TachoDriverMasterSyncJobWorker>();
+    builder.Services.AddHostedService<TachoDriverHoursRefreshWorker>();
+    builder.Services.AddHostedService<DriverMasterClassificationBackgroundService>();
+    builder.Services.AddHostedService<AuditOutboxBackgroundService>();
+    builder.Services.AddHostedService<BackloadTriggerHostedService>();
+    builder.Services.AddHostedService<LiveEtaService>();
+    builder.Services.AddHostedService<EtaAccuracyService>();
+}
 
 builder.Services.AddHealthChecks().AddDbContextCheck<TmsDbContext>();
 
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(o =>
+if (localTestMode)
 {
-    o.Authority = $"https://login.microsoftonline.com/{tenantId}/v2.0";
-    o.TokenValidationParameters = new TokenValidationParameters
+    builder.Services
+        .AddAuthentication(options =>
+        {
+            options.DefaultAuthenticateScheme = LocalTestAuthenticationHandler.SchemeName;
+            options.DefaultChallengeScheme = LocalTestAuthenticationHandler.SchemeName;
+        })
+        .AddScheme<AuthenticationSchemeOptions, LocalTestAuthenticationHandler>(
+            LocalTestAuthenticationHandler.SchemeName,
+            _ => { });
+}
+else
+{
+    builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(o =>
     {
-        ValidateIssuer = true,
-        ValidIssuers = new[]
+        o.Authority = $"https://login.microsoftonline.com/{tenantId}/v2.0";
+        o.TokenValidationParameters = new TokenValidationParameters
         {
-            $"https://login.microsoftonline.com/{tenantId}/v2.0",
-            $"https://sts.windows.net/{tenantId}/"
-        },
-        ValidateAudience = true,
-        ValidAudience = audience,
-        ValidateLifetime = true
-    };
-    o.Events = new JwtBearerEvents
-    {
-        OnMessageReceived = ctx =>
+            ValidateIssuer = true,
+            ValidIssuers = new[]
+            {
+                $"https://login.microsoftonline.com/{tenantId}/v2.0",
+                $"https://sts.windows.net/{tenantId}/"
+            },
+            ValidateAudience = true,
+            ValidAudience = audience,
+            ValidateLifetime = true
+        };
+        o.Events = new JwtBearerEvents
         {
-            var accessToken = ctx.Request.Query["access_token"];
-            var path = ctx.HttpContext.Request.Path;
-            if (!string.IsNullOrWhiteSpace(accessToken) &&
-                (path.StartsWithSegments("/dispatch-hub") || path.StartsWithSegments("/eta-hub")))
-                ctx.Token = accessToken;
-            return Task.CompletedTask;
-        },
-        OnAuthenticationFailed = ctx =>
-        {
-            ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            return Task.CompletedTask;
-        },
-        OnChallenge = ctx =>
-        {
-            if (!ctx.Handled) ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            return Task.CompletedTask;
-        }
-    };
-});
+            OnMessageReceived = ctx =>
+            {
+                var accessToken = ctx.Request.Query["access_token"];
+                var path = ctx.HttpContext.Request.Path;
+                if (!string.IsNullOrWhiteSpace(accessToken) &&
+                    (path.StartsWithSegments("/dispatch-hub") || path.StartsWithSegments("/eta-hub")))
+                    ctx.Token = accessToken;
+                return Task.CompletedTask;
+            },
+            OnAuthenticationFailed = ctx =>
+            {
+                ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return Task.CompletedTask;
+            },
+            OnChallenge = ctx =>
+            {
+                if (!ctx.Handled) ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return Task.CompletedTask;
+            }
+        };
+    });
+}
 
 builder.Services.AddAuthorization(options =>
 {
@@ -345,7 +373,7 @@ if (!app.Environment.IsEnvironment("Testing"))
     }
 }
 
-app.UseHttpsRedirection();
+if (!localTestMode) app.UseHttpsRedirection();
 app.UseCors("Portal");
 app.UseMiddleware<Slh.Tms.Api.Middleware.ApiLatencyMiddleware>();
 app.UseAuthentication();
@@ -355,7 +383,13 @@ app.UseMiddleware<Slh.Tms.Api.Middleware.PlanningControlResilienceMiddleware>();
 app.UseMiddleware<Slh.Tms.Api.Middleware.SiteLookupResilienceMiddleware>();
 app.UseMiddleware<Slh.Tms.Api.Middleware.PlanLockMiddleware>();
 
-app.MapGet("/api/v1/health", () => Results.Ok(new { status = "healthy", revision = deploymentRevision })).AllowAnonymous();
+app.MapGet("/api/v1/health", () => Results.Ok(new
+{
+    status = "healthy",
+    revision = deploymentRevision,
+    localTestMode,
+    externalIntegrationsEnabled = !localTestMode || builder.Configuration.GetValue<bool>("LocalTest:EnableExternalIntegrations")
+})).AllowAnonymous();
 app.MapHealthChecks("/api/v1/health/ready", new HealthCheckOptions
 {
     ResponseWriter = async (context, report) =>
