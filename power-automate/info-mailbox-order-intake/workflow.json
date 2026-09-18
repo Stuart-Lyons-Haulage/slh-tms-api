@@ -24,7 +24,7 @@
     },
     "definition": {
       "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
-      "contentVersion": "1.0.4.0",
+      "contentVersion": "1.0.5.0",
       "parameters": {
         "$connections": {
           "defaultValue": {},
@@ -85,53 +85,105 @@
             }
           },
           "actions": {
-            "Get_Attachment_(V2)": {
-              "type": "OpenApiConnection",
-              "inputs": {
-                "host": {
-                  "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365",
-                  "connectionName": "shared_office365",
-                  "operationId": "GetAttachment_V2"
-                },
-                "parameters": {
-                  "messageId": "@triggerOutputs()?['body/id']",
-                  "attachmentId": "@items('Apply_to_each')?['id']",
-                  "mailboxAddress": "@parameters('SLH_InfoMailboxUPN')"
-                }
-              },
-              "runtimeConfiguration": {
-                "retryPolicy": {
-                  "type": "exponential",
-                  "count": 4,
-                  "interval": "PT10S",
-                  "minimumInterval": "PT10S",
-                  "maximumInterval": "PT2M"
-                },
-                "secureData": {
-                  "properties": [
-                    "outputs"
-                  ]
-                }
-              }
-            },
-            "Append_to_array_variable": {
-              "type": "AppendToArrayVariable",
-              "runAfter": {
-                "Get_Attachment_(V2)": [
-                  "Succeeded"
+            "If_supported_order_attachment": {
+              "type": "If",
+              "expression": {
+                "and": [
+                  {
+                    "equals": [
+                      "@coalesce(items('Apply_to_each')?['isInline'],false)",
+                      false
+                    ]
+                  },
+                  {
+                    "or": [
+                      {
+                        "endsWith": [
+                          "@toLower(coalesce(items('Apply_to_each')?['name'],''))",
+                          ".xls"
+                        ]
+                      },
+                      {
+                        "endsWith": [
+                          "@toLower(coalesce(items('Apply_to_each')?['name'],''))",
+                          ".xlsx"
+                        ]
+                      },
+                      {
+                        "endsWith": [
+                          "@toLower(coalesce(items('Apply_to_each')?['name'],''))",
+                          ".xlsm"
+                        ]
+                      },
+                      {
+                        "endsWith": [
+                          "@toLower(coalesce(items('Apply_to_each')?['name'],''))",
+                          ".csv"
+                        ]
+                      },
+                      {
+                        "endsWith": [
+                          "@toLower(coalesce(items('Apply_to_each')?['name'],''))",
+                          ".pdf"
+                        ]
+                      }
+                    ]
+                  }
                 ]
               },
-              "inputs": {
-                "name": "NormalizedAttachments",
-                "value": {
-                  "id": "@outputs('Get_Attachment_(V2)')?['body/id']",
-                  "name": "@outputs('Get_Attachment_(V2)')?['body/name']",
-                  "contentType": "@outputs('Get_Attachment_(V2)')?['body/contentType']",
-                  "size": "@coalesce(outputs('Get_Attachment_(V2)')?['body/size'],0)",
-                  "isInline": "@coalesce(outputs('Get_Attachment_(V2)')?['body/isInline'],false)",
-                  "contentId": "@coalesce(outputs('Get_Attachment_(V2)')?['body/contentId'],'')",
-                  "contentBytes": "@outputs('Get_Attachment_(V2)')?['body/contentBytes']"
+              "actions": {
+                "Get_Attachment_(V2)": {
+                  "type": "OpenApiConnection",
+                  "inputs": {
+                    "host": {
+                      "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365",
+                      "connectionName": "shared_office365",
+                      "operationId": "GetAttachment_V2"
+                    },
+                    "parameters": {
+                      "messageId": "@triggerOutputs()?['body/id']",
+                      "attachmentId": "@items('Apply_to_each')?['id']",
+                      "mailboxAddress": "@parameters('SLH_InfoMailboxUPN')"
+                    }
+                  },
+                  "runtimeConfiguration": {
+                    "retryPolicy": {
+                      "type": "exponential",
+                      "count": 2,
+                      "interval": "PT5S",
+                      "minimumInterval": "PT5S",
+                      "maximumInterval": "PT30S"
+                    },
+                    "secureData": {
+                      "properties": [
+                        "outputs"
+                      ]
+                    }
+                  }
+                },
+                "Append_to_array_variable": {
+                  "type": "AppendToArrayVariable",
+                  "runAfter": {
+                    "Get_Attachment_(V2)": [
+                      "Succeeded"
+                    ]
+                  },
+                  "inputs": {
+                    "name": "NormalizedAttachments",
+                    "value": {
+                      "id": "@outputs('Get_Attachment_(V2)')?['body/id']",
+                      "name": "@outputs('Get_Attachment_(V2)')?['body/name']",
+                      "contentType": "@outputs('Get_Attachment_(V2)')?['body/contentType']",
+                      "size": "@coalesce(outputs('Get_Attachment_(V2)')?['body/size'],0)",
+                      "isInline": "@coalesce(outputs('Get_Attachment_(V2)')?['body/isInline'],false)",
+                      "contentId": "@coalesce(outputs('Get_Attachment_(V2)')?['body/contentId'],'')",
+                      "contentBytes": "@outputs('Get_Attachment_(V2)')?['body/contentBytes']"
+                    }
+                  }
                 }
+              },
+              "else": {
+                "actions": {}
               }
             }
           }
