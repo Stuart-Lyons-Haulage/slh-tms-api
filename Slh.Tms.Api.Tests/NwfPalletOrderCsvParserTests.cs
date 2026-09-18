@@ -196,6 +196,59 @@ Stuart Lyons| 19/09/2026| Selsey| Morrisons| MOR25| Morrisons DORDON 814| B78 1S
     }
 
     [Fact]
+    public void Sep19OutlookWrappedBody_ReassemblesLogicalRows()
+    {
+        const string body = """
+Hello,
+
+Please see below and attached.
+
+Haulier Name| Requested Ship Date| 04\\. Collection Site| Customer Name|
+DepotID| Depot Description| Delivery Address| Sales Order ID| CustomerRef|
+Pallet Name| PalletQty| PO REF
+---|---|---|---|---|---|---|---|---|---|---|---
+Stuart Lyons| 19/09/2026| Merston| Morrisons| MOR06| Morrisons FRUITBRIDGWATER
+718| TA6 4FG| SO000370882| 91329115| IPP STD| 2| PO00504426
+Stuart Lyons| 19/09/2026| Runcton| Morrisons| MOR09| Morrisons
+FRUITSITTINGBOURNE 763| ME10 2FD| SO000370885| 91329634| IPP STD| 7|
+PO00504426
+Stuart Lyons| 19/09/2026| Runcton| Tesco| ONE01| One Stop Tamworth| B78 1ST|
+SO000371055| 8000054552| IPP STD| 15| PO00504426
+""";
+
+        var request = new MailboxEmailIntakeRequest(
+            "nwf-19-sep-outlook-wrapped",
+            null,
+            "info@lyonshaulage.com",
+            "ShiftLogisticalPlanner@nwfltd.co.uk",
+            "Shift Logistical Planner",
+            "NWAY Stuart Lyons Transport Pallet Order Report 19/09/2026",
+            DateTimeOffset.Parse("2026-09-18T10:09:13Z"),
+            body,
+            null,
+            null,
+            [new MailboxAttachmentRequest("NWAY report.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", null, false, Size: 8192)]);
+
+        var result = parser.TryParse(request);
+
+        Assert.NotNull(result);
+        Assert.Null(result!.IgnoredReason);
+        Assert.Equal(3, result.Orders.Count);
+        Assert.Equal(24, result.Orders.Sum(order => order.Payload.GetProperty("pallets").GetInt32()));
+        Assert.Contains(result.Orders, order =>
+            order.Payload.GetProperty("depotId").GetString() == "MOR06" &&
+            order.Payload.GetProperty("depotDescription").GetString() == "Morrisons FRUITBRIDGWATER 718" &&
+            order.Payload.GetProperty("pallets").GetInt32() == 2);
+        Assert.Contains(result.Orders, order =>
+            order.Payload.GetProperty("depotId").GetString() == "MOR09" &&
+            order.Payload.GetProperty("depotDescription").GetString() == "Morrisons FRUITSITTINGBOURNE 763" &&
+            order.Payload.GetProperty("pallets").GetInt32() == 7);
+        Assert.Contains(result.Orders, order =>
+            order.Payload.GetProperty("customerName").GetString() == "Tesco" &&
+            order.Payload.GetProperty("pallets").GetInt32() == 15);
+    }
+
+    [Fact]
     public void MissingPo_UsesSalesOrderOnlyAsFallbackAndFlagsReview()
     {
         const string csv = """

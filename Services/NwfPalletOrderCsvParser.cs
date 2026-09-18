@@ -256,11 +256,24 @@ public sealed class NwfPalletOrderCsvParser
         var rows = new List<List<string>>();
         if (string.IsNullOrWhiteSpace(value)) return rows;
         var text = WebUtility.HtmlDecode(Regex.Replace(value, "<[^>]+>", "\n"));
+        var buffered = new StringBuilder();
         foreach (var line in text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
         {
-            if (!line.Contains('|')) continue;
-            var cells = line.Split('|').Select(cell => cell.Replace("\\.", ".").Trim()).ToList();
-            if (cells.Count < 4 || cells.All(cell => cell.Length == 0 || cell.All(ch => ch == '-' || char.IsWhiteSpace(ch)))) continue;
+            if (!line.Contains('|') && buffered.Length == 0) continue;
+
+            if (buffered.Length > 0) buffered.Append(' ');
+            buffered.Append(line.Trim());
+
+            // Outlook/Graph can wrap a wide 12-column NWF table inside a cell, so
+            // one logical row can arrive as two or three physical lines. Rebuild
+            // the row before header detection instead of silently losing it.
+            var candidate = buffered.ToString();
+            var cells = candidate.Split('|').Select(cell => cell.Replace("\\.", ".").Trim()).ToList();
+            if (cells.Count < RequiredHeaders.Length) continue;
+            if (cells.Count == RequiredHeaders.Length && string.IsNullOrWhiteSpace(cells[^1])) continue;
+
+            buffered.Clear();
+            if (cells.All(cell => cell.Length == 0 || cell.All(ch => ch == '-' || char.IsWhiteSpace(ch)))) continue;
             rows.Add(cells);
         }
         return rows;
