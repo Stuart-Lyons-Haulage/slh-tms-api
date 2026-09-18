@@ -109,17 +109,26 @@ GO
 IF OBJECT_ID(N'[master].[ExternalIdentities]', N'U') IS NULL
 CREATE TABLE [master].[ExternalIdentities](
     [Id] uniqueidentifier NOT NULL PRIMARY KEY,
-    [Provider] nvarchar(450) NOT NULL,
-    [EntityType] nvarchar(450) NOT NULL,
+    [Provider] nvarchar(80) NOT NULL,
+    [EntityType] nvarchar(80) NOT NULL,
     [EntityId] uniqueidentifier NOT NULL,
-    [ExternalKey] nvarchar(450) NOT NULL,
+    [ExternalKey] nvarchar(200) NOT NULL,
     [ExternalDisplayName] nvarchar(max) NULL,
     [Active] bit NOT NULL
 );
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_ExternalIdentities_ActiveKey' AND object_id = OBJECT_ID(N'[master].[ExternalIdentities]'))
-    CREATE UNIQUE INDEX [UX_master_ExternalIdentities_ActiveKey]
-    ON [master].[ExternalIdentities]([Provider],[EntityType],[ExternalKey])
-    WHERE [Active] = 1;
+IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_ExternalIdentities_ActiveKey' AND object_id = OBJECT_ID(N'[master].[ExternalIdentities]'))
+    DROP INDEX [UX_master_ExternalIdentities_ActiveKey] ON [master].[ExternalIdentities];
+
+IF COL_LENGTH(N'master.ExternalIdentities', N'Provider') > 160
+    ALTER TABLE [master].[ExternalIdentities] ALTER COLUMN [Provider] nvarchar(80) NOT NULL;
+IF COL_LENGTH(N'master.ExternalIdentities', N'EntityType') > 160
+    ALTER TABLE [master].[ExternalIdentities] ALTER COLUMN [EntityType] nvarchar(80) NOT NULL;
+IF COL_LENGTH(N'master.ExternalIdentities', N'ExternalKey') > 400
+    ALTER TABLE [master].[ExternalIdentities] ALTER COLUMN [ExternalKey] nvarchar(200) NOT NULL;
+
+CREATE UNIQUE INDEX [UX_master_ExternalIdentities_ActiveKey]
+ON [master].[ExternalIdentities]([Provider],[EntityType],[ExternalKey])
+WHERE [Active] = 1;
 GO
 
 IF OBJECT_ID(N'[master].[SiteAliases]', N'U') IS NULL
