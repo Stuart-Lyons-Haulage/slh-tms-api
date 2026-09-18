@@ -42,8 +42,8 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
         var driversByEmployee = (await db.Drivers.Where(x => x.EmployeeNumber != null).ToListAsync(ct))
             .ToDictionary(x => x.EmployeeNumber!, StringComparer.OrdinalIgnoreCase);
         var vehiclesByReg = await db.Vehicles.ToDictionaryAsync(x => x.Registration, StringComparer.OrdinalIgnoreCase, ct);
-        var fuelCardsByKey = (await db.FuelCards.ToListAsync(ct))
-            .ToDictionary(x => $"{x.Provider}|{x.CardType}|{x.CardNumber}", StringComparer.OrdinalIgnoreCase);
+        var fuelCardsByKey = (await db.FuelCards.Where(x => x.VehicleId != null).ToListAsync(ct))
+            .ToDictionary(x => $"{x.VehicleId}|{x.Provider}|{x.CardType}", StringComparer.OrdinalIgnoreCase);
         var trailersByNumber = await db.Trailers.ToDictionaryAsync(x => x.TrailerNumber, StringComparer.OrdinalIgnoreCase, ct);
         var contactsByCode = await db.CustomerContacts.ToDictionaryAsync(x => x.Code, StringComparer.OrdinalIgnoreCase, ct);
         var marketContactsByKey = await db.MarketContacts.ToDictionaryAsync(x => x.Key, StringComparer.OrdinalIgnoreCase, ct);
@@ -739,7 +739,7 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
             return;
 
         cardNumber = cardNumber.Trim();
-        var key = $"{provider}|{cardType}|{cardNumber}";
+        var key = $"{vehicle.Id}|{provider}|{cardType}";
 
         if (!fuelCardsByKey.TryGetValue(key, out var card))
         {
@@ -754,6 +754,7 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
         }
 
         card.VehicleId = vehicle.Id;
+        card.CardNumber = cardNumber;
         card.Pin = string.IsNullOrWhiteSpace(pin) ? card.Pin : pin.Trim();
         card.Notes = vehicle.Notes;
         card.Active = vehicle.Active;
