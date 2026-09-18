@@ -11,20 +11,6 @@ public enum IntakeReviewState
     Failed
 }
 
-public enum EvidenceClassification
-{
-    Unknown,
-    NewOrder,
-    Amendment,
-    Cancellation,
-    DeliveryNote,
-    BookingConfirmation,
-    CollectionConfirmation,
-    ETACommunication,
-    LoadPlan,
-    Informational
-}
-
 public sealed class SourceEvidence
 {
     public Guid Id { get; init; } = Guid.NewGuid();
@@ -35,13 +21,7 @@ public sealed class SourceEvidence
     public string? Sender { get; set; }
     public DateTimeOffset ReceivedAtUtc { get; set; }
     public required string EvidenceHash { get; set; }
-    public EvidenceClassification Classification { get; set; } = EvidenceClassification.Unknown;
-    public string? ParserKey { get; set; }
-    public string? ParserVersion { get; set; }
-    public string? SourceLink { get; set; }
     public string? RawBodyLocation { get; set; }
-    public string? RawBodyText { get; set; }
-    public string? AttachmentMetadataJson { get; set; }
 }
 
 public sealed record ExtractedOrderDraft(
