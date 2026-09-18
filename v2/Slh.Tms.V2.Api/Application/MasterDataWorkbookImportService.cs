@@ -205,7 +205,32 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
             site.Postcode = ExtractPostcode(site.FullAddress);
             site.MapLink = row.Get("Map Link");
             site.CollectionInstructions = row.Get("Collection Instructions");
-            site.DriverInstructions = row.Get("Collection Instructions");
+            site.DriverInstructions = row.Get("Driver Instructions") ?? row.Get("Collection Instructions");
+            site.EarliestCollectionTime =
+                ParseTime(row.Get("Earliest Collection Time"))
+                ?? ParseTime(row.Get("Collection From"))
+                ?? site.EarliestCollectionTime;
+            site.LatestCollectionTime =
+                ParseTime(row.Get("Latest Collection Time"))
+                ?? ParseTime(row.Get("Last Collection Time"))
+                ?? ParseTime(row.Get("Collection To"))
+                ?? site.LatestCollectionTime;
+            site.EarliestDeliveryTime =
+                ParseTime(row.Get("Earliest Delivery Time"))
+                ?? ParseTime(row.Get("Delivery From"))
+                ?? site.EarliestDeliveryTime;
+            site.LatestDeliveryTime =
+                ParseTime(row.Get("Latest Delivery Time"))
+                ?? ParseTime(row.Get("Delivery Deadline"))
+                ?? site.LatestDeliveryTime;
+            site.StandardCutoff =
+                ParseTime(row.Get("Standard Cutoff"))
+                ?? site.StandardCutoff;
+            site.ExtendedCutoff =
+                ParseTime(row.Get("Extended Cutoff"))
+                ?? site.ExtendedCutoff;
+            site.DeadlineContact = row.Get("Deadline Contact") ?? site.DeadlineContact;
+            site.DeadlineNotes = row.Get("Deadline Notes") ?? site.DeadlineNotes;
             site.Active = row.Active();
 
             var customerCode = row.Get("Customer Code");
