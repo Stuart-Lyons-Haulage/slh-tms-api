@@ -44,6 +44,14 @@ CREATE TABLE [master].[Sites](
     [County] nvarchar(max) NULL,
     [Postcode] nvarchar(20) NULL,
     [DriverInstructions] nvarchar(max) NULL,
+    [EarliestCollectionTime] time NULL,
+    [LatestCollectionTime] time NULL,
+    [EarliestDeliveryTime] time NULL,
+    [LatestDeliveryTime] time NULL,
+    [StandardCutoff] time NULL,
+    [ExtendedCutoff] time NULL,
+    [DeadlineContact] nvarchar(200) NULL,
+    [DeadlineNotes] nvarchar(max) NULL,
     [Latitude] decimal(9,6) NULL,
     [Longitude] decimal(9,6) NULL,
     [Active] bit NOT NULL,
@@ -396,4 +404,15 @@ IF COL_LENGTH(N'master.Trailers', N'EuroPalletCapacity') IS NULL ALTER TABLE [ma
 IF COL_LENGTH(N'master.Trailers', N'CurrentLocation') IS NULL ALTER TABLE [master].[Trailers] ADD [CurrentLocation] nvarchar(160) NULL;
 IF COL_LENGTH(N'master.Trailers', N'MotExpiry') IS NULL ALTER TABLE [master].[Trailers] ADD [MotExpiry] date NULL;
 IF COL_LENGTH(N'master.Trailers', N'Notes') IS NULL ALTER TABLE [master].[Trailers] ADD [Notes] nvarchar(max) NULL;
+GO
+
+
+IF COL_LENGTH(N'master.Sites', N'EarliestCollectionTime') IS NULL ALTER TABLE [master].[Sites] ADD [EarliestCollectionTime] time NULL;
+IF COL_LENGTH(N'master.Sites', N'LatestCollectionTime') IS NULL ALTER TABLE [master].[Sites] ADD [LatestCollectionTime] time NULL;
+IF COL_LENGTH(N'master.Sites', N'EarliestDeliveryTime') IS NULL ALTER TABLE [master].[Sites] ADD [EarliestDeliveryTime] time NULL;
+IF COL_LENGTH(N'master.Sites', N'LatestDeliveryTime') IS NULL ALTER TABLE [master].[Sites] ADD [LatestDeliveryTime] time NULL;
+IF COL_LENGTH(N'master.Sites', N'StandardCutoff') IS NULL ALTER TABLE [master].[Sites] ADD [StandardCutoff] time NULL;
+IF COL_LENGTH(N'master.Sites', N'ExtendedCutoff') IS NULL ALTER TABLE [master].[Sites] ADD [ExtendedCutoff] time NULL;
+IF COL_LENGTH(N'master.Sites', N'DeadlineContact') IS NULL ALTER TABLE [master].[Sites] ADD [DeadlineContact] nvarchar(200) NULL;
+IF COL_LENGTH(N'master.Sites', N'DeadlineNotes') IS NULL ALTER TABLE [master].[Sites] ADD [DeadlineNotes] nvarchar(max) NULL;
 GO
