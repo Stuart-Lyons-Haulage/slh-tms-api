@@ -240,6 +240,8 @@ IF COL_LENGTH(N'master.Sites', N'CollectionInstructions') IS NULL ALTER TABLE [m
 GO
 
 IF COL_LENGTH(N'master.Drivers', N'TachoName') IS NULL ALTER TABLE [master].[Drivers] ADD [TachoName] nvarchar(max) NULL;
+IF COL_LENGTH(N'master.Drivers', N'Email') IS NULL ALTER TABLE [master].[Drivers] ADD [Email] nvarchar(254) NULL;
+IF COL_LENGTH(N'master.Drivers', N'TachoMasterMemberCode') IS NULL ALTER TABLE [master].[Drivers] ADD [TachoMasterMemberCode] nvarchar(80) NULL;
 IF COL_LENGTH(N'master.Drivers', N'DriverType') IS NULL ALTER TABLE [master].[Drivers] ADD [DriverType] nvarchar(max) NULL;
 IF COL_LENGTH(N'master.Drivers', N'DriverGroup') IS NULL ALTER TABLE [master].[Drivers] ADD [DriverGroup] nvarchar(max) NULL;
 IF COL_LENGTH(N'master.Drivers', N'Coding') IS NULL ALTER TABLE [master].[Drivers] ADD [Coding] nvarchar(max) NULL;
