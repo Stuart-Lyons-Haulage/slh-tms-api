@@ -22,6 +22,7 @@ if (!string.IsNullOrWhiteSpace(connectionString))
 
     builder.Services.AddScoped<MasterResolver>();
     builder.Services.AddScoped<OrderPromotionService>();
+    builder.Services.AddScoped<MasterDataWorkbookImportService>();
 
     builder.Services.AddHealthChecks()
         .AddDbContextCheck<MasterDataDbContext>("master-data-db")
@@ -72,6 +73,68 @@ if (!string.IsNullOrWhiteSpace(connectionString))
 
     app.MapGet("/api/v2/master/drivers", async (MasterDataDbContext db, CancellationToken ct) =>
         await db.Drivers.AsNoTracking().Where(x => x.Active).OrderBy(x => x.DisplayName).ToListAsync(ct));
+
+    app.MapGet("/api/v2/master/vehicles", async (MasterDataDbContext db, CancellationToken ct) =>
+        await db.Vehicles.AsNoTracking().Where(x => x.Active).OrderBy(x => x.Registration).ToListAsync(ct));
+
+    app.MapGet("/api/v2/master/trailers", async (MasterDataDbContext db, CancellationToken ct) =>
+        await db.Trailers.AsNoTracking().Where(x => x.Active).OrderBy(x => x.TrailerNumber).ToListAsync(ct));
+
+    app.MapGet("/api/v2/master/customer-contacts", async (MasterDataDbContext db, CancellationToken ct) =>
+        await db.CustomerContacts.AsNoTracking().Where(x => x.Active).OrderBy(x => x.ContactName).ToListAsync(ct));
+
+    app.MapGet("/api/v2/master/market-contacts", async (MasterDataDbContext db, CancellationToken ct) =>
+        await db.MarketContacts.AsNoTracking().Where(x => x.Active).OrderBy(x => x.MarketName).ThenBy(x => x.Name).ToListAsync(ct));
+
+    app.MapGet("/api/v2/master/site-cutoffs", async (MasterDataDbContext db, CancellationToken ct) =>
+        await db.SiteCutoffs.AsNoTracking().Where(x => x.Active).OrderBy(x => x.Code).ToListAsync(ct));
+
+    app.MapGet("/api/v2/master/route-times", async (MasterDataDbContext db, CancellationToken ct) =>
+        await db.RouteTimings.AsNoTracking().Where(x => x.Active).OrderBy(x => x.Route).ToListAsync(ct));
+
+    app.MapGet("/api/v2/master/fuel-prices", async (MasterDataDbContext db, CancellationToken ct) =>
+        await db.FuelPrices.AsNoTracking().Where(x => x.Active).OrderByDescending(x => x.WeekCommencing).Take(2500).ToListAsync(ct));
+
+    app.MapGet("/api/v2/master/alias-candidates", async (MasterDataDbContext db, CancellationToken ct) =>
+        await db.SiteAliasCandidates.AsNoTracking().Where(x => x.Active && !x.Approved).OrderBy(x => x.AliasType).ThenBy(x => x.Alias).ToListAsync(ct));
+
+    app.MapGet("/api/v2/master/summary", async (MasterDataDbContext db, CancellationToken ct) => Results.Ok(new
+    {
+        customers = await db.Customers.CountAsync(x => x.Active, ct),
+        sites = await db.Sites.CountAsync(x => x.Active, ct),
+        markets = await db.Markets.CountAsync(x => x.Active, ct),
+        drivers = await db.Drivers.CountAsync(x => x.Active, ct),
+        vehicles = await db.Vehicles.CountAsync(x => x.Active, ct),
+        trailers = await db.Trailers.CountAsync(x => x.Active, ct),
+        customerContacts = await db.CustomerContacts.CountAsync(x => x.Active, ct),
+        marketContacts = await db.MarketContacts.CountAsync(x => x.Active, ct),
+        siteCutoffs = await db.SiteCutoffs.CountAsync(x => x.Active, ct),
+        routeTimes = await db.RouteTimings.CountAsync(x => x.Active, ct),
+        fuelPrices = await db.FuelPrices.CountAsync(x => x.Active, ct),
+        aliasCandidates = await db.SiteAliasCandidates.CountAsync(x => x.Active && !x.Approved, ct)
+    }));
+
+    app.MapPost("/api/v2/master/import/workbook", async (
+        HttpRequest request,
+        bool? commit,
+        MasterDataWorkbookImportService importer,
+        CancellationToken ct) =>
+    {
+        if (!request.HasFormContentType)
+            return Results.BadRequest(new { error = "Upload the master workbook as multipart/form-data." });
+
+        var form = await request.ReadFormAsync(ct);
+        var file = form.Files.GetFile("file") ?? form.Files.FirstOrDefault();
+        if (file is null || file.Length == 0)
+            return Results.BadRequest(new { error = "No workbook file was supplied." });
+
+        if (!file.FileName.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
+            return Results.BadRequest(new { error = "V2 Master Data import currently accepts .xlsx workbooks only." });
+
+        await using var stream = file.OpenReadStream();
+        var result = await importer.ImportAsync(stream, commit == true, ct);
+        return Results.Ok(result);
+    });
 
     app.MapGet("/api/v2/intake/review", async (IntakeDbContext db, CancellationToken ct) =>
         await db.IntakeRecords.AsNoTracking()
