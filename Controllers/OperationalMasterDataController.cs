@@ -90,7 +90,10 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
             var status = live.OrderByDescending(x => x.LastEventTimeUtc).FirstOrDefault(x => NormalizeReg(x.VehicleIdentifier) == NormalizeReg(v.Registration) || NormalizeReg(x.VehicleIdentifier) == NormalizeReg(v.Abbreviation ?? string.Empty));
             return new
             {
-                v.Id, v.Registration, v.FleetNumber, v.Abbreviation, v.Transmission, v.Active, v.FleetioStatus,
+                v.Id, v.Registration, v.VIN, v.OwnerType, v.VehicleSite, v.FleetNumber, v.Abbreviation, v.Transmission,
+                v.DvsCompliant, v.FuelProvider, v.CabMobile, v.FuelPin, v.ShellCard, v.BpRedCard, v.BpPlainCard,
+                v.FuelPinSecretName, v.FuelCardLastFour, v.MOTExpiry, v.TachoCalibrationExpiry, v.VehicleTestExpiry,
+                v.Notes, v.FleetioId, v.FleetioName, v.FleetioStatus, v.Active,
                 lastLocation = status is null ? null : new { status.Latitude, status.Longitude, status.LastEventTimeUtc, status.IsMoving, status.LastKnownStatus }
             };
         });
@@ -118,14 +121,28 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         if (vehicle is null) return NotFound();
         var before = Snapshot(vehicle);
         vehicle.Registration = CleanRequired(request.Registration, vehicle.Registration).ToUpperInvariant();
+        vehicle.VIN = Clean(request.VIN);
+        vehicle.OwnerType = Clean(request.OwnerType);
+        vehicle.VehicleSite = Clean(request.VehicleSite);
         vehicle.FleetNumber = Clean(request.FleetNumber);
         vehicle.Abbreviation = Clean(request.Abbreviation)?.ToUpperInvariant();
         vehicle.Transmission = Clean(request.Transmission);
         vehicle.DvsCompliant = request.DvsCompliant;
+        vehicle.FuelProvider = Clean(request.FuelProvider);
         vehicle.CabMobile = Clean(request.CabMobile);
+        vehicle.FuelPin = Clean(request.FuelPin);
+        vehicle.ShellCard = Clean(request.ShellCard);
+        vehicle.BpRedCard = Clean(request.BpRedCard);
+        vehicle.BpPlainCard = Clean(request.BpPlainCard);
+        vehicle.FuelPinSecretName = Clean(request.FuelPinSecretName);
+        vehicle.FuelCardLastFour = Clean(request.FuelCardLastFour);
+        vehicle.MOTExpiry = request.MOTExpiry;
+        vehicle.TachoCalibrationExpiry = request.TachoCalibrationExpiry;
+        vehicle.VehicleTestExpiry = request.VehicleTestExpiry;
         vehicle.Notes = Clean(request.Notes);
         vehicle.FleetioId = Clean(request.FleetioId);
         vehicle.FleetioName = Clean(request.FleetioName);
+        vehicle.FleetioStatus = Clean(request.FleetioStatus);
         await Audit("Vehicle", id, "Updated", before, Snapshot(vehicle), ct);
         return Ok(vehicle);
     }
@@ -142,7 +159,9 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         q = (q ?? string.Empty).Trim();
         var query = db.Trailers.AsNoTracking().Where(x => includeInactive || x.Active);
         if (q.Length > 0) query = query.Where(x => x.TrailerNumber.Contains(q) || (x.Type != null && x.Type.Contains(q)));
-        return Ok(await query.OrderBy(x => x.TrailerNumber).Take(50).ToListAsync(ct));
+        var rows = await query.OrderBy(x => x.TrailerNumber).Take(50).ToListAsync(ct);
+        await MasterDetailStore.EnrichTrailersAsync(db, rows, ct);
+        return Ok(rows);
     }
 
     [HttpPut("trailers/{id:guid}"), Authorize(Policy = "TmsApprove")]
@@ -155,7 +174,9 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         trailer.Type = Clean(request.Type);
         trailer.StandardCapacity = request.StandardCapacity;
         trailer.EuroCapacity = request.EuroCapacity;
+        trailer.Notes = Clean(request.Notes);
         await Audit("Trailer", id, "Updated", before, Snapshot(trailer), ct);
+        await MasterDetailStore.SaveAsync(db, "trailer", trailer.TrailerNumber, Snapshot(trailer), "SLH operational trailer editor", User.Identity?.Name, ct);
         return Ok(trailer);
     }
 
@@ -184,11 +205,21 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         await MasterDetailStore.EnrichSitesAsync(db, new[] { site }, ct);
         var before = Snapshot(site);
         site.ExternalCode = CleanRequired(request.ExternalCode, site.ExternalCode);
+        site.CustomerCode = Clean(request.CustomerCode);
         site.Name = CleanRequired(request.Name, site.Name);
         site.DriverTextName = Clean(request.DriverTextName);
         site.CollectionAddress = Clean(request.CollectionAddress);
         site.CollectionInstructions = Clean(request.CollectionInstructions);
         site.MapLink = Clean(request.MapLink);
+        site.Latitude = request.Latitude;
+        site.Longitude = request.Longitude;
+        site.Aliases = Clean(request.Aliases);
+        site.CustomField1 = Clean(request.CustomField1);
+        site.CustomField2 = Clean(request.CustomField2);
+        site.CustomField3 = Clean(request.CustomField3);
+        site.RoadrunnerCode = Clean(request.RoadrunnerCode);
+        site.RoadrunnerProfileJson = Clean(request.RoadrunnerProfileJson);
+        site.OperationalRegion = Clean(request.OperationalRegion);
         await Audit("Site", id, "Updated", before, Snapshot(site), ct);
         await MasterDetailStore.SaveAsync(db, "site", site.ExternalCode, Snapshot(site), "SLH operational site editor", User.Identity?.Name, ct);
         return Ok(site);
@@ -217,6 +248,10 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         var before = Snapshot(customer);
         customer.Code = CleanRequired(request.Code, customer.Code);
         customer.Name = CleanRequired(request.Name, customer.Name);
+        customer.TradingName = Clean(request.TradingName);
+        customer.AccountOwner = Clean(request.AccountOwner);
+        customer.ServiceNotes = Clean(request.ServiceNotes);
+        customer.DefaultSiteCode = Clean(request.DefaultSiteCode);
         await Audit("Customer", id, "Updated", before, Snapshot(customer), ct);
         return Ok(customer);
     }
@@ -449,9 +484,48 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
 }
 
 public sealed record DriverUpdateRequest(string? DisplayName, string? EmployeeNumber, string? TachoName, string? MobileNumber, string? DriverType, string? DriverGroup, string? Skills);
-public sealed record VehicleUpdateRequest(string? Registration, string? FleetNumber, string? Abbreviation, string? Transmission, bool? DvsCompliant, string? CabMobile, string? Notes, string? FleetioId, string? FleetioName);
-public sealed record TrailerUpdateRequest(string? TrailerNumber, string? Type, int? StandardCapacity, int? EuroCapacity);
-public sealed record SiteUpdateRequest(string? ExternalCode, string? Name, string? DriverTextName, string? CollectionAddress, string? CollectionInstructions, string? MapLink);
-public sealed record CustomerUpdateRequest(string? Code, string? Name);
+public sealed record VehicleUpdateRequest(
+    string? Registration,
+    string? VIN,
+    string? OwnerType,
+    string? VehicleSite,
+    string? FleetNumber,
+    string? Abbreviation,
+    string? Transmission,
+    bool? DvsCompliant,
+    string? FuelProvider,
+    string? CabMobile,
+    string? FuelPin,
+    string? ShellCard,
+    string? BpRedCard,
+    string? BpPlainCard,
+    string? FuelPinSecretName,
+    string? FuelCardLastFour,
+    DateOnly? MOTExpiry,
+    DateOnly? TachoCalibrationExpiry,
+    DateOnly? VehicleTestExpiry,
+    string? Notes,
+    string? FleetioId,
+    string? FleetioName,
+    string? FleetioStatus);
+public sealed record TrailerUpdateRequest(string? TrailerNumber, string? Type, int? StandardCapacity, int? EuroCapacity, string? Notes);
+public sealed record SiteUpdateRequest(
+    string? ExternalCode,
+    string? CustomerCode,
+    string? Name,
+    string? DriverTextName,
+    string? CollectionAddress,
+    string? CollectionInstructions,
+    string? MapLink,
+    decimal? Latitude,
+    decimal? Longitude,
+    string? Aliases,
+    string? CustomField1,
+    string? CustomField2,
+    string? CustomField3,
+    string? RoadrunnerCode,
+    string? RoadrunnerProfileJson,
+    string? OperationalRegion);
+public sealed record CustomerUpdateRequest(string? Code, string? Name, string? TradingName, string? AccountOwner, string? ServiceNotes, string? DefaultSiteCode);
 public sealed record GeofenceUpdateRequest(string? Name, string? Category, int? CategoryMaxWaitMinutes, int? MaxWaitMinutes, int PendingEntryMinutes, int PendingExitMinutes, string? SiteNumber, Guid? SiteId, bool? LocationOnly, string? PolygonJson);
 public sealed record GeofenceSiteSyncRequest(string? Name, string? SiteNumber, Guid? SiteId, bool? LocationOnly, string? PolygonJson);
