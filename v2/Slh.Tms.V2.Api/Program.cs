@@ -8,8 +8,8 @@ using Azure.Monitor.OpenTelemetry.Exporter;
 
 var builder = WebApplication.CreateBuilder(args);
 
-var connectionString = builder.Configuration.GetConnectionString("TmsV2")
-    ?? builder.Configuration["TMS_V2_SQL_CONNECTION"];
+var connectionString = builder.Configuration["TMS_V2_SQL_CONNECTION"]
+    ?? builder.Configuration.GetConnectionString("TmsV2");
 
 if (!string.IsNullOrWhiteSpace(connectionString))
 {
