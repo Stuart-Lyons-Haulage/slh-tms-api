@@ -88,7 +88,31 @@ if (!string.IsNullOrWhiteSpace(connectionString))
         await db.MarketContacts.AsNoTracking().Where(x => x.Active).OrderBy(x => x.MarketName).ThenBy(x => x.Name).ToListAsync(ct));
 
     app.MapGet("/api/v2/master/site-cutoffs", async (MasterDataDbContext db, CancellationToken ct) =>
-        await db.SiteCutoffs.AsNoTracking().Where(x => x.Active).OrderBy(x => x.Code).ToListAsync(ct));
+        await (
+            from cutoff in db.SiteCutoffs.AsNoTracking()
+            join site in db.Sites.AsNoTracking() on cutoff.SiteId equals site.Id
+            where cutoff.Active && site.Active
+            orderby site.Name, cutoff.Plan, cutoff.StandardCutoff
+            select new
+            {
+                cutoff.Id,
+                cutoff.Code,
+                cutoff.SiteId,
+                siteCode = site.Code,
+                siteName = site.Name,
+                cutoff.Plan,
+                cutoff.StandardCutoff,
+                cutoff.ExtendedCutoff,
+                cutoff.Contact,
+                cutoff.Notes,
+                cutoff.Temperature,
+                cutoff.PalletType,
+                cutoff.LastDespatchTime,
+                cutoff.PlannedCollectFrom,
+                cutoff.PlannedCollectTo,
+                cutoff.DepotDeliveryDeadline,
+                cutoff.Active
+            }).ToListAsync(ct));
 
     app.MapGet("/api/v2/master/route-times", async (MasterDataDbContext db, CancellationToken ct) =>
         await db.RouteTimings.AsNoTracking().Where(x => x.Active).OrderBy(x => x.Route).ToListAsync(ct));
