@@ -447,8 +447,12 @@ CREATE TABLE [master].[FuelCards](
     [Active] bit NOT NULL,
     CONSTRAINT [FK_master_FuelCards_Vehicles_VehicleId] FOREIGN KEY ([VehicleId]) REFERENCES [master].[Vehicles]([Id]) ON DELETE SET NULL
 );
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_FuelCards_Provider_Type_Number' AND object_id = OBJECT_ID(N'[master].[FuelCards]'))
-    CREATE UNIQUE INDEX [UX_master_FuelCards_Provider_Type_Number] ON [master].[FuelCards]([Provider],[CardType],[CardNumber]);
+IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_FuelCards_Provider_Type_Number' AND object_id = OBJECT_ID(N'[master].[FuelCards]'))
+    DROP INDEX [UX_master_FuelCards_Provider_Type_Number] ON [master].[FuelCards];
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_FuelCards_Vehicle_Provider_Type' AND object_id = OBJECT_ID(N'[master].[FuelCards]'))
+    CREATE UNIQUE INDEX [UX_master_FuelCards_Vehicle_Provider_Type]
+    ON [master].[FuelCards]([VehicleId],[Provider],[CardType])
+    WHERE [VehicleId] IS NOT NULL;
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_master_FuelCards_VehicleId' AND object_id = OBJECT_ID(N'[master].[FuelCards]'))
     CREATE INDEX [IX_master_FuelCards_VehicleId] ON [master].[FuelCards]([VehicleId]);
 GO
@@ -461,7 +465,7 @@ FROM [master].[Vehicles] v
 WHERE NULLIF(LTRIM(RTRIM(v.[ShellCard])), N'') IS NOT NULL
   AND NOT EXISTS (
       SELECT 1 FROM [master].[FuelCards] f
-      WHERE f.[Provider] = N'Shell' AND f.[CardType] = N'Shell' AND f.[CardNumber] = v.[ShellCard]
+      WHERE f.[VehicleId] = v.[Id] AND f.[Provider] = N'Shell' AND f.[CardType] = N'Shell'
   );
 
 INSERT INTO [master].[FuelCards] ([Id],[VehicleId],[Provider],[CardType],[CardNumber],[Pin],[Notes],[Active])
@@ -470,7 +474,7 @@ FROM [master].[Vehicles] v
 WHERE NULLIF(LTRIM(RTRIM(v.[BpRedCard])), N'') IS NOT NULL
   AND NOT EXISTS (
       SELECT 1 FROM [master].[FuelCards] f
-      WHERE f.[Provider] = N'BP' AND f.[CardType] = N'Red' AND f.[CardNumber] = v.[BpRedCard]
+      WHERE f.[VehicleId] = v.[Id] AND f.[Provider] = N'BP' AND f.[CardType] = N'Red'
   );
 
 INSERT INTO [master].[FuelCards] ([Id],[VehicleId],[Provider],[CardType],[CardNumber],[Pin],[Notes],[Active])
@@ -479,6 +483,6 @@ FROM [master].[Vehicles] v
 WHERE NULLIF(LTRIM(RTRIM(v.[BpPlainCard])), N'') IS NOT NULL
   AND NOT EXISTS (
       SELECT 1 FROM [master].[FuelCards] f
-      WHERE f.[Provider] = N'BP' AND f.[CardType] = N'Plain' AND f.[CardNumber] = v.[BpPlainCard]
+      WHERE f.[VehicleId] = v.[Id] AND f.[Provider] = N'BP' AND f.[CardType] = N'Plain'
   );
 GO
