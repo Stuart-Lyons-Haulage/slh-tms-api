@@ -378,15 +378,22 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
 
     private async Task ProcessDriversAsync(Workbook workbook, WorkbookImportResult result, bool commit, CancellationToken ct)
     {
-        var rows = workbook.Sheets.Where(sheet => sheet.Key.Contains("driver", StringComparison.OrdinalIgnoreCase)).SelectMany(sheet => sheet.Value).ToList();
+        var rows = workbook.Sheets
+            .Where(sheet => sheet.Key.Contains("driver", StringComparison.OrdinalIgnoreCase)
+                || sheet.Value.Any(row =>
+                    row.Text("member code", "tacho member", "worker name", "driver card no.", "driver card number") is not null))
+            .SelectMany(sheet => sheet.Value)
+            .Where(row => row.Text("member code", "tacho member", "worker name", "display name", "driver name", "driver card no.", "driver card number", "employee number", "driverid") is not null)
+            .ToList();
         if (rows.Count == 0) return;
         var drivers = await db.Drivers.ToListAsync(ct);
+        await MasterDetailStore.EnrichDriversAsync(db, drivers, ct);
         foreach (var row in rows)
         {
             var tachoId = row.Text("tachomasterdriverid", "tacho master driver id", "member code", "tacho member");
-            var tachoCard = row.Text("tachocardnumber", "tacho card number", "card number", "driver card", "digicard");
+            var tachoCard = row.Text("tachocardnumber", "tacho card number", "card number", "driver card", "driver card no.", "driver card no", "digicard");
             var employee = row.Text("employee number", "employee no", "driverid", "driver id", "payroll number");
-            var name = row.Text("display name", "driver", "driver name", "name");
+            var name = row.Text("display name", "driver", "driver name", "name", "worker name");
 
             var driver = drivers.FirstOrDefault(item => !string.IsNullOrWhiteSpace(tachoId) && TachoDriverIdentityRules.MemberMatches(item.TachoMasterDriverId, tachoId))
                 ?? drivers.FirstOrDefault(item => !string.IsNullOrWhiteSpace(tachoCard) && TachoDriverIdentityRules.CardsMatch(item.TachoCardNumber, tachoCard))
@@ -400,22 +407,37 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
 
             if (commit)
             {
+                driver.TachoMasterDriverId = tachoId ?? driver.TachoMasterDriverId;
+                driver.TachoCardNumber = tachoCard ?? driver.TachoCardNumber;
+                driver.TachoName = row.Text("tacho name", "worker name") ?? driver.TachoName;
                 driver.MobileNumber = row.Text("phone number", "mobile", "mobile number") ?? driver.MobileNumber;
                 driver.DriverType = row.Text("driver type", "type") ?? driver.DriverType;
                 driver.DriverGroup = row.Text("driver group", "group") ?? driver.DriverGroup;
+                driver.AgencyName = row.Text("agency", "agency name") ?? driver.AgencyName;
+                driver.Email = row.Text("email", "email address", "e-mail") ?? driver.Email;
                 driver.Skills = row.Text("skills", "driver skills") ?? driver.Skills;
+                driver.DigitalTachoCardExpiry = ParseWorkbookDate(row.Text("driver card exp.", "driver card exp", "driver card expiry", "digital tacho card expiry")) ?? driver.DigitalTachoCardExpiry;
+                driver.LicenceExpiry = ParseWorkbookDate(row.Text("driving licence exp.", "driving licence exp", "driving licence expiry", "licence expiry")) ?? driver.LicenceExpiry;
+                driver.CPCExpiry = ParseWorkbookDate(row.Text("dqc expiry", "cpc expiry")) ?? driver.CPCExpiry;
                 var payload = new
                 {
                     employeeNumber = driver.EmployeeNumber,
                     displayName = driver.DisplayName,
+                    tachoName = driver.TachoName,
                     tachoMasterDriverId = driver.TachoMasterDriverId,
                     tachoCardNumber = driver.TachoCardNumber,
+                    digitalTachoCardExpiry = driver.DigitalTachoCardExpiry,
+                    licenceExpiry = driver.LicenceExpiry,
+                    cpcExpiry = driver.CPCExpiry,
                     phoneNumber = driver.MobileNumber,
-                    email = row.Text("email", "email address", "e-mail"),
+                    email = driver.Email,
                     coding = row.Text("coding", "code", "driver code"),
                     driverType = driver.DriverType,
                     driverGroup = driver.DriverGroup,
+                    agencyName = driver.AgencyName,
                     skills = driver.Skills,
+                    cardLastRead = row.Text("card last read"),
+                    started = row.Text("started"),
                     northEligible = row.Bool("north eligible", "northeligible"),
                     preloadEligible = row.Bool("preload eligible", "preloadeligible"),
                     notes = row.Text("notes"),
@@ -427,6 +449,15 @@ public sealed class MasterDataWorkbookImportController(TmsDbContext db, StagingS
             result.Rows.Add(new WorkbookRowResult("Drivers", row.RowNumber, driver.DisplayName, commit ? "updated" : "matched", "Matched existing live driver; operational overlay only, no driver creation.", 95) { ActionTaken = commit ? "updated driver overlay" : "would update driver overlay" });
         }
         if (commit) await db.SaveChangesAsync(ct);
+    }
+
+    private static DateOnly? ParseWorkbookDate(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var formats = new[] { "dd-MM-yyyy", "d-M-yyyy", "dd/MM/yyyy", "d/M/yyyy", "yyyy-MM-dd" };
+        return DateOnly.TryParseExact(value.Trim(), formats, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var parsed)
+            ? parsed
+            : DateOnly.TryParse(value.Trim(), out parsed) ? parsed : null;
     }
 
     private async Task SaveMasterDetailAsync(string entityType, string key, object payload, string source, CancellationToken ct)

@@ -165,7 +165,7 @@ public sealed class OrderIntakeRoutingRegressionTests : IClassFixture<CustomWebF
     }
 
     [Fact]
-    public async Task Preview_endpoint_parses_historic_Barfoots_09_September_waitrose_email()
+    public async Task Preview_endpoint_retains_historic_Barfoots_free_text_as_evidence_only()
     {
         var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Access");
         var request = new MailboxEmailIntakeRequest(
@@ -181,16 +181,13 @@ public sealed class OrderIntakeRoutingRegressionTests : IClassFixture<CustomWebF
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var root = await response.Content.ReadFromJsonAsync<JsonElement>();
 
-        Assert.Equal(4, root.GetProperty("orderCount").GetInt32());
-        var orders = root.GetProperty("orders").EnumerateArray().ToList();
-        Assert.All(orders, order => Assert.Equal("Sefter", order.GetProperty("payload").GetProperty("sellerName").GetString()));
-        Assert.Equal(2, orders.Count(order => order.GetProperty("payload").GetProperty("wave").GetInt32() == 3));
-        Assert.All(orders.Where(order => order.GetProperty("payload").GetProperty("wave").GetInt32() == 3),
-            order => Assert.Equal("17:00", order.GetProperty("payload").GetProperty("requestedTime").GetString()));
+        Assert.True(root.GetProperty("ignored").GetBoolean());
+        Assert.Equal(0, root.GetProperty("orderCount").GetInt32());
+        Assert.Contains("No verified order format matched", root.GetProperty("ignoredReason").GetString());
     }
 
     [Fact]
-    public async Task Preview_endpoint_parses_historic_SummerBerry_COOP_email_without_site_contamination()
+    public async Task Preview_endpoint_retains_historic_SummerBerry_free_text_as_evidence_only()
     {
         var client = factory.CreateClientWithUser("planner@lyonshaulage.com", "Tms.Access");
         var request = new MailboxEmailIntakeRequest(
@@ -205,13 +202,8 @@ public sealed class OrderIntakeRoutingRegressionTests : IClassFixture<CustomWebF
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var root = await response.Content.ReadFromJsonAsync<JsonElement>();
 
-        Assert.Equal(1, root.GetProperty("orderCount").GetInt32());
-        var payload = root.GetProperty("orders")[0].GetProperty("payload");
-        var json = payload.GetRawText();
-        Assert.Equal("COOP", payload.GetProperty("customerCode").GetString());
-        Assert.Equal(3, payload.GetProperty("pallets").GetInt32());
-        Assert.Equal("Summer Berry", payload.GetProperty("sellerName").GetString());
-        Assert.False(json.Contains("NWF", StringComparison.OrdinalIgnoreCase));
-        Assert.False(json.Contains("Drayton", StringComparison.OrdinalIgnoreCase));
+        Assert.True(root.GetProperty("ignored").GetBoolean());
+        Assert.Equal(0, root.GetProperty("orderCount").GetInt32());
+        Assert.Contains("No verified order format matched", root.GetProperty("ignoredReason").GetString());
     }
 }
