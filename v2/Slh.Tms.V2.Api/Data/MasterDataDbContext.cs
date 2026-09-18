@@ -50,7 +50,11 @@ public sealed class MasterDataDbContext(DbContextOptions<MasterDataDbContext> op
         b.Entity<Driver>().HasIndex(x => x.EmployeeNumber).IsUnique().HasFilter("[EmployeeNumber] IS NOT NULL");
         b.Entity<Driver>().Property(x => x.EmployeeNumber).HasMaxLength(80);
         b.Entity<Driver>().Property(x => x.DisplayName).HasMaxLength(200);
+        b.Entity<Driver>().Property(x => x.MobileNumber).HasMaxLength(40);
+        b.Entity<Driver>().Property(x => x.Email).HasMaxLength(254);
+        b.Entity<Driver>().Property(x => x.TachoMasterMemberCode).HasMaxLength(80);
         b.Entity<Driver>().Property(x => x.TachoMasterDriverId).HasMaxLength(120);
+        b.Entity<Driver>().Property(x => x.TachoCardNumber).HasMaxLength(120);
 
         b.Entity<Vehicle>().HasKey(x => x.Id);
         b.Entity<Vehicle>().HasIndex(x => x.Registration).IsUnique();
