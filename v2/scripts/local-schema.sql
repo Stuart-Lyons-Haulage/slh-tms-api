@@ -50,7 +50,8 @@ CREATE TABLE [master].[Sites](
     CONSTRAINT [UX_master_Sites_Code] UNIQUE ([Code]),
     CONSTRAINT [FK_master_Sites_Customers_CustomerId] FOREIGN KEY ([CustomerId]) REFERENCES [master].[Customers]([Id])
 );
-CREATE INDEX [IX_master_Sites_CustomerId] ON [master].[Sites]([CustomerId]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_master_Sites_CustomerId' AND object_id = OBJECT_ID(N'[master].[Sites]'))
+    CREATE INDEX [IX_master_Sites_CustomerId] ON [master].[Sites]([CustomerId]);
 GO
 
 IF OBJECT_ID(N'[master].[Markets]', N'U') IS NULL
@@ -64,7 +65,8 @@ CREATE TABLE [master].[Markets](
     CONSTRAINT [UX_master_Markets_Code] UNIQUE ([Code]),
     CONSTRAINT [FK_master_Markets_Sites_SiteId] FOREIGN KEY ([SiteId]) REFERENCES [master].[Sites]([Id])
 );
-CREATE INDEX [IX_master_Markets_SiteId] ON [master].[Markets]([SiteId]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_master_Markets_SiteId' AND object_id = OBJECT_ID(N'[master].[Markets]'))
+    CREATE INDEX [IX_master_Markets_SiteId] ON [master].[Markets]([SiteId]);
 GO
 
 IF OBJECT_ID(N'[master].[Drivers]', N'U') IS NULL
@@ -78,7 +80,8 @@ CREATE TABLE [master].[Drivers](
     [Skills] nvarchar(max) NULL,
     [Active] bit NOT NULL
 );
-CREATE UNIQUE INDEX [UX_master_Drivers_EmployeeNumber] ON [master].[Drivers]([EmployeeNumber]) WHERE [EmployeeNumber] IS NOT NULL;
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_Drivers_EmployeeNumber' AND object_id = OBJECT_ID(N'[master].[Drivers]'))
+    CREATE UNIQUE INDEX [UX_master_Drivers_EmployeeNumber] ON [master].[Drivers]([EmployeeNumber]) WHERE [EmployeeNumber] IS NOT NULL;
 GO
 
 IF OBJECT_ID(N'[master].[Vehicles]', N'U') IS NULL
@@ -113,9 +116,10 @@ CREATE TABLE [master].[ExternalIdentities](
     [ExternalDisplayName] nvarchar(max) NULL,
     [Active] bit NOT NULL
 );
-CREATE UNIQUE INDEX [UX_master_ExternalIdentities_ActiveKey]
-ON [master].[ExternalIdentities]([Provider],[EntityType],[ExternalKey])
-WHERE [Active] = 1;
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_ExternalIdentities_ActiveKey' AND object_id = OBJECT_ID(N'[master].[ExternalIdentities]'))
+    CREATE UNIQUE INDEX [UX_master_ExternalIdentities_ActiveKey]
+    ON [master].[ExternalIdentities]([Provider],[EntityType],[ExternalKey])
+    WHERE [Active] = 1;
 GO
 
 IF OBJECT_ID(N'[master].[SiteAliases]', N'U') IS NULL
@@ -127,7 +131,8 @@ CREATE TABLE [master].[SiteAliases](
     [Approved] bit NOT NULL,
     CONSTRAINT [FK_master_SiteAliases_Sites_SiteId] FOREIGN KEY ([SiteId]) REFERENCES [master].[Sites]([Id]) ON DELETE CASCADE
 );
-CREATE UNIQUE INDEX [UX_master_SiteAliases_Site_Alias] ON [master].[SiteAliases]([SiteId],[Alias]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_SiteAliases_Site_Alias' AND object_id = OBJECT_ID(N'[master].[SiteAliases]'))
+    CREATE UNIQUE INDEX [UX_master_SiteAliases_Site_Alias] ON [master].[SiteAliases]([SiteId],[Alias]);
 GO
 
 IF OBJECT_ID(N'[intake].[Evidence]', N'U') IS NULL
@@ -143,7 +148,8 @@ CREATE TABLE [intake].[Evidence](
     [RawBodyLocation] nvarchar(max) NULL,
     CONSTRAINT [UX_intake_Evidence_Hash] UNIQUE ([EvidenceHash])
 );
-CREATE INDEX [IX_intake_Evidence_Source_Message] ON [intake].[Evidence]([SourceSystem],[MessageId]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_intake_Evidence_Source_Message' AND object_id = OBJECT_ID(N'[intake].[Evidence]'))
+    CREATE INDEX [IX_intake_Evidence_Source_Message] ON [intake].[Evidence]([SourceSystem],[MessageId]);
 GO
 
 IF OBJECT_ID(N'[intake].[IntakeRecords]', N'U') IS NULL
@@ -159,7 +165,8 @@ CREATE TABLE [intake].[IntakeRecords](
     [UpdatedAtUtc] datetimeoffset NOT NULL,
     CONSTRAINT [UX_intake_IntakeRecords_EvidenceId] UNIQUE ([EvidenceId])
 );
-CREATE INDEX [IX_intake_IntakeRecords_State_Created] ON [intake].[IntakeRecords]([State],[CreatedAtUtc]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_intake_IntakeRecords_State_Created' AND object_id = OBJECT_ID(N'[intake].[IntakeRecords]'))
+    CREATE INDEX [IX_intake_IntakeRecords_State_Created] ON [intake].[IntakeRecords]([State],[CreatedAtUtc]);
 GO
 
 IF OBJECT_ID(N'[ops].[Orders]', N'U') IS NULL
@@ -191,10 +198,14 @@ CREATE TABLE [ops].[Orders](
     [UpdatedAtUtc] datetimeoffset NOT NULL,
     CONSTRAINT [UX_ops_Orders_StableKey] UNIQUE ([StableKey])
 );
-CREATE INDEX [IX_ops_Orders_CollectionDate_State] ON [ops].[Orders]([CollectionDate],[State]);
-CREATE INDEX [IX_ops_Orders_CustomerId] ON [ops].[Orders]([CustomerId]);
-CREATE INDEX [IX_ops_Orders_CollectionSiteId] ON [ops].[Orders]([CollectionSiteId]);
-CREATE INDEX [IX_ops_Orders_DeliverySiteId] ON [ops].[Orders]([DeliverySiteId]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_ops_Orders_CollectionDate_State' AND object_id = OBJECT_ID(N'[ops].[Orders]'))
+    CREATE INDEX [IX_ops_Orders_CollectionDate_State] ON [ops].[Orders]([CollectionDate],[State]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_ops_Orders_CustomerId' AND object_id = OBJECT_ID(N'[ops].[Orders]'))
+    CREATE INDEX [IX_ops_Orders_CustomerId] ON [ops].[Orders]([CustomerId]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_ops_Orders_CollectionSiteId' AND object_id = OBJECT_ID(N'[ops].[Orders]'))
+    CREATE INDEX [IX_ops_Orders_CollectionSiteId] ON [ops].[Orders]([CollectionSiteId]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_ops_Orders_DeliverySiteId' AND object_id = OBJECT_ID(N'[ops].[Orders]'))
+    CREATE INDEX [IX_ops_Orders_DeliverySiteId] ON [ops].[Orders]([DeliverySiteId]);
 GO
 
 IF OBJECT_ID(N'[ops].[OrderSourceLinks]', N'U') IS NULL
@@ -207,5 +218,6 @@ CREATE TABLE [ops].[OrderSourceLinks](
     CONSTRAINT [FK_ops_OrderSourceLinks_Orders_OrderId] FOREIGN KEY ([OrderId]) REFERENCES [ops].[Orders]([Id]),
     CONSTRAINT [UX_ops_OrderSourceLinks_Order_Revision] UNIQUE ([OrderId],[RevisionNumber])
 );
-CREATE INDEX [IX_ops_OrderSourceLinks_EvidenceId] ON [ops].[OrderSourceLinks]([EvidenceId]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_ops_OrderSourceLinks_EvidenceId' AND object_id = OBJECT_ID(N'[ops].[OrderSourceLinks]'))
+    CREATE INDEX [IX_ops_OrderSourceLinks_EvidenceId] ON [ops].[OrderSourceLinks]([EvidenceId]);
 GO
