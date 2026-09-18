@@ -17,7 +17,6 @@ namespace Slh.Tms.Api.Controllers;
 [Authorize]
 public sealed class OrderIntakeController(TmsDbContext db, StagingService stagingService, ILogger<OrderIntakeController> logger) : ControllerBase
 {
-    private readonly EmailOrderIntakeService emailParser = new();
     private readonly SpecialistMailboxOrderParser specialistParser = new();
     private readonly SainsburyHaulierPlanParser sainsburyParser = new();
     private readonly NwfDailyTrackerParser nwfParser = new();
@@ -62,19 +61,6 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         // and can be replayed later without manufacturing review-queue orders today.
         await EnsureSourceEmailEvidence(request, ct);
 
-        if (!IsSimplifiedIntakeSource(request))
-            return Ok(new
-            {
-                ignored = true,
-                reason = "Paused by simplified order intake lane; source evidence retained.",
-                staged = 0,
-                existing = 0,
-                superseded = 0,
-                linked = 0,
-                warnings = Array.Empty<string>(),
-                outlookCategory = (string?)null
-            });
-
         var parsed = await ParseEmail(request, ct);
         if (parsed.IgnoredReason is not null)
         {
@@ -85,20 +71,6 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             }
             return Ok(new { ignored = true, reason = parsed.IgnoredReason, staged = 0, existing = 0, superseded = 0, linked, warnings = parsed.Warnings, outlookCategory = (string?)null });
         }
-
-        parsed = ApplySimplifiedDestinationGate(request, parsed);
-        if (parsed.Orders.Count == 0)
-            return Ok(new
-            {
-                ignored = true,
-                reason = "Parsed source is outside the simplified Aldi/Morrisons/Waitrose/Costco lane; source evidence retained.",
-                staged = 0,
-                existing = 0,
-                superseded = 0,
-                linked = 0,
-                warnings = parsed.Warnings,
-                outlookCategory = (string?)null
-            });
 
         var staged = 0;
         var existing = 0;
@@ -231,33 +203,25 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
     private async Task<EmailIntakeParseResult> ParseEmail(MailboxEmailIntakeRequest request, CancellationToken ct)
     {
-        var knownSender = await CustomerEmailRouteService.HasApprovedRouteAsync(db, request, ct);
+        // Info mailbox intake is deliberately parser-led. A sender/domain mapping,
+        // retailer name or generic "looks like an order" heuristic must never create
+        // a staging order. If none of the verified formats below recognise the
+        // message, retain its source evidence and stop.
         var parsed = nwfQuantityChangeParser.TryParse(request)
             ?? nwfCsvParser.TryParse(request)
             ?? nwfWorkbookParser.TryParse(request)
             ?? nwfParser.TryParse(request)
             ?? sainsburyParser.TryParse(request)
             ?? specialistParser.TryParse(request)
-            ?? emailParser.Parse(request, knownSender ? [] : await MasterSiteNames(ct));
+            ?? new EmailIntakeParseResult(
+                [],
+                [],
+                "No verified order format matched; source evidence retained.");
 
-        var routed = await CustomerEmailRouteService.ApplyAsync(db, parsed, request, ct);
-        var fullyMappedFastPath = knownSender && routed.Orders.Count > 0 && routed.Orders.All(order =>
-            ReadBool(order.Payload, "emailRouteMatched") == true &&
-            !string.IsNullOrWhiteSpace(ReadText(order.Payload, "emailRouteDefaultSiteCode")) &&
-            !string.IsNullOrWhiteSpace(ReadText(order.Payload, "emailRouteDefaultDeliverySiteCode")) &&
-            ReadBool(order.Payload, "emailRouteRequiresReview") != true);
-        if (fullyMappedFastPath)
-        {
-            routed = routed with
-            {
-                Orders = routed.Orders.Select(order => order with
-                {
-                    Payload = AddFastPathMarker(order.Payload)
-                }).ToList()
-            };
-            return routed;
-        }
-        var aligned = await EmailOrderSiteMasterAlignment.AlignAsync(db, routed, ct);
+        if (parsed.Orders.Count == 0)
+            return parsed;
+
+        var aligned = await EmailOrderSiteMasterAlignment.AlignAsync(db, parsed, ct);
         return await NwfCrateReferenceLinker.EnrichAsync(db, aligned, request, ct);
     }
 

@@ -314,8 +314,17 @@ public sealed class NwfPalletOrderCsvParser
         var subject = request.Subject ?? string.Empty;
         var attachments = string.Join(" ", (request.Attachments ?? []).Select(item => item.Name));
         var value = $"{sender} {subject} {attachments}";
-        return sender.EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) &&
-               (value.Contains("NWAY", StringComparison.OrdinalIgnoreCase) || value.Contains("NWF", StringComparison.OrdinalIgnoreCase)) &&
+        var nwfSignal =
+            value.Contains("NWAY", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("NWF", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("Natures Way", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("Nature's Way", StringComparison.OrdinalIgnoreCase);
+
+        // Direct NWF mail is common, but genuine NWF reports are also forwarded or
+        // replied to internally. The body fallback still requires the complete
+        // 12-column pallet-order table signature, so sender domain is not used as
+        // an authority for creating an order.
+        return nwfSignal &&
                value.Contains("pallet", StringComparison.OrdinalIgnoreCase) &&
                value.Contains("order", StringComparison.OrdinalIgnoreCase);
     }

@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Slh.Tms.Api.Services;
 
@@ -41,6 +42,10 @@ public sealed class SpecialistMailboxOrderParser
         var summerBerry = TryParseSummerBerryMorrisonsAldi(request);
         if (summerBerry is not null)
             return summerBerry;
+
+        var greenhouse = TryParseGreenhouseAldiWorkbook(request);
+        if (greenhouse is not null)
+            return greenhouse;
 
         var vitacress = TryParseVitacressWaitroseWorkbook(request);
         if (vitacress is not null)
@@ -188,6 +193,109 @@ public sealed class SpecialistMailboxOrderParser
         if (depot.StartsWith("MORRISONS", StringComparison.OrdinalIgnoreCase))
             return ("SUMMERBERRY", "MORRISONS");
         return null;
+    }
+
+    private static EmailIntakeParseResult? TryParseGreenhouseAldiWorkbook(MailboxEmailIntakeRequest request)
+    {
+        var attachments = (request.Attachments ?? [])
+            .Where(item => item.IsInline != true && !string.IsNullOrWhiteSpace(item.EffectiveContentBase64))
+            .Where(item => IsExcel(item.Name))
+            .Where(item => (item.Name ?? string.Empty).Contains("GHS Aldi Bookings", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (attachments.Count == 0)
+            return null;
+
+        var orders = new List<ParsedEmailOrder>();
+        var warnings = new List<string>();
+        foreach (var attachment in attachments)
+        {
+            try
+            {
+                using var stream = new MemoryStream(Convert.FromBase64String(attachment.EffectiveContentBase64!));
+                using var reader = ExcelReaderFactory.CreateReader(stream);
+                var sheetNumber = 0;
+                do
+                {
+                    sheetNumber++;
+                    var rows = ReadRows(reader);
+                    var headerIndex = rows.FindIndex(row =>
+                        RowContains(row, "Date") &&
+                        RowContains(row, "Collection Site") &&
+                        RowContains(row, "Depot Description") &&
+                        RowContains(row, "Pallets") &&
+                        RowContains(row, "Temperature") &&
+                        RowContains(row, "Pallet Type"));
+                    if (headerIndex < 0)
+                        continue;
+
+                    var headers = HeaderMap(rows[headerIndex]);
+                    var dateIndex = FindColumn(headers, "date");
+                    var collectionIndex = FindColumn(headers, "collectionsite");
+                    var depotIndex = FindColumn(headers, "depotdescription");
+                    var palletsIndex = FindColumn(headers, "pallets");
+                    var temperatureIndex = FindColumn(headers, "temperature");
+                    var palletTypeIndex = FindColumn(headers, "pallettype");
+                    if (dateIndex < 0 || collectionIndex < 0 || depotIndex < 0 || palletsIndex < 0)
+                        continue;
+
+                    for (var rowIndex = headerIndex + 1; rowIndex < rows.Count; rowIndex++)
+                    {
+                        var row = rows[rowIndex];
+                        var collection = CellText(row, collectionIndex);
+                        var destination = CellText(row, depotIndex);
+                        var pallets = CellInt(row, palletsIndex);
+                        var date = CellDate(row, dateIndex);
+                        if (date is null || pallets is null or <= 0 ||
+                            !string.Equals(collection, "Greenhouse", StringComparison.OrdinalIgnoreCase) ||
+                            string.IsNullOrWhiteSpace(destination) ||
+                            !destination.StartsWith("ALDI-", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        var temperature = CellText(row, temperatureIndex);
+                        var palletType = CellText(row, palletTypeIndex);
+                        var rowWarnings = new List<string>();
+                        var reference = $"GHS-{date:yyyyMMdd}-{NormaliseKey(destination)}";
+                        var naturalKey = NaturalKey(request, "GHS", collection, destination, date.Value, pallets.Value);
+                        var payload = BuildPayload(
+                            request,
+                            reference,
+                            null,
+                            "GHS",
+                            date.Value,
+                            date.Value,
+                            pallets.Value,
+                            "Greenhouse",
+                            destination,
+                            null,
+                            null,
+                            attachment.Name,
+                            reader.Name,
+                            rowIndex + 1,
+                            "Greenhouse Aldi workbook",
+                            rowWarnings,
+                            "ALDI");
+
+                        var root = JsonNode.Parse(payload.GetRawText())?.AsObject() ?? new JsonObject();
+                        root["temperatureRequirement"] = temperature;
+                        root["palletType"] = palletType;
+                        payload = JsonSerializer.SerializeToElement(root);
+
+                        orders.Add(new ParsedEmailOrder(
+                            $"greenhouse-aldi-{sheetNumber}-{rowIndex + 1}-{NormaliseKey(destination)}",
+                            naturalKey,
+                            payload,
+                            rowWarnings));
+                    }
+                }
+                while (reader.NextResult());
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                warnings.Add($"Attachment '{attachment.Name}' could not be parsed by the Greenhouse Aldi workbook parser: {ex.GetBaseException().Message}");
+            }
+        }
+
+        return orders.Count == 0 ? null : new EmailIntakeParseResult(orders, warnings, null);
     }
 
     private static EmailIntakeParseResult? TryParseVitacressWaitroseWorkbook(MailboxEmailIntakeRequest request)
