@@ -360,3 +360,25 @@ CREATE TABLE [master].[SiteAliasCandidates](
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_SiteAliasCandidates_Type_Alias' AND object_id = OBJECT_ID(N'[master].[SiteAliasCandidates]'))
     CREATE UNIQUE INDEX [UX_master_SiteAliasCandidates_Type_Alias] ON [master].[SiteAliasCandidates]([AliasType],[Alias]);
 GO
+
+
+IF OBJECT_ID(N'[master].[MasterDataReviewItems]', N'U') IS NULL
+CREATE TABLE [master].[MasterDataReviewItems](
+    [Id] uniqueidentifier NOT NULL PRIMARY KEY,
+    [Key] nvarchar(300) NOT NULL,
+    [Category] nvarchar(80) NOT NULL,
+    [EntityType] nvarchar(80) NOT NULL,
+    [SourceReference] nvarchar(160) NULL,
+    [Summary] nvarchar(max) NOT NULL,
+    [PayloadJson] nvarchar(max) NULL,
+    [Resolved] bit NOT NULL,
+    [ResolutionNotes] nvarchar(max) NULL,
+    [CreatedAtUtc] datetimeoffset NOT NULL,
+    [UpdatedAtUtc] datetimeoffset NOT NULL,
+    [Active] bit NOT NULL,
+    CONSTRAINT [UX_master_MasterDataReviewItems_Key] UNIQUE ([Key])
+);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_master_MasterDataReviewItems_Resolved_Category_CreatedAtUtc' AND object_id = OBJECT_ID(N'[master].[MasterDataReviewItems]'))
+    CREATE INDEX [IX_master_MasterDataReviewItems_Resolved_Category_CreatedAtUtc]
+    ON [master].[MasterDataReviewItems]([Resolved],[Category],[CreatedAtUtc]);
+GO
