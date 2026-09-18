@@ -90,7 +90,10 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
             var status = live.OrderByDescending(x => x.LastEventTimeUtc).FirstOrDefault(x => NormalizeReg(x.VehicleIdentifier) == NormalizeReg(v.Registration) || NormalizeReg(x.VehicleIdentifier) == NormalizeReg(v.Abbreviation ?? string.Empty));
             return new
             {
-                v.Id, v.Registration, v.FleetNumber, v.Abbreviation, v.Transmission, v.Active, v.FleetioStatus,
+                v.Id, v.Registration, v.VIN, v.OwnerType, v.VehicleSite, v.FleetNumber, v.Abbreviation, v.Transmission,
+                v.DvsCompliant, v.FuelProvider, v.CabMobile, v.FuelPin, v.ShellCard, v.BpRedCard, v.BpPlainCard,
+                v.FuelPinSecretName, v.FuelCardLastFour, v.MOTExpiry, v.TachoCalibrationExpiry, v.VehicleTestExpiry,
+                v.Notes, v.FleetioId, v.FleetioName, v.FleetioStatus, v.Active,
                 lastLocation = status is null ? null : new { status.Latitude, status.Longitude, status.LastEventTimeUtc, status.IsMoving, status.LastKnownStatus }
             };
         });
@@ -156,7 +159,9 @@ public sealed class OperationalMasterDataController(TmsDbContext db) : Controlle
         q = (q ?? string.Empty).Trim();
         var query = db.Trailers.AsNoTracking().Where(x => includeInactive || x.Active);
         if (q.Length > 0) query = query.Where(x => x.TrailerNumber.Contains(q) || (x.Type != null && x.Type.Contains(q)));
-        return Ok(await query.OrderBy(x => x.TrailerNumber).Take(50).ToListAsync(ct));
+        var rows = await query.OrderBy(x => x.TrailerNumber).Take(50).ToListAsync(ct);
+        await MasterDetailStore.EnrichTrailersAsync(db, rows, ct);
+        return Ok(rows);
     }
 
     [HttpPut("trailers/{id:guid}"), Authorize(Policy = "TmsApprove")]
