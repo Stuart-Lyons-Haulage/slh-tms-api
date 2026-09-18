@@ -93,6 +93,7 @@ public sealed class MasterDataCrudService(
             "sites" => await master.Sites.SingleOrDefaultAsync(x => x.Id == id, ct),
             "drivers" => await master.Drivers.SingleOrDefaultAsync(x => x.Id == id, ct),
             "vehicles" => await master.Vehicles.SingleOrDefaultAsync(x => x.Id == id, ct),
+            "fuel-cards" => await master.FuelCards.SingleOrDefaultAsync(x => x.Id == id, ct),
             "trailers" => await master.Trailers.SingleOrDefaultAsync(x => x.Id == id, ct),
             "markets" => await master.Markets.SingleOrDefaultAsync(x => x.Id == id, ct),
             "customer-contacts" => await master.CustomerContacts.SingleOrDefaultAsync(x => x.Id == id, ct),
@@ -141,6 +142,7 @@ public sealed class MasterDataCrudService(
             "sitecutoffs" => "site-cutoffs",
             "routetimes" => "route-times",
             "fuelprices" => "fuel-prices",
+            "fuelcards" => "fuel-cards",
             var normalized => normalized
         };
 
