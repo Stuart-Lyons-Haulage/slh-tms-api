@@ -177,6 +177,37 @@ public static class MasterDetailStore
         }
     }
 
+    public static async Task EnrichTrailersAsync(TmsDbContext db, IReadOnlyCollection<Trailer> trailers, CancellationToken ct)
+    {
+        if (trailers.Count == 0) return;
+        var byNumber = trailers
+            .Where(trailer => !string.IsNullOrWhiteSpace(trailer.TrailerNumber))
+            .GroupBy(trailer => NormaliseKey(trailer.TrailerNumber), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
+        var rows = await db.StagedImports.AsNoTracking()
+            .Where(item => item.EntityType == "masterdetail:trailer" && item.Status == StagingStatus.Promoted)
+            .OrderByDescending(item => item.ReviewedAtUtc ?? item.ReceivedAtUtc)
+            .Take(5000)
+            .ToListAsync(ct);
+
+        var applied = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in rows)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(row.PayloadJson);
+                var payload = document.RootElement;
+                var number = Text(payload, "trailerNumber") ?? Text(payload, "fleetNumber") ?? Text(payload, "registration");
+                if (string.IsNullOrWhiteSpace(number)) continue;
+                var normalised = NormaliseKey(number);
+                if (!applied.Add(normalised) || !byNumber.TryGetValue(normalised, out var matches)) continue;
+                foreach (var trailer in matches)
+                    trailer.Notes = Text(payload, "notes");
+            }
+            catch (JsonException) { }
+        }
+    }
+
     public static async Task<int> QuarantineFleetioPlaceholdersAsync(TmsDbContext db, CancellationToken ct)
     {
         var candidates = await db.Vehicles.Where(vehicle => vehicle.Active && vehicle.Registration.StartsWith("C")).ToListAsync(ct);
