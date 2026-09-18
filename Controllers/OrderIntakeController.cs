@@ -277,6 +277,7 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         return sender.EndsWith("@nwfltd.co.uk", StringComparison.OrdinalIgnoreCase) ||
                sender.EndsWith("@barfoots.co.uk", StringComparison.OrdinalIgnoreCase) ||
                sender.EndsWith("@summerberry.co.uk", StringComparison.OrdinalIgnoreCase) ||
+               IsNwfTransferSource(request) ||
                source.Contains("Natures Way", StringComparison.OrdinalIgnoreCase) ||
                source.Contains("Nature's Way", StringComparison.OrdinalIgnoreCase) ||
                Regex.IsMatch(source, @"\b(?:NWF|NWAY)\b", RegexOptions.IgnoreCase) ||
@@ -297,7 +298,8 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         }.Where(value => !string.IsNullOrWhiteSpace(value)));
 
         var eligible = parsed.Orders
-            .Where(order => IsSimplifiedDestination(order.Payload.GetRawText()) ||
+            .Where(order => IsNwfTransferOrder(order.Payload) ||
+                            IsSimplifiedDestination(order.Payload.GetRawText()) ||
                             (parsed.Orders.Count == 1 && IsSimplifiedDestination(source)))
             .ToList();
 
@@ -310,6 +312,19 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         value.Contains("Waitrose", StringComparison.OrdinalIgnoreCase) ||
         value.Contains("Weightrose", StringComparison.OrdinalIgnoreCase) ||
         value.Contains("Costco", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsNwfTransferOrder(JsonElement payload) =>
+        string.Equals(ReadText(payload, "customerCode"), "NWF", StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(ReadText(payload, "jobType"), "Collection transfer", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsNwfTransferSource(MailboxEmailIntakeRequest request)
+    {
+        var subject = request.Subject ?? string.Empty;
+        if (!subject.Contains("transfer", StringComparison.OrdinalIgnoreCase)) return false;
+
+        var nwfSites = new[] { "Barnham", "Merston", "Runcton", "Selsey", "Drayton" };
+        return nwfSites.Count(site => subject.Contains(site, StringComparison.OrdinalIgnoreCase)) >= 2;
+    }
 
     private static JsonElement AddFastPathMarker(JsonElement payload)
     {
