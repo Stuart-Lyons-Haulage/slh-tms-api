@@ -57,8 +57,8 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
         var reviewItems = (await db.MasterDataReviewItems.ToListAsync(ct))
             .ToDictionary(x => x.Key, StringComparer.OrdinalIgnoreCase);
 
-        ImportCustomerContacts(workbook, customersByCode, customersByName, sitesByCode, contactsByCode);
         ImportSites(workbook, customersByCode, sitesByCode, siteAliases);
+        ImportCustomerContacts(workbook, customersByCode, customersByName, sitesByCode, contactsByCode);
         ImportDrivers(workbook, driversByEmployee);
         ImportVehicles(workbook, vehiclesByReg, fuelCardsByKey);
         ImportTrailers(workbook, trailersByNumber);
