@@ -249,6 +249,36 @@ SO000371055| 8000054552| IPP STD| 15| PO00504426
     }
 
     [Fact]
+    public void ForwardedNwfBodyTable_IsAcceptedOnlyBecauseVerifiedTableSignatureIsPresent()
+    {
+        const string body = """
+Forwarded message
+NWAY Stuart Lyons Transport Pallet Order Report 19/09/2026
+Haulier Name| Requested Ship Date| 04. Collection Site| Customer Name| DepotID| Depot Description| Delivery Address| Sales Order ID| CustomerRef| Pallet Name| PalletQty| PO REF
+---|---|---|---|---|---|---|---|---|---|---|---
+Stuart Lyons| 19/09/2026| Selsey| Tesco| ONE01| One Stop Tamworth| B78 1ST| SO000371055| 8000054552| IPP STD| 15| PO00504426
+""";
+        var request = new MailboxEmailIntakeRequest(
+            "forwarded-nwf-table",
+            null,
+            "info@lyonshaulage.com",
+            "gerone@lyonshaulage.com",
+            "Gerone",
+            "FW: NWAY Stuart Lyons Transport Pallet Order Report 19/09/2026",
+            DateTimeOffset.Parse("2026-09-18T12:03:00Z"),
+            body,
+            null,
+            null,
+            null);
+
+        var result = parser.TryParse(request);
+
+        var order = Assert.Single(result!.Orders);
+        Assert.Equal("Tesco", order.Payload.GetProperty("customerName").GetString());
+        Assert.Equal(15, order.Payload.GetProperty("pallets").GetInt32());
+    }
+
+    [Fact]
     public void MissingPo_UsesSalesOrderOnlyAsFallbackAndFlagsReview()
     {
         const string csv = """
