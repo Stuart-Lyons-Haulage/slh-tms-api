@@ -26,9 +26,10 @@ The supported production pattern is therefore:
 1. Trigger on every new Info mailbox Inbox message. Do not filter by sender, subject, order type or attachment presence.
 2. Initialise the `NormalizedAttachments` array.
 3. `Apply to each` over `@coalesce(triggerOutputs()?['body/attachments'],json('[]'))`.
-4. Inside the loop, call `Get Attachment (V2)` using the trigger Message Id and the current attachment Id.
-5. Append a structured object containing `id`, `name`, `contentType`, `size`, `isInline`, `contentId` and `contentBytes` to `NormalizedAttachments`.
-6. Submit `IntakeInfoMailboxEmail` after the attachment loop whether the loop succeeded, failed, timed out or was skipped. This prevents a single attachment problem from dropping the entire customer email.
+4. Before downloading content, continue only when `isInline` is false and the attachment name ends `.xls`, `.xlsx`, `.xlsm`, `.csv` or `.pdf`. Signature/social-media images are ignored.
+5. For supported order documents only, call `Get Attachment (V2)` using the trigger Message Id and current attachment Id. Keep retries bounded so one bad attachment cannot hold the serial loop for several minutes.
+6. Append a structured object containing `id`, `name`, `contentType`, `size`, `isInline`, `contentId` and `contentBytes` to `NormalizedAttachments`.
+7. Submit `IntakeInfoMailboxEmail` after the attachment loop whether the loop succeeded, failed, timed out or was skipped. This prevents a single attachment problem from dropping the entire customer email.
 
 Do not build attachment objects with a manually concatenated `json(concat(...))` string in the source-controlled definition. A structured object avoids malformed JSON when Outlook returns values such as inline `contentId` strings. The live flow may still show a designer expression, but its effective payload must match the structured object above.
 
