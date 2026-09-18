@@ -416,3 +416,39 @@ IF COL_LENGTH(N'master.Sites', N'ExtendedCutoff') IS NULL ALTER TABLE [master].[
 IF COL_LENGTH(N'master.Sites', N'DeadlineContact') IS NULL ALTER TABLE [master].[Sites] ADD [DeadlineContact] nvarchar(200) NULL;
 IF COL_LENGTH(N'master.Sites', N'DeadlineNotes') IS NULL ALTER TABLE [master].[Sites] ADD [DeadlineNotes] nvarchar(max) NULL;
 GO
+
+
+/* Site-owned planner knowledge / contacts and canonical fuel cards */
+IF COL_LENGTH(N'master.CustomerContacts', N'SiteId') IS NULL ALTER TABLE [master].[CustomerContacts] ADD [SiteId] uniqueidentifier NULL;
+IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'FK_master_CustomerContacts_Sites_SiteId')
+    ALTER TABLE [master].[CustomerContacts] ADD CONSTRAINT [FK_master_CustomerContacts_Sites_SiteId]
+    FOREIGN KEY ([SiteId]) REFERENCES [master].[Sites]([Id]) ON DELETE SET NULL;
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_master_CustomerContacts_SiteId' AND object_id = OBJECT_ID(N'[master].[CustomerContacts]'))
+    CREATE INDEX [IX_master_CustomerContacts_SiteId] ON [master].[CustomerContacts]([SiteId]);
+GO
+
+IF COL_LENGTH(N'master.RouteTimings', N'SiteId') IS NULL ALTER TABLE [master].[RouteTimings] ADD [SiteId] uniqueidentifier NULL;
+IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'FK_master_RouteTimings_Sites_SiteId')
+    ALTER TABLE [master].[RouteTimings] ADD CONSTRAINT [FK_master_RouteTimings_Sites_SiteId]
+    FOREIGN KEY ([SiteId]) REFERENCES [master].[Sites]([Id]) ON DELETE SET NULL;
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_master_RouteTimings_SiteId' AND object_id = OBJECT_ID(N'[master].[RouteTimings]'))
+    CREATE INDEX [IX_master_RouteTimings_SiteId] ON [master].[RouteTimings]([SiteId]);
+GO
+
+IF OBJECT_ID(N'[master].[FuelCards]', N'U') IS NULL
+CREATE TABLE [master].[FuelCards](
+    [Id] uniqueidentifier NOT NULL PRIMARY KEY,
+    [VehicleId] uniqueidentifier NULL,
+    [Provider] nvarchar(80) NOT NULL,
+    [CardType] nvarchar(80) NOT NULL,
+    [CardNumber] nvarchar(120) NOT NULL,
+    [Pin] nvarchar(40) NULL,
+    [Notes] nvarchar(max) NULL,
+    [Active] bit NOT NULL,
+    CONSTRAINT [FK_master_FuelCards_Vehicles_VehicleId] FOREIGN KEY ([VehicleId]) REFERENCES [master].[Vehicles]([Id]) ON DELETE SET NULL
+);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_FuelCards_Provider_Type_Number' AND object_id = OBJECT_ID(N'[master].[FuelCards]'))
+    CREATE UNIQUE INDEX [UX_master_FuelCards_Provider_Type_Number] ON [master].[FuelCards]([Provider],[CardType],[CardNumber]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_master_FuelCards_VehicleId' AND object_id = OBJECT_ID(N'[master].[FuelCards]'))
+    CREATE INDEX [IX_master_FuelCards_VehicleId] ON [master].[FuelCards]([VehicleId]);
+GO
