@@ -101,10 +101,13 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
 
     private void ValidateWorkbook(XLWorkbook workbook)
     {
-        foreach (var name in ExpectedSheets)
+        var recognised = ExpectedSheets
+            .Concat(OptionalSheets)
+            .Count(name => workbook.Worksheets.TryGetWorksheet(name, out _));
+
+        if (recognised == 0)
         {
-            if (!workbook.Worksheets.TryGetWorksheet(name, out _))
-                AddIssue($"Workbook is missing expected sheet '{name}'.");
+            AddIssue("Workbook does not contain any recognised V2 Master Data sheets.");
         }
     }
 
