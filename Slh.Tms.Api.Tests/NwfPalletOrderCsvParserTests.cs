@@ -139,6 +139,63 @@ Stuart Lyons| 25/08/2026| Selsey| Tesco| ONE01| One Stop Tamworth| B78 1ST| SO00
     }
 
     [Fact]
+    public void Sep19MorrisonsBodySnapshot_ProducesAll22MovementsAnd106Pallets()
+    {
+        const string body = """
+Hello,
+Please see below and attached.
+Haulier Name| Requested Ship Date| 04. Collection Site| Customer Name| DepotID| Depot Description| Delivery Address| Sales Order ID| CustomerRef| Pallet Name| PalletQty| PO REF
+---|---|---|---|---|---|---|---|---|---|---|---
+Stuart Lyons| 19/09/2026| Merston| Morrisons| MOR06| Morrisons FRUITBRIDGWATER 718| TA6 4FG| SO000370882| 91329115| IPP STD| 2| PO00504426
+Stuart Lyons| 19/09/2026| Merston| Morrisons| MOR07| Morrisons FRUITGADBROOK 971| CW9 7WA| SO000370878| 91321935| IPP STD| 3| PO00504426
+Stuart Lyons| 19/09/2026| Merston| Morrisons| MOR08| Morrisons FRUITLATIMER 952| NN15 5YT| SO000370880| 91324453| IPP STD| 3| PO00504426
+Stuart Lyons| 19/09/2026| Merston| Morrisons| MOR09| Morrisons FRUITSITTINGBOURNE 763| ME10 2FD| SO000370885| 91329634| IPP STD| 3| PO00504426
+Stuart Lyons| 19/09/2026| Merston| Morrisons| MOR11| Morrisons FRUITWAKEFIELD 990| WF2 0XF| SO000370884| 91329422| IPP STD| 3| PO00504426
+Stuart Lyons| 19/09/2026| Merston| Morrisons| MOR18| Morrisons STOCKTON 994| TS18 2SZ| SO000370879| 91322045| IPP STD| 2| PO00504426
+Stuart Lyons| 19/09/2026| Merston| Morrisons| MOR25| Morrisons DORDON 814| B78 1SE| SO000370902| 52333848| IPP STD| 1| PO00504426
+Stuart Lyons| 19/09/2026| Runcton| Morrisons| MOR06| Morrisons FRUITBRIDGWATER 718| TA6 4FG| SO000370882| 91329115| IPP STD| 6| PO00504426
+Stuart Lyons| 19/09/2026| Runcton| Morrisons| MOR07| Morrisons FRUITGADBROOK 971| CW9 7WA| SO000370878| 91321935| IPP STD| 7| PO00504426
+Stuart Lyons| 19/09/2026| Runcton| Morrisons| MOR08| Morrisons FRUITLATIMER 952| NN15 5YT| SO000370880| 91324453| IPP STD| 9| PO00504426
+Stuart Lyons| 19/09/2026| Runcton| Morrisons| MOR09| Morrisons FRUITSITTINGBOURNE 763| ME10 2FD| SO000370885| 91329634| IPP STD| 7| PO00504426
+Stuart Lyons| 19/09/2026| Runcton| Morrisons| MOR10| Morrisons FRUITSTOCKTON 993| TS18 2SZ| SO000370881| 91325050| IPP STD| 1| PO00504426
+Stuart Lyons| 19/09/2026| Runcton| Morrisons| MOR11| Morrisons FRUITWAKEFIELD 990| WF2 0XF| SO000370884| 91329422| IPP STD| 8| PO00504426
+Stuart Lyons| 19/09/2026| Runcton| Morrisons| MOR18| Morrisons STOCKTON 994| TS18 2SZ| SO000370879| 91322045| IPP STD| 3| PO00504426
+Stuart Lyons| 19/09/2026| Runcton| Morrisons| MOR25| Morrisons DORDON 814| B78 1SE| SO000370902| 52333848| IPP STD| 1| PO00504426
+Stuart Lyons| 19/09/2026| Selsey| Morrisons| MOR06| Morrisons FRUITBRIDGWATER 718| TA6 4FG| SO000370882| 91329115| IPP STD| 7| PO00504426
+Stuart Lyons| 19/09/2026| Selsey| Morrisons| MOR07| Morrisons FRUITGADBROOK 971| CW9 7WA| SO000370878| 91321935| IPP STD| 7| PO00504426
+Stuart Lyons| 19/09/2026| Selsey| Morrisons| MOR08| Morrisons FRUITLATIMER 952| NN15 5YT| SO000370880| 91324453| IPP STD| 10| PO00504426
+Stuart Lyons| 19/09/2026| Selsey| Morrisons| MOR09| Morrisons FRUITSITTINGBOURNE 763| ME10 2FD| SO000370885| 91329634| IPP STD| 10| PO00504426
+Stuart Lyons| 19/09/2026| Selsey| Morrisons| MOR11| Morrisons FRUITWAKEFIELD 990| WF2 0XF| SO000370884| 91329422| IPP STD| 7| PO00504426
+Stuart Lyons| 19/09/2026| Selsey| Morrisons| MOR18| Morrisons STOCKTON 994| TS18 2SZ| SO000370879| 91322045| IPP STD| 3| PO00504426
+Stuart Lyons| 19/09/2026| Selsey| Morrisons| MOR25| Morrisons DORDON 814| B78 1SE| SO000370902| 52333848| IPP STD| 3| PO00504426
+""";
+
+        var request = new MailboxEmailIntakeRequest(
+            "nwf-19-sep-live-shape",
+            null,
+            "info@lyonshaulage.com",
+            "ShiftLogisticalPlanner@nwfltd.co.uk",
+            "Shift Logistical Planner",
+            "NWAY Stuart Lyons Transport Pallet Order Report 19/09/2026",
+            DateTimeOffset.Parse("2026-09-18T05:37:05Z"),
+            body,
+            body,
+            null,
+            [new MailboxAttachmentRequest("NWAY Stuart Lyons Transport Pallet Order Report 19-09-2026.csv", "text/csv", null, false, Size: 8192)]);
+
+        var result = parser.TryParse(request);
+
+        Assert.NotNull(result);
+        Assert.Null(result!.IgnoredReason);
+        Assert.Equal(22, result.Orders.Count);
+        Assert.Equal(106, result.Orders.Sum(order => order.Payload.GetProperty("pallets").GetInt32()));
+        Assert.All(result.Orders, order => Assert.Equal("2026-09-19", order.Payload.GetProperty("collectionDate").GetString()));
+        Assert.Equal(7, result.Orders.Count(order => order.Payload.GetProperty("sellerName").GetString() == "Merston"));
+        Assert.Equal(8, result.Orders.Count(order => order.Payload.GetProperty("sellerName").GetString() == "Runcton"));
+        Assert.Equal(7, result.Orders.Count(order => order.Payload.GetProperty("sellerName").GetString() == "Selsey"));
+    }
+
+    [Fact]
     public void MissingPo_UsesSalesOrderOnlyAsFallbackAndFlagsReview()
     {
         const string csv = """
