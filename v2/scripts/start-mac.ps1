@@ -92,12 +92,10 @@ if (-not $healthy) {
     throw 'Local V2 API failed to start.'
 }
 
-Start-Process open -ArgumentList 'http://localhost:5180' | Out-Null
-
 Write-Host ''
 Write-Host 'SLH TMS V2 is running in the background.' -ForegroundColor Green
 Write-Host 'Your PowerShell prompt remains free to use.' -ForegroundColor Green
-Write-Host 'Portal: http://localhost:5180'
+Write-Host 'Portal: http://localhost:5180 (open this manually in your browser)'
 Write-Host 'API:    http://localhost:5080'
 Write-Host "Logs:   $runDir"
 Write-Host 'Stop it later with: ./stop-mac.ps1' -ForegroundColor Yellow
