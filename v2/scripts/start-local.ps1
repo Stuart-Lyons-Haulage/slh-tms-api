@@ -5,7 +5,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $api = Join-Path $root 'Slh.Tms.V2.Api'
-$webRepo = Resolve-Path (Join-Path $root '..\..\..\slh-tms-web\v2') -ErrorAction SilentlyContinue
+$webRepo = Resolve-Path (Join-Path $root '..\..\slh-tms-web\v2') -ErrorAction SilentlyContinue
 
 Write-Host 'SLH TMS V2 local start' -ForegroundColor Cyan
 
