@@ -203,6 +203,15 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
 
     private async Task<EmailIntakeParseResult> ParseEmail(MailboxEmailIntakeRequest request, CancellationToken ct)
     {
+        // Keep operational status messages out of the order-creation lane while still
+        // allowing Intake() to link them to the existing staged order as evidence.
+        // The generic parser is used here only for its explicit operational-message
+        // classification; any generic orders it may infer are deliberately ignored.
+        var operationalSignal = new EmailOrderIntakeService().Parse(request);
+        if (operationalSignal.Orders.Count == 0 &&
+            operationalSignal.IgnoredReason?.Contains("Operational request", StringComparison.OrdinalIgnoreCase) == true)
+            return operationalSignal;
+
         // Info mailbox intake is deliberately parser-led. A sender/domain mapping,
         // retailer name or generic "looks like an order" heuristic must never create
         // a staging order. If none of the verified formats below recognise the
@@ -222,7 +231,25 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
             return parsed;
 
         var aligned = await EmailOrderSiteMasterAlignment.AlignAsync(db, parsed, ct);
-        return await NwfCrateReferenceLinker.EnrichAsync(db, aligned, request, ct);
+        var enriched = await NwfCrateReferenceLinker.EnrichAsync(db, aligned, request, ct);
+
+        // A later tray/crate instruction can be matched uniquely back to the retained
+        // NWF dump order. In that case the dump remains the order authority and this
+        // email is source evidence only; do not stage a duplicate movement.
+        var ordersToStage = enriched.Orders
+            .Where(order => string.IsNullOrWhiteSpace(ReadText(order.Payload, "referenceLinkSourceStagedImportId")))
+            .ToList();
+
+        if (ordersToStage.Count == enriched.Orders.Count)
+            return enriched;
+
+        if (ordersToStage.Count == 0)
+            return new EmailIntakeParseResult(
+                [],
+                enriched.Warnings,
+                "NWF crate/tray load matched an existing staged order; source evidence retained without creating another order.");
+
+        return enriched with { Orders = ordersToStage };
     }
 
     private static bool IsSimplifiedIntakeSource(MailboxEmailIntakeRequest request)
