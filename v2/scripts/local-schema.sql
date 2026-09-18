@@ -452,3 +452,33 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_master_FuelCards_Prov
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_master_FuelCards_VehicleId' AND object_id = OBJECT_ID(N'[master].[FuelCards]'))
     CREATE INDEX [IX_master_FuelCards_VehicleId] ON [master].[FuelCards]([VehicleId]);
 GO
+
+
+/* One-time, idempotent migration of legacy vehicle fuel fields into canonical FuelCards */
+INSERT INTO [master].[FuelCards] ([Id],[VehicleId],[Provider],[CardType],[CardNumber],[Pin],[Notes],[Active])
+SELECT NEWID(), v.[Id], N'Shell', N'Shell', v.[ShellCard], v.[FuelPin], v.[Notes], v.[Active]
+FROM [master].[Vehicles] v
+WHERE NULLIF(LTRIM(RTRIM(v.[ShellCard])), N'') IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM [master].[FuelCards] f
+      WHERE f.[Provider] = N'Shell' AND f.[CardType] = N'Shell' AND f.[CardNumber] = v.[ShellCard]
+  );
+
+INSERT INTO [master].[FuelCards] ([Id],[VehicleId],[Provider],[CardType],[CardNumber],[Pin],[Notes],[Active])
+SELECT NEWID(), v.[Id], N'BP', N'Red', v.[BpRedCard], v.[FuelPin], v.[Notes], v.[Active]
+FROM [master].[Vehicles] v
+WHERE NULLIF(LTRIM(RTRIM(v.[BpRedCard])), N'') IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM [master].[FuelCards] f
+      WHERE f.[Provider] = N'BP' AND f.[CardType] = N'Red' AND f.[CardNumber] = v.[BpRedCard]
+  );
+
+INSERT INTO [master].[FuelCards] ([Id],[VehicleId],[Provider],[CardType],[CardNumber],[Pin],[Notes],[Active])
+SELECT NEWID(), v.[Id], N'BP', N'Plain', v.[BpPlainCard], v.[FuelPin], v.[Notes], v.[Active]
+FROM [master].[Vehicles] v
+WHERE NULLIF(LTRIM(RTRIM(v.[BpPlainCard])), N'') IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM [master].[FuelCards] f
+      WHERE f.[Provider] = N'BP' AND f.[CardType] = N'Plain' AND f.[CardNumber] = v.[BpPlainCard]
+  );
+GO
