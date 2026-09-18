@@ -64,7 +64,10 @@ public sealed class MasterDataDbContext(DbContextOptions<MasterDataDbContext> op
         b.Entity<Vehicle>().Property(x => x.FleetNumber).HasMaxLength(80);
 
         b.Entity<FuelCard>().HasKey(x => x.Id);
-        b.Entity<FuelCard>().HasIndex(x => new { x.Provider, x.CardType, x.CardNumber }).IsUnique();
+        b.Entity<FuelCard>()
+            .HasIndex(x => new { x.VehicleId, x.Provider, x.CardType })
+            .IsUnique()
+            .HasFilter("[VehicleId] IS NOT NULL");
         b.Entity<FuelCard>().Property(x => x.Provider).HasMaxLength(80);
         b.Entity<FuelCard>().Property(x => x.CardType).HasMaxLength(80);
         b.Entity<FuelCard>().Property(x => x.CardNumber).HasMaxLength(120);
