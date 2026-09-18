@@ -40,11 +40,20 @@ Stuart Lyons| 20/09/2026| Selsey| NISA| NISA01| NISA depot| UK| SO000999099| REF
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-        var order = Assert.Single(db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains(messageId)));
-        Assert.Equal(StagingStatus.PendingReview, order.Status);
-        using var payload = JsonDocument.Parse(order.PayloadJson);
-        Assert.Equal("Selsey", payload.RootElement.GetProperty("sellerName").GetString());
-        Assert.Contains("Morrisons", payload.RootElement.GetProperty("stallNumber").GetString() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+        var orders = db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains(messageId)).ToList();
+        Assert.Equal(2, orders.Count);
+        Assert.All(orders, order => Assert.Equal(StagingStatus.PendingReview, order.Status));
+        var payloads = orders.Select(order => JsonDocument.Parse(order.PayloadJson)).ToList();
+        try
+        {
+            Assert.All(payloads, payload => Assert.Equal("Selsey", payload.RootElement.GetProperty("sellerName").GetString()));
+            Assert.Contains(payloads, payload => string.Equals(payload.RootElement.GetProperty("customerName").GetString(), "Morrisons", StringComparison.OrdinalIgnoreCase));
+            Assert.Contains(payloads, payload => string.Equals(payload.RootElement.GetProperty("customerName").GetString(), "NISA", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            foreach (var payload in payloads) payload.Dispose();
+        }
     }
 
     [Fact]
