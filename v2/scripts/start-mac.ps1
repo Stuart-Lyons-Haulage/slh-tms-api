@@ -53,8 +53,8 @@ Write-Host 'Launching API and portal in the background...' -ForegroundColor Gree
 
 $apiProcess = Start-Process dotnet `
     -WorkingDirectory $api `
-    -ArgumentList @('run','--no-build','--launch-profile','SLH TMS V2 Local') `
-    -Environment @{ TMS_V2_SQL_CONNECTION = $connection } `
+    -ArgumentList @('run','--no-build','--urls','http://localhost:5080') `
+    -Environment @{ TMS_V2_SQL_CONNECTION = $connection; ASPNETCORE_ENVIRONMENT = 'Development' } `
     -RedirectStandardOutput $apiOut `
     -RedirectStandardError $apiErr `
     -PassThru
