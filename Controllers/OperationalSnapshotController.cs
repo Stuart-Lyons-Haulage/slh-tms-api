@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -207,32 +206,10 @@ public sealed class OperationalSnapshotController(TmsDbContext db, ILogger<Opera
         var rows = await db.StagedImports.AsNoTracking()
             .Where(x => x.EntityType == "order" && x.Status == StagingStatus.PendingReview)
             .OrderByDescending(x => x.ReceivedAtUtc).Take(2000).ToListAsync(ct);
-        return rows.Where(row => PayloadMatchesDate(row.PayloadJson, day)).ToList();
-    }
-
-    private static bool PayloadMatchesDate(string payloadJson, DateOnly day)
-    {
-        try
-        {
-            using var document = JsonDocument.Parse(payloadJson);
-            var root = document.RootElement;
-            foreach (var name in new[] { "collectionDate", "deliveryDate" })
-            {
-                if (TryGet(root, name, out var value) && DateOnly.TryParse(value.ValueKind == JsonValueKind.String ? value.GetString() : value.ToString(), out var parsed) && parsed == day)
-                    return true;
-            }
-        }
-        catch (JsonException) { }
-        return false;
-    }
-
-    private static bool TryGet(JsonElement root, string name, out JsonElement value)
-    {
-        if (root.TryGetProperty(name, out value)) return true;
-        foreach (var property in root.EnumerateObject())
-            if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase)) { value = property.Value; return true; }
-        value = default;
-        return false;
+        // Keep Dashboard readiness/attention on exactly the same planning-date
+        // projection as Planning Review. In particular, a cross-date overnight order
+        // belongs to its collection-day review queue, not both collection and delivery.
+        return rows.Where(row => StagingQueueProjection.MatchesPlanningDate(row.PayloadJson, day)).ToList();
     }
 
     private static object Item(Load load, string severity, string type, string title, string detail) => new
