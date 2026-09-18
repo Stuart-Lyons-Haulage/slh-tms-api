@@ -77,7 +77,23 @@ if (!string.IsNullOrWhiteSpace(connectionString))
         await db.Drivers.AsNoTracking().Where(x => x.Active).OrderBy(x => x.DisplayName).ToListAsync(ct));
 
     app.MapGet("/api/v2/master/vehicles", async (MasterDataDbContext db, CancellationToken ct) =>
-        await db.Vehicles.AsNoTracking().Where(x => x.Active).OrderBy(x => x.Registration).ToListAsync(ct));
+        await db.Vehicles.AsNoTracking()
+            .Where(x => x.Active)
+            .OrderBy(x => x.Registration)
+            .Select(x => new
+            {
+                x.Id,
+                x.Registration,
+                x.FleetNumber,
+                x.Abbreviation,
+                x.VehicleType,
+                x.Transmission,
+                x.Dvs,
+                x.CabMobile,
+                x.Notes,
+                x.Active
+            })
+            .ToListAsync(ct));
 
     app.MapGet("/api/v2/master/fuel-cards", async (MasterDataDbContext db, CancellationToken ct) =>
         await (
