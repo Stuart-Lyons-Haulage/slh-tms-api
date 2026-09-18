@@ -51,17 +51,19 @@ finally { Pop-Location }
 
 Write-Host 'Launching API and portal in the background...' -ForegroundColor Green
 
-$apiProcess = Start-Process dotnet `
+$apiDll = Join-Path $api 'bin/Debug/net8.0/Slh.Tms.V2.Api.dll'
+
+$apiProcess = Start-Process /usr/bin/nohup `
     -WorkingDirectory $api `
-    -ArgumentList @('run','--no-build','--urls','http://localhost:5080') `
+    -ArgumentList @('dotnet', $apiDll, '--urls', 'http://localhost:5080') `
     -Environment @{ TMS_V2_SQL_CONNECTION = $connection; ASPNETCORE_ENVIRONMENT = 'Development' } `
     -RedirectStandardOutput $apiOut `
     -RedirectStandardError $apiErr `
     -PassThru
 
-$webProcess = Start-Process npm `
+$webProcess = Start-Process /usr/bin/nohup `
     -WorkingDirectory $web `
-    -ArgumentList @('run','dev','--','--host','0.0.0.0') `
+    -ArgumentList @('npm', 'run', 'dev', '--', '--host', '0.0.0.0') `
     -RedirectStandardOutput $webOut `
     -RedirectStandardError $webErr `
     -PassThru
@@ -75,20 +77,17 @@ $webProcess = Start-Process npm `
 Write-Host 'Waiting for the API health check...' -ForegroundColor DarkCyan
 $healthy = $false
 for ($i = 0; $i -lt 30; $i++) {
-    try {
-        $response = Invoke-WebRequest 'http://localhost:5080/health/ready' -UseBasicParsing -TimeoutSec 2
-        if ($response.StatusCode -eq 200) {
-            $healthy = $true
-            break
-        }
+    & /usr/bin/curl -fsS --max-time 2 'http://localhost:5080/health/ready' *> $null
+    if ($LASTEXITCODE -eq 0) {
+        $healthy = $true
+        break
     }
-    catch {
-        Start-Sleep -Seconds 1
-    }
+    Start-Sleep -Seconds 1
 }
 
 if (-not $healthy) {
-    Write-Host 'API did not become healthy. Recent API error log:' -ForegroundColor Red
+    Write-Host 'API did not become healthy. Recent API logs:' -ForegroundColor Red
+    if (Test-Path $apiOut) { Get-Content $apiOut -Tail 40 }
     if (Test-Path $apiErr) { Get-Content $apiErr -Tail 40 }
     throw 'Local V2 API failed to start.'
 }
