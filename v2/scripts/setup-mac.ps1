@@ -1,5 +1,5 @@
 param(
-    [string]$SaPassword = $env:SLH_TMS_V2_SA_PASSWORD
+    [string]$SaPassword
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,8 +18,6 @@ if ([string]::IsNullOrWhiteSpace($SaPassword)) {
 }
 
 if ($SaPassword.Length -lt 12) { throw 'Use a password of at least 12 characters with upper/lowercase, a number and a symbol.' }
-$env:SLH_TMS_V2_SA_PASSWORD = $SaPassword
-
 Write-Host 'Starting SQL Server 2022 container for SLH TMS V2...' -ForegroundColor Cyan
 docker compose -f $composeFile up -d
 if ($LASTEXITCODE -ne 0) { throw 'Docker SQL start failed.' }
