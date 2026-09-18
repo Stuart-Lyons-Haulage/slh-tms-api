@@ -201,6 +201,96 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         }
     }
 
+    internal Task<EmailIntakeParseResult> ParseForReplay(MailboxEmailIntakeRequest request, CancellationToken ct) =>
+        ParseEmail(request, ct);
+
+    internal async Task<IActionResult> StageParsedForReplay(
+        MailboxEmailIntakeRequest request,
+        EmailIntakeParseResult parsed,
+        CancellationToken ct)
+    {
+        var staged = 0;
+        var existing = 0;
+        var records = new List<object>();
+
+        var prepared = parsed.Orders.Select(order =>
+        {
+            var key = BuildOrderIdempotencyKey(request.MessageId, order.SourceKey);
+            return (Order: order, IdempotencyKey: key);
+        }).ToList();
+
+        var idempotencyKeys = prepared.Select(item => item.IdempotencyKey).Distinct(StringComparer.Ordinal).ToList();
+        var existingByKey = idempotencyKeys.Count == 0
+            ? new Dictionary<string, StagedImport>(StringComparer.Ordinal)
+            : await db.StagedImports.AsNoTracking()
+                .Where(item => idempotencyKeys.Contains(item.IdempotencyKey))
+                .ToDictionaryAsync(item => item.IdempotencyKey, StringComparer.Ordinal, ct);
+
+        var missingOrders = prepared
+            .Where(item => !existingByKey.ContainsKey(item.IdempotencyKey))
+            .Select(item => item.Order)
+            .ToList();
+        var superseded = await SupersedeOlderPendingBatch(missingOrders, parsed.Orders, request.MessageId, ct);
+        var createdByKey = new Dictionary<string, StagedImport>(StringComparer.Ordinal);
+
+        foreach (var preparedOrder in prepared)
+        {
+            if (existingByKey.TryGetValue(preparedOrder.IdempotencyKey, out var already) ||
+                createdByKey.TryGetValue(preparedOrder.IdempotencyKey, out already))
+            {
+                existing++;
+                records.Add(new
+                {
+                    stagingId = already.Id,
+                    status = already.Status.ToString(),
+                    existing = true,
+                    reviewUrl = $"{Request.Scheme}://{Request.Host}/api/v1/staging/{already.Id}"
+                });
+                continue;
+            }
+
+            var order = preparedOrder.Order;
+            var stagedPayload = EnrichSourceEvidence(order.Payload, request);
+            var item = stagingService.Create(new StageImportRequest(
+                "order",
+                preparedOrder.IdempotencyKey,
+                stagedPayload,
+                $"Info mailbox replay / {(request.SenderAddress ?? "unknown sender").Trim()}"));
+            db.StagedImports.Add(item);
+            db.StagedImportEvents.Add(StagingAudit.Create(item, "Replayed"));
+            createdByKey[preparedOrder.IdempotencyKey] = item;
+            staged++;
+
+            records.Add(new
+            {
+                stagingId = item.Id,
+                status = item.Status.ToString(),
+                existing = false,
+                plannerReady = ReadBool(order.Payload, "plannerReady"),
+                intakeStatus = ReadText(order.Payload, "intakeStatus"),
+                warnings = order.Warnings,
+                reviewUrl = $"{Request.Scheme}://{Request.Host}/api/v1/staging/{item.Id}"
+            });
+        }
+
+        if (staged > 0 || superseded > 0)
+            await db.SaveChangesAsync(ct);
+
+        TmsMetrics.Shared.RecordImportBatch(staged + existing, existing, "email_order_replay");
+
+        logger.LogInformation(
+            "Info mailbox replay {MessageId}: staged {Staged}, existing {Existing}, superseded {Superseded}, parser warnings {Warnings}.",
+            request.MessageId, staged, existing, superseded, parsed.Warnings.Count);
+
+        return Accepted(new { ignored = false, staged, existing, superseded, warnings = parsed.Warnings, outlookCategory = "TMS Imported", records });
+    }
+
+    internal static string BuildOrderIdempotencyKey(string messageId, string sourceKey)
+    {
+        var key = $"email:{CompactKey(messageId)}:{sourceKey}";
+        return key.Length <= 200 ? key : key[..200];
+    }
+
     private async Task<EmailIntakeParseResult> ParseEmail(MailboxEmailIntakeRequest request, CancellationToken ct)
     {
         // Info mailbox intake is deliberately parser-led. A sender/domain mapping,
