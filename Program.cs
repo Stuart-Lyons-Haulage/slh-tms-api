@@ -346,6 +346,12 @@ static bool ReadBool(IConfiguration configuration, bool fallback, params string[
 
 var app = builder.Build();
 
+if (localTestMode)
+{
+    var bootstrapLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Tms.LocalDatabase");
+    await LocalDatabaseBootstrap.EnsureCreatedAsync(builder.Configuration, bootstrapLogger, CancellationToken.None);
+}
+
 if (!app.Environment.IsEnvironment("Testing"))
 {
     await using var scope = app.Services.CreateAsyncScope();
