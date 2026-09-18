@@ -178,20 +178,25 @@ public static class MasterDataDuplicateReviewService
     private static async Task<IReadOnlyList<MasterDataDuplicateCandidate>> FindDriverCandidatesAsync(TmsDbContext db, CancellationToken ct)
     {
         var rows = await db.Drivers.AsNoTracking().Where(row => row.Active).ToListAsync(ct);
+        // TachoMasterDriverId is [NotMapped] — it must be populated by EnrichDriversAsync
+        // or sameTacho will always be false and drivers will incorrectly score at 96 instead of 99.
+        await MasterDetailStore.EnrichDriversAsync(db, rows, ct);
         var groups = new Dictionary<string, HashSet<Driver>>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var row in rows)
         {
-            var tacho = Normalise(row.TachoMasterDriverId);
+            var tacho    = Normalise(row.TachoMasterDriverId);
             var employee = Normalise(row.EmployeeNumber);
-            var licence = Normalise(row.DrivingLicenceNumber);
-            var name = Normalise(row.DisplayName);
-            var mobile = Normalise(row.MobileNumber);
+            var licence  = Normalise(row.DrivingLicenceNumber);
+            var card     = Normalise(row.TachoCardNumber);
 
-            if (tacho.Length > 0) Add(groups, $"driver-tacho:{tacho}", row);
+            // Hard identity keys only — name+mobile intentionally excluded.
+            // Two drivers with the same name and mobile number are not necessarily the same person;
+            // only a shared Tacho member code, employee number, licence, or card proves identity.
+            if (tacho.Length > 0)    Add(groups, $"driver-tacho:{tacho}", row);
             if (employee.Length > 0) Add(groups, $"driver-employee:{employee}", row);
-            if (licence.Length > 6) Add(groups, $"driver-licence:{licence}", row);
-            if (name.Length >= 8 && mobile.Length >= 6) Add(groups, $"driver-name-mobile:{name}|{mobile}", row);
+            if (licence.Length > 6)  Add(groups, $"driver-licence:{licence}", row);
+            if (card.Length > 6)     Add(groups, $"driver-card:{card}", row);
         }
 
         return DistinctGroups(groups.Values, row => row.Id)
@@ -512,21 +517,53 @@ public static class MasterDataDuplicateReviewService
 
     private static MasterDataDuplicateCandidate BuildDriverCandidate(IReadOnlyList<Driver> group)
     {
-        var canonical = group.OrderByDescending(row => new[] { row.TachoMasterDriverId, row.MobileNumber, row.DriverType, row.DriverGroup, row.Skills, row.DrivingLicenceNumber }.Count(value => !string.IsNullOrWhiteSpace(value))).ThenBy(row => row.DisplayName).First();
+        var canonical = group
+            .OrderByDescending(row => new[] { row.TachoMasterDriverId, row.TachoCardNumber, row.MobileNumber, row.DriverType, row.DriverGroup, row.Skills, row.DrivingLicenceNumber }
+                .Count(value => !string.IsNullOrWhiteSpace(value)))
+            .ThenBy(row => row.DisplayName)
+            .First();
         var duplicates = group.Where(row => row.Id != canonical.Id).ToList();
-        var sameTacho = !string.IsNullOrWhiteSpace(canonical.TachoMasterDriverId) && duplicates.Any(row => Normalise(row.TachoMasterDriverId) == Normalise(canonical.TachoMasterDriverId));
-        var sameEmployee = !string.IsNullOrWhiteSpace(canonical.EmployeeNumber) && duplicates.Any(row => Normalise(row.EmployeeNumber) == Normalise(canonical.EmployeeNumber));
-        var confidence = sameTacho ? 99 : sameEmployee ? 96 : 90;
+
+        // TachoMasterDriverId is enriched by FindDriverCandidatesAsync (EnrichDriversAsync called first)
+        var sameTacho    = !string.IsNullOrWhiteSpace(canonical.TachoMasterDriverId) &&
+                           duplicates.Any(row => Normalise(row.TachoMasterDriverId) == Normalise(canonical.TachoMasterDriverId) &&
+                                                 !string.IsNullOrWhiteSpace(row.TachoMasterDriverId));
+        var sameCard     = !string.IsNullOrWhiteSpace(canonical.TachoCardNumber) &&
+                           duplicates.Any(row => Normalise(row.TachoCardNumber) == Normalise(canonical.TachoCardNumber) &&
+                                                 !string.IsNullOrWhiteSpace(row.TachoCardNumber));
+        var sameLicence  = !string.IsNullOrWhiteSpace(canonical.DrivingLicenceNumber) &&
+                           duplicates.Any(row => Normalise(row.DrivingLicenceNumber) == Normalise(canonical.DrivingLicenceNumber) &&
+                                                 !string.IsNullOrWhiteSpace(row.DrivingLicenceNumber));
+        // Employee number alone is a weaker signal — it can be a data entry repeat.
+        // Only auto-merge on employee number if there is also a matching licence or card.
+        var sameEmployee = !string.IsNullOrWhiteSpace(canonical.EmployeeNumber) &&
+                           duplicates.Any(row => Normalise(row.EmployeeNumber) == Normalise(canonical.EmployeeNumber) &&
+                                                 !string.IsNullOrWhiteSpace(row.EmployeeNumber));
+        var employeeWithCorroboration = sameEmployee && (sameLicence || sameCard);
+
+        var confidence = sameTacho ? 99
+            : sameCard ? 98
+            : sameLicence ? 97
+            : employeeWithCorroboration ? 96
+            : sameEmployee ? 88   // employee alone: review only, not auto-merge
+            : 80;
+
+        var reason = sameTacho   ? "Same TachoMaster member code — strong identity match." :
+                     sameCard    ? "Same digital tachograph card number." :
+                     sameLicence ? "Same driving licence number." :
+                     employeeWithCorroboration ? "Same employee number corroborated by matching licence or card." :
+                     sameEmployee ? "Same employee number only — review before merging; could be a data entry repeat." :
+                     "Grouped by name or partial identity; review all fields before merging.";
 
         return new MasterDataDuplicateCandidate(
             CandidateId($"driver:{canonical.Id}:{string.Join(',', duplicates.Select(row => row.Id))}"),
             "drivers",
             confidence,
-            sameTacho ? "Same Tachomaster member number." : sameEmployee ? "Same employee number across driver records." : "Likely duplicate driver identity.",
+            reason,
             confidence >= 95,
             DriverRecord(canonical),
             duplicates.Select(DriverRecord).ToList(),
-            ["tachomasterDriverId", "mobileNumber", "driverType", "driverGroup", "skills", "linked loads/runs"]);
+            ["tachomasterDriverId", "tachoCardNumber", "mobileNumber", "driverType", "driverGroup", "skills", "linked loads/runs"]);
     }
 
     private static MasterDataDuplicateCandidate BuildVehicleCandidate(IReadOnlyList<Vehicle> group)
@@ -634,7 +671,7 @@ public static class MasterDataDuplicateReviewService
     }
 
     private static MasterDataDuplicateRecord SiteRecord(Site row) => new(row.Id, row.ExternalCode, row.Name, row.CollectionAddress, ExtractPostcode(row.CollectionAddress), row.Active, new Dictionary<string, object?> { ["customerCode"] = row.CustomerCode, ["driverTextName"] = row.DriverTextName, ["collectionInstructions"] = row.CollectionInstructions, ["mapLink"] = row.MapLink, ["latitude"] = row.Latitude, ["longitude"] = row.Longitude, ["aliases"] = row.Aliases, ["region"] = row.OperationalRegion });
-    private static MasterDataDuplicateRecord DriverRecord(Driver row) => new(row.Id, row.EmployeeNumber, row.DisplayName, null, null, row.Active, new Dictionary<string, object?> { ["tachoMasterDriverId"] = row.TachoMasterDriverId, ["mobileNumber"] = row.MobileNumber, ["driverType"] = row.DriverType, ["driverGroup"] = row.DriverGroup, ["skills"] = row.Skills });
+    private static MasterDataDuplicateRecord DriverRecord(Driver row) => new(row.Id, row.EmployeeNumber, row.DisplayName, null, null, row.Active, new Dictionary<string, object?> { ["tachoMasterDriverId"] = row.TachoMasterDriverId, ["tachoCardNumber"] = row.TachoCardNumber, ["mobileNumber"] = row.MobileNumber, ["driverType"] = row.DriverType, ["driverGroup"] = row.DriverGroup, ["skills"] = row.Skills, ["licenceNumber"] = row.DrivingLicenceNumber });
     private static MasterDataDuplicateRecord VehicleRecord(Vehicle row) => new(row.Id, row.Registration, row.Registration, null, null, row.Active, new Dictionary<string, object?> { ["fleetNumber"] = row.FleetNumber, ["abbreviation"] = row.Abbreviation, ["fuelProvider"] = row.FuelProvider, ["cabMobile"] = row.CabMobile, ["fuelPin"] = row.FuelPin, ["shellCard"] = row.ShellCard, ["bpRedCard"] = row.BpRedCard, ["bpPlainCard"] = row.BpPlainCard, ["fleetioId"] = row.FleetioId });
     private static MasterDataDuplicateRecord TrailerRecord(Trailer row) => new(row.Id, row.TrailerNumber, row.TrailerNumber, null, null, row.Active, new Dictionary<string, object?> { ["type"] = row.Type, ["standardCapacity"] = row.StandardCapacity, ["euroCapacity"] = row.EuroCapacity });
     private static MasterDataDuplicateRecord MarketRecord(MarketContact row) => new(row.Id, row.MarketKey ?? row.Id.ToString("N"), $"{CanonicalMarket(row.Market)} / {Clean(row.Name) ?? row.Name}", null, null, row.Active, new Dictionary<string, object?> { ["market"] = CanonicalMarket(row.Market), ["standOrLocation"] = Clean(row.StandOrLocation) ?? InferStand(row.Name), ["salesman"] = Clean(row.Salesman), ["sender"] = Clean(row.Sender) });

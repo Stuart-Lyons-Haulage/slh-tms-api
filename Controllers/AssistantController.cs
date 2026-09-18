@@ -273,7 +273,7 @@ public sealed class AssistantController(
         var clean = (value ?? string.Empty).Trim();
         var normal = Normalise(clean);
         if (normal.Contains("covent")) return "Covent";
-        if (normal.Contains("spit")) return "Spit";
+        if (normal.Contains("spit")) return "Spitalfields";
         if (normal.Contains("western")) return "Western";
         if (normal.Contains("sender")) return "Sender";
         return clean;

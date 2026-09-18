@@ -72,10 +72,21 @@ public static class SiteMasterConsolidation
             var fenceBacked = rows
                 .Where(site => activeFences.Any(fence => fence.SiteId == site.Id))
                 .ToList();
+            var noGeofencesAtAll = fenceBacked.Count == 0;
 
-            if (fenceBacked.Count == 1)
+            // Auto-merge when exactly one member owns an active geofence (clear canonical).
+            // Also auto-merge when no member has any geofence AND all members share the same
+            // ExternalCode or have identical normalised names — broken-import duplicates that
+            // are safe to collapse without geofence evidence.
+            var shouldAutoMerge = fenceBacked.Count == 1 ||
+                (noGeofencesAtAll && IsSafeNoGeofenceSiteDuplicate(rows));
+
+            if (shouldAutoMerge)
             {
-                var canonical = fenceBacked[0];
+                var canonical = fenceBacked.Count == 1
+                    ? fenceBacked[0]
+                    : rows.OrderByDescending(site => SiteCompleteness(site)).ThenBy(site => site.ExternalCode, StringComparer.OrdinalIgnoreCase).First();
+
                 foreach (var duplicate in rows.Where(x => x.Id != canonical.Id))
                 {
                     await AddSiteAliasesAsync(
@@ -84,6 +95,23 @@ public static class SiteMasterConsolidation
                         SiteNames(duplicate).Append(duplicate.ExternalCode),
                         source,
                         ct);
+
+                    // Preserve address/routing data from duplicate before archiving it
+                    canonical.CollectionAddress ??= duplicate.CollectionAddress;
+                    canonical.Latitude ??= duplicate.Latitude;
+                    canonical.Longitude ??= duplicate.Longitude;
+                    canonical.MapLink ??= duplicate.MapLink;
+                    canonical.CollectionInstructions ??= duplicate.CollectionInstructions;
+                    canonical.DriverTextName ??= duplicate.DriverTextName;
+
+                    // Reassign any geofences from the duplicate to the canonical
+                    var duplicateFences = activeFences.Where(fence => fence.SiteId == duplicate.Id).ToList();
+                    foreach (var fence in duplicateFences)
+                    {
+                        fence.SiteId = canonical.Id;
+                        fence.SiteNumber = canonical.ExternalCode;
+                        fence.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                    }
 
                     duplicate.Active = false;
                     db.MasterDataAudits.Add(new MasterDataAudit
@@ -99,7 +127,9 @@ public static class SiteMasterConsolidation
                             canonicalSiteName = canonical.Name,
                             mergedSiteId = duplicate.Id,
                             mergedSiteCode = duplicate.ExternalCode,
-                            mergedSiteName = duplicate.Name
+                            mergedSiteName = duplicate.Name,
+                            geofencesReassigned = duplicateFences.Count,
+                            mergeReason = fenceBacked.Count == 1 ? "single-geofence-backed" : "safe-no-geofence-duplicate"
                         })
                     });
                     archivedDuplicates++;
@@ -447,6 +477,67 @@ public static class SiteMasterConsolidation
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Returns true when a group of sites with no geofences is safe to auto-merge:
+    /// all members share the same ExternalCode, OR all have identical normalised names
+    /// and no conflicting postcodes or addresses — classic broken-import duplicates.
+    /// </summary>
+    private static bool IsSafeNoGeofenceSiteDuplicate(IReadOnlyList<Site> rows)
+    {
+        if (rows.Count < 2) return false;
+
+        // Same ExternalCode — definitively the same site entered twice
+        var codes = rows.Select(s => Normalize(s.ExternalCode)).Where(c => c.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (codes.Count == 1) return true;
+
+        // Same normalised name with no conflicting postcode or address evidence
+        var names = rows.Select(s => Normalize(s.Name)).Where(n => n.Length >= 4).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (names.Count != 1) return false;
+
+        var postcodes = rows
+            .Select(s => ExtractPostcode(s.CollectionAddress))
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (postcodes.Count > 1) return false; // conflicting postcodes — different sites
+
+        var addresses = rows
+            .Select(s => NormalizeAddress(s.CollectionAddress))
+            .Where(a => a.Length >= 8)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (addresses.Count > 1) return false; // conflicting addresses — different sites
+
+        return true;
+    }
+
+    private static int SiteCompleteness(Site site) => new object?[]
+    {
+        site.CollectionAddress, site.MapLink, site.Latitude, site.Longitude,
+        site.CollectionInstructions, site.DriverTextName, site.Aliases,
+        site.OperationalRegion, site.CustomerCode
+    }.Count(value => value is not null && !string.IsNullOrWhiteSpace(value?.ToString()));
+
+    private static string? ExtractPostcode(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var match = System.Text.RegularExpressions.Regex.Match(
+            value.ToUpperInvariant(),
+            @"\b([A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2})\b");
+        return match.Success
+            ? System.Text.RegularExpressions.Regex.Replace(match.Groups[1].Value, @"\s+", string.Empty)
+            : null;
+    }
+
+    private static string NormalizeAddress(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        var compact = System.Text.RegularExpressions.Regex.Replace(
+            value, @"\b(road|rd|street|st|avenue|ave|lane|ln|drive|dr|unit|industrial|estate)\b",
+            string.Empty, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return Normalize(compact);
     }
 
     private static IEnumerable<string?> SiteNames(Site site)
