@@ -8,11 +8,11 @@ using Xunit;
 
 namespace Slh.Tms.Api.Tests;
 
-public sealed class SimplifiedOrderIntakeTests : IClassFixture<CustomWebFactory>
+public sealed class VerifiedFormatOrderIntakeTests : IClassFixture<CustomWebFactory>
 {
     private readonly CustomWebFactory factory;
 
-    public SimplifiedOrderIntakeTests(CustomWebFactory factory) => this.factory = factory;
+    public VerifiedFormatOrderIntakeTests(CustomWebFactory factory) => this.factory = factory;
 
     [Fact]
     public async Task Nwf_morrisons_structured_order_enters_pending_review()
@@ -91,9 +91,9 @@ ALDI| PO00505089 | £195.87| 19/09/2026| 20/09/2026| 26| Bedford| 228419486| PO0
     }
 
     [Fact]
-    public async Task Nwf_non_target_customer_is_evidence_only()
+    public async Task Nwf_verified_table_accepts_nisa_as_a_valid_customer()
     {
-        var messageId = $"simplified-nwf-other-{Guid.NewGuid():N}";
+        var messageId = $"verified-nwf-nisa-{Guid.NewGuid():N}";
         const string body = """
 Haulier Name| Requested Ship Date| 04. Collection Site| Customer Name| DepotID| Depot Description| Delivery Address| Sales Order ID| CustomerRef| Pallet Name| PalletQty| PO REF
 ---|---|---|---|---|---|---|---|---|---|---|---
@@ -111,8 +111,37 @@ Stuart Lyons| 20/09/2026| Selsey| NISA| NISA01| NISA depot| UK| SO000999002| REF
             bodyText = body
         });
 
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var order = Assert.Single(db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains(messageId)));
+        Assert.Equal(StagingStatus.PendingReview, order.Status);
+        using var payload = JsonDocument.Parse(order.PayloadJson);
+        Assert.Equal("NWF", payload.RootElement.GetProperty("customerCode").GetString());
+        Assert.Equal("NISA", payload.RootElement.GetProperty("customerName").GetString());
+        Assert.Equal(4, payload.RootElement.GetProperty("pallets").GetInt32());
+    }
+
+    [Fact]
+    public async Task Unknown_order_like_email_is_evidence_only_without_sender_route_or_generic_guessing()
+    {
+        var messageId = $"verified-unknown-{Guid.NewGuid():N}";
+        var response = await Post(new
+        {
+            messageId,
+            mailbox = "info@lyonshaulage.com",
+            senderAddress = "orders@unknown-customer.example",
+            senderName = "Unknown Customer",
+            subject = "Order for 20/09",
+            receivedAtUtc = "2026-09-19T08:00:00Z",
+            bodyText = "Please collect 12 pallets from Selsey and deliver to Birmingham on 20/09/2026. PO 12345."
+        });
+
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Contains("\"ignored\":true", await response.Content.ReadAsStringAsync());
+        var responseBody = await response.Content.ReadAsStringAsync();
+        Assert.Contains("\"ignored\":true", responseBody);
+        Assert.Contains("No verified order format matched", responseBody);
+
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
         Assert.Empty(db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains(messageId)));
