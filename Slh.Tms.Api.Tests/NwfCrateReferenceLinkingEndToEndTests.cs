@@ -75,7 +75,7 @@ public sealed class NwfCrateReferenceLinkingEndToEndTests : IClassFixture<Custom
     }
 
     [Fact]
-    public async Task Later_crate_load_is_enriched_from_unique_dump_row_and_notes_survive_approval()
+    public async Task Later_non_lane_crate_load_is_retained_as_evidence_without_creating_an_order()
     {
         var suffix = Guid.NewGuid().ToString("N")[..8].ToUpperInvariant();
         var destination = $"Vitacress Herbs {suffix}";
@@ -120,31 +120,14 @@ public sealed class NwfCrateReferenceLinkingEndToEndTests : IClassFixture<Custom
             bodyText = $"IFCO | TBC | | 10/09/2026 | 10/09/2026 | | TBC | TBC | TBC | {destination} | 18 | trays"
         });
 
-        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
-
-        Guid stagedId;
-        using (var scope = factory.Services.CreateScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-            var staged = Assert.Single(await db.StagedImports.Where(row => row.EntityType == "order" && row.PayloadJson.Contains(messageId)).ToListAsync());
-            stagedId = staged.Id;
-            using var payload = JsonDocument.Parse(staged.PayloadJson);
-            Assert.Equal(reference, payload.RootElement.GetProperty("collectionReference").GetString());
-            Assert.Equal(reference, payload.RootElement.GetProperty("customerRef").GetString());
-            Assert.Equal(collection, payload.RootElement.GetProperty("sellerName").GetString());
-            Assert.Contains($"Collection ref: {reference}", payload.RootElement.GetProperty("driverInstructions").GetString());
-            Assert.True(payload.RootElement.GetProperty("plannerReady").GetBoolean());
-        }
-
-        var approve = await PostJson(client, $"/api/v1/staging/{stagedId}/approve", new { note = "Reference linking regression test" });
-        Assert.Equal(HttpStatusCode.OK, approve.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("\"ignored\":true", await response.Content.ReadAsStringAsync());
 
         using (var scope = factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
-            var order = Assert.Single(await db.TransportOrders.Where(row => row.SourceStagedImportId == stagedId).ToListAsync());
-            Assert.Equal(collection, order.SellerName);
-            Assert.Contains($"Collection ref: {reference}", order.DriverInstructions);
+            Assert.Empty(await db.StagedImports.Where(row => row.EntityType == "order" && row.PayloadJson.Contains(messageId)).ToListAsync());
+            Assert.Single(await db.StagedImports.Where(row => row.EntityType == "email-evidence" && row.PayloadJson.Contains(messageId)).ToListAsync());
         }
     }
 
