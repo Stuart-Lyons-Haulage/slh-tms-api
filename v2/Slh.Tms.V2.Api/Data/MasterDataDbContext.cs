@@ -64,6 +64,9 @@ public sealed class MasterDataDbContext(DbContextOptions<MasterDataDbContext> op
         b.Entity<Trailer>().HasKey(x => x.Id);
         b.Entity<Trailer>().HasIndex(x => x.TrailerNumber).IsUnique();
         b.Entity<Trailer>().Property(x => x.TrailerNumber).HasMaxLength(80);
+        b.Entity<Trailer>().Property(x => x.Registration).HasMaxLength(40);
+        b.Entity<Trailer>().Property(x => x.TrailerType).HasMaxLength(80);
+        b.Entity<Trailer>().Property(x => x.CurrentLocation).HasMaxLength(160);
 
         b.Entity<CustomerContact>().HasKey(x => x.Id);
         b.Entity<CustomerContact>().HasIndex(x => x.Code).IsUnique();
