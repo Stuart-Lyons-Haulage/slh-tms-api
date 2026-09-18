@@ -17,6 +17,7 @@ public sealed class MasterDataDbContext(DbContextOptions<MasterDataDbContext> op
     public DbSet<RouteTiming> RouteTimings => Set<RouteTiming>();
     public DbSet<FuelPrice> FuelPrices => Set<FuelPrice>();
     public DbSet<SiteAliasCandidate> SiteAliasCandidates => Set<SiteAliasCandidate>();
+    public DbSet<MasterDataReviewItem> MasterDataReviewItems => Set<MasterDataReviewItem>();
     public DbSet<ExternalIdentity> ExternalIdentities => Set<ExternalIdentity>();
     public DbSet<SiteAlias> SiteAliases => Set<SiteAlias>();
 
@@ -94,6 +95,14 @@ public sealed class MasterDataDbContext(DbContextOptions<MasterDataDbContext> op
         b.Entity<SiteAliasCandidate>().Property(x => x.AliasType).HasMaxLength(40);
         b.Entity<SiteAliasCandidate>().Property(x => x.Alias).HasMaxLength(250);
         b.Entity<SiteAliasCandidate>().HasOne<Site>().WithMany().HasForeignKey(x => x.SiteId).OnDelete(DeleteBehavior.SetNull);
+
+        b.Entity<MasterDataReviewItem>().HasKey(x => x.Id);
+        b.Entity<MasterDataReviewItem>().HasIndex(x => x.Key).IsUnique();
+        b.Entity<MasterDataReviewItem>().HasIndex(x => new { x.Resolved, x.Category, x.CreatedAtUtc });
+        b.Entity<MasterDataReviewItem>().Property(x => x.Key).HasMaxLength(300);
+        b.Entity<MasterDataReviewItem>().Property(x => x.Category).HasMaxLength(80);
+        b.Entity<MasterDataReviewItem>().Property(x => x.EntityType).HasMaxLength(80);
+        b.Entity<MasterDataReviewItem>().Property(x => x.SourceReference).HasMaxLength(160);
 
         b.Entity<ExternalIdentity>().HasKey(x => x.Id);
         b.Entity<ExternalIdentity>().Property(x => x.Provider).HasMaxLength(80);
