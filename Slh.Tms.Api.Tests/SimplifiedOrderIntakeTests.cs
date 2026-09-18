@@ -48,6 +48,49 @@ Stuart Lyons| 20/09/2026| Selsey| NISA| NISA01| NISA depot| UK| SO000999099| REF
     }
 
     [Fact]
+    public async Task Nwf_confirmed_aldi_20_september_splits_into_three_pending_review_movements()
+    {
+        var messageId = $"simplified-nwf-aldi-confirmed-{Guid.NewGuid():N}";
+        const string body = """
+Please see confirmed ALDI trays collection for 19/09
+
+ALDI| PO00505088 | £195.87| 19/09/2026| 20/09/2026| 26| Bedford| 228419235| PO00503669 | Merston / Runcton| 33| Merston 18 plt / Runcton 15/ plt
+ALDI| PO00505089 | £195.87| 19/09/2026| 20/09/2026| 26| Bedford| 228419486| PO00503677 | Selsey| 33|
+""";
+
+        var response = await Post(new
+        {
+            messageId,
+            mailbox = "info@lyonshaulage.com",
+            senderAddress = "MariuszUrbanski@nwfltd.co.uk",
+            senderName = "Mariusz Urbanski",
+            subject = "Aldi Bedford - confirmation for 19/09",
+            receivedAtUtc = "2026-09-17T13:23:55Z",
+            bodyText = body
+        });
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var orders = db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains(messageId)).ToList();
+        Assert.Equal(3, orders.Count);
+        Assert.All(orders, order => Assert.Equal(StagingStatus.PendingReview, order.Status));
+        var payloads = orders.Select(order => JsonDocument.Parse(order.PayloadJson)).ToList();
+        try
+        {
+            Assert.Equal(66, payloads.Sum(payload => payload.RootElement.GetProperty("pallets").GetInt32()));
+            Assert.Contains(payloads, payload => payload.RootElement.GetProperty("sellerName").GetString() == "Merston" && payload.RootElement.GetProperty("pallets").GetInt32() == 18);
+            Assert.Contains(payloads, payload => payload.RootElement.GetProperty("sellerName").GetString() == "Runcton" && payload.RootElement.GetProperty("pallets").GetInt32() == 15);
+            Assert.Contains(payloads, payload => payload.RootElement.GetProperty("sellerName").GetString() == "Selsey" && payload.RootElement.GetProperty("pallets").GetInt32() == 33);
+            Assert.All(payloads, payload => Assert.Equal("2026-09-20", payload.RootElement.GetProperty("deliveryDate").GetString()));
+        }
+        finally
+        {
+            foreach (var payload in payloads) payload.Dispose();
+        }
+    }
+
+    [Fact]
     public async Task Nwf_non_target_customer_is_evidence_only()
     {
         var messageId = $"simplified-nwf-other-{Guid.NewGuid():N}";
@@ -74,6 +117,45 @@ Stuart Lyons| 20/09/2026| Selsey| NISA| NISA01| NISA depot| UK| SO000999002| REF
         var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
         Assert.Empty(db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains(messageId)));
         Assert.Single(db.StagedImports.Where(item => item.EntityType == "email-evidence" && item.PayloadJson.Contains(messageId)));
+    }
+
+    [Theory]
+    [InlineData("PackagingPlanner@nwfltd.co.uk", "NWF transfer - Barnham to Drayton SUN 20/09", "@D_Drayton Logistics - please receive on arrival = INTO000173010\n20/09/2026 | 25FPPCOLTOV2 | V1 | 35,840 | 2plts = All stock", "Barnham", "Drayton", 2)]
+    [InlineData("gerone@lyonshaulage.com", "Merston to Drayton transfers for collections - 20-09-2026", "Please could you transfer pallets from Merston to Drayton:\n10 Aldi-Cardiff", "Merston", "Drayton", null)]
+    public async Task Nwf_transfer_enters_pending_review_even_without_target_retailer(
+        string senderAddress,
+        string subject,
+        string body,
+        string expectedCollection,
+        string expectedDestination,
+        int? expectedPallets)
+    {
+        var messageId = $"simplified-nwf-transfer-{Guid.NewGuid():N}";
+        var response = await Post(new
+        {
+            messageId,
+            mailbox = "info@lyonshaulage.com",
+            senderAddress,
+            senderName = "NWF transfer planner",
+            subject,
+            receivedAtUtc = "2026-09-18T07:04:36Z",
+            bodyText = body
+        });
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<TmsDbContext>();
+        var order = Assert.Single(db.StagedImports.Where(item => item.EntityType == "order" && item.PayloadJson.Contains(messageId)));
+        Assert.Equal(StagingStatus.PendingReview, order.Status);
+        using var payload = JsonDocument.Parse(order.PayloadJson);
+        Assert.Equal("NWF", payload.RootElement.GetProperty("customerCode").GetString());
+        Assert.Equal("Collection transfer", payload.RootElement.GetProperty("jobType").GetString());
+        Assert.Equal(expectedCollection, payload.RootElement.GetProperty("sellerName").GetString());
+        Assert.Equal(expectedDestination, payload.RootElement.GetProperty("stallNumber").GetString());
+        if (expectedPallets is null)
+            Assert.Equal(JsonValueKind.Null, payload.RootElement.GetProperty("pallets").ValueKind);
+        else
+            Assert.Equal(expectedPallets.Value, payload.RootElement.GetProperty("pallets").GetInt32());
     }
 
     private Task<HttpResponseMessage> Post(object payload)
