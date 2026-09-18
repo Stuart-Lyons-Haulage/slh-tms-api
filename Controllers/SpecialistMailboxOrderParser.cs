@@ -121,12 +121,8 @@ public sealed class SpecialistMailboxOrderParser
                             continue;
                         }
 
-                        var retailer = depot.StartsWith("ALDI", StringComparison.OrdinalIgnoreCase)
-                            ? "ALDI"
-                            : depot.StartsWith("MORRISONS", StringComparison.OrdinalIgnoreCase)
-                                ? "MORRISONS"
-                                : null;
-                        if (retailer is null)
+                        var identity = SummerBerryIdentity(depot);
+                        if (identity is null)
                             continue;
 
                         var collection = CellText(row, collectionIndex) ?? "SB-Groves Farm";
@@ -139,12 +135,12 @@ public sealed class SpecialistMailboxOrderParser
 
                         var baseReference = rawPo ?? StableEmailReference(request.MessageId);
                         var reference = BuildReference(baseReference, destination);
-                        var naturalKey = NaturalKey(request, "SUMMERBERRY", collection, destination, rowDate.Value, pallets.Value);
+                        var naturalKey = NaturalKey(request, identity.Value.CustomerCode, collection, destination, rowDate.Value, pallets.Value);
                         var payload = BuildPayload(
                             request,
                             reference,
                             rawPo,
-                            "SUMMERBERRY",
+                            identity.Value.CustomerCode,
                             rowDate.Value,
                             rowDate.Value,
                             pallets.Value,
@@ -157,7 +153,7 @@ public sealed class SpecialistMailboxOrderParser
                             rowIndex + 1,
                             "Summer Berry Morrisons/Aldi workbook",
                             warnings,
-                            retailer);
+                            identity.Value.RetailerCode);
 
                         orders.Add(new ParsedEmailOrder(
                             $"summerberry-{sheetNumber}-{rowIndex + 1}-{NormaliseKey(destination)}",
@@ -183,6 +179,15 @@ public sealed class SpecialistMailboxOrderParser
             return null;
 
         return new EmailIntakeParseResult(orders, globalWarnings, null);
+    }
+
+    internal static (string CustomerCode, string RetailerCode)? SummerBerryIdentity(string depot)
+    {
+        if (depot.StartsWith("ALDI", StringComparison.OrdinalIgnoreCase))
+            return ("SUMMERBERRY", "ALDI");
+        if (depot.StartsWith("MORRISONS", StringComparison.OrdinalIgnoreCase))
+            return ("SUMMERBERRY", "MORRISONS");
+        return null;
     }
 
     private static EmailIntakeParseResult? TryParseVitacressWaitroseWorkbook(MailboxEmailIntakeRequest request)
