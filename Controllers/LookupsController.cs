@@ -162,8 +162,9 @@ public sealed class LookupsController(TmsDbContext db, ILogger<LookupsController
                         status = "review",
                         confidence = resolution?.Confidence ?? 0,
                         reason = resolution?.Reason ?? "Possible Site Master match requires review.",
-                        candidates = resolution?.PossibleDuplicates.Select(site => new { site.Id, site.ExternalCode, site.Name }).ToArray()
-                            ?? Array.Empty<object>()
+                        candidates = resolution is null
+                            ? Array.Empty<object>()
+                            : resolution.PossibleDuplicates.Select(site => (object)new { site.Id, site.ExternalCode, site.Name }).ToArray()
                     });
                 }
                 else
