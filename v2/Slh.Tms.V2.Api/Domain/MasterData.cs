@@ -52,6 +52,8 @@ public sealed class Driver : ICanonicalEntity
     public string? EmployeeNumber { get; set; }
     public string? TachoName { get; set; }
     public string? MobileNumber { get; set; }
+    public string? Email { get; set; }
+    public string? TachoMasterMemberCode { get; set; }
     public string? DriverType { get; set; }
     public string? DriverGroup { get; set; }
     public string? Skills { get; set; }
