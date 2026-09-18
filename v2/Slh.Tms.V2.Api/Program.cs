@@ -23,6 +23,7 @@ if (!string.IsNullOrWhiteSpace(connectionString))
     builder.Services.AddScoped<MasterResolver>();
     builder.Services.AddScoped<OrderPromotionService>();
     builder.Services.AddScoped<MasterDataWorkbookImportService>();
+    builder.Services.AddScoped<MasterDataCrudService>();
 
     builder.Services.AddHealthChecks()
         .AddDbContextCheck<MasterDataDbContext>("master-data-db")
@@ -170,6 +171,41 @@ if (!string.IsNullOrWhiteSpace(connectionString))
             routeTimes,
             reviewItems
         });
+    });
+
+    app.MapPut("/api/v2/master/{entity}/{id:guid}", async (
+        string entity,
+        Guid id,
+        JsonElement patch,
+        MasterDataCrudService crud,
+        CancellationToken ct) =>
+    {
+        try
+        {
+            var updated = await crud.UpdateAsync(entity, id, patch, ct);
+            return updated is null ? Results.NotFound() : Results.Ok(updated);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+    });
+
+    app.MapDelete("/api/v2/master/{entity}/{id:guid}", async (
+        string entity,
+        Guid id,
+        MasterDataCrudService crud,
+        CancellationToken ct) =>
+    {
+        try
+        {
+            var deleted = await crud.DeleteAsync(entity, id, ct);
+            return deleted ? Results.NoContent() : Results.NotFound();
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.Conflict(new { error = ex.Message });
+        }
     });
 
     app.MapGet("/api/v2/master/summary", async (MasterDataDbContext db, CancellationToken ct) => Results.Ok(new
