@@ -93,8 +93,13 @@ public sealed class Trailer : ICanonicalEntity
 {
     public Guid Id { get; init; } = Guid.NewGuid();
     public required string TrailerNumber { get; set; }
+    public string? Registration { get; set; }
     public string? TrailerType { get; set; }
     public int? PalletCapacity { get; set; }
+    public int? EuroPalletCapacity { get; set; }
+    public string? CurrentLocation { get; set; }
+    public DateOnly? MotExpiry { get; set; }
+    public string? Notes { get; set; }
     public bool Active { get; set; } = true;
 }
 
