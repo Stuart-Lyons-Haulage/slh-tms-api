@@ -1,5 +1,5 @@
 param(
-    [string]$SaPassword = $env:SLH_TMS_V2_SA_PASSWORD
+    [string]$SaPassword
 )
 
 $ErrorActionPreference = 'Stop'
