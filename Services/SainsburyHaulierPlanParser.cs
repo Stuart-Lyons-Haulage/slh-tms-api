@@ -15,7 +15,7 @@ public sealed class SainsburyHaulierPlanParser
 
     public EmailIntakeParseResult? TryParse(MailboxEmailIntakeRequest request)
     {
-        if (!(request.Subject ?? string.Empty).Contains("Transport plan for STUART LYONS", StringComparison.OrdinalIgnoreCase))
+        if (!IsSainsburyPlanEmail(request))
             return null;
 
         var attachment = (request.Attachments ?? []).FirstOrDefault(item =>
@@ -139,6 +139,27 @@ public sealed class SainsburyHaulierPlanParser
         {
             return new EmailIntakeParseResult([], [$"Sainsbury Haulier Plan could not be parsed: {ex.GetBaseException().Message}"], "Sainsbury workbook parsing failed; manual review is required.");
         }
+    }
+
+    internal static bool IsSainsburyPlanEmail(MailboxEmailIntakeRequest request)
+    {
+        var subject = request.Subject?.Trim() ?? string.Empty;
+        if (subject.Contains("Transport plan for STUART LYONS", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        // The Central Transport PCC/Bond messages use subjects such as:
+        // [CrosspointPCC] STUART LYONS - Crosspoint PCC Plan for delivery date 19/09/2026
+        // [DaventryBond] STUART LYONS - Daventry Bond Plan for delivery date 19/09/2026
+        // [HDKPCC] STUART LYONS - Haydock PCC Plan for delivery date 19/09/2026
+        // Scope the broader subject match to Sainsbury's own domain so another haulier/customer
+        // email mentioning Stuart Lyons and "plan" cannot be claimed by this parser.
+        var sender = request.SenderAddress?.Trim() ?? string.Empty;
+        return sender.EndsWith("@sainsburys.co.uk", StringComparison.OrdinalIgnoreCase)
+            && subject.Contains("STUART LYONS", StringComparison.OrdinalIgnoreCase)
+            && subject.Contains("Plan", StringComparison.OrdinalIgnoreCase)
+            && (subject.Contains("PCC", StringComparison.OrdinalIgnoreCase)
+                || subject.Contains("Bond", StringComparison.OrdinalIgnoreCase)
+                || subject.Contains("delivery date", StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool IsHeader(object?[] row)

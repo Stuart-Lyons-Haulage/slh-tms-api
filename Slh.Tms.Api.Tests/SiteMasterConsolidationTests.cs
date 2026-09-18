@@ -132,8 +132,8 @@ public sealed class SiteMasterConsolidationTests
     {
         await using var db = CreateDb();
         db.Sites.AddRange(
-            new Site { ExternalCode = "A1", Name = "Aldi Cardiff", Active = true },
-            new Site { ExternalCode = "A2", Name = "ALDI CARDIFF", Active = true });
+            new Site { ExternalCode = "A1", Name = "Aldi Cardiff", CollectionAddress = "1 North Road, Cardiff, CF10 1AA", Active = true },
+            new Site { ExternalCode = "A2", Name = "ALDI CARDIFF", CollectionAddress = "2 South Road, Cardiff, CF11 2BB", Active = true });
         await db.SaveChangesAsync();
 
         var result = await SiteMasterConsolidation.ReconcileAsync(db, "test", CancellationToken.None);

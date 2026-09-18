@@ -136,6 +136,7 @@ jobs:
           probe_tachomaster
           probe_200 'Falcon geofence payload' "$API_BASE/api/v1/health/geofences"
           if test "$GITHUB_EVENT_NAME" != "pull_request"; then
+            probe_200 'Info mailbox intake pipeline' "$API_BASE/api/v1/health/intake"
             probe_200 'Planner and import data path' "$API_BASE/api/v1/health/planner-import"
             probe_run_evidence
           fi

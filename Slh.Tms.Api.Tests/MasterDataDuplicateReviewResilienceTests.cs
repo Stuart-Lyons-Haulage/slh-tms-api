@@ -64,7 +64,7 @@ public sealed class MasterDataDuplicateReviewResilienceTests : IClassFixture<Cus
     }
 
     [Fact]
-    public async Task Driver_scan_links_tachomaster_row_to_existing_employee_number_row()
+    public async Task Driver_scan_keeps_employee_number_only_duplicates_for_review()
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];
         await using (var scope = _factory.Services.CreateAsyncScope())
@@ -82,8 +82,8 @@ public sealed class MasterDataDuplicateReviewResilienceTests : IClassFixture<Cus
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var candidates = await response.Content.ReadFromJsonAsync<List<MasterDataDuplicateCandidate>>();
         var candidate = Assert.Single(candidates!.Where(x => x.Canonical.Code == $"EMP{suffix}"));
-        Assert.True(candidate.CanAutoMerge);
-        Assert.True(candidate.Confidence >= 95);
+        Assert.False(candidate.CanAutoMerge);
+        Assert.Equal(88, candidate.Confidence);
     }
 
     [Fact]
