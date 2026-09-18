@@ -81,7 +81,15 @@ def validate(workflow):
         errors.append("Apply_to_each must enumerate the trigger body/attachments collection with an empty-array fallback")
 
     loop_actions = loop.get("actions", {})
-    get_attachment = loop_actions.get("Get_Attachment_(V2)", {})
+    condition = _find_action(loop_actions, "If_supported_order_attachment") or {}
+    condition_text = json.dumps(condition.get("expression", {}), separators=(",", ":")).lower()
+    if "isinline" not in condition_text:
+        errors.append("attachment loop must skip inline/signature attachments before Get Attachment (V2)")
+    for extension in (".xls", ".xlsx", ".xlsm", ".csv", ".pdf"):
+        if extension not in condition_text:
+            errors.append(f"attachment loop must allow supported order document extension {extension}")
+
+    get_attachment = _find_action(loop_actions, "Get_Attachment_(V2)") or {}
     if get_attachment.get("inputs", {}).get("host", {}).get("operationId") != "GetAttachment_V2":
         errors.append("Get_Attachment_(V2) must call Outlook GetAttachment_V2")
     get_params = get_attachment.get("inputs", {}).get("parameters", {})
@@ -90,7 +98,7 @@ def validate(workflow):
     if "Apply_to_each" not in str(get_params.get("attachmentId", "")):
         errors.append("Get_Attachment_(V2) must use the current Apply_to_each attachment Id")
 
-    append = loop_actions.get("Append_to_array_variable", {})
+    append = _find_action(loop_actions, "Append_to_array_variable") or {}
     append_inputs = append.get("inputs", {})
     if append_inputs.get("name") != "NormalizedAttachments":
         errors.append("attachment normalisation must append to NormalizedAttachments")
