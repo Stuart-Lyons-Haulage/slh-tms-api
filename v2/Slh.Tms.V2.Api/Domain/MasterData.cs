@@ -177,6 +177,22 @@ public sealed class SiteAliasCandidate : ICanonicalEntity
     public bool Active { get; set; } = true;
 }
 
+public sealed class MasterDataReviewItem : ICanonicalEntity
+{
+    public Guid Id { get; init; } = Guid.NewGuid();
+    public required string Key { get; set; }
+    public required string Category { get; set; }
+    public required string EntityType { get; set; }
+    public string? SourceReference { get; set; }
+    public required string Summary { get; set; }
+    public string? PayloadJson { get; set; }
+    public bool Resolved { get; set; }
+    public string? ResolutionNotes { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public bool Active { get; set; } = true;
+}
+
 public sealed class ExternalIdentity
 {
     public Guid Id { get; init; } = Guid.NewGuid();
