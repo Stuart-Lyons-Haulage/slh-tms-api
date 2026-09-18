@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
+using System.Text.Json;
 using ClosedXML.Excel;
 using Microsoft.EntityFrameworkCore;
 using Slh.Tms.V2.Api.Data;
@@ -47,12 +48,14 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
             .ToDictionary(x => $"{x.AliasType}|{x.Alias}", StringComparer.OrdinalIgnoreCase);
         var siteAliases = (await db.SiteAliases.ToListAsync(ct))
             .ToDictionary(x => $"{x.SiteId}|{x.Alias}", StringComparer.OrdinalIgnoreCase);
+        var reviewItems = (await db.MasterDataReviewItems.ToListAsync(ct))
+            .ToDictionary(x => x.Key, StringComparer.OrdinalIgnoreCase);
 
         ImportCustomerContacts(workbook, customersByCode, customersByName, contactsByCode);
         ImportSites(workbook, customersByCode, sitesByCode, siteAliases);
         ImportDrivers(workbook, driversByEmployee);
         ImportVehicles(workbook, vehiclesByReg);
-        ImportSiteCutoffs(workbook, sitesByCode, cutoffsByCode);
+        ImportSiteCutoffs(workbook, sitesByCode, cutoffsByCode, reviewItems);
         ImportRouteTimings(workbook, timingsByKey);
         ImportMarketContacts(workbook, marketContactsByKey);
         ImportAliasCandidates(workbook, "Delivery Aliases", "Delivery", aliasCandidates);
@@ -296,7 +299,8 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
     private void ImportSiteCutoffs(
         XLWorkbook workbook,
         Dictionary<string, Site> sitesByCode,
-        Dictionary<string, SiteCutoff> cutoffsByCode)
+        Dictionary<string, SiteCutoff> cutoffsByCode,
+        Dictionary<string, MasterDataReviewItem> reviewItems)
     {
         if (!workbook.Worksheets.TryGetWorksheet("Site Cutoffs", out var ws))
             return;
@@ -308,10 +312,27 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
             if (string.IsNullOrWhiteSpace(code) || string.IsNullOrWhiteSpace(siteCode))
                 continue;
 
+            var reviewKey = $"SiteCutoff:{code}:MissingSite:{siteCode}";
             if (!sitesByCode.TryGetValue(siteCode, out var site))
             {
-                AddIssue($"Cutoff {code} references missing site {siteCode}.");
+                var summary = $"Cutoff {code} references missing site {siteCode}.";
+                AddIssue(summary);
+                StageReview(
+                    reviewItems,
+                    reviewKey,
+                    "Site cut-off",
+                    "SiteCutoff",
+                    code,
+                    summary,
+                    JsonSerializer.Serialize(row.Values));
                 continue;
+            }
+
+            if (reviewItems.TryGetValue(reviewKey, out var resolvedReview))
+            {
+                resolvedReview.Resolved = true;
+                resolvedReview.ResolutionNotes = $"Resolved automatically when site {siteCode} became canonical.";
+                resolvedReview.UpdatedAtUtc = DateTimeOffset.UtcNow;
             }
 
             if (!cutoffsByCode.TryGetValue(code, out var cutoff))
@@ -510,6 +531,46 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
     {
         if (_issues.Count < 200)
             _issues.Add(issue);
+    }
+
+    private void StageReview(
+        Dictionary<string, MasterDataReviewItem> reviewItems,
+        string key,
+        string category,
+        string entityType,
+        string? sourceReference,
+        string summary,
+        string? payloadJson)
+    {
+        if (!reviewItems.TryGetValue(key, out var item))
+        {
+            item = new MasterDataReviewItem
+            {
+                Key = key,
+                Category = category,
+                EntityType = entityType,
+                SourceReference = sourceReference,
+                Summary = summary,
+                PayloadJson = payloadJson,
+                Resolved = false,
+                CreatedAtUtc = DateTimeOffset.UtcNow,
+                UpdatedAtUtc = DateTimeOffset.UtcNow,
+                Active = true
+            };
+            db.MasterDataReviewItems.Add(item);
+            reviewItems[key] = item;
+            return;
+        }
+
+        item.Category = category;
+        item.EntityType = entityType;
+        item.SourceReference = sourceReference;
+        item.Summary = summary;
+        item.PayloadJson = payloadJson;
+        item.Resolved = false;
+        item.ResolutionNotes = null;
+        item.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        item.Active = true;
     }
 
     private static string MakeCode(string value, int maxLength)
