@@ -46,6 +46,9 @@ public sealed class MasterDataDbContext(DbContextOptions<MasterDataDbContext> op
         b.Entity<Trailer>().HasIndex(x => x.TrailerNumber).IsUnique();
 
         b.Entity<ExternalIdentity>().HasKey(x => x.Id);
+        b.Entity<ExternalIdentity>().Property(x => x.Provider).HasMaxLength(80);
+        b.Entity<ExternalIdentity>().Property(x => x.EntityType).HasMaxLength(80);
+        b.Entity<ExternalIdentity>().Property(x => x.ExternalKey).HasMaxLength(200);
         b.Entity<ExternalIdentity>()
             .HasIndex(x => new { x.Provider, x.EntityType, x.ExternalKey })
             .IsUnique()
