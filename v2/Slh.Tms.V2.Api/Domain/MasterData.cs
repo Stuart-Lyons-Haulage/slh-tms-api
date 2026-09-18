@@ -89,10 +89,24 @@ public sealed class Vehicle : ICanonicalEntity
     public string? Transmission { get; set; }
     public string? Dvs { get; set; }
     public string? CabMobile { get; set; }
+    // Legacy import fields are retained temporarily for backwards-compatible workbook ingestion.
+    // Fuel-card operations use FuelCard as the canonical entity.
     public string? FuelPin { get; set; }
     public string? ShellCard { get; set; }
     public string? BpRedCard { get; set; }
     public string? BpPlainCard { get; set; }
+    public string? Notes { get; set; }
+    public bool Active { get; set; } = true;
+}
+
+public sealed class FuelCard : ICanonicalEntity
+{
+    public Guid Id { get; init; } = Guid.NewGuid();
+    public Guid? VehicleId { get; set; }
+    public required string Provider { get; set; }
+    public required string CardType { get; set; }
+    public required string CardNumber { get; set; }
+    public string? Pin { get; set; }
     public string? Notes { get; set; }
     public bool Active { get; set; } = true;
 }
@@ -116,6 +130,7 @@ public sealed class CustomerContact : ICanonicalEntity
     public Guid Id { get; init; } = Guid.NewGuid();
     public required string Code { get; set; }
     public Guid CustomerId { get; set; }
+    public Guid? SiteId { get; set; }
     public required string ContactName { get; set; }
     public string? Role { get; set; }
     public string? Email { get; set; }
@@ -159,6 +174,7 @@ public sealed class RouteTiming : ICanonicalEntity
 {
     public Guid Id { get; init; } = Guid.NewGuid();
     public required string Key { get; set; }
+    public Guid? SiteId { get; set; }
     public required string Route { get; set; }
     public string? PalletType { get; set; }
     public TimeOnly? LastDespatchTime { get; set; }
