@@ -23,10 +23,13 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
         CancellationToken ct)
     {
         using var workbook = new XLWorkbook(input);
-        var rows = ExpectedSheets.ToDictionary(
-            sheet => sheet,
-            sheet => CountRows(workbook, sheet),
-            StringComparer.OrdinalIgnoreCase);
+        var rows = ExpectedSheets
+            .Concat(OptionalSheets)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                sheet => sheet,
+                sheet => CountRows(workbook, sheet),
+                StringComparer.OrdinalIgnoreCase);
 
         ValidateWorkbook(workbook);
 
@@ -39,6 +42,7 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
         var driversByEmployee = (await db.Drivers.Where(x => x.EmployeeNumber != null).ToListAsync(ct))
             .ToDictionary(x => x.EmployeeNumber!, StringComparer.OrdinalIgnoreCase);
         var vehiclesByReg = await db.Vehicles.ToDictionaryAsync(x => x.Registration, StringComparer.OrdinalIgnoreCase, ct);
+        var trailersByNumber = await db.Trailers.ToDictionaryAsync(x => x.TrailerNumber, StringComparer.OrdinalIgnoreCase, ct);
         var contactsByCode = await db.CustomerContacts.ToDictionaryAsync(x => x.Code, StringComparer.OrdinalIgnoreCase, ct);
         var marketContactsByKey = await db.MarketContacts.ToDictionaryAsync(x => x.Key, StringComparer.OrdinalIgnoreCase, ct);
         var cutoffsByCode = await db.SiteCutoffs.ToDictionaryAsync(x => x.Code, StringComparer.OrdinalIgnoreCase, ct);
@@ -55,6 +59,7 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
         ImportSites(workbook, customersByCode, sitesByCode, siteAliases);
         ImportDrivers(workbook, driversByEmployee);
         ImportVehicles(workbook, vehiclesByReg);
+        ImportTrailers(workbook, trailersByNumber);
         ImportSiteCutoffs(workbook, sitesByCode, cutoffsByCode, reviewItems);
         ImportRouteTimings(workbook, timingsByKey);
         ImportMarketContacts(workbook, marketContactsByKey);
@@ -78,6 +83,11 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
         "Delivery Aliases",
         "Collection Aliases",
         "Fuel Price History"
+    ];
+
+    private static readonly string[] OptionalSheets =
+    [
+        "Trailers"
     ];
 
     private static int CountRows(XLWorkbook workbook, string sheetName)
@@ -289,7 +299,7 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
 
         foreach (var row in ReadRows(ws))
         {
-            var registration = row.Get("Registration");
+            var registration = row.Get("Registration") ?? row.Get("vehicle") ?? row.Get("Vehicle");
             if (string.IsNullOrWhiteSpace(registration))
                 continue;
 
@@ -302,17 +312,67 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
                 vehiclesByReg[registration] = vehicle;
             }
 
-            vehicle.FleetNumber = row.Get("VehicleID");
-            vehicle.Abbreviation = row.Get("Abbreviation");
-            vehicle.Transmission = row.Get("Transmission");
-            vehicle.Dvs = row.Get("DVS");
-            vehicle.CabMobile = row.Get("Cab Mobile");
-            vehicle.FuelPin = row.Get("Fuel PIN");
-            vehicle.ShellCard = row.Get("Shell Card");
-            vehicle.BpRedCard = row.Get("BP Red Card");
-            vehicle.BpPlainCard = row.Get("BP Plain Card");
-            vehicle.Notes = row.Get("Notes");
+            vehicle.FleetNumber = row.Get("VehicleID") ?? vehicle.FleetNumber;
+            vehicle.Abbreviation = row.Get("Abbreviation") ?? row.Get("Reg Abv") ?? vehicle.Abbreviation;
+            vehicle.Transmission = row.Get("Transmission") ?? vehicle.Transmission;
+            vehicle.Dvs = row.Get("DVS") ?? vehicle.Dvs;
+            vehicle.CabMobile = row.Get("Cab Mobile") ?? vehicle.CabMobile;
+            vehicle.FuelPin = row.Get("Fuel PIN") ?? row.Get("Pin No") ?? vehicle.FuelPin;
+            vehicle.ShellCard = row.Get("Shell Card") ?? row.Get("Shell Card Number") ?? vehicle.ShellCard;
+            vehicle.BpRedCard = row.Get("BP Red Card") ?? row.Get("RED STICKERED BP Card") ?? vehicle.BpRedCard;
+            vehicle.BpPlainCard = row.Get("BP Plain Card") ?? row.Get("PLAIN NEW BP CARD") ?? vehicle.BpPlainCard;
+            vehicle.Notes = row.Get("Notes") ?? row.Get("NOTES") ?? vehicle.Notes;
             vehicle.Active = row.Active();
+        }
+    }
+
+    private void ImportTrailers(
+        XLWorkbook workbook,
+        Dictionary<string, Trailer> trailersByNumber)
+    {
+        if (!workbook.Worksheets.TryGetWorksheet("Trailers", out var ws))
+            return;
+
+        foreach (var row in ReadRows(ws))
+        {
+            var trailerNumber =
+                row.Get("TrailerNumber")
+                ?? row.Get("Trailer Number")
+                ?? row.Get("Trailer No")
+                ?? row.Get("Trailer");
+
+            if (string.IsNullOrWhiteSpace(trailerNumber))
+                continue;
+
+            trailerNumber = trailerNumber.Trim();
+
+            if (!trailersByNumber.TryGetValue(trailerNumber, out var trailer))
+            {
+                trailer = new Trailer { TrailerNumber = trailerNumber };
+                db.Trailers.Add(trailer);
+                trailersByNumber[trailerNumber] = trailer;
+            }
+
+            trailer.Registration = row.Get("Registration") ?? trailer.Registration;
+            trailer.TrailerType = row.Get("Trailer Type") ?? row.Get("Type") ?? trailer.TrailerType;
+            trailer.PalletCapacity =
+                ParseInt(row.Get("Standard Pallet Capacity"))
+                ?? ParseInt(row.Get("Pallet Capacity"))
+                ?? trailer.PalletCapacity;
+            trailer.EuroPalletCapacity =
+                ParseInt(row.Get("Euro Pallet Capacity"))
+                ?? ParseInt(row.Get("Euro Capacity"))
+                ?? trailer.EuroPalletCapacity;
+            trailer.CurrentLocation =
+                row.Get("Current Location")
+                ?? row.Get("Location")
+                ?? trailer.CurrentLocation;
+            trailer.MotExpiry =
+                ParseDate(row.Get("MOT Expiry"))
+                ?? ParseDate(row.Get("Test Expiry"))
+                ?? trailer.MotExpiry;
+            trailer.Notes = row.Get("Notes") ?? trailer.Notes;
+            trailer.Active = row.Active();
         }
     }
 
@@ -664,6 +724,17 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
 
         return DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var parsed)
             || DateTimeOffset.TryParse(value, CultureInfo.CurrentCulture, DateTimeStyles.AssumeLocal, out parsed)
+            ? parsed
+            : null;
+    }
+
+    private static int? ParseInt(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+
+        return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+            || int.TryParse(value, NumberStyles.Integer, CultureInfo.CurrentCulture, out parsed)
             ? parsed
             : null;
     }
