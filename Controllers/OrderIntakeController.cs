@@ -9,13 +9,14 @@ using Slh.Tms.Api.Contracts;
 using Slh.Tms.Api.Data;
 using Slh.Tms.Api.Models;
 using Slh.Tms.Api.Services;
+using Slh.Tms.Api.Local;
 
 namespace Slh.Tms.Api.Controllers;
 
 [ApiController]
 [Route("api/v1/order-intake")]
 [Authorize]
-public sealed class OrderIntakeController(TmsDbContext db, StagingService stagingService, ILogger<OrderIntakeController> logger) : ControllerBase
+public sealed class OrderIntakeController(TmsDbContext db, StagingService stagingService, ILogger<OrderIntakeController> logger, LocalFileEvidenceArchiveService? localEvidenceArchive = null) : ControllerBase
 {
     private readonly SpecialistMailboxOrderParser specialistParser = new();
     private readonly SainsburyHaulierPlanParser sainsburyParser = new();
@@ -62,6 +63,9 @@ public sealed class OrderIntakeController(TmsDbContext db, StagingService stagin
         await EnsureSourceEmailEvidence(request, ct);
 
         var parsed = await ParseEmail(request, ct);
+        if (localEvidenceArchive is not null)
+            await localEvidenceArchive.ArchiveAsync(request, parsed, ct);
+
         if (parsed.IgnoredReason is not null)
         {
             var linked = 0;
