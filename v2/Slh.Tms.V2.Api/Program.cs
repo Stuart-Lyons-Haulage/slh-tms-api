@@ -98,6 +98,80 @@ if (!string.IsNullOrWhiteSpace(connectionString))
     app.MapGet("/api/v2/master/alias-candidates", async (MasterDataDbContext db, CancellationToken ct) =>
         await db.SiteAliasCandidates.AsNoTracking().Where(x => x.Active && !x.Approved).OrderBy(x => x.AliasType).ThenBy(x => x.Alias).ToListAsync(ct));
 
+    app.MapGet("/api/v2/master/review", async (MasterDataDbContext db, CancellationToken ct) =>
+        await db.MasterDataReviewItems.AsNoTracking()
+            .Where(x => x.Active && !x.Resolved)
+            .OrderBy(x => x.Category)
+            .ThenBy(x => x.CreatedAtUtc)
+            .ToListAsync(ct));
+
+    app.MapGet("/api/v2/master/sites/{id:guid}/crm", async (Guid id, MasterDataDbContext db, CancellationToken ct) =>
+    {
+        var site = await db.Sites.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct);
+        if (site is null) return Results.NotFound();
+
+        Customer? customer = null;
+        if (site.CustomerId is Guid customerId)
+            customer = await db.Customers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == customerId, ct);
+
+        var aliases = await db.SiteAliases.AsNoTracking()
+            .Where(x => x.SiteId == id)
+            .OrderBy(x => x.Alias)
+            .ToListAsync(ct);
+
+        var cutoffs = await db.SiteCutoffs.AsNoTracking()
+            .Where(x => x.Active && x.SiteId == id)
+            .OrderBy(x => x.Plan)
+            .ThenBy(x => x.StandardCutoff)
+            .ToListAsync(ct);
+
+        var markets = await db.Markets.AsNoTracking()
+            .Where(x => x.Active && x.SiteId == id)
+            .OrderBy(x => x.Name)
+            .ToListAsync(ct);
+
+        var identities = await db.ExternalIdentities.AsNoTracking()
+            .Where(x => x.Active && x.EntityType == "Site" && x.EntityId == id)
+            .OrderBy(x => x.Provider)
+            .ToListAsync(ct);
+
+        var routeQuery = db.RouteTimings.AsNoTracking()
+            .Where(x => x.Active && (x.Route.Contains(site.Code) || x.Route.Contains(site.Name)));
+
+        if (!string.IsNullOrWhiteSpace(site.DriverTextName))
+        {
+            var driverTextName = site.DriverTextName;
+            routeQuery = db.RouteTimings.AsNoTracking()
+                .Where(x => x.Active &&
+                    (x.Route.Contains(site.Code) ||
+                     x.Route.Contains(site.Name) ||
+                     x.Route.Contains(driverTextName)));
+        }
+
+        var routeTimes = await routeQuery
+            .OrderBy(x => x.Route)
+            .Take(100)
+            .ToListAsync(ct);
+
+        var reviewItems = await db.MasterDataReviewItems.AsNoTracking()
+            .Where(x => x.Active && !x.Resolved &&
+                (x.Summary.Contains(site.Code) || x.Summary.Contains(site.Name)))
+            .OrderBy(x => x.CreatedAtUtc)
+            .ToListAsync(ct);
+
+        return Results.Ok(new
+        {
+            site,
+            customer,
+            aliases,
+            cutoffs,
+            markets,
+            externalIdentities = identities,
+            routeTimes,
+            reviewItems
+        });
+    });
+
     app.MapGet("/api/v2/master/summary", async (MasterDataDbContext db, CancellationToken ct) => Results.Ok(new
     {
         customers = await db.Customers.CountAsync(x => x.Active, ct),
@@ -111,7 +185,8 @@ if (!string.IsNullOrWhiteSpace(connectionString))
         siteCutoffs = await db.SiteCutoffs.CountAsync(x => x.Active, ct),
         routeTimes = await db.RouteTimings.CountAsync(x => x.Active, ct),
         fuelPrices = await db.FuelPrices.CountAsync(x => x.Active, ct),
-        aliasCandidates = await db.SiteAliasCandidates.CountAsync(x => x.Active && !x.Approved, ct)
+        aliasCandidates = await db.SiteAliasCandidates.CountAsync(x => x.Active && !x.Approved, ct),
+        reviewItems = await db.MasterDataReviewItems.CountAsync(x => x.Active && !x.Resolved, ct)
     }));
 
     app.MapPost("/api/v2/master/import/workbook", async (
