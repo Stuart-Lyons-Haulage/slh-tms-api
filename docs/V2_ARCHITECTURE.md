@@ -6,14 +6,39 @@ The current application contains proven business knowledge, but several concerns
 
 ## Deployment approach
 
-V1 remains live. V2 is built in this repository under `v2/` and deployed to separate Azure Container Apps and a separate V2 database until cutover. This avoids copying V1 wholesale into a new repository while still giving V2 an independent build and deployment surface.
+V1 remains live while V2 is built and proven side-by-side.
 
-Recommended names:
-- API app: `slh-tms-api-v2`
-- Web app: `slh-tms-portal-v2`
-- SQL database: `slh-tms-v2`
-- API URL: separate Azure Container Apps FQDN during test
-- Portal URL: separate Azure Container Apps FQDN during test
+V2 is now **local-first and private-network hosted**. Azure is not a runtime dependency.
+
+Target deployment:
+- dedicated always-on Windows server or business mini-PC on the Lyons office network
+- SLH TMS V2 API hosted on the server
+- SLH TMS V2 portal hosted on the same server
+- Microsoft SQL Server hosted locally on the server
+- private DNS name such as `slh-tms` for office users
+- VPN access for authorised staff outside the office
+- GitHub remains the source repository and CI/test system
+- integrations call outward from the server wherever possible
+
+Remote access must require the VPN. The normal portal and API are not exposed directly to the public internet.
+
+If a future integration genuinely requires an inbound webhook, expose only the dedicated webhook ingress endpoint through a hardened tunnel/reverse proxy. Do not publish the full TMS portal, database or general API.
+
+## Network model
+
+Office users:
+`Office device -> LAN -> SLH TMS server`
+
+Remote users:
+`Authorised device -> VPN -> Lyons LAN / SLH TMS server`
+
+Outbound integrations:
+`SLH TMS server -> HTTPS -> Microsoft Graph / TachoMaster / RoadTech / Sage HR / other provider APIs`
+
+Inbound integrations, only when unavoidable:
+`External provider -> authenticated narrow ingress -> integration adapter -> application service`
+
+A VPN product such as Tailscale/WireGuard may be used for the first deployment. The application must not depend on a specific VPN vendor.
 
 ## Canonical data ownership
 
@@ -94,8 +119,7 @@ PO/reference values are first-class and never discarded. A stable source key ide
 ## V1 capability classification
 
 ### KEEP behaviour, reimplement behind V2 boundaries
-- Entra authentication pattern
-- Azure Container Apps deployment pattern
+- Entra authentication pattern where useful
 - master-data concepts and operational fields
 - TachoMaster identity reconciliation rules that have proved correct
 - site identity/alias knowledge
@@ -115,8 +139,10 @@ PO/reference values are first-class and never discarded. A stable source key ide
 - master duplicate handling
 - order amendment/deduplication
 - frontend API layer and data loading
+- deployment around a local server + VPN rather than Azure Container Apps
 
 ### DROP from V2
+- Azure-only runtime assumptions
 - patch middleware whose purpose is schema drift recovery
 - duplicate background writers
 - legacy planner variants
@@ -128,7 +154,7 @@ PO/reference values are first-class and never discarded. A stable source key ide
 
 ## Database strategy
 
-Use one Azure SQL database for V2 initially, but separate schemas and EF Core DbContexts by bounded area. This keeps operations simple without recreating the V1 all-in-one DbContext.
+Use one local SQL Server database for V2 initially, with separate schemas and EF Core DbContexts by bounded area.
 
 Initial schemas:
 - `master`
@@ -138,6 +164,18 @@ Initial schemas:
 - `integration`
 
 V2 migrations are created only from V2 projects and never target the V1 database.
+
+Database access is private to the server/LAN and must not be exposed publicly.
+
+## Backups and recovery
+
+The local-first design must still be production-safe:
+- automated nightly SQL backup
+- encrypted off-machine backup copy
+- application/config backup excluding plaintext secrets
+- documented restore test
+- UPS recommended for the host
+- health monitoring and Windows service/container auto-restart
 
 ## Acceptance gates
 
@@ -149,7 +187,7 @@ A feature is not considered migrated because the UI exists. It must pass:
 - observable health/telemetry
 - no second writer for the same concern
 - side-by-side comparison with V1 where applicable
-- explicit production smoke test before traffic/cutover
+- explicit production smoke test before cutover
 
 ## Initial delivery sequence
 
@@ -162,15 +200,19 @@ A feature is not considered migrated because the UI exists. It must pass:
 7. Tracking/ETA: RoadTech observations, geofences, live run projection.
 8. Roadrunner export: deterministic CSV from canonical run/order/master data.
 9. Operational dashboard/TV once core read models are stable.
-10. Cutover, rollback window, V1 retirement.
+10. Local server deployment, VPN rollout, cutover and rollback window.
+11. V1 retirement after an agreed stability period.
 
 ## Manual connections required later
 
 Do not put credentials in GitHub.
-- Azure: create V2 Container Apps / database / managed identities or grant deployment identity permission.
-- Entra ID: register/authorise V2 API and portal redirect URLs if current app registration cannot safely host both.
-- Key Vault: add V2 SQL and integration secrets; grant V2 managed identities read access.
-- Outlook: authorise the mailbox/Graph connection used for intake.
-- TachoMaster, RoadTech/Roadrunner and Sage HR: provide/authorise existing credentials in V2 secret configuration.
-- DNS/custom domain: only after V2 acceptance; test on Azure FQDN first.
 
+- Local server: administrator access for the dedicated host.
+- VPN: install/authorise the VPN client on the server and approved user devices.
+- Microsoft/Outlook: authorise the mailbox/Graph connection used for intake.
+- TachoMaster, RoadTech/Roadrunner and Sage HR: provide/authorise existing credentials in protected local server configuration.
+- Entra ID: optional for application sign-in if we retain Microsoft identity inside the VPN.
+- Inbound webhooks: only configure a secure narrow ingress if a provider cannot be polled outbound.
+- Backups: choose the protected off-machine destination.
+
+See `docs/V2_LOCAL_DEPLOYMENT.md` for the target local/VPN topology.
