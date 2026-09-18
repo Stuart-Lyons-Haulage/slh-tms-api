@@ -118,12 +118,48 @@ public sealed class DriverMasterManualController(TmsDbContext db) : ControllerBa
             var driver = candidates[0];
             var changed = false;
 
-            changed |= Assign(ref driver.TachoMasterDriverId, memberCode);
-            changed |= Assign(ref driver.TachoCardNumber, cardNumber);
-            changed |= Assign(ref driver.TachoName, workerName);
-            changed |= Assign(ref driver.DriverType, Clean(record.Type, 80));
-            changed |= Assign(ref driver.AgencyName, Clean(record.Agency, 160));
-            changed |= Assign(ref driver.Email, Clean(record.Email, 320));
+            if (!string.IsNullOrWhiteSpace(memberCode) &&
+                !string.Equals(driver.TachoMasterDriverId, memberCode, StringComparison.OrdinalIgnoreCase))
+            {
+                driver.TachoMasterDriverId = memberCode;
+                changed = true;
+            }
+            if (!string.IsNullOrWhiteSpace(cardNumber) &&
+                !string.Equals(driver.TachoCardNumber, cardNumber, StringComparison.OrdinalIgnoreCase))
+            {
+                driver.TachoCardNumber = cardNumber;
+                changed = true;
+            }
+            if (!string.IsNullOrWhiteSpace(workerName) &&
+                !string.Equals(driver.TachoName, workerName, StringComparison.OrdinalIgnoreCase))
+            {
+                driver.TachoName = workerName;
+                changed = true;
+            }
+
+            var workerType = Clean(record.Type, 80);
+            if (!string.IsNullOrWhiteSpace(workerType) &&
+                !string.Equals(driver.DriverType, workerType, StringComparison.OrdinalIgnoreCase))
+            {
+                driver.DriverType = workerType;
+                changed = true;
+            }
+
+            var agency = Clean(record.Agency, 160);
+            if (!string.IsNullOrWhiteSpace(agency) &&
+                !string.Equals(driver.AgencyName, agency, StringComparison.OrdinalIgnoreCase))
+            {
+                driver.AgencyName = agency;
+                changed = true;
+            }
+
+            var email = Clean(record.Email, 320);
+            if (!string.IsNullOrWhiteSpace(email) &&
+                !string.Equals(driver.Email, email, StringComparison.OrdinalIgnoreCase))
+            {
+                driver.Email = email;
+                changed = true;
+            }
 
             var cardExpiry = ParseDate(record.DriverCardExpiry);
             if (cardExpiry is not null && driver.DigitalTachoCardExpiry != cardExpiry) { driver.DigitalTachoCardExpiry = cardExpiry; changed = true; }
@@ -316,13 +352,6 @@ public sealed class DriverMasterManualController(TmsDbContext db) : ControllerBa
             existing.ReviewedBy = actor;
             existing.ReviewNote = "Tacho worker still requires Driver Master matching. No driver was created.";
         }
-    }
-
-    private static bool Assign(ref string? target, string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value) || string.Equals(target, value, StringComparison.OrdinalIgnoreCase)) return false;
-        target = value;
-        return true;
     }
 
     private static DateOnly? ParseDate(string? value)
