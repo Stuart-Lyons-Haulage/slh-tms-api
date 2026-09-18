@@ -24,6 +24,7 @@ if (!string.IsNullOrWhiteSpace(connectionString))
     builder.Services.AddScoped<OrderPromotionService>();
     builder.Services.AddScoped<MasterDataWorkbookImportService>();
     builder.Services.AddScoped<MasterDataCrudService>();
+    builder.Services.AddScoped<MasterDataReviewAllocationService>();
 
     builder.Services.AddHealthChecks()
         .AddDbContextCheck<MasterDataDbContext>("master-data-db")
@@ -78,6 +79,26 @@ if (!string.IsNullOrWhiteSpace(connectionString))
     app.MapGet("/api/v2/master/vehicles", async (MasterDataDbContext db, CancellationToken ct) =>
         await db.Vehicles.AsNoTracking().Where(x => x.Active).OrderBy(x => x.Registration).ToListAsync(ct));
 
+    app.MapGet("/api/v2/master/fuel-cards", async (MasterDataDbContext db, CancellationToken ct) =>
+        await (
+            from card in db.FuelCards.AsNoTracking()
+            join vehicle in db.Vehicles.AsNoTracking() on card.VehicleId equals vehicle.Id into vehicles
+            from vehicle in vehicles.DefaultIfEmpty()
+            where card.Active
+            orderby vehicle!.Registration, card.Provider, card.CardType
+            select new
+            {
+                card.Id,
+                card.VehicleId,
+                vehicleRegistration = vehicle == null ? null : vehicle.Registration,
+                card.Provider,
+                card.CardType,
+                card.CardNumber,
+                card.Pin,
+                card.Notes,
+                card.Active
+            }).ToListAsync(ct));
+
     app.MapGet("/api/v2/master/trailers", async (MasterDataDbContext db, CancellationToken ct) =>
         await db.Trailers.AsNoTracking().Where(x => x.Active).OrderBy(x => x.TrailerNumber).ToListAsync(ct));
 
@@ -130,6 +151,96 @@ if (!string.IsNullOrWhiteSpace(connectionString))
             .ThenBy(x => x.CreatedAtUtc)
             .ToListAsync(ct));
 
+    app.MapGet("/api/v2/master/review/allocations", async (MasterDataDbContext db, CancellationToken ct) =>
+    {
+        var rows = new List<object>();
+
+        var persistent = await db.MasterDataReviewItems.AsNoTracking()
+            .Where(x => x.Active && !x.Resolved)
+            .OrderBy(x => x.Category)
+            .ThenBy(x => x.CreatedAtUtc)
+            .ToListAsync(ct);
+        rows.AddRange(persistent.Select(x => (object)new
+        {
+            id = x.Id,
+            kind = "review",
+            category = x.Category,
+            summary = x.Summary,
+            reference = x.SourceReference,
+            source = x.EntityType
+        }));
+
+        var aliases = await db.SiteAliasCandidates.AsNoTracking()
+            .Where(x => x.Active && !x.Approved)
+            .OrderBy(x => x.AliasType)
+            .ThenBy(x => x.Alias)
+            .ToListAsync(ct);
+        rows.AddRange(aliases.Select(x => (object)new
+        {
+            id = x.Id,
+            kind = "alias",
+            category = "Site alias",
+            summary = $"{x.AliasType} alias: {x.Alias}",
+            reference = x.Alias,
+            source = x.Source
+        }));
+
+        var timings = await db.RouteTimings.AsNoTracking()
+            .Where(x => x.Active && x.SiteId == null)
+            .OrderBy(x => x.Route)
+            .ToListAsync(ct);
+        rows.AddRange(timings.Select(x => (object)new
+        {
+            id = x.Id,
+            kind = "routeTiming",
+            category = "Planner knowledge",
+            summary = x.Route,
+            reference = x.PalletType,
+            source = "Unallocated route timing"
+        }));
+
+        var contacts = await (
+            from contact in db.CustomerContacts.AsNoTracking()
+            join customer in db.Customers.AsNoTracking() on contact.CustomerId equals customer.Id
+            where contact.Active && contact.SiteId == null
+            orderby customer.Name, contact.ContactName
+            select new
+            {
+                contact.Id,
+                customer.Name,
+                contact.ContactName,
+                contact.Email,
+                contact.Phone
+            }).ToListAsync(ct);
+        rows.AddRange(contacts.Select(x => (object)new
+        {
+            id = x.Id,
+            kind = "customerContact",
+            category = "Customer contact",
+            summary = $"{x.Name} · {x.ContactName}",
+            reference = x.Email ?? x.Phone,
+            source = "Unallocated contact"
+        }));
+
+        return Results.Ok(rows);
+    });
+
+    app.MapPost("/api/v2/master/review/allocate-site", async (
+        SiteAllocationRequest request,
+        MasterDataReviewAllocationService allocator,
+        CancellationToken ct) =>
+    {
+        try
+        {
+            await allocator.AllocateToSiteAsync(request.Kind, request.Id, request.SiteId, ct);
+            return Results.Ok(new { allocated = true, request.Kind, request.Id, request.SiteId });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+    });
+
     app.MapGet("/api/v2/master/sites/{id:guid}/crm", async (Guid id, MasterDataDbContext db, CancellationToken ct) =>
     {
         var site = await db.Sites.AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, ct);
@@ -160,22 +271,15 @@ if (!string.IsNullOrWhiteSpace(connectionString))
             .OrderBy(x => x.Provider)
             .ToListAsync(ct);
 
-        var routeQuery = db.RouteTimings.AsNoTracking()
-            .Where(x => x.Active && (x.Route.Contains(site.Code) || x.Route.Contains(site.Name)));
-
-        if (!string.IsNullOrWhiteSpace(site.DriverTextName))
-        {
-            var driverTextName = site.DriverTextName;
-            routeQuery = db.RouteTimings.AsNoTracking()
-                .Where(x => x.Active &&
-                    (x.Route.Contains(site.Code) ||
-                     x.Route.Contains(site.Name) ||
-                     x.Route.Contains(driverTextName)));
-        }
-
-        var routeTimes = await routeQuery
+        var routeTimes = await db.RouteTimings.AsNoTracking()
+            .Where(x => x.Active && x.SiteId == id)
             .OrderBy(x => x.Route)
-            .Take(100)
+            .Take(250)
+            .ToListAsync(ct);
+
+        var customerContacts = await db.CustomerContacts.AsNoTracking()
+            .Where(x => x.Active && x.SiteId == id)
+            .OrderBy(x => x.ContactName)
             .ToListAsync(ct);
 
         var reviewItems = await db.MasterDataReviewItems.AsNoTracking()
@@ -193,6 +297,7 @@ if (!string.IsNullOrWhiteSpace(connectionString))
             markets,
             externalIdentities = identities,
             routeTimes,
+            customerContacts,
             reviewItems
         });
     });
@@ -239,6 +344,7 @@ if (!string.IsNullOrWhiteSpace(connectionString))
         markets = await db.Markets.CountAsync(x => x.Active, ct),
         drivers = await db.Drivers.CountAsync(x => x.Active, ct),
         vehicles = await db.Vehicles.CountAsync(x => x.Active, ct),
+        fuelCards = await db.FuelCards.CountAsync(x => x.Active, ct),
         trailers = await db.Trailers.CountAsync(x => x.Active, ct),
         customerContacts = await db.CustomerContacts.CountAsync(x => x.Active, ct),
         marketContacts = await db.MarketContacts.CountAsync(x => x.Active, ct),
