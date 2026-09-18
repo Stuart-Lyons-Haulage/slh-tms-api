@@ -30,6 +30,14 @@ public sealed class Site : ICanonicalEntity
     public string? MapLink { get; set; }
     public string? CollectionInstructions { get; set; }
     public string? DriverInstructions { get; set; }
+    public TimeOnly? EarliestCollectionTime { get; set; }
+    public TimeOnly? LatestCollectionTime { get; set; }
+    public TimeOnly? EarliestDeliveryTime { get; set; }
+    public TimeOnly? LatestDeliveryTime { get; set; }
+    public TimeOnly? StandardCutoff { get; set; }
+    public TimeOnly? ExtendedCutoff { get; set; }
+    public string? DeadlineContact { get; set; }
+    public string? DeadlineNotes { get; set; }
     public decimal? Latitude { get; set; }
     public decimal? Longitude { get; set; }
     public bool Active { get; set; } = true;
