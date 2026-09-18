@@ -12,6 +12,11 @@ def load_workflow():
     return json.loads((ROOT / "workflow.json").read_text(encoding="utf-8"))
 
 
+def supported_attachment_actions(workflow):
+    foreach_actions = workflow["properties"]["definition"]["actions"]["Apply_to_each"]["actions"]
+    return foreach_actions["If_supported_order_attachment"]["actions"]
+
+
 class WorkflowValidationTests(unittest.TestCase):
     def test_production_workflow_contract(self):
         self.assertEqual([], validate(load_workflow()))
@@ -72,21 +77,21 @@ class WorkflowValidationTests(unittest.TestCase):
 
     def test_rejects_missing_attachment_content_fetch(self):
         workflow = load_workflow()
-        actions = workflow["properties"]["definition"]["actions"]["Apply_to_each"]["actions"]
+        actions = supported_attachment_actions(workflow)
         actions["Get_Attachment_(V2)"]["inputs"]["host"]["operationId"] = "GetAttachments_V2"
         errors = validate(workflow)
         self.assertTrue(any("GetAttachment_V2" in item for item in errors))
 
     def test_rejects_manual_json_string_attachment_payload(self):
         workflow = load_workflow()
-        actions = workflow["properties"]["definition"]["actions"]["Apply_to_each"]["actions"]
+        actions = supported_attachment_actions(workflow)
         actions["Append_to_array_variable"]["inputs"]["value"] = "@json(concat('{...}'))"
         errors = validate(workflow)
         self.assertTrue(any("JSON object" in item for item in errors))
 
     def test_rejects_attachment_without_content_bytes(self):
         workflow = load_workflow()
-        actions = workflow["properties"]["definition"]["actions"]["Apply_to_each"]["actions"]
+        actions = supported_attachment_actions(workflow)
         del actions["Append_to_array_variable"]["inputs"]["value"]["contentBytes"]
         errors = validate(workflow)
         self.assertTrue(any("missing contentBytes" in item for item in errors))
