@@ -244,7 +244,18 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
 
             driver.DisplayName = name;
             driver.TachoName = row.Get("Tacho Name");
-            driver.MobileNumber = row.Get("Phone Number");
+            driver.MobileNumber = row.Get("Phone Number") ?? row.Get("Mobile") ?? row.Get("Mobile Number");
+            driver.Email = row.Get("Email") ?? row.Get("Email Address");
+            driver.TachoMasterMemberCode =
+                row.Get("Member Number")
+                ?? row.Get("Member Code")
+                ?? row.Get("TachoMaster Member Code")
+                ?? row.Get("TachoMaster Member Number");
+            driver.TachoCardNumber =
+                row.Get("Tacho Card Number")
+                ?? row.Get("Tacho Card")
+                ?? row.Get("Driver Card Number")
+                ?? row.Get("Card Number");
             driver.DriverType = row.Get("Driver Type");
             driver.DriverGroup = row.Get("Driver Group");
             driver.Skills = row.Get("Skills");
