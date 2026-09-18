@@ -3,6 +3,8 @@ using Microsoft.EntityFrameworkCore;
 using Slh.Tms.V2.Api.Application;
 using Slh.Tms.V2.Api.Data;
 using Slh.Tms.V2.Api.Domain;
+using OpenTelemetry.Trace;
+using Azure.Monitor.OpenTelemetry.Exporter;
 
 var builder = WebApplication.CreateBuilder(args);
 
