@@ -36,6 +36,7 @@ public sealed class MasterDataDbContext(DbContextOptions<MasterDataDbContext> op
         b.Entity<Site>().Property(x => x.Name).HasMaxLength(200);
         b.Entity<Site>().Property(x => x.DriverTextName).HasMaxLength(200);
         b.Entity<Site>().Property(x => x.Postcode).HasMaxLength(20);
+        b.Entity<Site>().Property(x => x.DeadlineContact).HasMaxLength(200);
         b.Entity<Site>().Property(x => x.Latitude).HasPrecision(9, 6);
         b.Entity<Site>().Property(x => x.Longitude).HasPrecision(9, 6);
         b.Entity<Site>().HasOne<Customer>().WithMany().HasForeignKey(x => x.CustomerId).OnDelete(DeleteBehavior.Restrict);
