@@ -42,6 +42,8 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
         var driversByEmployee = (await db.Drivers.Where(x => x.EmployeeNumber != null).ToListAsync(ct))
             .ToDictionary(x => x.EmployeeNumber!, StringComparer.OrdinalIgnoreCase);
         var vehiclesByReg = await db.Vehicles.ToDictionaryAsync(x => x.Registration, StringComparer.OrdinalIgnoreCase, ct);
+        var fuelCardsByKey = (await db.FuelCards.ToListAsync(ct))
+            .ToDictionary(x => $"{x.Provider}|{x.CardType}|{x.CardNumber}", StringComparer.OrdinalIgnoreCase);
         var trailersByNumber = await db.Trailers.ToDictionaryAsync(x => x.TrailerNumber, StringComparer.OrdinalIgnoreCase, ct);
         var contactsByCode = await db.CustomerContacts.ToDictionaryAsync(x => x.Code, StringComparer.OrdinalIgnoreCase, ct);
         var marketContactsByKey = await db.MarketContacts.ToDictionaryAsync(x => x.Key, StringComparer.OrdinalIgnoreCase, ct);
@@ -55,13 +57,13 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
         var reviewItems = (await db.MasterDataReviewItems.ToListAsync(ct))
             .ToDictionary(x => x.Key, StringComparer.OrdinalIgnoreCase);
 
-        ImportCustomerContacts(workbook, customersByCode, customersByName, contactsByCode);
+        ImportCustomerContacts(workbook, customersByCode, customersByName, sitesByCode, contactsByCode);
         ImportSites(workbook, customersByCode, sitesByCode, siteAliases);
         ImportDrivers(workbook, driversByEmployee);
-        ImportVehicles(workbook, vehiclesByReg);
+        ImportVehicles(workbook, vehiclesByReg, fuelCardsByKey);
         ImportTrailers(workbook, trailersByNumber);
         ImportSiteCutoffs(workbook, sitesByCode, cutoffsByCode, reviewItems);
-        ImportRouteTimings(workbook, timingsByKey);
+        ImportRouteTimings(workbook, sitesByCode, timingsByKey);
         ImportMarketContacts(workbook, marketContactsByKey);
         ImportAliasCandidates(workbook, "Delivery Aliases", "Delivery", aliasCandidates);
         ImportAliasCandidates(workbook, "Collection Aliases", "Collection", aliasCandidates);
@@ -115,6 +117,7 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
         XLWorkbook workbook,
         Dictionary<string, Customer> customersByCode,
         Dictionary<string, Customer> customersByName,
+        Dictionary<string, Site> sitesByCode,
         Dictionary<string, CustomerContact> contactsByCode)
     {
         if (!workbook.Worksheets.TryGetWorksheet("Customer Contacts", out var ws))
@@ -167,6 +170,15 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
             }
 
             contact.CustomerId = customer.Id;
+
+            var contactSite =
+                ResolveSite(
+                    sitesByCode.Values,
+                    row.Get("SiteID"),
+                    row.Get("Site") ?? row.Get("Site Name") ?? row.Get("Location"));
+            if (contactSite is not null)
+                contact.SiteId = contactSite.Id;
+
             contact.ContactName = contactName;
             contact.Role = row.Get("Role");
             contact.Email = row.Get("Email");
@@ -320,7 +332,10 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
         }
     }
 
-    private void ImportVehicles(XLWorkbook workbook, Dictionary<string, Vehicle> vehiclesByReg)
+    private void ImportVehicles(
+        XLWorkbook workbook,
+        Dictionary<string, Vehicle> vehiclesByReg,
+        Dictionary<string, FuelCard> fuelCardsByKey)
     {
         if (!workbook.Worksheets.TryGetWorksheet("Vehicles & Fuel", out var ws))
             return;
@@ -351,6 +366,11 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
             vehicle.BpPlainCard = row.Get("BP Plain Card") ?? row.Get("PLAIN NEW BP CARD") ?? vehicle.BpPlainCard;
             vehicle.Notes = row.Get("Notes") ?? row.Get("NOTES") ?? vehicle.Notes;
             vehicle.Active = row.Active();
+
+            var pin = row.Get("Fuel PIN") ?? row.Get("Pin No");
+            UpsertFuelCard(fuelCardsByKey, vehicle, "Shell", "Shell", row.Get("Shell Card") ?? row.Get("Shell Card Number"), pin);
+            UpsertFuelCard(fuelCardsByKey, vehicle, "BP", "Red", row.Get("BP Red Card") ?? row.Get("RED STICKERED BP Card"), pin);
+            UpsertFuelCard(fuelCardsByKey, vehicle, "BP", "Plain", row.Get("BP Plain Card") ?? row.Get("PLAIN NEW BP CARD"), pin);
         }
     }
 
@@ -466,7 +486,10 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
         }
     }
 
-    private void ImportRouteTimings(XLWorkbook workbook, Dictionary<string, RouteTiming> timingsByKey)
+    private void ImportRouteTimings(
+        XLWorkbook workbook,
+        Dictionary<string, Site> sitesByCode,
+        Dictionary<string, RouteTiming> timingsByKey)
     {
         if (!workbook.Worksheets.TryGetWorksheet("Run Times", out var ws))
             return;
@@ -488,6 +511,15 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
             }
 
             timing.Route = route;
+
+            var routeSite = ResolveSite(
+                sitesByCode.Values,
+                row.Get("SiteID"),
+                row.Get("Site") ?? row.Get("Site Name"));
+            routeSite ??= ResolveUniqueSiteFromRoute(sitesByCode.Values, route);
+            if (routeSite is not null)
+                timing.SiteId = routeSite.Id;
+
             timing.PalletType = palletType;
             timing.LastDespatchTime = ParseTime(row.Get("Last Despatch Time"));
             timing.PlannedCollectFrom = ParseTime(row.Get("Planned Collect Time From"));
@@ -693,6 +725,83 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
             normalized = "UNKNOWN";
 
         return normalized.Length <= maxLength ? normalized : normalized[..maxLength];
+    }
+
+    private void UpsertFuelCard(
+        Dictionary<string, FuelCard> fuelCardsByKey,
+        Vehicle vehicle,
+        string provider,
+        string cardType,
+        string? cardNumber,
+        string? pin)
+    {
+        if (string.IsNullOrWhiteSpace(cardNumber))
+            return;
+
+        cardNumber = cardNumber.Trim();
+        var key = $"{provider}|{cardType}|{cardNumber}";
+
+        if (!fuelCardsByKey.TryGetValue(key, out var card))
+        {
+            card = new FuelCard
+            {
+                Provider = provider,
+                CardType = cardType,
+                CardNumber = cardNumber
+            };
+            db.FuelCards.Add(card);
+            fuelCardsByKey[key] = card;
+        }
+
+        card.VehicleId = vehicle.Id;
+        card.Pin = string.IsNullOrWhiteSpace(pin) ? card.Pin : pin.Trim();
+        card.Notes = vehicle.Notes;
+        card.Active = vehicle.Active;
+    }
+
+    private static Site? ResolveSite(
+        IEnumerable<Site> sites,
+        string? siteCode,
+        string? siteName)
+    {
+        if (!string.IsNullOrWhiteSpace(siteCode))
+        {
+            var byCode = sites.FirstOrDefault(x =>
+                x.Code.Equals(siteCode.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (byCode is not null)
+                return byCode;
+        }
+
+        if (string.IsNullOrWhiteSpace(siteName))
+            return null;
+
+        var normalized = siteName.Trim();
+        var matches = sites
+            .Where(x =>
+                x.Name.Equals(normalized, StringComparison.OrdinalIgnoreCase)
+                || (!string.IsNullOrWhiteSpace(x.DriverTextName)
+                    && x.DriverTextName.Equals(normalized, StringComparison.OrdinalIgnoreCase)))
+            .Take(2)
+            .ToList();
+
+        return matches.Count == 1 ? matches[0] : null;
+    }
+
+    private static Site? ResolveUniqueSiteFromRoute(IEnumerable<Site> sites, string route)
+    {
+        var candidates = sites
+            .Where(site =>
+                (!string.IsNullOrWhiteSpace(site.Code)
+                    && route.Contains(site.Code, StringComparison.OrdinalIgnoreCase))
+                || (!string.IsNullOrWhiteSpace(site.Name)
+                    && route.Contains(site.Name, StringComparison.OrdinalIgnoreCase))
+                || (!string.IsNullOrWhiteSpace(site.DriverTextName)
+                    && route.Contains(site.DriverTextName, StringComparison.OrdinalIgnoreCase)))
+            .DistinctBy(x => x.Id)
+            .Take(2)
+            .ToList();
+
+        return candidates.Count == 1 ? candidates[0] : null;
     }
 
     private static IEnumerable<string> SplitAliases(string? aliases)
