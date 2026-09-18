@@ -5,9 +5,7 @@ namespace Slh.Tms.Api.Authorization;
 internal static class TmsMasterRolePolicy
 {
     public static bool CanReadMaster(ClaimsPrincipal user, IReadOnlyCollection<string> allowedDomains) =>
-        TmsAccessPolicy.IsCompanyUser(user, allowedDomains) &&
-        (HasRole(user, "TMS.ReadMaster", "Tms.ReadMaster") ||
-         HasRole(user, "TMS.Admin", "Tms.Admin"));
+        TmsAccessPolicy.IsCompanyUser(user, allowedDomains);
 
     public static bool IsAdmin(ClaimsPrincipal user, IReadOnlyCollection<string> allowedDomains) =>
         TmsAccessPolicy.IsCompanyUser(user, allowedDomains) &&
