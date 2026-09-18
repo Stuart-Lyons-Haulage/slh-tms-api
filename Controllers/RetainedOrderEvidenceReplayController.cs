@@ -39,6 +39,10 @@ public sealed class RetainedOrderEvidenceReplayController(
         };
 
         var summary = new ReplaySummary();
+        summary.LegacyMappingExceptionsArchived = await ArchiveLegacyMappingExceptions(
+            receivedFromUtc,
+            minimumPlanningDate,
+            ct);
         foreach (var evidence in evidenceRows)
         {
             ct.ThrowIfCancellationRequested();
@@ -95,7 +99,8 @@ public sealed class RetainedOrderEvidenceReplayController(
                 var existingPending = await db.StagedImports
                     .Where(item => item.EntityType == "order" &&
                                    item.Status == StagingStatus.PendingReview &&
-                                   keys.Contains(item.IdempotencyKey))
+                                   keys.Contains(item.IdempotencyKey) &&
+                                   (item.Source == null || !item.Source.StartsWith("Info mailbox replay")))
                     .ToListAsync(ct);
 
                 foreach (var pending in existingPending)
@@ -161,11 +166,65 @@ public sealed class RetainedOrderEvidenceReplayController(
             summary.PendingArchivedForRefresh,
             summary.ManuallyAmendedPreserved,
             summary.PendingAfterReplay,
+            summary.LegacyMappingExceptionsArchived,
             summary.UnmatchedEvidence,
             summary.BeforeMinimumDate,
             summary.InvalidEvidence,
             messages = summary.Messages
         });
+    }
+
+    private async Task<int> ArchiveLegacyMappingExceptions(
+        DateTimeOffset receivedFromUtc,
+        DateOnly minimumPlanningDate,
+        CancellationToken ct)
+    {
+        var candidates = await db.StagedImports
+            .Where(item => item.EntityType == "order" &&
+                           item.Status == StagingStatus.PendingReview &&
+                           item.ReceivedAtUtc >= receivedFromUtc &&
+                           ((item.Source != null && item.Source.StartsWith("Info mailbox mapping exception")) ||
+                            item.PayloadJson.Contains("\"intakeStatus\":\"MappingException\"")))
+            .ToListAsync(ct);
+
+        var archived = 0;
+        foreach (var item in candidates)
+        {
+            if (!PayloadIsOnOrAfter(item.PayloadJson, minimumPlanningDate)) continue;
+            var manuallyAmended = await db.StagedImportEvents.AsNoTracking()
+                .AnyAsync(evt => evt.StagedImportId == item.Id && evt.EventType == "Amended", ct);
+            if (manuallyAmended) continue;
+
+            var previous = item.Status;
+            item.Status = StagingStatus.Archived;
+            item.IdempotencyKey = $"archived-mapping:{item.Id:N}";
+            item.ReviewedAtUtc = DateTimeOffset.UtcNow;
+            item.ReviewedBy = "Retained evidence replay";
+            item.ReviewNote = "Archived legacy mapping-exception placeholder; verified-format intake now retains unmatched mail as evidence only.";
+            db.StagedImportEvents.Add(StagingAudit.Create(
+                item,
+                "LegacyMappingArchived",
+                previous,
+                item.ReviewNote,
+                "Retained evidence replay"));
+            archived++;
+        }
+
+        if (archived > 0) await db.SaveChangesAsync(ct);
+        return archived;
+    }
+
+    private static bool PayloadIsOnOrAfter(string payloadJson, DateOnly minimumPlanningDate)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(payloadJson);
+            return IsOnOrAfter(document.RootElement, minimumPlanningDate);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     private static MailboxEmailIntakeRequest Rehydrate(string payloadJson)
@@ -275,6 +334,7 @@ public sealed class RetainedOrderEvidenceReplayController(
         public int PendingArchivedForRefresh { get; set; }
         public int ManuallyAmendedPreserved { get; set; }
         public int PendingAfterReplay { get; set; }
+        public int LegacyMappingExceptionsArchived { get; set; }
         public int UnmatchedEvidence { get; set; }
         public int BeforeMinimumDate { get; set; }
         public int InvalidEvidence { get; set; }
