@@ -10,6 +10,7 @@ public sealed class MasterDataDbContext(DbContextOptions<MasterDataDbContext> op
     public DbSet<Market> Markets => Set<Market>();
     public DbSet<Driver> Drivers => Set<Driver>();
     public DbSet<Vehicle> Vehicles => Set<Vehicle>();
+    public DbSet<FuelCard> FuelCards => Set<FuelCard>();
     public DbSet<Trailer> Trailers => Set<Trailer>();
     public DbSet<CustomerContact> CustomerContacts => Set<CustomerContact>();
     public DbSet<MarketContact> MarketContacts => Set<MarketContact>();
@@ -62,6 +63,14 @@ public sealed class MasterDataDbContext(DbContextOptions<MasterDataDbContext> op
         b.Entity<Vehicle>().Property(x => x.Registration).HasMaxLength(40);
         b.Entity<Vehicle>().Property(x => x.FleetNumber).HasMaxLength(80);
 
+        b.Entity<FuelCard>().HasKey(x => x.Id);
+        b.Entity<FuelCard>().HasIndex(x => new { x.Provider, x.CardType, x.CardNumber }).IsUnique();
+        b.Entity<FuelCard>().Property(x => x.Provider).HasMaxLength(80);
+        b.Entity<FuelCard>().Property(x => x.CardType).HasMaxLength(80);
+        b.Entity<FuelCard>().Property(x => x.CardNumber).HasMaxLength(120);
+        b.Entity<FuelCard>().Property(x => x.Pin).HasMaxLength(40);
+        b.Entity<FuelCard>().HasOne<Vehicle>().WithMany().HasForeignKey(x => x.VehicleId).OnDelete(DeleteBehavior.SetNull);
+
         b.Entity<Trailer>().HasKey(x => x.Id);
         b.Entity<Trailer>().HasIndex(x => x.TrailerNumber).IsUnique();
         b.Entity<Trailer>().Property(x => x.TrailerNumber).HasMaxLength(80);
@@ -73,6 +82,7 @@ public sealed class MasterDataDbContext(DbContextOptions<MasterDataDbContext> op
         b.Entity<CustomerContact>().HasIndex(x => x.Code).IsUnique();
         b.Entity<CustomerContact>().Property(x => x.Code).HasMaxLength(80);
         b.Entity<CustomerContact>().HasOne<Customer>().WithMany().HasForeignKey(x => x.CustomerId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<CustomerContact>().HasOne<Site>().WithMany().HasForeignKey(x => x.SiteId).OnDelete(DeleteBehavior.SetNull);
 
         b.Entity<MarketContact>().HasKey(x => x.Id);
         b.Entity<MarketContact>().HasIndex(x => x.Key).IsUnique();
@@ -89,6 +99,7 @@ public sealed class MasterDataDbContext(DbContextOptions<MasterDataDbContext> op
         b.Entity<RouteTiming>().HasIndex(x => x.Key).IsUnique();
         b.Entity<RouteTiming>().Property(x => x.Key).HasMaxLength(300);
         b.Entity<RouteTiming>().Property(x => x.Route).HasMaxLength(250);
+        b.Entity<RouteTiming>().HasOne<Site>().WithMany().HasForeignKey(x => x.SiteId).OnDelete(DeleteBehavior.SetNull);
 
         b.Entity<FuelPrice>().HasKey(x => x.Id);
         b.Entity<FuelPrice>().HasIndex(x => x.Code).IsUnique();
