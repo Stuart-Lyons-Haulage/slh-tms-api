@@ -486,3 +486,68 @@ WHERE NULLIF(LTRIM(RTRIM(v.[BpPlainCard])), N'') IS NOT NULL
       WHERE f.[VehicleId] = v.[Id] AND f.[Provider] = N'BP' AND f.[CardType] = N'Plain'
   );
 GO
+
+
+/* Planning package */
+IF COL_LENGTH(N'ops.Orders', N'EuroPallets') IS NULL
+    ALTER TABLE [ops].[Orders] ADD [EuroPallets] int NOT NULL CONSTRAINT [DF_ops_Orders_EuroPallets] DEFAULT(0);
+IF COL_LENGTH(N'ops.Orders', N'Trolleys') IS NULL
+    ALTER TABLE [ops].[Orders] ADD [Trolleys] int NOT NULL CONSTRAINT [DF_ops_Orders_Trolleys] DEFAULT(0);
+GO
+
+IF COL_LENGTH(N'master.Trailers', N'TrolleyCapacity') IS NULL
+    ALTER TABLE [master].[Trailers] ADD [TrolleyCapacity] int NULL;
+IF COL_LENGTH(N'master.Trailers', N'EuroToStandardEquivalent') IS NULL
+    ALTER TABLE [master].[Trailers] ADD [EuroToStandardEquivalent] decimal(8,3) NULL;
+IF COL_LENGTH(N'master.Trailers', N'TrolleyToStandardEquivalent') IS NULL
+    ALTER TABLE [master].[Trailers] ADD [TrolleyToStandardEquivalent] decimal(8,3) NULL;
+GO
+
+IF OBJECT_ID(N'[ops].[PlanningRuns]', N'U') IS NULL
+CREATE TABLE [ops].[PlanningRuns](
+    [Id] uniqueidentifier NOT NULL PRIMARY KEY,
+    [RunNumber] nvarchar(80) NOT NULL,
+    [PlanDate] date NOT NULL,
+    [Period] int NOT NULL,
+    [DriverId] uniqueidentifier NULL,
+    [VehicleId] uniqueidentifier NULL,
+    [TrailerId] uniqueidentifier NULL,
+    [StartTime] time NULL,
+    [NightOut] bit NOT NULL,
+    [TrailerSwapNotes] nvarchar(max) NULL,
+    [Notes] nvarchar(max) NULL,
+    [CapacityOverrideReason] nvarchar(max) NULL,
+    [State] int NOT NULL,
+    [CreatedAtUtc] datetimeoffset NOT NULL,
+    [UpdatedAtUtc] datetimeoffset NOT NULL
+);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_ops_PlanningRuns_Date_Period_Number' AND object_id = OBJECT_ID(N'[ops].[PlanningRuns]'))
+    CREATE UNIQUE INDEX [UX_ops_PlanningRuns_Date_Period_Number]
+    ON [ops].[PlanningRuns]([PlanDate],[Period],[RunNumber]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_ops_PlanningRuns_Date_State' AND object_id = OBJECT_ID(N'[ops].[PlanningRuns]'))
+    CREATE INDEX [IX_ops_PlanningRuns_Date_State]
+    ON [ops].[PlanningRuns]([PlanDate],[State]);
+GO
+
+IF OBJECT_ID(N'[ops].[RunOrderAllocations]', N'U') IS NULL
+CREATE TABLE [ops].[RunOrderAllocations](
+    [Id] uniqueidentifier NOT NULL PRIMARY KEY,
+    [RunId] uniqueidentifier NOT NULL,
+    [OrderId] uniqueidentifier NOT NULL,
+    [StandardPallets] int NOT NULL,
+    [EuroPallets] int NOT NULL,
+    [Trolleys] int NOT NULL,
+    [Sequence] int NOT NULL,
+    [UpdatedAtUtc] datetimeoffset NOT NULL,
+    CONSTRAINT [FK_ops_RunOrderAllocations_Runs_RunId]
+        FOREIGN KEY ([RunId]) REFERENCES [ops].[PlanningRuns]([Id]) ON DELETE CASCADE,
+    CONSTRAINT [FK_ops_RunOrderAllocations_Orders_OrderId]
+        FOREIGN KEY ([OrderId]) REFERENCES [ops].[Orders]([Id])
+);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_ops_RunOrderAllocations_Run_Order' AND object_id = OBJECT_ID(N'[ops].[RunOrderAllocations]'))
+    CREATE UNIQUE INDEX [UX_ops_RunOrderAllocations_Run_Order]
+    ON [ops].[RunOrderAllocations]([RunId],[OrderId]);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_ops_RunOrderAllocations_OrderId' AND object_id = OBJECT_ID(N'[ops].[RunOrderAllocations]'))
+    CREATE INDEX [IX_ops_RunOrderAllocations_OrderId]
+    ON [ops].[RunOrderAllocations]([OrderId]);
+GO
