@@ -73,6 +73,8 @@ public sealed class OrderPromotionService(
             DeliveryDate = draft.DeliveryDate,
             DeliveryTime = draft.DeliveryTime,
             Pallets = Math.Max(0, draft.Pallets ?? 0),
+            EuroPallets = Math.Max(0, draft.EuroPallets ?? 0),
+            Trolleys = Math.Max(0, draft.Trolleys ?? 0),
             Cases = Math.Max(0, draft.Cases ?? 0),
             Crates = Math.Max(0, draft.Crates ?? 0),
             Trays = Math.Max(0, draft.Trays ?? 0),
