@@ -519,58 +519,80 @@ public sealed class PlanningService(
                 "Select a trailer to calculate capacity.");
         }
 
-        var directOver =
-            (trailer.PalletCapacity is int standardCapacity && standard > standardCapacity)
-            || (trailer.EuroPalletCapacity is int euroCapacity && euro > euroCapacity)
-            || (trailer.TrolleyCapacity is int trolleyCapacity && trolley > trolleyCapacity);
+        var activeTypes =
+            (standard > 0 ? 1 : 0)
+            + (euro > 0 ? 1 : 0)
+            + (trolley > 0 ? 1 : 0);
 
-        decimal? equivalentUsed = null;
         decimal? utilisation = null;
-        var missingMixedRule = false;
+        decimal? equivalentUsed = null;
+        decimal? equivalentCapacity = null;
+        var missingRules = false;
 
-        if (trailer.PalletCapacity is int baseCapacity && baseCapacity > 0)
+        if (activeTypes <= 1)
         {
-            decimal used = standard;
-
-            if (euro > 0)
+            if (standard > 0 && trailer.PalletCapacity is int stdCapacity && stdCapacity > 0)
             {
-                if (trailer.EuroToStandardEquivalent is decimal euroFactor)
-                    used += euro * euroFactor;
-                else
-                    missingMixedRule = standard > 0 || trolley > 0;
+                utilisation = Math.Round((decimal)standard / stdCapacity * 100m, 1);
+                equivalentUsed = standard;
+                equivalentCapacity = stdCapacity;
             }
-
-            if (trolley > 0)
+            else if (euro > 0 && trailer.EuroPalletCapacity is int euroCapacity && euroCapacity > 0)
             {
-                if (trailer.TrolleyToStandardEquivalent is decimal trolleyFactor)
-                    used += trolley * trolleyFactor;
-                else
-                    missingMixedRule = standard > 0 || euro > 0;
+                utilisation = Math.Round((decimal)euro / euroCapacity * 100m, 1);
+                equivalentUsed = euro;
+                equivalentCapacity = euroCapacity;
             }
-
-            if (!missingMixedRule)
+            else if (trolley > 0 && trailer.TrolleyCapacity is int trolleyCapacity && trolleyCapacity > 0)
             {
-                equivalentUsed = used;
-                utilisation = Math.Round(used / baseCapacity * 100m, 1);
+                utilisation = Math.Round((decimal)trolley / trolleyCapacity * 100m, 1);
+                equivalentUsed = trolley;
+                equivalentCapacity = trolleyCapacity;
+            }
+            else if (activeTypes == 0)
+            {
+                utilisation = 0m;
             }
         }
         else
         {
-            var singleUse =
-                (standard > 0 ? 1 : 0)
-                + (euro > 0 ? 1 : 0)
-                + (trolley > 0 ? 1 : 0);
-
-            if (singleUse == 1)
+            if (trailer.PalletCapacity is not int baseCapacity || baseCapacity <= 0)
             {
-                if (standard > 0 && trailer.PalletCapacity is int sc && sc > 0)
-                    utilisation = Math.Round((decimal)standard / sc * 100m, 1);
-                if (euro > 0 && trailer.EuroPalletCapacity is int ec && ec > 0)
-                    utilisation = Math.Round((decimal)euro / ec * 100m, 1);
-                if (trolley > 0 && trailer.TrolleyCapacity is int tc && tc > 0)
-                    utilisation = Math.Round((decimal)trolley / tc * 100m, 1);
+                missingRules = true;
+            }
+            else
+            {
+                decimal used = standard;
+
+                if (euro > 0)
+                {
+                    if (trailer.EuroToStandardEquivalent is decimal euroFactor && euroFactor > 0)
+                        used += euro * euroFactor;
+                    else
+                        missingRules = true;
+                }
+
+                if (trolley > 0)
+                {
+                    if (trailer.TrolleyToStandardEquivalent is decimal trolleyFactor && trolleyFactor > 0)
+                        used += trolley * trolleyFactor;
+                    else
+                        missingRules = true;
+                }
+
+                if (!missingRules)
+                {
+                    equivalentUsed = used;
+                    equivalentCapacity = baseCapacity;
+                    utilisation = Math.Round(used / baseCapacity * 100m, 1);
+                }
             }
         }
+
+        var directOver =
+            (trailer.PalletCapacity is int standardCapacity && standard > standardCapacity)
+            || (trailer.EuroPalletCapacity is int euroCapacity2 && euro > euroCapacity2)
+            || (trailer.TrolleyCapacity is int trolleyCapacity2 && trolley > trolleyCapacity2);
 
         if (directOver || utilisation > 100m)
         {
@@ -584,11 +606,11 @@ public sealed class PlanningService(
                 trailer.EuroPalletCapacity,
                 trailer.TrolleyCapacity,
                 equivalentUsed,
-                trailer.PalletCapacity,
+                equivalentCapacity,
                 "OVER CAPACITY — amend the load or record an override reason.");
         }
 
-        if (missingMixedRule)
+        if (missingRules)
         {
             return new(
                 "rules-missing",
@@ -600,7 +622,7 @@ public sealed class PlanningService(
                 trailer.EuroPalletCapacity,
                 trailer.TrolleyCapacity,
                 equivalentUsed,
-                trailer.PalletCapacity,
+                equivalentCapacity,
                 "Mixed load detected. Complete the Euro/trolley conversion rules in Trailer Master.");
         }
 
@@ -616,7 +638,7 @@ public sealed class PlanningService(
                 trailer.EuroPalletCapacity,
                 trailer.TrolleyCapacity,
                 equivalentUsed,
-                trailer.PalletCapacity,
+                equivalentCapacity,
                 "Trailer capacity is incomplete in Master Data.");
         }
 
@@ -631,7 +653,7 @@ public sealed class PlanningService(
             trailer.EuroPalletCapacity,
             trailer.TrolleyCapacity,
             equivalentUsed,
-            trailer.PalletCapacity,
+            equivalentCapacity,
             $"{utilisation:0.#}% of configured trailer capacity.");
     }
 
