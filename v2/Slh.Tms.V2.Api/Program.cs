@@ -25,6 +25,7 @@ if (!string.IsNullOrWhiteSpace(connectionString))
     builder.Services.AddScoped<MasterDataWorkbookImportService>();
     builder.Services.AddScoped<MasterDataCrudService>();
     builder.Services.AddScoped<MasterDataReviewAllocationService>();
+    builder.Services.AddScoped<PlanningService>();
 
     builder.Services.AddHealthChecks()
         .AddDbContextCheck<MasterDataDbContext>("master-data-db")
@@ -391,6 +392,50 @@ if (!string.IsNullOrWhiteSpace(connectionString))
         await using var stream = file.OpenReadStream();
         var result = await importer.ImportAsync(stream, commit == true, ct);
         return Results.Ok(result);
+    });
+
+    app.MapGet("/api/v2/planning", async (
+        DateOnly date,
+        PlanningService planning,
+        CancellationToken ct) =>
+        Results.Ok(await planning.GetSnapshotAsync(date, ct)));
+
+    app.MapPost("/api/v2/planning/runs", async (
+        CreatePlanningRunRequest request,
+        PlanningService planning,
+        CancellationToken ct) =>
+    {
+        var run = await planning.CreateRunAsync(request, ct);
+        return Results.Ok(run);
+    });
+
+    app.MapPut("/api/v2/planning/runs/{id:guid}", async (
+        Guid id,
+        PlanningRunUpdateRequest request,
+        PlanningService planning,
+        CancellationToken ct) =>
+    {
+        var run = await planning.UpdateRunAsync(id, request, ct);
+        return run is null ? Results.NotFound() : Results.Ok(run);
+    });
+
+    app.MapPut("/api/v2/planning/runs/{id:guid}/movement", async (
+        Guid id,
+        SetMovementQuantityRequest request,
+        PlanningService planning,
+        CancellationToken ct) =>
+    {
+        try
+        {
+            await planning.SetMovementQuantityAsync(id, request, ct);
+            return Results.Ok(await planning.GetSnapshotAsync(
+                (await planning.GetSnapshotAsync(DateOnly.FromDateTime(DateTime.Today), ct)).PlanDate,
+                ct));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
     });
 
     app.MapGet("/api/v2/intake/review", async (IntakeDbContext db, CancellationToken ct) =>
