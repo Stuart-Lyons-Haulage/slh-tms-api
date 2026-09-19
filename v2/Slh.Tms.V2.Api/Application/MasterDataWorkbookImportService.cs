@@ -411,6 +411,18 @@ public sealed class MasterDataWorkbookImportService(MasterDataDbContext db)
                 ParseInt(row.Get("Euro Pallet Capacity"))
                 ?? ParseInt(row.Get("Euro Capacity"))
                 ?? trailer.EuroPalletCapacity;
+            trailer.TrolleyCapacity =
+                ParseInt(row.Get("Trolley Capacity"))
+                ?? ParseInt(row.Get("Trolleys"))
+                ?? trailer.TrolleyCapacity;
+            trailer.EuroToStandardEquivalent =
+                ParseDecimal(row.Get("Euro To Standard Equivalent"))
+                ?? ParseDecimal(row.Get("Euro Space Factor"))
+                ?? trailer.EuroToStandardEquivalent;
+            trailer.TrolleyToStandardEquivalent =
+                ParseDecimal(row.Get("Trolley To Standard Equivalent"))
+                ?? ParseDecimal(row.Get("Trolley Space Factor"))
+                ?? trailer.TrolleyToStandardEquivalent;
             trailer.CurrentLocation =
                 row.Get("Current Location")
                 ?? row.Get("Location")
