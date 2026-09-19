@@ -428,9 +428,7 @@ if (!string.IsNullOrWhiteSpace(connectionString))
         try
         {
             await planning.SetMovementQuantityAsync(id, request, ct);
-            return Results.Ok(await planning.GetSnapshotAsync(
-                (await planning.GetSnapshotAsync(DateOnly.FromDateTime(DateTime.Today), ct)).PlanDate,
-                ct));
+            return Results.Ok(new { updated = true });
         }
         catch (InvalidOperationException ex)
         {
