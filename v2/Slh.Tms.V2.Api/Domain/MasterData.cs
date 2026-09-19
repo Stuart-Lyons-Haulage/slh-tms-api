@@ -119,6 +119,9 @@ public sealed class Trailer : ICanonicalEntity
     public string? TrailerType { get; set; }
     public int? PalletCapacity { get; set; }
     public int? EuroPalletCapacity { get; set; }
+    public int? TrolleyCapacity { get; set; }
+    public decimal? EuroToStandardEquivalent { get; set; }
+    public decimal? TrolleyToStandardEquivalent { get; set; }
     public string? CurrentLocation { get; set; }
     public DateOnly? MotExpiry { get; set; }
     public string? Notes { get; set; }
