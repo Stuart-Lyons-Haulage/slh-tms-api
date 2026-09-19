@@ -66,3 +66,17 @@ public sealed record SetMovementQuantityRequest(
     int StandardPallets,
     int EuroPallets,
     int Trolleys);
+
+
+public sealed record QuickOrderBookingRequest(
+    DateOnly PlanDate,
+    PlanningPeriod Period,
+    Guid CollectionSiteId,
+    Guid DeliverySiteId,
+    Guid? CustomerId,
+    int StandardPallets,
+    int EuroPallets,
+    int Trolleys,
+    string? PurchaseOrder,
+    string? OrderReference,
+    string? Notes);
