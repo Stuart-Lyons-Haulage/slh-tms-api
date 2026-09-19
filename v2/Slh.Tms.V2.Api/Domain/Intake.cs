@@ -35,6 +35,8 @@ public sealed record ExtractedOrderDraft(
     DateOnly? DeliveryDate,
     TimeOnly? DeliveryTime,
     int? Pallets,
+    int? EuroPallets,
+    int? Trolleys,
     int? Cases,
     int? Crates,
     int? Trays,
