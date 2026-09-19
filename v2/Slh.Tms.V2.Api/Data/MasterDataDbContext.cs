@@ -79,6 +79,8 @@ public sealed class MasterDataDbContext(DbContextOptions<MasterDataDbContext> op
         b.Entity<Trailer>().Property(x => x.TrailerNumber).HasMaxLength(80);
         b.Entity<Trailer>().Property(x => x.Registration).HasMaxLength(40);
         b.Entity<Trailer>().Property(x => x.TrailerType).HasMaxLength(80);
+        b.Entity<Trailer>().Property(x => x.EuroToStandardEquivalent).HasPrecision(8, 3);
+        b.Entity<Trailer>().Property(x => x.TrolleyToStandardEquivalent).HasPrecision(8, 3);
         b.Entity<Trailer>().Property(x => x.CurrentLocation).HasMaxLength(160);
 
         b.Entity<CustomerContact>().HasKey(x => x.Id);
