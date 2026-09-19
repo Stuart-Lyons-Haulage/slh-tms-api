@@ -112,6 +112,71 @@ public sealed class PlanningService(
         return new(date, movements, runs, matrix);
     }
 
+    public async Task<TransportOrder> CreateQuickOrderAsync(
+        QuickOrderBookingRequest request,
+        CancellationToken ct)
+    {
+        if (request.StandardPallets < 0 || request.EuroPallets < 0 || request.Trolleys < 0)
+            throw new InvalidOperationException("Order quantities cannot be negative.");
+
+        if (request.StandardPallets == 0 && request.EuroPallets == 0 && request.Trolleys == 0)
+            throw new InvalidOperationException("Enter at least one pallet or trolley.");
+
+        var collection = await master.Sites.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.Id == request.CollectionSiteId && x.Active, ct)
+            ?? throw new InvalidOperationException("Collection Site was not found.");
+
+        var delivery = await master.Sites.AsNoTracking()
+            .SingleOrDefaultAsync(x => x.Id == request.DeliverySiteId && x.Active, ct)
+            ?? throw new InvalidOperationException("Delivery Site was not found.");
+
+        var customerId =
+            request.CustomerId
+            ?? delivery.CustomerId
+            ?? collection.CustomerId
+            ?? throw new InvalidOperationException("Select a customer because neither Site has a linked customer.");
+
+        var customerExists = await master.Customers.AsNoTracking()
+            .AnyAsync(x => x.Id == customerId && x.Active, ct);
+        if (!customerExists)
+            throw new InvalidOperationException("The selected customer was not found.");
+
+        var orderId = Guid.NewGuid();
+        var periodTime = request.Period == PlanningPeriod.PM
+            ? new TimeOnly(15, 0)
+            : new TimeOnly(8, 0);
+
+        var order = new TransportOrder
+        {
+            Id = orderId,
+            StableKey = $"MANUAL:{orderId:N}",
+            CustomerId = customerId,
+            CollectionSiteId = request.CollectionSiteId,
+            DeliverySiteId = request.DeliverySiteId,
+            PurchaseOrder = string.IsNullOrWhiteSpace(request.PurchaseOrder) ? null : request.PurchaseOrder.Trim(),
+            CustomerOrderReference = string.IsNullOrWhiteSpace(request.OrderReference) ? null : request.OrderReference.Trim(),
+            SourceOrderReference = string.IsNullOrWhiteSpace(request.OrderReference) ? $"MANUAL-{orderId:N}" : request.OrderReference.Trim(),
+            CollectionDate = request.PlanDate,
+            CollectionTime = periodTime,
+            DeliveryDate = request.PlanDate,
+            Pallets = request.StandardPallets,
+            EuroPallets = request.EuroPallets,
+            Trolleys = request.Trolleys,
+            Cases = 0,
+            Crates = 0,
+            Trays = 0,
+            Notes = string.IsNullOrWhiteSpace(request.Notes) ? "Manual planner booking" : request.Notes.Trim(),
+            State = OrderState.ReadyToPlan,
+            RevisionNumber = 1,
+            CreatedAtUtc = DateTimeOffset.UtcNow,
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        };
+
+        ops.Orders.Add(order);
+        await ops.SaveChangesAsync(ct);
+        return order;
+    }
+
     public async Task<PlanningRun> CreateRunAsync(
         CreatePlanningRunRequest request,
         CancellationToken ct)
@@ -566,16 +631,30 @@ public sealed class PlanningService(
 
                 if (euro > 0)
                 {
-                    if (trailer.EuroToStandardEquivalent is decimal euroFactor && euroFactor > 0)
-                        used += euro * euroFactor;
+                    var euroFactor =
+                        trailer.EuroToStandardEquivalent is decimal configuredEuroFactor && configuredEuroFactor > 0
+                            ? configuredEuroFactor
+                            : trailer.EuroPalletCapacity is int euroCapacity && euroCapacity > 0
+                                ? (decimal)baseCapacity / euroCapacity
+                                : (decimal?)null;
+
+                    if (euroFactor is decimal factor)
+                        used += euro * factor;
                     else
                         missingRules = true;
                 }
 
                 if (trolley > 0)
                 {
-                    if (trailer.TrolleyToStandardEquivalent is decimal trolleyFactor && trolleyFactor > 0)
-                        used += trolley * trolleyFactor;
+                    var trolleyFactor =
+                        trailer.TrolleyToStandardEquivalent is decimal configuredTrolleyFactor && configuredTrolleyFactor > 0
+                            ? configuredTrolleyFactor
+                            : trailer.TrolleyCapacity is int trolleyCapacity && trolleyCapacity > 0
+                                ? (decimal)baseCapacity / trolleyCapacity
+                                : (decimal?)null;
+
+                    if (trolleyFactor is decimal factor)
+                        used += trolley * factor;
                     else
                         missingRules = true;
                 }
