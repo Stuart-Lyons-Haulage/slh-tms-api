@@ -400,6 +400,22 @@ if (!string.IsNullOrWhiteSpace(connectionString))
         CancellationToken ct) =>
         Results.Ok(await planning.GetSnapshotAsync(date, ct)));
 
+    app.MapPost("/api/v2/planning/quick-order", async (
+        QuickOrderBookingRequest request,
+        PlanningService planning,
+        CancellationToken ct) =>
+    {
+        try
+        {
+            var order = await planning.CreateQuickOrderAsync(request, ct);
+            return Results.Ok(order);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+    });
+
     app.MapPost("/api/v2/planning/runs", async (
         CreatePlanningRunRequest request,
         PlanningService planning,
