@@ -26,6 +26,8 @@ public sealed class TransportOrder
     public DateOnly? DeliveryDate { get; set; }
     public TimeOnly? DeliveryTime { get; set; }
     public int Pallets { get; set; }
+    public int EuroPallets { get; set; }
+    public int Trolleys { get; set; }
     public int Cases { get; set; }
     public int Crates { get; set; }
     public int Trays { get; set; }
