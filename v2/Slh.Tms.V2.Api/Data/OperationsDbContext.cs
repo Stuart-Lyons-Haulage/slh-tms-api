@@ -7,6 +7,8 @@ public sealed class OperationsDbContext(DbContextOptions<OperationsDbContext> op
 {
     public DbSet<TransportOrder> Orders => Set<TransportOrder>();
     public DbSet<OrderSourceLink> OrderSourceLinks => Set<OrderSourceLink>();
+    public DbSet<PlanningRun> PlanningRuns => Set<PlanningRun>();
+    public DbSet<RunOrderAllocation> RunOrderAllocations => Set<RunOrderAllocation>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -27,5 +29,16 @@ public sealed class OperationsDbContext(DbContextOptions<OperationsDbContext> op
         b.Entity<OrderSourceLink>().HasIndex(x => new { x.OrderId, x.RevisionNumber }).IsUnique();
         b.Entity<OrderSourceLink>().HasIndex(x => x.EvidenceId);
         b.Entity<OrderSourceLink>().HasOne<TransportOrder>().WithMany().HasForeignKey(x => x.OrderId).OnDelete(DeleteBehavior.Restrict);
+
+        b.Entity<PlanningRun>().HasKey(x => x.Id);
+        b.Entity<PlanningRun>().HasIndex(x => new { x.PlanDate, x.Period, x.RunNumber }).IsUnique();
+        b.Entity<PlanningRun>().HasIndex(x => new { x.PlanDate, x.State });
+        b.Entity<PlanningRun>().Property(x => x.RunNumber).HasMaxLength(80);
+
+        b.Entity<RunOrderAllocation>().HasKey(x => x.Id);
+        b.Entity<RunOrderAllocation>().HasIndex(x => new { x.RunId, x.OrderId }).IsUnique();
+        b.Entity<RunOrderAllocation>().HasIndex(x => x.OrderId);
+        b.Entity<RunOrderAllocation>().HasOne<PlanningRun>().WithMany().HasForeignKey(x => x.RunId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<RunOrderAllocation>().HasOne<TransportOrder>().WithMany().HasForeignKey(x => x.OrderId).OnDelete(DeleteBehavior.Restrict);
     }
 }
